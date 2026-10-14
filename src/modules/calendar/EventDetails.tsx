@@ -22,6 +22,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
+  type RefObject,
   useEffect,
   useId,
   useLayoutEffect,
@@ -63,16 +64,61 @@ interface EventDetailsProps {
   account: Account | undefined;
   /** Element the card points at (the clicked event). */
   anchor: HTMLElement | null;
+  /** The calendar's card, which the details stay inside. */
+  boundary?: RefObject<HTMLElement | null>;
   onClose: (restoreFocus: boolean) => void;
   onEdit: (event: CalendarEvent) => void;
 }
 
 const WIDTH = 380;
+/** Between the card and the event it belongs to. */
 const GAP = 8;
+/** The card keeps this far inside the calendar's card. */
+const MARGIN = 12;
+/** A boundary shorter than this (or not laid out yet) gives way to the window. */
+const MIN_HEIGHT = 240;
 /** People listed before "Show all"; the card scrolls once they're all shown. */
 const PEOPLE_SHOWN = 8;
 /** Titles longer than this take a smaller serif so the details stay in view. */
 const LONG_TITLE = 80;
+
+interface Area {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * Where the card may go: inside `boundary` less MARGIN on every side, each
+ * axis falling back to the window when the boundary is too small for the
+ * card.
+ */
+function placementArea(boundary: HTMLElement | null): Area {
+  const win = {
+    left: MARGIN,
+    top: MARGIN,
+    right: window.innerWidth - MARGIN,
+    bottom: window.innerHeight - MARGIN,
+  };
+  if (!boundary) return win;
+  const r = boundary.getBoundingClientRect();
+  const left = Math.max(r.left + MARGIN, win.left);
+  const right = Math.min(r.right - MARGIN, win.right);
+  const top = Math.max(r.top + MARGIN, win.top);
+  const bottom = Math.min(r.bottom - MARGIN, win.bottom);
+  const wide = right - left >= WIDTH;
+  const tall = bottom - top >= MIN_HEIGHT;
+  return {
+    left: wide ? left : win.left,
+    right: wide ? right : win.right,
+    top: tall ? top : win.top,
+    bottom: tall ? bottom : win.bottom,
+  };
+}
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), Math.max(min, max));
 
 function reminderText(minutes: number | null): string {
   if (minutes === null) return "No reminder";
@@ -173,6 +219,7 @@ export function EventDetails({
   calendar,
   account,
   anchor,
+  boundary,
   onClose,
   onEdit,
 }: EventDetailsProps) {
@@ -192,34 +239,42 @@ export function EventDetails({
     [event.bodyHtml],
   );
 
-  // Position next to the anchor: right of it if there is room, else left.
+  // Position next to the anchor, inside the calendar's card: right of the
+  // event if there is room, else left, else on the side with more room.
   useLayoutEffect(() => {
     const card = ref.current;
     if (!card) return;
     const rect = anchor?.isConnected ? anchor.getBoundingClientRect() : null;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const height = card.offsetHeight;
+    const area = placementArea(boundary?.current ?? null);
+    // Taller details scroll inside the card.
+    card.style.maxHeight = `${Math.floor(area.bottom - area.top)}px`;
+    // The layout height, unscaled by the entrance and rounded up, so the
+    // margin below never comes out a fraction short.
+    const height = Math.ceil(parseFloat(getComputedStyle(card).height)) || card.offsetHeight;
     let left: number;
     let top: number;
     // The card grows out of the event it belongs to.
     let originX = WIDTH / 2;
     let originY = height / 2;
     if (!rect) {
-      left = (vw - WIDTH) / 2;
-      top = Math.max(GAP, (vh - height) / 2);
+      left = (area.left + area.right - WIDTH) / 2;
+      top = clamp((area.top + area.bottom - height) / 2, area.top, area.bottom - height);
     } else {
-      if (rect.right + GAP + WIDTH <= vw - GAP) {
-        left = rect.right + GAP;
-        originX = 0;
-      } else if (rect.left - GAP - WIDTH >= GAP) {
+      const roomRight = area.right - rect.right - GAP;
+      const roomLeft = rect.left - GAP - area.left;
+      if (roomRight >= WIDTH) {
+        left = Math.max(area.left, rect.right + GAP);
+      } else if (roomLeft >= WIDTH) {
         left = rect.left - GAP - WIDTH;
-        originX = WIDTH;
       } else {
-        left = Math.min(Math.max(GAP, rect.left), vw - WIDTH - GAP);
+        // Neither side is free: the one with more room, so the card covers
+        // as little of the event as it can.
+        left = roomRight >= roomLeft ? area.right - WIDTH : area.left;
       }
-      top = Math.min(Math.max(GAP, rect.top), Math.max(GAP, vh - height - GAP));
-      originY = Math.min(Math.max(0, rect.top + Math.min(rect.height, 40) / 2 - top), height);
+      left = clamp(left, area.left, area.right - WIDTH);
+      top = clamp(rect.top, area.top, area.bottom - height);
+      originX = clamp(rect.left + rect.width / 2 - left, 0, WIDTH);
+      originY = clamp(rect.top + Math.min(rect.height, 40) / 2 - top, 0, height);
     }
     card.style.left = `${Math.round(left)}px`;
     card.style.top = `${Math.round(top)}px`;
@@ -383,7 +438,7 @@ export function EventDetails({
             {canEdit && (
               <button
                 type="button"
-                className="icon-btn"
+                className="icon-btn cal-details__delete"
                 aria-label="Delete event"
                 title="Delete"
                 onClick={() => setConfirmDelete(true)}
@@ -407,7 +462,9 @@ export function EventDetails({
           <Row icon={<Clock size={16} />} label="When">
             <div>{eventDateLine(event)}</div>
             <div className="cal-details__muted">
-              {allDayText(event) ?? eventTimeRange(event)}
+              {/* How the time shows to others, as on the grid ("1:00 – 3:00 PM · Tentative"). */}
+              <span>{allDayText(event) ?? eventTimeRange(event)}</span>
+              <span> · {SHOW_AS_LABELS[event.showAs]}</span>
               {event.isRecurring && (
                 <span className="cal-details__recurring">
                   <Repeat size={12} aria-hidden="true" /> Recurring
@@ -509,9 +566,7 @@ export function EventDetails({
           )}
 
           <Row icon={<Bell size={16} />} label="Reminder">
-            <span className="cal-details__muted">
-              {reminderText(event.reminderMinutes)} · Show as {SHOW_AS_LABELS[event.showAs]}
-            </span>
+            <span className="cal-details__muted">{reminderText(event.reminderMinutes)}</span>
           </Row>
 
           {/* The calendar's name, then its account on a line of its own: long

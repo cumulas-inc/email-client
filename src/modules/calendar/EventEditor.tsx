@@ -193,7 +193,7 @@ export function EventEditor({
             className="btn btn--primary"
             disabled={save.isPending}
           >
-            {save.isPending ? "Saving…" : "Save"}
+            {save.isPending ? "Saving…" : editing ? "Save changes" : "Save"}
           </button>
         </>
       }
@@ -416,7 +416,7 @@ export function EventEditor({
             </div>
             <div className="field">
               <label htmlFor={ids.showAs} className="field__label">
-                Show as
+                Availability
               </label>
               <select
                 id={ids.showAs}

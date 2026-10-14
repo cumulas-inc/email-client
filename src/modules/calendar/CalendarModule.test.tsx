@@ -137,6 +137,7 @@ describe("CalendarModule", () => {
     expect(within(dialog).getByLabelText("Start date")).toHaveValue("2026-10-15");
     expect(within(dialog).getByLabelText("Start time")).toHaveValue("10:00");
     expect(within(dialog).getByLabelText("End time")).toHaveValue("10:30");
+    expect(within(dialog).getByLabelText("Availability")).toHaveValue("busy");
 
     await user.type(within(dialog).getByLabelText("Title"), "Roadmap review");
     await user.type(within(dialog).getByLabelText("Location"), "Room 4.12");
@@ -235,6 +236,8 @@ describe("CalendarModule", () => {
 
     const details = screen.getByRole("dialog", { name: "Atlas launch review" });
     expect(within(details).getByText("2:00 – 3:00 PM")).toBeInTheDocument();
+    // How the time shows to others, beside it as on the grid.
+    expect(within(details).getByText("· Busy")).toBeInTheDocument();
     expect(within(details).getByText("Room 4.12 / Online")).toBeInTheDocument();
     await user.click(within(details).getByRole("button", { name: "Edit event" }));
 
@@ -243,7 +246,9 @@ describe("CalendarModule", () => {
     expect(input).toHaveValue("Atlas launch review");
     await user.clear(input);
     await user.type(input, "Atlas go/no-go");
-    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    // Edits save changes; new events just save.
+    expect(within(dialog).queryByRole("button", { name: "Save" })).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
     const [id, draft] = update.mock.calls[0]!;

@@ -5,10 +5,11 @@ import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react"
 import type { Calendar, CalendarEvent } from "../../api/types";
 import { formatDate, formatTime } from "../../lib/datetime";
 import { formatCount } from "../../lib/format";
+import { AvailabilityGlyph } from "./AvailabilityGlyph";
 import { eventRange } from "./dates";
 import { EventBar } from "./EventBar";
 import { type EventSelectProps, eventClasses, eventStyle, selectHandlers } from "./eventProps";
-import { eventAriaLabel, eventTitle } from "./eventText";
+import { displayShowAs, eventAriaLabel, eventTitle } from "./eventText";
 import { useElementHeight } from "./hooks";
 import { cellLanes, chunk, hiddenCount, isBar, laneTable, rowItems } from "./layout";
 
@@ -226,7 +227,11 @@ function MonthEntry({ event, calendar, selected, onSelect }: MonthEntryProps) {
       aria-expanded={selected}
       {...selectHandlers(event, onSelect)}
     >
-      <span className="cal-entry__dot" aria-hidden="true" />
+      {displayShowAs(event) === "workingElsewhere" ? (
+        <AvailabilityGlyph event={event} className="cal-entry__glyph" size={12} />
+      ) : (
+        <span className="cal-entry__dot" aria-hidden="true" />
+      )}
       <span className="cal-entry__time tnum">{formatTime(eventRange(event).start)}</span>
       <span className="cal-entry__title" dir="auto">
         {eventTitle(event)}

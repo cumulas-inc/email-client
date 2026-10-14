@@ -14,6 +14,7 @@ import {
 import type { Calendar, CalendarEvent } from "../../api/types";
 import { appLocale, formatDate, formatHour, formatTime, formatTimeSpan } from "../../lib/datetime";
 import { formatCount } from "../../lib/format";
+import { AvailabilityGlyph } from "./AvailabilityGlyph";
 import { atMinutes, eventRange, minutesOfDay } from "./dates";
 import { EventBar } from "./EventBar";
 import { type EventSelectProps, eventClasses, eventStyle, selectHandlers } from "./eventProps";
@@ -23,7 +24,8 @@ import {
   eventAriaLabel,
   eventTimeRange,
   eventTitle,
-  formatClock,
+  formatCompactTime,
+  formatCompactTimeRange,
 } from "./eventText";
 import { useElementWidth } from "./hooks";
 import {
@@ -72,6 +74,25 @@ const CHIP_GAP = 2;
 const FIT = { minWidth: 48, shownWidth: 72, chipWidth: CHIP_WIDTH + CHIP_GAP };
 /** All-day rows shown before the rest go behind "+N more". */
 const ALL_DAY_LINES = 3;
+
+/**
+ * About how wide a short time is, in ems of its font, erring a little wide:
+ * tabular digits are 0.6em, AM/PM letters three quarters of one. The CSS
+ * falls back from the range to the start, and from the start to nothing,
+ * by comparing these with the width of the event.
+ */
+function timeWidthEm(text: string): number {
+  let em = 0;
+  for (const ch of text) {
+    if (/\d/.test(ch)) em += 0.6;
+    else if (/[:.\u2009]/.test(ch)) em += 0.26;
+    else if (/\s/.test(ch)) em += 0.28;
+    else if (ch === "–") em += 0.5;
+    else if (/[A-Za-z]/.test(ch)) em += 0.75;
+    else em += 1;
+  }
+  return Math.round(em * 100) / 100;
+}
 
 interface TimeGridProps {
   days: Date[];
@@ -545,6 +566,8 @@ function TimedEvent({ placed, calendar, selected, onSelect }: TimedEventProps) {
   const range = eventRange(event);
   const status = displayShowAs(event);
   const statusText = status === "busy" ? "" : ` · ${SHOW_AS_LABELS[status]}`;
+  const shortRange = formatCompactTimeRange(range.start, range.end);
+  const shortStart = formatCompactTime(range.start);
   return (
     <button
       type="button"
@@ -575,28 +598,31 @@ function TimedEvent({ placed, calendar, selected, onSelect }: TimedEventProps) {
       {...selectHandlers(event, onSelect)}
     >
       <span className="cal-ev__title" dir="auto">
+        <AvailabilityGlyph event={event} className="cal-ev__glyph" />
         {eventTitle(event)}
       </span>
       {compact ? (
         !placed.continuesBefore && (
           <span className="cal-ev__meta tnum">
             <span className="cal-ev__time-full">{formatTime(range.start)}</span>
-            <span className="cal-ev__time-short">{formatClock(range.start)}</span>
+            <span className="cal-ev__time-short">{shortStart}</span>
           </span>
         )
       ) : (
         <>
-          <span className="cal-ev__meta tnum">
-            {/* calendar.css shows one of the two by the width of the event. */}
+          <span
+            className="cal-ev__meta tnum"
+            style={
+              {
+                "--range-width": `${timeWidthEm(shortRange)}em`,
+                "--start-width": `${timeWidthEm(shortStart)}em`,
+              } as CSSProperties
+            }
+          >
+            {/* calendar.css shows one of the three by the width of the event. */}
             <span className="cal-ev__time-full">{eventTimeRange(event)}</span>
-            <span className="cal-ev__time-short">
-              {formatClock(range.start)}
-              {/* Thin spaces keep the short form short. */}
-              <span className="cal-ev__time-end">
-                {"\u2009–\u2009"}
-                {formatClock(range.end)}
-              </span>
-            </span>
+            <span className="cal-ev__time-short">{shortRange}</span>
+            <span className="cal-ev__time-start">{shortStart}</span>
             {statusText && <span className="cal-ev__status">{statusText}</span>}
           </span>
           {showLocation && (

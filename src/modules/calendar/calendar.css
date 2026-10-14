@@ -719,9 +719,27 @@ td:last-child > .cal-mini__day--in-range {
   background: var(--tint-bg);
 }
 
-.cal-show--workingElsewhere::before {
-  background: radial-gradient(circle, var(--tint-bar) 1.4px, transparent 1.6px) center top / 3px 5px
-    repeat-y;
+/* Working elsewhere: a small house leads the title instead of the stripe
+   (AvailabilityGlyph). */
+.cal-show--workingElsewhere:is(.cal-ev, .cal-bar)::before {
+  display: none;
+}
+
+.cal-ev__glyph,
+.cal-bar__glyph,
+.cal-entry__glyph {
+  flex-shrink: 0;
+  color: var(--tint-bar);
+}
+
+.cal-ev__glyph {
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+
+.cal-ev--struck :is(.cal-ev__glyph, .cal-bar__glyph),
+.cal-entry.cal-ev--struck .cal-entry__glyph {
+  color: var(--fg-tertiary);
 }
 
 /* Tentative: hatched, with a dashed stripe. */
@@ -1104,9 +1122,11 @@ button.cal-tg__daybtn:active {
   text-overflow: ellipsis;
 }
 
-/* "10:30 – 12:00" where "10:30 AM – 12:00 PM" would be cut off. Container
-   sizes are the event's content box, inside its padding. */
-.cal-ev__time-short {
+/* "10:30 – 12 PM" where "10:30 AM – 12:00 PM" would be cut off, and the
+   start alone ("10:30 AM") where even that would be. Container sizes (and
+   cqi) are the event's content box, inside its padding. */
+.cal-ev__time-short,
+.cal-ev__time-start {
   display: none;
 }
 
@@ -1119,22 +1139,37 @@ button.cal-tg__daybtn:active {
     display: inline;
   }
 
-  /* Hatching and outlines already say tentative or free. */
+  /* The range where it fits, else the start alone where that fits, else
+     neither (the grid shows when it starts) rather than "10:3…". TimeGrid
+     sets about how wide each is; the one not shown takes no width at all. */
+  .cal-ev__meta > :is(.cal-ev__time-short, .cal-ev__time-start) {
+    display: inline-block;
+    overflow: hidden;
+    vertical-align: top;
+  }
+
+  .cal-ev__meta > .cal-ev__time-short {
+    max-width: clamp(0px, (100cqi - var(--range-width)) * 1000, 100%);
+  }
+
+  .cal-ev__meta > .cal-ev__time-start {
+    max-width: min(
+      clamp(0px, (var(--range-width) - 100cqi) * 1000, 100%),
+      clamp(0px, (100cqi - var(--start-width)) * 1000, 100%)
+    );
+  }
+
+  /* Hatching, outlines and the house already say tentative, free or
+     working elsewhere. */
   .cal-ev__status {
     display: none;
   }
 }
 
-/* Very narrow: the start time alone, and one-line events keep the line
-   for their title (the grid shows when they start). */
+/* Very narrow: one-line events keep the line for their title (the grid
+   shows when they start). */
 @container cal-ev (max-width: 110px) {
   .cal-ev--compact .cal-ev__meta {
-    display: none;
-  }
-}
-
-@container cal-ev (max-width: 70px) {
-  .cal-ev__time-end {
     display: none;
   }
 }
@@ -1152,6 +1187,17 @@ button.cal-tg__daybtn:active {
 
   .cal-ev__title {
     font-size: 12px;
+  }
+}
+
+/* No stripe to clear: the house sits at the start of the title. */
+.cal-ev.cal-show--workingElsewhere {
+  padding-left: 8px;
+}
+
+@container cal-col (max-width: 170px) {
+  .cal-ev.cal-show--workingElsewhere {
+    padding-left: 6px;
   }
 }
 
@@ -1344,11 +1390,18 @@ button.cal-tg__daybtn:active {
   bottom: 3px;
 }
 
-.cal-bar--joins-before {
-  --bar-ml: 0px;
+.cal-bar.cal-show--workingElsewhere {
   padding-left: var(--space-2);
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
+}
+
+/* An end that carries on into the next week (or behind "+N more") keeps
+   the same inset as every other end, squared off, with a chevron pointing
+   the way it goes. */
+.cal-bar--joins-before,
+.cal-bar.cal-show--workingElsewhere.cal-bar--joins-before {
+  padding-left: 3px;
+  border-top-left-radius: 2px;
+  border-bottom-left-radius: 2px;
 }
 
 .cal-bar--joins-before::before {
@@ -1356,9 +1409,23 @@ button.cal-tg__daybtn:active {
 }
 
 .cal-bar--joins-after {
-  --bar-mr: 0px;
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
+  padding-right: 3px;
+  border-top-right-radius: 2px;
+  border-bottom-right-radius: 2px;
+}
+
+.cal-bar__cont {
+  flex-shrink: 0;
+  margin: 0 -2px;
+  color: var(--tint-sub);
+}
+
+.cal-bar__cont--after {
+  margin-left: auto;
+}
+
+.cal-ev--struck .cal-bar__cont {
+  color: var(--fg-tertiary);
 }
 
 .cal-bar__time {
@@ -1546,7 +1613,6 @@ button.cal-tg__daybtn:active {
 }
 
 .cal-show--free .cal-entry__dot,
-.cal-show--workingElsewhere .cal-entry__dot,
 .cal-show--tentative .cal-entry__dot {
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--tint-bar);
@@ -1725,6 +1791,16 @@ button.cal-tg__daybtn:active {
 .cal-details__actions {
   display: flex;
   flex-shrink: 0;
+}
+
+/* Destructive: red on hover, and it asks first (ConfirmDialog). */
+.icon-btn.cal-details__delete:hover:not(:disabled) {
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.icon-btn.cal-details__delete:active:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-subtle), var(--danger) 10%);
 }
 
 .cal-details__body {
@@ -2158,21 +2234,23 @@ button.cal-tg__daybtn:active {
   list-style: none;
 }
 
+/* Plain name chips, the same as the recipients in compose. */
 .cal-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  max-width: 240px;
-  height: 24px;
-  padding: 0 2px;
-  border-radius: var(--radius-round);
-  background: var(--bg-field);
+  gap: 2px;
+  max-width: 260px;
+  height: 26px;
+  padding: 0 2px 0 9px;
+  border-radius: 7px;
+  background: var(--bg-tile);
   box-shadow: inset 0 0 0 1px var(--border-default);
+  color: var(--fg-primary);
 }
 
 .cal-chip__name {
   overflow: hidden;
-  font-size: var(--text-sm);
+  font-size: 13px;
   font-weight: var(--weight-medium);
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -2187,7 +2265,7 @@ button.cal-tg__daybtn:active {
   flex-shrink: 0;
   padding: 0;
   border: none;
-  border-radius: var(--radius-round);
+  border-radius: 5px;
   background: transparent;
   color: var(--fg-tertiary);
   cursor: pointer;
@@ -2197,8 +2275,12 @@ button.cal-tg__daybtn:active {
 }
 
 .cal-chip__remove:hover {
-  background: var(--bg-pressed);
+  background: var(--bg-hover);
   color: var(--fg-primary);
+}
+
+.cal-chip__remove:active {
+  background: var(--bg-pressed);
 }
 
 .cal-attendees__input {

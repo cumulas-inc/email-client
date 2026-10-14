@@ -2,7 +2,7 @@ import "./calendar.css";
 
 import { addMonths, startOfDay, startOfMonth } from "date-fns";
 import { CalendarDays, CalendarPlus, CircleAlert, EyeOff } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAccounts } from "../../api/queries";
 import type { Account, Calendar, CalendarEvent } from "../../api/types";
@@ -48,6 +48,7 @@ export function CalendarModule() {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [editor, setEditor] = useState<EditorRequest | null>(null);
   const [editorKey, setEditorKey] = useState(0);
+  const mainRef = useRef<HTMLElement>(null);
 
   const accounts = useAccounts().data ?? NO_ACCOUNTS;
   const calendarsQuery = useCalendars();
@@ -252,7 +253,7 @@ export function CalendarModule() {
         )}
       </ModuleSidebar>
 
-      <section className="cal-main card" aria-label="Calendar">
+      <section className="cal-main card" aria-label="Calendar" ref={mainRef}>
         <Toolbar
           view={view}
           title={title}
@@ -341,6 +342,7 @@ export function CalendarModule() {
           calendar={selectedCalendar}
           account={accountsById.get(selectedEvent.accountId)}
           anchor={selection.anchor}
+          boundary={mainRef}
           onClose={closeDetails}
           onEdit={(event) => openEditor({ mode: "edit", event })}
         />

@@ -102,7 +102,6 @@ export function AttendeeInput({ id, value, onChange, placeholder }: AttendeeInpu
         <ul className="cal-attendees__chips" aria-label="Attendees">
           {value.map((a) => (
             <li key={a.address} className="cal-chip" title={a.address}>
-              <Avatar name={displayName(a)} colorKey={a.address} size={20} />
               <span className="cal-chip__name" dir="auto">
                 {displayName(a)}
               </span>

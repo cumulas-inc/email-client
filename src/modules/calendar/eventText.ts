@@ -53,25 +53,57 @@ export function eventTimeRange(event: CalendarEvent): string {
 
 const clockFormats = new Map<string, Intl.DateTimeFormat>();
 
-/**
- * "10:30" without AM/PM ("15:30" where the locale uses a 24-hour clock), for
- * narrow events: the hour labels beside the grid already say whether it is
- * morning or afternoon.
- */
-export function formatClock(date: Date): string {
+function clockParts(date: Date): Intl.DateTimeFormatPart[] {
   const locale = appLocale();
   let f = clockFormats.get(locale);
   if (!f) {
     f = new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" });
     clockFormats.set(locale, f);
   }
-  return f
-    .formatToParts(date)
-    .filter((p) => p.type !== "dayPeriod")
+  return f.formatToParts(date);
+}
+
+/**
+ * A time of day for a narrow event. With a 12-hour clock the minutes go
+ * when they are zero, and AM/PM is left off unless `period` asks for it
+ * ("10:30", "11", "12 PM"). A 24-hour clock keeps its usual form ("15:00").
+ */
+function compactClock(date: Date, period: boolean): string {
+  const parts = clockParts(date);
+  const twelveHour = parts.some((p) => p.type === "dayPeriod");
+  const onTheHour = twelveHour && parts.find((p) => p.type === "minute")?.value === "00";
+  return parts
+    .filter((p, i) => {
+      if (p.type === "dayPeriod") return period;
+      if (!onTheHour) return true;
+      // The minutes, and the ":" in front of them.
+      return p.type !== "minute" && !(p.type === "literal" && parts[i + 1]?.type === "minute");
+    })
     .map((p) => p.value)
     .join("")
     .replace(/[\s\u202f\u2009\u00a0]+/g, " ")
     .trim();
+}
+
+/** "10:30 AM", "11 AM" (or "15:00") for an event too narrow for its range. */
+export function formatCompactTime(date: Date): string {
+  return compactClock(date, true);
+}
+
+/** "AM" or "PM" (as the locale writes it), or null with a 24-hour clock. */
+function dayPeriod(date: Date): string | null {
+  return clockParts(date).find((p) => p.type === "dayPeriod")?.value ?? null;
+}
+
+/**
+ * "10:30 – 11 PM" for narrow events: AM/PM once, on the end, when both
+ * times share it, and on both when they don't ("11 AM – 12 PM"), so the
+ * start never reads as the wrong half of the day. 24-hour clocks stay as
+ * they are ("10:30 – 12:00"). Thin spaces keep the short form short.
+ */
+export function formatCompactTimeRange(start: Date, end: Date): string {
+  const both = dayPeriod(start) !== dayPeriod(end);
+  return `${compactClock(start, both)}\u2009\u2013\u2009${compactClock(end, true)}`;
 }
 
 /** "Wednesday, October 14, 2026", or "Wed, Oct 14 – Fri, Oct 16, 2026" for long events. */
