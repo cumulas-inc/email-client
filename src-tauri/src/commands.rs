@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use cumulas_core::model::{
     Account, Calendar, Contact, ContactDraft, EmailAddress, Event, EventDraft, EventResponse,
-    Folder, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount, OutgoingMessage,
+    Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount, OutgoingMessage,
     Settings, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::service::BUILTIN_MICROSOFT_CLIENT_ID;
@@ -85,6 +85,27 @@ pub async fn add_microsoft_account(
     let account = state
         .service
         .add_microsoft_account(&open_browser, login_hint.as_deref())
+        .await?;
+    spawn_sync(&state, &account.id);
+    Ok(account)
+}
+
+/// Stops waiting for a Microsoft sign-in the user abandoned in the browser.
+#[tauri::command]
+pub fn cancel_microsoft_sign_in(state: State<'_, AppState>) {
+    state.service.cancel_microsoft_sign_in();
+}
+
+/// Updates an IMAP account's password and/or servers, then syncs it.
+#[tauri::command]
+pub async fn update_imap_account(
+    state: State<'_, AppState>,
+    account_id: String,
+    update: ImapAccountUpdate,
+) -> Result<Account> {
+    let account = state
+        .service
+        .update_imap_account(&account_id, update)
         .await?;
     spawn_sync(&state, &account.id);
     Ok(account)

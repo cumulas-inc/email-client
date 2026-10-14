@@ -79,6 +79,7 @@ export class MockBackend implements Backend {
   private syncHandlers = new Set<(s: SyncStatus) => void>();
   private seq = 1000;
   private latency: number;
+  private pendingSignIn: (() => void) | null = null;
   /** Messages sent through the mock, for tests. */
   readonly sent: Parameters<Backend["sendMessage"]>[0][] = [];
 
@@ -203,6 +204,13 @@ export class MockBackend implements Backend {
       );
     }
     if (hint.startsWith("cancel")) fail("signInCancelled", "Sign-in was cancelled.");
+    if (hint.startsWith("slow")) {
+      // Never finishes on its own, like a browser tab the user walked away from.
+      await new Promise<void>((resolve) => {
+        this.pendingSignIn = resolve;
+      });
+      fail("signInCancelled", "Sign-in was cancelled.");
+    }
     const email = hint.includes("@") ? hint : "new.user@contoso.example";
     const account: Account = {
       id: this.id("acct"),
@@ -227,6 +235,36 @@ export class MockBackend implements Backend {
       totalCount: 0,
     });
     this.emit(["accounts", "mail"], account.id);
+    return clone(account);
+  }
+
+  async cancelMicrosoftSignIn() {
+    this.pendingSignIn?.();
+    this.pendingSignIn = null;
+  }
+
+  async updateImapAccount(accountId: string, update: Parameters<Backend["updateImapAccount"]>[1]) {
+    await this.delay();
+    const account = this.account(accountId);
+    if (account.settings.kind !== "imap") {
+      fail("unsupported", "Only IMAP accounts have server settings.");
+    }
+    if (update.password === "wrong") {
+      fail("authRequired", "The server rejected the user name or password.");
+    }
+    if (update.settings) {
+      const { imapHost, smtpHost, imapTls, smtpTls } = update.settings;
+      if (!imapHost.trim() || !smtpHost.trim()) {
+        fail("invalidInput", "Enter the IMAP and SMTP server names.");
+      }
+      const local = (host: string) => ["localhost", "127.0.0.1", "::1"].includes(host.trim());
+      if ((imapTls === "none" && !local(imapHost)) || (smtpTls === "none" && !local(smtpHost))) {
+        fail("invalidInput", "Unencrypted connections are only allowed to this computer.");
+      }
+      account.settings = { kind: "imap", ...update.settings };
+    }
+    account.syncError = null;
+    this.emit(["accounts"], accountId);
     return clone(account);
   }
 

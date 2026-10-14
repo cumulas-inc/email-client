@@ -26,6 +26,8 @@ export const tauriBackend: Backend = {
   addImapAccount: (input) => invoke("add_imap_account", { input }),
   addMicrosoftAccount: (loginHint) =>
     invoke("add_microsoft_account", { loginHint: loginHint ?? null }),
+  cancelMicrosoftSignIn: () => invoke("cancel_microsoft_sign_in"),
+  updateImapAccount: (accountId, update) => invoke("update_imap_account", { accountId, update }),
   updateAccount: (accountId, displayName, color) =>
     invoke("update_account", {
       accountId,

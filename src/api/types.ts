@@ -37,6 +37,12 @@ export interface NewImapAccount {
   settings: ImapSettings;
 }
 
+/** Changes to an IMAP account; omitted fields keep their current value. */
+export interface ImapAccountUpdate {
+  password?: string | null;
+  settings?: ImapSettings | null;
+}
+
 // --- Mail -------------------------------------------------------------------
 
 export interface EmailAddress {

@@ -10,8 +10,9 @@ use super::*;
 use crate::auth::microsoft::SignInResult;
 use crate::error::ErrorCode;
 use crate::model::{
-    AttachmentMeta, EmailAddress, EventDraft, Folder, FolderRole, ImapSettings, Importance,
-    Message, MessageQuery, OutgoingMessage, ShowAs, TaskDraft, TaskPatch, TaskStatus,
+    AccountSettings, AttachmentMeta, EmailAddress, EventDraft, Folder, FolderRole,
+    ImapAccountUpdate, ImapSettings, Importance, Message, MessageQuery, OutgoingMessage, ShowAs,
+    TaskDraft, TaskPatch, TaskStatus,
 };
 use crate::providers::{MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow};
 use crate::secrets::MemorySecretStore;
@@ -200,7 +201,19 @@ impl MailProvider for FakeMail {
 
 pub(crate) struct FakeConnector {
     pub server: Arc<Mutex<FakeServer>>,
-    pub reject_login: bool,
+    pub reject_login: std::sync::atomic::AtomicBool,
+    /// Passwords passed to `verify_imap`, in order.
+    pub verified_passwords: Mutex<Vec<String>>,
+}
+
+impl FakeConnector {
+    pub fn new(server: Arc<Mutex<FakeServer>>, reject_login: bool) -> Self {
+        Self {
+            server,
+            reject_login: reject_login.into(),
+            verified_passwords: Mutex::default(),
+        }
+    }
 }
 
 #[async_trait]
@@ -217,8 +230,12 @@ impl Connector for FakeConnector {
         })
     }
 
-    async fn verify_imap(&self, _: &ImapCredentials) -> Result<()> {
-        if self.reject_login {
+    async fn verify_imap(&self, credentials: &ImapCredentials) -> Result<()> {
+        self.verified_passwords
+            .lock()
+            .unwrap()
+            .push(credentials.password.clone());
+        if self.reject_login.load(std::sync::atomic::Ordering::Relaxed) {
             Err(Error::auth_required("Authentication failed"))
         } else {
             Ok(())
@@ -226,7 +243,8 @@ impl Connector for FakeConnector {
     }
 
     async fn microsoft_sign_in(&self, _: &BrowserOpener, _: Option<&str>) -> Result<SignInResult> {
-        Err(Error::unsupported("not in tests"))
+        // Like a user who never finishes signing in in the browser.
+        std::future::pending().await
     }
 }
 
@@ -246,6 +264,7 @@ impl EventSink for RecordingSink {
 
 struct Harness {
     service: CoreService,
+    connector: Arc<FakeConnector>,
     server: Arc<Mutex<FakeServer>>,
     secrets: Arc<MemorySecretStore>,
     sink: Arc<RecordingSink>,
@@ -262,17 +281,16 @@ fn harness() -> Harness {
     }));
     let secrets = Arc::new(MemorySecretStore::default());
     let sink = Arc::new(RecordingSink::default());
+    let connector = Arc::new(FakeConnector::new(Arc::clone(&server), false));
     let service = CoreService::new(
         Arc::new(Store::open_in_memory().unwrap()),
         secrets.clone(),
-        Arc::new(FakeConnector {
-            server: Arc::clone(&server),
-            reject_login: false,
-        }),
+        connector.clone(),
         sink.clone(),
     );
     Harness {
         service,
+        connector,
         server,
         secrets,
         sink,
@@ -372,10 +390,7 @@ async fn rejected_login_does_not_create_account() {
     let service = CoreService::new(
         Arc::new(Store::open_in_memory().unwrap()),
         h.secrets.clone(),
-        Arc::new(FakeConnector {
-            server: h.server.clone(),
-            reject_login: true,
-        }),
+        Arc::new(FakeConnector::new(h.server.clone(), true)),
         Arc::new(NullSink),
     );
     let err = service
@@ -658,4 +673,122 @@ async fn local_calendar_and_tasks_for_imap_accounts() {
             .is_empty()
     );
     assert_eq!(h.service.list_tasks(Some(&list.id), true).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn updating_imap_account_verifies_and_stores_new_password() {
+    let h = harness();
+    let account = h
+        .service
+        .add_imap_account(new_imap_account("me@example.com"))
+        .await
+        .unwrap();
+    h.service
+        .store()
+        .set_account_sync_result(&account.id, None, Some("Authentication failed"))
+        .unwrap();
+
+    // A rejected password leaves the stored one alone.
+    h.connector
+        .reject_login
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let update = ImapAccountUpdate {
+        password: Some("wrong".into()),
+        settings: None,
+    };
+    let err = h
+        .service
+        .update_imap_account(&account.id, update)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    let stored = h
+        .secrets
+        .get(&keys::imap_password(&account.id))
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("hunter2"));
+
+    h.connector
+        .reject_login
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let mut settings = match &account.settings {
+        AccountSettings::Imap(s) => s.clone(),
+        AccountSettings::Microsoft(_) => unreachable!(),
+    };
+    settings.imap_host = "mail.example.com".into();
+    let updated = h
+        .service
+        .update_imap_account(
+            &account.id,
+            ImapAccountUpdate {
+                password: Some("new-secret".into()),
+                settings: Some(settings),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&updated.settings, AccountSettings::Imap(s) if s.imap_host == "mail.example.com")
+    );
+    assert_eq!(updated.sync_error, None);
+    let stored = h
+        .secrets
+        .get(&keys::imap_password(&account.id))
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("new-secret"));
+    assert_eq!(
+        h.service
+            .store()
+            .get_account(&account.id)
+            .unwrap()
+            .sync_error,
+        None
+    );
+
+    // Settings-only change re-verifies with the stored password.
+    h.service
+        .update_imap_account(&account.id, ImapAccountUpdate::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        h.connector
+            .verified_passwords
+            .lock()
+            .unwrap()
+            .last()
+            .map(String::as_str),
+        Some("new-secret")
+    );
+
+    let mut insecure = ImapAccountUpdate::default();
+    let mut s = match &updated.settings {
+        AccountSettings::Imap(s) => s.clone(),
+        AccountSettings::Microsoft(_) => unreachable!(),
+    };
+    s.smtp_tls = TlsMode::None;
+    insecure.settings = Some(s);
+    assert_eq!(
+        h.service
+            .update_imap_account(&account.id, insecure)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn microsoft_sign_in_can_be_cancelled() {
+    let h = harness();
+    let service = &h.service;
+    let (result, ()) = tokio::join!(service.add_microsoft_account(&|_| Ok(()), None), async {
+        tokio::task::yield_now().await;
+        service.cancel_microsoft_sign_in();
+    });
+    assert_eq!(result.unwrap_err().code, ErrorCode::SignInCancelled);
+    // Nothing left pending; cancelling again is a no-op.
+    service.cancel_microsoft_sign_in();
+    assert!(service.list_accounts().unwrap().is_empty());
 }

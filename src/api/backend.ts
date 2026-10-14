@@ -10,6 +10,7 @@ import type {
   EventDraft,
   EventResponse,
   Folder,
+  ImapAccountUpdate,
   Message,
   MessagePage,
   MessageQuery,
@@ -42,6 +43,10 @@ export interface Backend {
   addImapAccount(input: NewImapAccount): Promise<Account>;
   /** Opens the system browser for Microsoft sign-in and resolves once done. */
   addMicrosoftAccount(loginHint?: string): Promise<Account>;
+  /** Abandons a pending addMicrosoftAccount, which rejects with signInCancelled. */
+  cancelMicrosoftSignIn(): Promise<void>;
+  /** Checks new credentials/servers against the servers, then saves them. */
+  updateImapAccount(accountId: string, update: ImapAccountUpdate): Promise<Account>;
   updateAccount(accountId: string, displayName?: string, color?: string): Promise<Account>;
   removeAccount(accountId: string): Promise<void>;
   getSettings(): Promise<Settings>;

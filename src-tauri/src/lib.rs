@@ -144,6 +144,8 @@ pub fn run() {
             commands::list_accounts,
             commands::add_imap_account,
             commands::add_microsoft_account,
+            commands::cancel_microsoft_sign_in,
+            commands::update_imap_account,
             commands::update_account,
             commands::remove_account,
             commands::get_settings,

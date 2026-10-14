@@ -20,11 +20,11 @@ pub use connector::{
 };
 pub use mail::Attachment;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
-    Account, AccountKind, AccountSettings, Calendar, DataKind, EntityKind, MessageSummary,
-    MicrosoftSettings, NewImapAccount, Settings, SyncState, SyncStatus, TaskList, TlsMode,
-    local_id,
+    Account, AccountKind, AccountSettings, Calendar, DataKind, EntityKind, ImapAccountUpdate,
+    ImapSettings, MessageSummary, MicrosoftSettings, NewImapAccount, Settings, SyncState,
+    SyncStatus, TaskList, TlsMode, local_id,
 };
 use crate::providers::imap::ImapCredentials;
 use crate::secrets::{SecretStore, keys};
@@ -65,6 +65,9 @@ pub struct CoreService {
     providers: tokio::sync::Mutex<HashMap<String, ProviderSet>>,
     sync_status: Mutex<HashMap<String, SyncStatus>>,
     sync_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Cancels the Microsoft sign-in in progress, tagged with its sequence number.
+    pending_sign_in: Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>>,
+    sign_in_seq: std::sync::atomic::AtomicU64,
 }
 
 impl CoreService {
@@ -82,6 +85,8 @@ impl CoreService {
             providers: tokio::sync::Mutex::new(HashMap::new()),
             sync_status: Mutex::new(HashMap::new()),
             sync_locks: Mutex::new(HashMap::new()),
+            pending_sign_in: Mutex::new(None),
+            sign_in_seq: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -134,19 +139,7 @@ impl CoreService {
         if !email.contains('@') {
             return Err(Error::invalid_input("Enter a valid email address."));
         }
-        let s = &input.settings;
-        if s.imap_host.trim().is_empty() || s.smtp_host.trim().is_empty() {
-            return Err(Error::invalid_input(
-                "Enter the IMAP and SMTP server names.",
-            ));
-        }
-        for (host, tls) in [(&s.imap_host, s.imap_tls), (&s.smtp_host, s.smtp_tls)] {
-            if tls == TlsMode::None && !is_loopback(host) {
-                return Err(Error::invalid_input(format!(
-                    "Unencrypted connections are only allowed to this computer, not {host}."
-                )));
-            }
-        }
+        validate_imap_settings(&input.settings)?;
         if self
             .store
             .list_accounts()?
@@ -191,6 +184,50 @@ impl CoreService {
         Ok(account)
     }
 
+    /// Changes the password and/or server settings of an IMAP account, after
+    /// checking them against the servers.
+    pub async fn update_imap_account(
+        &self,
+        account_id: &str,
+        update: ImapAccountUpdate,
+    ) -> Result<Account> {
+        let mut account = self.store.get_account(account_id)?;
+        let AccountSettings::Imap(current) = &account.settings else {
+            return Err(Error::unsupported(
+                "Only IMAP accounts have server settings.",
+            ));
+        };
+        let settings = update.settings.unwrap_or_else(|| current.clone());
+        validate_imap_settings(&settings)?;
+        let password = match update.password.filter(|p| !p.is_empty()) {
+            Some(password) => password,
+            None => self
+                .secrets
+                .get(&keys::imap_password(account_id))
+                .await?
+                .ok_or_else(|| Error::invalid_input("Enter the password for this account."))?,
+        };
+        self.connector
+            .verify_imap(&ImapCredentials {
+                settings: settings.clone(),
+                password: password.clone(),
+                display_name: account.display_name.clone(),
+                email: account.email.clone(),
+            })
+            .await?;
+
+        self.secrets
+            .set(&keys::imap_password(account_id), &password)
+            .await?;
+        account.settings = AccountSettings::Imap(settings);
+        account.sync_error = None;
+        self.store.update_account(&account)?;
+        self.store.set_account_sync_result(account_id, None, None)?;
+        self.forget_providers(Some(account_id)).await;
+        self.notify(&[DataKind::Accounts], Some(account_id));
+        Ok(account)
+    }
+
     /// IMAP accounts get a local calendar and task list so every account can
     /// use every module.
     fn create_local_pim_containers(&self, account: &Account) -> Result<()> {
@@ -220,10 +257,30 @@ impl CoreService {
         open_browser: &BrowserOpener,
         login_hint: Option<&str>,
     ) -> Result<Account> {
-        let result = self
-            .connector
-            .microsoft_sign_in(open_browser, login_hint)
-            .await?;
+        let seq = self
+            .sign_in_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        // Starting a new sign-in cancels one still waiting for the browser.
+        if let Some((_, previous)) = self
+            .pending_sign_in
+            .lock()
+            .unwrap()
+            .replace((seq, cancel_tx))
+        {
+            let _ = previous.send(());
+        }
+        let outcome = tokio::select! {
+            result = self.connector.microsoft_sign_in(open_browser, login_hint) => result,
+            _ = cancel_rx => Err(Error::new(ErrorCode::SignInCancelled, "Sign-in was cancelled.")),
+        };
+        {
+            let mut pending = self.pending_sign_in.lock().unwrap();
+            if pending.as_ref().is_some_and(|(s, _)| *s == seq) {
+                *pending = None;
+            }
+        }
+        let result = outcome?;
         let existing = self.store.list_accounts()?.into_iter().find(
             |a| matches!(&a.settings, AccountSettings::Microsoft(m) if m.user_id == result.user_id),
         );
@@ -261,6 +318,14 @@ impl CoreService {
         self.forget_providers(Some(&account.id)).await;
         self.notify(&[DataKind::Accounts], Some(&account.id));
         Ok(account)
+    }
+
+    /// Abandons a Microsoft sign-in that is waiting for the browser; the
+    /// pending `add_microsoft_account` call fails with `SignInCancelled`.
+    pub fn cancel_microsoft_sign_in(&self) {
+        if let Some((_, cancel)) = self.pending_sign_in.lock().unwrap().take() {
+            let _ = cancel.send(());
+        }
     }
 
     pub async fn update_account(
@@ -364,6 +429,27 @@ impl CoreService {
             .unwrap()
             .insert(status.account_id.clone(), status);
     }
+}
+
+fn validate_imap_settings(s: &ImapSettings) -> Result<()> {
+    if s.imap_host.trim().is_empty() || s.smtp_host.trim().is_empty() {
+        return Err(Error::invalid_input(
+            "Enter the IMAP and SMTP server names.",
+        ));
+    }
+    if s.imap_port == 0 || s.smtp_port == 0 {
+        return Err(Error::invalid_input(
+            "Enter the IMAP and SMTP port numbers.",
+        ));
+    }
+    for (host, tls) in [(&s.imap_host, s.imap_tls), (&s.smtp_host, s.smtp_tls)] {
+        if tls == TlsMode::None && !is_loopback(host) {
+            return Err(Error::invalid_input(format!(
+                "Unencrypted connections are only allowed to this computer, not {host}."
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn is_loopback(host: &str) -> bool {

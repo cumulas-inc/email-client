@@ -130,6 +130,17 @@ pub struct NewImapAccount {
     pub settings: ImapSettings,
 }
 
+/// Changes to an existing IMAP account, e.g. after a password change. Fields
+/// left `None` keep their current value.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImapAccountUpdate {
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub settings: Option<ImapSettings>,
+}
+
 // ---------------------------------------------------------------------------
 // Mail
 // ---------------------------------------------------------------------------
