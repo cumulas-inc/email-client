@@ -1,0 +1,30 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('48d31887-5fad-4d73-a9f5-3c356e68a038')/mailFolders(id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount)",
+  "value": [
+    {
+      "id": "AAMkInbox",
+      "displayName": "Inbox",
+      "parentFolderId": "AAMkRoot",
+      "childFolderCount": 1,
+      "unreadItemCount": 3,
+      "totalItemCount": 120
+    },
+    {
+      "id": "AAMkDrafts",
+      "displayName": "Drafts",
+      "parentFolderId": "AAMkRoot",
+      "childFolderCount": 0,
+      "unreadItemCount": 0,
+      "totalItemCount": 2
+    },
+    {
+      "id": "AAMkSent",
+      "displayName": "Sent Items",
+      "parentFolderId": "AAMkRoot",
+      "childFolderCount": 0,
+      "unreadItemCount": 0,
+      "totalItemCount": 340
+    }
+  ],
+  "@odata.nextLink": "{{base}}/me/mailFolders?%24select=id%2CdisplayName%2CparentFolderId%2CchildFolderCount%2CunreadItemCount%2CtotalItemCount&%24top=3&%24skip=3"
+}

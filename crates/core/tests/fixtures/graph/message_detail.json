@@ -1,0 +1,23 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('48d31887-5fad-4d73-a9f5-3c356e68a038')/messages(body,bccRecipients,replyTo,internetMessageId,internetMessageHeaders,hasAttachments)/$entity",
+  "@odata.etag": "W/\"CQAAABYAAAAiIsqMbYjsT5e-T7KzowPTAAAYNKvX\"",
+  "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAIgAA",
+  "hasAttachments": true,
+  "internetMessageId": "<CAF4b2Xx=QzE@mail.contoso.com>",
+  "body": {
+    "contentType": "html",
+    "content": "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"></head><body><p>See the chart:</p><img src=\"cid:image001.png@01DA1F2B.3C4D5E60\" alt=\"chart\"><p>Logo: <img src=\"cid:logo@contoso\"></p><p>Thanks</p></body></html>"
+  },
+  "bccRecipients": [
+    { "emailAddress": { "name": "Audit", "address": "audit@contoso.com" } }
+  ],
+  "replyTo": [
+    { "emailAddress": { "name": "Sales", "address": "sales@contoso.com" } }
+  ],
+  "internetMessageHeaders": [
+    { "name": "Received", "value": "from mail.contoso.com by EX01 with Microsoft SMTP Server" },
+    { "name": "Message-ID", "value": "<CAF4b2Xx=QzE@mail.contoso.com>" },
+    { "name": "In-Reply-To", "value": "<parent-1@mail.contoso.com>" },
+    { "name": "References", "value": "<root-1@mail.contoso.com>\r\n <parent-1@mail.contoso.com>" }
+  ]
+}

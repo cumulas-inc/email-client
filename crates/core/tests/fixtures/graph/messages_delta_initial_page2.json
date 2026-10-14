@@ -1,0 +1,28 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(message)",
+  "@odata.deltaLink": "{{base}}/me/mailFolders('AAMkInbox')/messages/delta?%24deltatoken=token-1",
+  "value": [
+    {
+      "@odata.type": "#microsoft.graph.message",
+      "@odata.etag": "W/\"CQAAABYAAAAiIsqMbYjsT5e-T7KzowPTAAAYNKvZ\"",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAJAAA",
+      "receivedDateTime": "2026-10-13T11:02:00Z",
+      "hasAttachments": false,
+      "subject": "Lunch?",
+      "bodyPreview": "Are you free on Thursday?",
+      "importance": "low",
+      "conversationId": "AAQkAGI2TG95AAA=",
+      "isRead": false,
+      "isDraft": false,
+      "from": null,
+      "sender": {
+        "emailAddress": { "name": "Nestor Wilke", "address": "NestorW@contoso.com" }
+      },
+      "toRecipients": [
+        { "emailAddress": { "name": "Adele Vance", "address": "AdeleV@contoso.com" } }
+      ],
+      "ccRecipients": null,
+      "flag": { "flagStatus": "complete" }
+    }
+  ]
+}
