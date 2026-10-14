@@ -3,8 +3,8 @@ import { ListChecks } from "lucide-react";
 import { useEffect, useId, type KeyboardEvent, type ReactNode } from "react";
 
 import type { Account, TaskList } from "../../api/types";
+import { AccountBadge } from "../../components/AccountBadge";
 import { listboxTarget, scrollIdIntoView } from "../../components/listboxKeys";
-import { initials } from "../../lib/format";
 import { smartListIcon } from "./smartIcons";
 import { SMART_LISTS, type TaskView } from "./taskUtils";
 
@@ -90,14 +90,7 @@ export function TaskSidebar({ accounts, lists, view, onSelect, counts }: TaskSid
             className="tasks-nav__group"
           >
             <div className="tasks-nav__account" title={`${account.displayName} (${account.email})`}>
-              {/* White on the account color: every color in the palette is dark enough. */}
-              <span
-                className="tasks-nav__badge"
-                style={{ background: account.color }}
-                aria-hidden="true"
-              >
-                {initials(account.displayName)}
-              </span>
+              <AccountBadge name={account.displayName} color={account.color} />
               <span id={headerId} className="tasks-nav__account-text">
                 <span className="tasks-nav__account-name">{account.displayName}</span>{" "}
                 <span className="tasks-nav__account-email">{account.email}</span>

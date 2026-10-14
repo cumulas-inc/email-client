@@ -72,6 +72,9 @@
   --bg-surface-raised: #ffffff;
   --bg-sidebar: #ffffff;
   --bg-field: #f5f4f1;
+  /* A raised tile on a sunken track (the chosen segment), and a recessed panel. */
+  --bg-tile: #ffffff;
+  --bg-sunken: #f5f4f1;
   --bg-hover: #f2f0eb;
   --bg-pressed: #e9e6e0;
   --bg-selected: #e3f1ee;
@@ -102,6 +105,10 @@
   --success-subtle: #e5f2e3;
   --flag: #c4581f;
   --flag-subtle: #fcebdd;
+  --star: #a87a0a;
+  --star-text: #82620e;
+  --star-subtle: #faf1d9;
+  --star-border: #ecdcae;
   --unread: #0b7a75;
   --now: #d8463a;
 
@@ -154,6 +161,8 @@
     --bg-surface-raised: #2a2926;
     --bg-sidebar: #22211e;
     --bg-field: #2a2926;
+    --bg-tile: #34322e;
+    --bg-sunken: #1d1c1a;
     --bg-hover: #2c2a27;
     --bg-pressed: #34322e;
     --bg-selected: #1a3532;
@@ -183,6 +192,10 @@
     --success-subtle: #1f3122;
     --flag: #ef8a4f;
     --flag-subtle: #3b2a1e;
+    --star: #e0b445;
+    --star-text: #e9c27a;
+    --star-subtle: #3a3020;
+    --star-border: #54452a;
     --unread: #3fb3a8;
     --now: #f06a5d;
 
@@ -233,6 +246,8 @@
   --bg-surface-raised: #2a2926;
   --bg-sidebar: #22211e;
   --bg-field: #2a2926;
+  --bg-tile: #34322e;
+  --bg-sunken: #1d1c1a;
   --bg-hover: #2c2a27;
   --bg-pressed: #34322e;
   --bg-selected: #1a3532;
@@ -262,6 +277,10 @@
   --success-subtle: #1f3122;
   --flag: #ef8a4f;
   --flag-subtle: #3b2a1e;
+  --star: #e0b445;
+  --star-text: #e9c27a;
+  --star-subtle: #3a3020;
+  --star-border: #54452a;
   --unread: #3fb3a8;
   --now: #f06a5d;
 

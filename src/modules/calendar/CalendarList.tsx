@@ -2,7 +2,7 @@ import { Check, ChevronDown } from "lucide-react";
 import { useId, useState } from "react";
 
 import type { Account, Calendar } from "../../api/types";
-import { initials } from "../../lib/format";
+import { AccountBadge } from "../../components/AccountBadge";
 import { tintStyle } from "./colors";
 import { type CalendarGroup, groupCalendars } from "./model";
 
@@ -35,13 +35,10 @@ function AccountGroup({
         title={open ? "Hide this account's calendars" : "Show this account's calendars"}
         onClick={() => setOpen((o) => !o)}
       >
-        <span
-          className="cal-list__badge cal-tint"
-          style={tintStyle(group.account?.color ?? group.calendars[0]?.color)}
-          aria-hidden="true"
-        >
-          {initials(name)}
-        </span>
+        <AccountBadge
+          name={name}
+          color={group.account?.color ?? group.calendars[0]?.color ?? "#0b7a75"}
+        />
         <span className="cal-list__account-text">
           <span className="cal-list__account-name">{name}</span>
           {group.account && <span className="cal-list__account-email">{group.account.email}</span>}

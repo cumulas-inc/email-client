@@ -3,6 +3,7 @@ import { useId, useState, type FormEvent } from "react";
 
 import { errorMessage } from "../../api/errors";
 import type { Account, Contact } from "../../api/types";
+import { AccountBadge } from "../../components/AccountBadge";
 import { Avatar } from "../../components/Avatar";
 import { Dialog } from "../../components/Dialog";
 import { toast } from "../../components/toast";
@@ -10,7 +11,6 @@ import {
   type ContactForm,
   PHONE_KINDS,
   type PhoneRow,
-  accountMark,
   composeName,
   draftFromForm,
   emptyForm,
@@ -165,13 +165,12 @@ export function ContactEditor({
                           checked={form.accountId === a.id}
                           onChange={() => set("accountId", a.id)}
                         />
-                        <span
+                        <AccountBadge
+                          size={26}
                           className="people-form__account-mark"
-                          style={{ background: a.color }}
-                          aria-hidden="true"
-                        >
-                          {accountMark(a.displayName)}
-                        </span>
+                          name={a.displayName}
+                          color={a.color}
+                        />
                         <span className="people-form__account-text">
                           <span className="people-form__account-name">{a.displayName}</span>
                           <span className="people-form__account-email">{a.email}</span>

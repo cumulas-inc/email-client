@@ -2,7 +2,8 @@ import { Users } from "lucide-react";
 import { useId } from "react";
 
 import type { Account } from "../../api/types";
-import { accountMark, contactCount } from "./contactUtils";
+import { AccountBadge } from "../../components/AccountBadge";
+import { contactCount } from "./contactUtils";
 
 interface AddressBooksProps {
   accounts: Account[];
@@ -57,13 +58,11 @@ export function AddressBooks({ accounts, counts, selectedId, onSelect }: Address
                 title={`${account.displayName} (${account.email})`}
                 onClick={() => onSelect(account.id)}
               >
-                <span
+                <AccountBadge
                   className="people-book__mark"
-                  style={{ background: account.color }}
-                  aria-hidden="true"
-                >
-                  {accountMark(account.displayName)}
-                </span>
+                  name={account.displayName}
+                  color={account.color}
+                />
                 <span className="people-book__name">{account.displayName}</span>
                 <span className="people-book__email">{account.email}</span>
                 {n !== null && <span className="people-book__count">{n}</span>}

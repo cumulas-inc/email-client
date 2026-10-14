@@ -80,6 +80,8 @@
   width: var(--sidebar-width);
   flex-shrink: 0;
   background: var(--bg-sidebar);
+  /* Mail's folder pane can be narrowed; the switcher adapts (below). */
+  container-type: inline-size;
 }
 
 .module-sidebar__action {
@@ -179,18 +181,25 @@
 }
 
 .module-switcher__item[aria-current="page"] {
-  background: var(--bg-surface);
+  background: var(--bg-tile);
   color: var(--brand-text);
   box-shadow: var(--shadow-sm);
 }
 
-:root[data-theme="dark"] .module-switcher__item[aria-current="page"] {
-  background: var(--bg-pressed);
-}
+/* In a narrow sidebar the switcher shows icons only; the names stay for
+   screen readers and in the tooltips. */
+@container (max-width: 236px) {
+  .module-switcher__item {
+    padding: 8px 0;
+  }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .module-switcher__item[aria-current="page"] {
-    background: var(--bg-pressed);
+  .module-switcher__item span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
   }
 }
 

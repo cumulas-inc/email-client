@@ -13,6 +13,7 @@ import {
 import { useAppStore } from "../../app/store";
 import { useAccounts } from "../../api/queries";
 import type { Account, Folder } from "../../api/types";
+import { AccountBadge } from "../../components/AccountBadge";
 import type { MailActions } from "./actions";
 import { currentMailDrag, endMailDrag } from "./dnd";
 import { FolderIcon } from "./FolderIcon";
@@ -27,12 +28,6 @@ function quoteAttr(value: string): string {
 /** The number shown next to a folder: drafts count all items, others unread. */
 function folderCount(folder: Folder): number {
   return folder.role === "drafts" ? folder.totalCount : folder.unreadCount;
-}
-
-/** The letter on an account's badge: "W" for Work. Its color tells accounts apart. */
-function accountInitial(name: string): string {
-  const letter = name.match(/[\p{L}\p{N}]/u)?.[0] ?? "?";
-  return letter.toLocaleUpperCase();
 }
 
 function countLabel(folder: Folder): string {
@@ -421,15 +416,7 @@ export function FolderPane({ actions }: FolderPaneProps) {
               secondary={account.email}
               title={`${account.displayName} (${account.email})`}
               ariaLabel={`${account.displayName} (${account.email})`}
-              icon={
-                <span
-                  className="mail-tree__badge"
-                  style={{ background: account.color }}
-                  aria-hidden="true"
-                >
-                  {accountInitial(account.displayName)}
-                </span>
-              }
+              icon={<AccountBadge name={account.displayName} color={account.color} />}
               heading="account"
               expandable
               expanded={expanded}

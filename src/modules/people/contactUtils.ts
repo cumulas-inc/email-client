@@ -55,17 +55,6 @@ export function contactSecondary(c: Contact): string {
   return (repeatsName ? "" : company) || c.emails[0]?.address || company;
 }
 
-/** The letters on an account's badge: "AM" for Alex Morgan, "W" for Work. */
-export function accountMark(name: string): string {
-  const words = name
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
-    .filter(Boolean);
-  const first = words[0]?.[0] ?? "?";
-  const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? "") : "";
-  return (first + last).toUpperCase();
-}
-
 /** How many contacts each account holds. */
 export function countByAccount(contacts: Contact[]): Map<string, number> {
   const counts = new Map<string, number>();

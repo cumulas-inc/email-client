@@ -135,7 +135,7 @@
 
 .segmented__option--selected,
 .segmented__option--selected:hover {
-  background: var(--bg-surface);
+  background: var(--bg-tile);
   color: var(--fg-primary);
   box-shadow: var(--shadow-sm);
 }

@@ -32,6 +32,17 @@ export function initials(nameOrAddress: string): string {
   return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
 }
 
+/** The letters on an account's badge: "AM" for Alex Morgan, "W" for Work. */
+export function accountMark(name: string): string {
+  const words = name
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  const first = words[0]?.[0] ?? "?";
+  const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? "") : "";
+  return (first + last).toLocaleUpperCase();
+}
+
 export const AVATAR_HUES = [
   "teal",
   "rose",

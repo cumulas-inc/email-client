@@ -20,7 +20,7 @@ import { EmptyState } from "../../../components/EmptyState";
 import { PaneSpinner } from "../../../components/Spinner";
 import { toast } from "../../../components/toast";
 import { openAddAccount } from "../addAccountStore";
-import { AccountBadge } from "../AccountBadge";
+import { AccountBadge } from "../../../components/AccountBadge";
 import { ACCOUNT_COLORS, ADD_ACCOUNT_BUTTON_ID } from "../constants";
 import { Callout, TextField } from "../Fields";
 import { focusLater } from "../focus";
@@ -228,7 +228,7 @@ function AccountItem({
   return (
     <li className={clsx("account-item", expanded && "account-item--expanded")}>
       <div className="account-item__header">
-        <AccountBadge name={account.displayName} color={account.color} />
+        <AccountBadge name={account.displayName} color={account.color} size={36} />
         <div className="account-item__identity">
           <div className="account-item__line">
             <span className="account-item__name">{account.displayName}</span>
