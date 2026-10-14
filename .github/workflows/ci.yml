@@ -53,6 +53,42 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
+  imap-integration:
+    name: IMAP/SMTP integration (GreenMail)
+    runs-on: ubuntu-24.04
+    services:
+      greenmail:
+        image: greenmail/standalone:2.1.14
+        env:
+          # The image's defaults minus `greenmail.auth.disabled`, so that wrong
+          # passwords are rejected.
+          GREENMAIL_OPTS: >-
+            -Dgreenmail.setup.test.all
+            -Dgreenmail.hostname=0.0.0.0
+            -Dgreenmail.users=alice:secret@example.com,bob:secret@example.com
+        ports:
+          - 3025:3025
+          - 3143:3143
+          - 3993:3993
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Wait for GreenMail
+        run: |
+          for _ in $(seq 1 60); do
+            (exec 3<>/dev/tcp/127.0.0.1/3143) 2>/dev/null && exit 0
+            sleep 1
+          done
+          echo "GreenMail did not start" >&2
+          exit 1
+      - name: Run integration tests
+        run: cargo test -p cumulas-core --test imap_integration --locked -- --nocapture
+        env:
+          CUMULAS_TEST_IMAP: "1"
+          # GreenMail's self-signed certificate must be refused.
+          CUMULAS_TEST_UNTRUSTED_TLS_PORT: "3993"
+
   flatpak:
     name: Flatpak build
     runs-on: ubuntu-24.04
