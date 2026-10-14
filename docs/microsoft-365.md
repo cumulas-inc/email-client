@@ -24,7 +24,7 @@ themselves by default:
 | `Mail.Send`                               | Sending mail                                       |
 | `MailboxSettings.Read`                    | Time zone and mailbox preferences                  |
 | `Calendars.ReadWrite`                     | Calendar views, creating events, meeting responses |
-| `Contacts.ReadWrite`                      | People and address autocomplete                    |
+| `Contacts.ReadWrite`                      | Contacts and address autocomplete                  |
 | `Tasks.ReadWrite`                         | Microsoft To Do lists and tasks                    |
 
 ## "Need admin approval"

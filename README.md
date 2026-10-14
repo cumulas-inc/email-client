@@ -11,9 +11,9 @@ React, packaged for Flathub as `co.cumulas.Mail`.
 
 ![Mail](docs/screenshots/mail-light.png)
 
-| Calendar                                                  | To Do                                              | Dark mode                                     |
-| --------------------------------------------------------- | -------------------------------------------------- | --------------------------------------------- |
-| ![Calendar](docs/screenshots/calendar-workweek-light.png) | ![To Do](docs/screenshots/tasks-planned-light.png) | ![Mail, dark](docs/screenshots/mail-dark.png) |
+| Calendar                                                  | Tasks                                                | Dark mode                                     |
+| --------------------------------------------------------- | ---------------------------------------------------- | --------------------------------------------- |
+| ![Calendar](docs/screenshots/calendar-workweek-light.png) | ![Tasks](docs/screenshots/tasks-scheduled-light.png) | ![Mail, dark](docs/screenshots/mail-dark.png) |
 
 ## Features
 
@@ -25,8 +25,8 @@ React, packaged for Flathub as `co.cumulas.Mail`.
 - **Calendar**: day, work week, week and month views, all-day and multi-day
   events, meeting invitations (accept / tentative / decline), Teams meetings
   for Microsoft accounts.
-- **People**: contacts with search, editing and "send email".
-- **To Do**: Microsoft To Do lists, Important and Planned views, due dates,
+- **Contacts**: contacts with search, editing and "send email".
+- **Tasks**: Microsoft To Do lists, Starred and Scheduled views, due dates,
   notes.
 - **Accounts**: Microsoft 365 and Outlook.com sign-in in the browser (no
   passwords in the app); IMAP/SMTP with presets for Gmail, iCloud, Fastmail,
