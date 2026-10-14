@@ -107,7 +107,9 @@ interface MessageSeed {
   to?: EmailAddress[];
   cc?: EmailAddress[];
   subject: string;
-  html: string;
+  html?: string;
+  /** A plain-text body (no HTML part). */
+  plainText?: string;
   received: Date;
   read?: boolean;
   flagged?: boolean;
@@ -119,7 +121,7 @@ interface MessageSeed {
 function message(accountId: string, me: EmailAddress, seed: MessageSeed): Message {
   messageSeq += 1;
   const id = `msg-${messageSeq}`;
-  const text = seed.html
+  const text = (seed.plainText ?? seed.html ?? "")
     .replace(/<style[\s\S]*?<\/style>/g, "")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/g, " ")
@@ -145,8 +147,8 @@ function message(accountId: string, me: EmailAddress, seed: MessageSeed): Messag
     importance: seed.importance ?? "normal",
     bcc: [],
     replyTo: [],
-    bodyHtml: seed.html,
-    bodyText: text,
+    bodyHtml: seed.plainText !== undefined ? null : (seed.html ?? ""),
+    bodyText: seed.plainText ?? text,
     hasBlockedContent: false,
     attachments: (seed.attachments ?? []).map((a, i) => ({
       id: `${id}-att-${i}`,
@@ -225,7 +227,7 @@ function workMessages(): Message[] {
       html:
         para(
           "Numbers from last night's run look good: p95 latency stayed under 180 ms up to 4× expected peak. The one regression was the export endpoint — I've opened a ticket.",
-          "Full report on the wiki.",
+          'Full report on the <a href="https://wiki.acme.example/atlas/load-tests">wiki</a>.',
         ) +
         `<blockquote style="border-left:3px solid #c8c6c4;margin:0;padding-left:12px;color:#605e5c">On Monday, Alex Morgan wrote:<br>Can we get a load test in before the review?</blockquote>` +
         signature("Jonas"),
@@ -234,6 +236,8 @@ function workMessages(): Message[] {
     m({
       folderId: "w-inbox",
       from: people.dana,
+      to: [ME_WORK, people.priya, people.jonas, people.mei, people.sam],
+      cc: [{ name: "Engineering Leads", address: "eng-leads@acme.example" }],
       subject: "Quarterly planning: please add your team's top three bets",
       html:
         para(
@@ -397,6 +401,23 @@ function homeMessages(): Message[] {
     }),
     m({
       folderId: "h-inbox",
+      from: people.ben,
+      subject: "Climbing on Thursday?",
+      plainText: [
+        "Hey Alex,",
+        "",
+        "Are you up for climbing on Thursday evening? The new routes look fun:",
+        "https://riversideclimbing.example/routes",
+        "",
+        "If you can't make it, could you let Sam know (sam.okafor@acme.example)? He was asking about a partner.",
+        "",
+        "Ben",
+      ].join("\n"),
+      received: at(0, 7, 15),
+      read: false,
+    }),
+    m({
+      folderId: "h-inbox",
       from: people.club,
       subject: "New bouldering routes this weekend",
       html: para(
@@ -423,6 +444,95 @@ function homeMessages(): Message[] {
       ],
     }),
   ];
+}
+
+/** Older work mail, so the inbox has more than one page and several date groups. */
+function olderWorkMessages(): Message[] {
+  const senders = [
+    people.priya,
+    people.jonas,
+    people.mei,
+    people.sam,
+    people.dana,
+    people.lucia,
+    people.it,
+    people.hr,
+  ];
+  const topics: [string, string][] = [
+    [
+      "Weekly sync notes",
+      "Notes from this week's sync are below. Main decision: we keep the Thursday demo slot.",
+    ],
+    [
+      "Design review follow-up",
+      "Thanks for the review. I've updated the flows based on your comments.",
+    ],
+    [
+      "Budget check-in",
+      "We're tracking slightly under budget for the quarter. No action needed yet.",
+    ],
+    [
+      "Customer feedback roundup",
+      "Top themes this month: faster search, offline mode and better calendar sharing.",
+    ],
+    ["Release notes draft", "First draft of the release notes is ready for a look."],
+    [
+      "Incident review: API latency",
+      "Root cause was a misconfigured connection pool. Follow-ups are tracked in the board.",
+    ],
+    [
+      "Hiring loop schedule",
+      "Interview slots for next week are confirmed. Please check your calendar.",
+    ],
+    ["Roadmap questions", "A few questions came up in the roadmap session — could you weigh in?"],
+    [
+      "Docs migration plan",
+      "We'll move the docs to the new site in three phases, starting with the API reference.",
+    ],
+    [
+      "Security training reminder",
+      "Please complete the annual security training by the end of the month.",
+    ],
+    [
+      "Quarterly metrics",
+      "Quarterly metrics are in. Activation is up 4% and support tickets are down.",
+    ],
+    [
+      "Vendor contract renewal",
+      "The analytics vendor contract renews next month. Any concerns before we sign?",
+    ],
+    ["Onboarding buddy", "Would you be the onboarding buddy for our new engineer starting Monday?"],
+    [
+      "Accessibility audit results",
+      "The audit found 12 issues, mostly colour contrast. Details in the report.",
+    ],
+  ];
+  const out: Message[] = [];
+  for (let i = 0; i < 64; i++) {
+    const from = senders[i % senders.length]!;
+    const [topic, line] = topics[(i * 5) % topics.length]!;
+    out.push(
+      message(WORK, ME_WORK, {
+        folderId: "w-inbox",
+        from,
+        subject: i % 4 === 1 ? `Re: ${topic}` : topic,
+        html: para("Hi Alex,", line) + signature((from.name ?? "").split(" ")[0] ?? ""),
+        received: at(-14 - Math.floor(i * 2.6), 8 + (i % 9), (i * 17) % 60),
+        flagged: i % 19 === 3,
+        attachments:
+          i % 11 === 4
+            ? [
+                {
+                  name: `${topic.toLowerCase().replace(/\W+/g, "-")}.pdf`,
+                  contentType: "application/pdf",
+                  size: 120_000 + i * 997,
+                },
+              ]
+            : undefined,
+      }),
+    );
+  }
+  return out;
 }
 
 function contact(
@@ -548,7 +658,7 @@ export function createDemoState(): MockState {
     folder(HOME, "h-trash", "Trash", "trash"),
   ];
 
-  const messages = [...workMessages(), ...homeMessages()];
+  const messages = [...workMessages(), ...homeMessages(), ...olderWorkMessages()];
 
   const calendars: Calendar[] = [
     {
