@@ -55,7 +55,7 @@ export function GeneralSection() {
       <SettingsGroup title="Notifications">
         <div className="setting-row">
           <Switch
-            label="New mail notifications"
+            label="New message notifications"
             description="Show a desktop notification when new messages arrive."
             checked={settings.notificationsEnabled}
             onChange={(notificationsEnabled) => void save({ notificationsEnabled })}

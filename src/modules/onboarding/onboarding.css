@@ -1,4 +1,9 @@
-/* First-run welcome screen. Tokens only; see styles/tokens.css. */
+/* First-run welcome screen. Tokens only; see styles/tokens.css.
+
+   One card on the canvas. It is the one place in the app with a little
+   ceremony: the card rises in, the two clouds of the mark drift together,
+   and the back cloud keeps floating very slowly. Nothing moves when the
+   system asks for reduced motion. */
 
 .welcome {
   display: flex;
@@ -6,47 +11,60 @@
   justify-content: center;
   align-items: safe center;
   min-height: 0;
-  padding: var(--space-8) var(--space-6);
+  padding: var(--space-4) var(--space-4) var(--space-6);
   overflow-y: auto;
-  background:
-    radial-gradient(ellipse 70% 55% at 50% 0%, var(--brand-subtle), transparent 70%), var(--bg-app);
 }
 
-.welcome__inner {
+.welcome__card {
   display: flex;
   flex-direction: column;
   align-items: center;
   width: 100%;
-  max-width: 780px;
+  max-width: 736px;
+  padding: 44px var(--space-8) var(--space-6);
+  border-radius: 16px;
+  /* A little sky behind the mark. */
+  background:
+    radial-gradient(
+      ellipse 300px 150px at 50% 0,
+      color-mix(in srgb, var(--brand-subtle) 70%, transparent),
+      transparent
+    ),
+    var(--bg-surface);
+  box-shadow: var(--shadow-card);
   text-align: center;
-  animation: welcome-in 360ms var(--ease);
 }
 
-.welcome__logo {
+.welcome__mark {
+  display: flex;
   margin-bottom: var(--space-5);
 }
 
+/* What people read first: the serif. */
 .welcome__title {
-  font-size: calc(var(--text-2xl) * 1.45);
-  font-weight: var(--weight-semibold);
-  line-height: 1.15;
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1.12;
   letter-spacing: -0.01em;
+  text-wrap: balance;
 }
 
 .welcome__lead {
-  max-width: 640px;
-  text-wrap: balance;
-  margin-top: var(--space-3);
+  max-width: 46ch;
+  margin-top: 10px;
   font-size: var(--text-lg);
   line-height: 1.5;
   color: var(--fg-secondary);
+  text-wrap: balance;
 }
 
 .welcome__features {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: var(--space-2);
+  gap: 6px;
   margin: var(--space-5) 0 0;
   padding: 0;
   list-style: none;
@@ -56,11 +74,11 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 30px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--border-subtle);
+  height: 28px;
+  padding: 0 11px 0 9px;
   border-radius: var(--radius-round);
-  background: var(--bg-surface-raised);
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-default);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   color: var(--fg-secondary);
@@ -68,30 +86,63 @@
 
 .welcome__feature svg {
   display: block;
-  color: var(--brand);
+  color: var(--brand-text);
 }
 
 .welcome__choices {
   width: 100%;
-  margin-top: calc(var(--space-8) + var(--space-2));
+  margin-top: 36px;
   text-align: left;
 }
 
+/* A label between two hairlines, introducing the choice below it. */
 .welcome__choose {
-  margin-bottom: var(--space-3);
-  font-size: var(--text-md);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: 14px;
+  font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
+  letter-spacing: 0.01em;
   color: var(--fg-secondary);
-  text-align: center;
+  white-space: nowrap;
+}
+
+.welcome__choose::before,
+.welcome__choose::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-default);
+}
+
+/* The tiles sit on the card itself. */
+.welcome .kind-option {
+  background: var(--bg-surface);
+}
+
+.welcome .kind-option:hover {
+  background: var(--bg-surface);
+  box-shadow:
+    inset 0 0 0 1px var(--border-strong),
+    var(--shadow-md);
+}
+
+.welcome .kind-option:active {
+  background: var(--bg-hover);
+}
+
+.welcome svg.lucide[stroke-width="2"]:not([width="12"], [width="14"]) {
+  stroke-width: 1.75;
 }
 
 .welcome__privacy {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: var(--space-6);
+  margin-top: var(--space-5);
   font-size: var(--text-sm);
-  color: var(--fg-tertiary);
+  color: var(--fg-secondary);
 }
 
 .welcome__privacy svg {
@@ -99,9 +150,157 @@
   color: var(--success);
 }
 
-@keyframes welcome-in {
+/* Short windows (down to 960×600): the same card, a little tighter, so the
+   choices and the privacy line still fit without scrolling. */
+@media (max-height: 700px) {
+  .welcome {
+    padding-top: var(--space-2);
+  }
+
+  .welcome__card {
+    padding-top: var(--space-6);
+    padding-bottom: var(--space-4);
+  }
+
+  .welcome__mark {
+    margin-bottom: var(--space-3);
+  }
+
+  .welcome__mark .logo-mark {
+    width: 64px;
+    height: auto;
+  }
+
+  .welcome__title {
+    font-size: 30px;
+  }
+
+  .welcome__lead {
+    margin-top: 6px;
+  }
+
+  .welcome__features {
+    margin-top: 14px;
+  }
+
+  .welcome__choices {
+    margin-top: var(--space-5);
+  }
+
+  .welcome .kind-options--cards .kind-option {
+    gap: 10px;
+    padding: var(--space-4) var(--space-4) 14px;
+  }
+
+  .welcome .kind-options--cards .kind-option__arrow {
+    top: var(--space-4);
+    right: var(--space-4);
+  }
+
+  .welcome__privacy {
+    margin-top: 14px;
+  }
+}
+
+/* --- The arrival ----------------------------------------------------------- */
+
+@media (prefers-reduced-motion: no-preference) {
+  .welcome__card {
+    animation: welcome-rise 520ms var(--ease-out) both;
+  }
+
+  /* SVG user units: the mark is 22.8 wide, so 3 units is about 11px at this
+     size. The pale back cloud (first shape) drifts in from the right, the
+     front one (last) from the left, and they meet. */
+  .welcome__mark .logo-mark__back {
+    animation:
+      cloud-back-in 1100ms var(--ease-out) 140ms both,
+      cloud-float 7s var(--ease-in-out) 1300ms infinite alternate;
+  }
+
+  .welcome__mark .logo-mark__front {
+    animation: cloud-front-in 900ms var(--ease-out) 80ms both;
+  }
+
+  .welcome__feature {
+    animation: welcome-chip 420ms var(--ease-out) both;
+  }
+
+  .welcome__feature:nth-child(1) {
+    animation-delay: 260ms;
+  }
+
+  .welcome__feature:nth-child(2) {
+    animation-delay: 310ms;
+  }
+
+  .welcome__feature:nth-child(3) {
+    animation-delay: 360ms;
+  }
+
+  .welcome__feature:nth-child(4) {
+    animation-delay: 410ms;
+  }
+
+  /* A tile lifts toward the pointer. */
+  @media (hover: hover) and (pointer: fine) {
+    .welcome .kind-option {
+      transition:
+        background var(--duration-fast) var(--ease),
+        box-shadow var(--duration-normal) var(--ease),
+        transform var(--duration-normal) var(--ease-out);
+    }
+
+    .welcome .kind-option:hover {
+      transform: translateY(-2px);
+    }
+
+    .welcome .kind-option:hover:active {
+      transform: translateY(0) scale(0.99);
+    }
+
+    .welcome .kind-option__arrow {
+      transition:
+        color var(--duration-fast) var(--ease),
+        transform var(--duration-normal) var(--ease-out);
+    }
+
+    .welcome .kind-option:hover .kind-option__arrow {
+      transform: translateX(2px);
+    }
+  }
+}
+
+@keyframes welcome-rise {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(12px) scale(0.985);
+  }
+}
+
+@keyframes cloud-back-in {
+  from {
+    opacity: 0;
+    transform: translate(3px, 0.6px);
+  }
+}
+
+@keyframes cloud-front-in {
+  from {
+    opacity: 0;
+    transform: translateX(-2px);
+  }
+}
+
+@keyframes cloud-float {
+  to {
+    transform: translateX(-0.7px);
+  }
+}
+
+@keyframes welcome-chip {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
   }
 }

@@ -20,7 +20,7 @@ const OPTIONS: Option[] = [
     title: "Microsoft 365 or Outlook.com",
     description:
       "Work, school or personal Microsoft account. Mail, calendar, contacts and tasks all stay in sync.",
-    icon: <BriefcaseBusiness size={22} />,
+    icon: <BriefcaseBusiness size={22} strokeWidth={1.75} />,
     examples: ["Microsoft 365", "Outlook.com", "Hotmail", "Live"],
   },
   {
@@ -28,13 +28,13 @@ const OPTIONS: Option[] = [
     title: "Other email (IMAP)",
     description:
       "Any provider that supports IMAP. Your calendar, contacts and tasks are kept on this computer.",
-    icon: <AtSign size={22} />,
+    icon: <AtSign size={22} strokeWidth={1.75} />,
     examples: ["Gmail", "Fastmail", "iCloud", "Yahoo", "Self-hosted"],
   },
 ];
 
 interface AccountKindOptionsProps {
-  /** "cards": large side-by-side cards (welcome); "list": rows (dialog). */
+  /** "cards": side-by-side tiles (welcome); "list": stacked tiles (dialog). */
   variant: "cards" | "list";
   onChoose: (kind: AccountKindChoice) => void;
   /** Mark the first option for initial focus. */
@@ -76,7 +76,11 @@ export function AccountKindOptions({ variant, onChoose, autoFocus }: AccountKind
             </span>
           </span>
           <span className="kind-option__arrow" aria-hidden="true">
-            {variant === "cards" ? <ArrowRight size={18} /> : <ChevronRight size={18} />}
+            {variant === "cards" ? (
+              <ArrowRight size={18} strokeWidth={1.75} />
+            ) : (
+              <ChevronRight size={18} strokeWidth={1.75} />
+            )}
           </span>
         </button>
       ))}

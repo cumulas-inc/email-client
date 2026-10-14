@@ -17,12 +17,14 @@ import { SaveIndicator } from "./SettingsLayout";
 
 import "./settings.css";
 
+const ICON = { size: 18, strokeWidth: 1.75 };
+
 const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode }[] = [
-  { id: "accounts", label: "Accounts", icon: <UserRound size={18} /> },
-  { id: "general", label: "General", icon: <SlidersHorizontal size={18} /> },
-  { id: "mail", label: "Mail", icon: <Mail size={18} /> },
-  { id: "microsoft", label: "Microsoft app registration", icon: <AppWindow size={18} /> },
-  { id: "about", label: "About", icon: <Info size={18} /> },
+  { id: "accounts", label: "Accounts", icon: <UserRound {...ICON} /> },
+  { id: "general", label: "General", icon: <SlidersHorizontal {...ICON} /> },
+  { id: "mail", label: "Mail", icon: <Mail {...ICON} /> },
+  { id: "microsoft", label: "Microsoft app registration", icon: <AppWindow {...ICON} /> },
+  { id: "about", label: "About", icon: <Info {...ICON} /> },
 ];
 
 /** Settings, shown while `settingsOpen` names a section. Changes save as you make them. */
@@ -33,7 +35,7 @@ export function SettingsDialog() {
 
   return (
     <>
-      <Dialog open={section !== null} onClose={closeSettings} title="Settings" width={840}>
+      <Dialog open={section !== null} onClose={closeSettings} title="Settings" width={880}>
         {section && <SettingsBody section={section} onRemoveAccount={setRemoving} />}
       </Dialog>
       {/* A sibling, not a child, so Escape in it doesn't also close Settings. */}
@@ -106,7 +108,7 @@ function SettingsBody({
               <span className="settings__tab-icon" aria-hidden="true">
                 {s.icon}
               </span>
-              <span>{s.label}</span>
+              <span className="settings__tab-label">{s.label}</span>
             </button>
           );
         })}
@@ -118,7 +120,7 @@ function SettingsBody({
         className="settings__panel"
       >
         <div className="settings__header">
-          <h3 className="settings__title">{current.label}</h3>
+          <h3 className="settings__title pane-title">{current.label}</h3>
           <SaveIndicator />
         </div>
         <div className="settings__content">

@@ -113,7 +113,7 @@ describe("General", () => {
     const user = userEvent.setup();
     const { lastSaved } = openAt("general");
 
-    const toggle = await screen.findByRole("switch", { name: "New mail notifications" });
+    const toggle = await screen.findByRole("switch", { name: "New message notifications" });
     expect(toggle).toBeChecked();
     await user.click(toggle);
     await waitFor(() => expect(lastSaved()).toMatchObject({ notificationsEnabled: false }));

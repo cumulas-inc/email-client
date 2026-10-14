@@ -1,27 +1,30 @@
 import { CalendarDays, CircleCheckBig, LockKeyhole, Mail, Users } from "lucide-react";
 
+import { LogoMark } from "../../app/LogoMark";
 import { AccountKindOptions } from "../settings/AccountKindOptions";
 import { openAddAccount } from "../settings/addAccountStore";
 
 import "./onboarding.css";
 
+const ICON = { size: 16, strokeWidth: 1.75 };
+
 const FEATURES = [
-  { label: "Mail", icon: <Mail size={16} /> },
-  { label: "Calendar", icon: <CalendarDays size={16} /> },
-  { label: "Contacts", icon: <Users size={16} /> },
-  { label: "Tasks", icon: <CircleCheckBig size={16} /> },
+  { label: "Mail", icon: <Mail {...ICON} /> },
+  { label: "Calendar", icon: <CalendarDays {...ICON} /> },
+  { label: "Contacts", icon: <Users {...ICON} /> },
+  { label: "Tasks", icon: <CircleCheckBig {...ICON} /> },
 ];
 
 /** First-run screen, shown while there are no accounts. */
 export function Welcome() {
   return (
     <div className="welcome">
-      <div className="welcome__inner">
-        <img className="welcome__logo" src="/icon.svg" alt="" width={72} height={72} />
+      <div className="welcome__card">
+        <div className="welcome__mark">
+          <LogoMark size={84} />
+        </div>
         <h1 className="welcome__title">Welcome to Cumulas Mail</h1>
-        <p className="welcome__lead">
-          Your mail, calendar, contacts and tasks in one place — fast, private and made for Linux.
-        </p>
+        <p className="welcome__lead">One app for your inbox and your week.</p>
         <ul className="welcome__features" aria-label="Included">
           {FEATURES.map((f) => (
             <li key={f.label} className="welcome__feature">
@@ -40,8 +43,7 @@ export function Welcome() {
 
         <p className="welcome__privacy">
           <LockKeyhole size={14} aria-hidden="true" />
-          Your data stays on this computer and goes only to your mail provider. No tracking, no
-          telemetry.
+          Cumulas Mail connects only to your mail provider. No tracking, no telemetry.
         </p>
       </div>
     </div>

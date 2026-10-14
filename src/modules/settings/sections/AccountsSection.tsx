@@ -20,6 +20,7 @@ import { EmptyState } from "../../../components/EmptyState";
 import { PaneSpinner } from "../../../components/Spinner";
 import { toast } from "../../../components/toast";
 import { openAddAccount } from "../addAccountStore";
+import { AccountBadge } from "../AccountBadge";
 import { ACCOUNT_COLORS, ADD_ACCOUNT_BUTTON_ID } from "../constants";
 import { Callout, TextField } from "../Fields";
 import { focusLater } from "../focus";
@@ -160,7 +161,7 @@ function AccountItem({
   if (imap && editing) {
     servers = (
       <div className="account-field">
-        <span className="field__label">Password and servers</span>
+        <span className="account-field__label">Password and servers</span>
         <ImapAccountEditor
           account={account}
           settings={imap}
@@ -173,7 +174,7 @@ function AccountItem({
     servers = (
       <div className="account-field">
         <div className="account-field__head">
-          <span className="field__label">Password and servers</span>
+          <span className="account-field__label">Password and servers</span>
           <button
             id={editButtonId}
             type="button"
@@ -216,23 +217,22 @@ function AccountItem({
       </span>
     );
   } else {
-    statusNode = <span className="account-status">{syncedLabel(lastSyncedAt)}</span>;
+    statusNode = (
+      <span className="account-status account-status--ok">
+        <span className="account-status__dot" aria-hidden="true" />
+        {syncedLabel(lastSyncedAt)}
+      </span>
+    );
   }
 
   return (
     <li className={clsx("account-item", expanded && "account-item--expanded")}>
       <div className="account-item__header">
-        <span
-          className="account-item__dot"
-          style={{ background: account.color }}
-          aria-hidden="true"
-        />
+        <AccountBadge name={account.displayName} color={account.color} />
         <div className="account-item__identity">
           <div className="account-item__line">
             <span className="account-item__name">{account.displayName}</span>
-            <span className={`kind-badge kind-badge--${account.kind}`}>
-              {microsoft ? "Microsoft 365" : "IMAP"}
-            </span>
+            <span className="kind-badge">{microsoft ? "Microsoft 365" : "IMAP"}</span>
           </div>
           <div className="account-item__email selectable">{account.email}</div>
           <div className="account-item__status">{statusNode}</div>
@@ -264,7 +264,7 @@ function AccountItem({
               aria-label={`Manage ${account.displayName}`}
               onClick={onToggle}
             >
-              <ChevronDown size={18} />
+              <ChevronDown size={18} strokeWidth={1.75} />
             </button>
           )}
         </div>
@@ -304,8 +304,8 @@ function AccountItem({
 
           <AccountNameField account={account} />
 
-          <div className="account-field">
-            <span id={`${id}-color`} className="field__label">
+          <div className="account-field account-field--row">
+            <span id={`${id}-color`} className="account-field__label">
               Color
             </span>
             <ColorPicker
@@ -322,8 +322,8 @@ function AccountItem({
 
           <div className="account-field account-field--row">
             <div>
-              <span className="field__label">Sync</span>
-              <p className="field__hint">
+              <span className="account-field__label">Sync</span>
+              <p className="account-field__hint">
                 {syncing ? "Syncing now…" : syncedLabel(lastSyncedAt)}
                 {intervalMinutes !== undefined &&
                   ` · checks every ${intervalMinutes === 1 ? "minute" : `${intervalMinutes} minutes`}`}
@@ -337,10 +337,10 @@ function AccountItem({
 
           {!syncError && servers}
 
-          <div className="account-field account-field--row account-field--danger">
+          <div className="account-field account-field--row">
             <div>
-              <span className="field__label">Remove account</span>
-              <p className="field__hint">
+              <span className="account-field__label">Remove account</span>
+              <p className="account-field__hint">
                 Removes it and its data from this computer. Nothing changes on the server.
               </p>
             </div>
