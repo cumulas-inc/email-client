@@ -90,20 +90,37 @@ jobs:
           # GreenMail's self-signed certificate must be refused.
           CUMULAS_TEST_UNTRUSTED_TLS_PORT: "3993"
 
+  flatpak-sources:
+    name: Flatpak offline sources
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Generate offline Cargo and npm sources
+        run: |
+          git clone --depth 1 https://github.com/flatpak/flatpak-builder-tools /tmp/flatpak-builder-tools
+          python -m pip install aiohttp tomlkit /tmp/flatpak-builder-tools/node
+          FLATPAK_BUILDER_TOOLS=/tmp/flatpak-builder-tools packaging/flatpak/generate-sources.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-sources
+          path: packaging/flatpak/*-sources.json
+
   flatpak:
     name: Flatpak build
+    needs: flatpak-sources
     runs-on: ubuntu-24.04
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
       options: --privileged
     steps:
       - uses: actions/checkout@v4
-      - name: Generate offline Cargo and npm sources
-        run: |
-          dnf install -y python3-pip python3-aiohttp python3-tomlkit git
-          git clone --depth 1 https://github.com/flatpak/flatpak-builder-tools /tmp/flatpak-builder-tools
-          pip install /tmp/flatpak-builder-tools/node
-          FLATPAK_BUILDER_TOOLS=/tmp/flatpak-builder-tools packaging/flatpak/generate-sources.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: flatpak-sources
+          path: packaging/flatpak
       - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
         with:
           bundle: cumulas-mail.flatpak

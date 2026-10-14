@@ -58,9 +58,14 @@ modules:
       - type: dir
         path: ../..
         skip:
+          - .git
+          - .claude
+          - .flatpak-builder
           - target
           - node_modules
           - dist
-          - .flatpak-builder
+          - flatpak_app
+          - build-dir
+          - repo
       - cargo-sources.json
       - node-sources.json
