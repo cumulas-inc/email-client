@@ -1,6 +1,7 @@
 import { clsx } from "clsx";
-import { Trash2, X } from "lucide-react";
+import { ChevronDown, Trash2, X } from "lucide-react";
 import {
+  useEffect,
   useId,
   useLayoutEffect,
   useRef,
@@ -33,25 +34,54 @@ interface TaskDetailsProps {
   onClose: () => void;
 }
 
-/** Grows a textarea to fit its content. */
-function useAutoSize(ref: RefObject<HTMLTextAreaElement | null>, value: string) {
+/** Grows a textarea to fit its content (while `enabled`; otherwise CSS sizes it). */
+function useAutoSize(ref: RefObject<HTMLTextAreaElement | null>, value: string, enabled = true) {
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    if (!enabled) {
+      el.style.height = "";
+      el.scrollTop = 0;
+      return;
+    }
     el.style.height = "auto";
     if (el.scrollHeight > 0) el.style.height = `${el.scrollHeight}px`;
-  }, [ref, value]);
+  }, [ref, value, enabled]);
+}
+
+/** Lines a task title shows before it is clamped (see .tasks-title__text). */
+const TITLE_LINES = 3;
+
+/** Whether the text in `ref` runs past TITLE_LINES lines, re-checked as the pane resizes. */
+function useLongerThanClamp(ref: RefObject<HTMLElement | null>, text: string) {
+  const [longer, setLonger] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const style = getComputedStyle(el);
+      const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      const lines = (el.scrollHeight - padding) / parseFloat(style.lineHeight);
+      setLonger(lines > TITLE_LINES + 0.5);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref, text]);
+  return longer;
 }
 
 /**
  * The details card. It stays mounted while the selection moves from task to
- * task, so it only animates in when it opens.
+ * task, so it only animates in when it opens, and only when `enter` is set
+ * (not when Tasks opens with a task already showing).
  */
 export function TaskDetailsPane({
   children,
+  enter,
   onClose,
 }: {
   children: ReactNode;
+  enter: boolean;
   onClose: () => void;
 }) {
   const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
@@ -63,7 +93,11 @@ export function TaskDetailsPane({
     }
   };
   return (
-    <aside className="tasks-details card" aria-label="Task details" onKeyDown={onKeyDown}>
+    <aside
+      className={clsx("tasks-details card", enter && "tasks-details--enter")}
+      aria-label="Task details"
+      onKeyDown={onKeyDown}
+    >
       {children}
     </aside>
   );
@@ -92,7 +126,12 @@ export function TaskDetails({
   const notesValue = notes ?? task.notes ?? "";
   const dueValue = due ?? task.dueDate ?? "";
   const notesRef = useRef<HTMLTextAreaElement>(null);
-  useAutoSize(titleRef, titleValue);
+  const titleTextRef = useRef<HTMLParagraphElement>(null);
+  // The title is a draft (non-null) exactly while its field has focus.
+  const editingTitle = title !== null;
+  const [titleExpanded, setTitleExpanded] = useState(false);
+  const titleIsLong = useLongerThanClamp(titleTextRef, titleValue);
+  useAutoSize(titleRef, titleValue, editingTitle);
   useAutoSize(notesRef, notesValue);
 
   const discardTitle = useRef(false);
@@ -146,17 +185,49 @@ export function TaskDetails({
     <div className="tasks-details__scroll">
       <div className="tasks-details__head">
         <TaskCheckbox task={task} size="lg" onToggle={onToggleComplete} />
-        <textarea
-          ref={titleRef}
-          className={clsx("tasks-details__title", done && "tasks-details__title--done")}
-          aria-label="Task title"
-          rows={1}
-          value={titleValue}
-          onFocus={() => setTitle(task.title)}
-          onChange={(e) => setTitle(e.target.value.replace(/\n/g, " "))}
-          onBlur={commitTitle}
-          onKeyDown={onTitleKeyDown}
-        />
+        <div className="tasks-details__title-col">
+          {/*
+            The title reads as a serif heading clamped to a few lines; the
+            field over it takes the click and shows the whole title while
+            it's being edited.
+          */}
+          <div
+            className={clsx(
+              "tasks-title",
+              editingTitle && "tasks-title--editing",
+              titleExpanded && "tasks-title--expanded",
+              done && "tasks-title--done",
+            )}
+          >
+            <p ref={titleTextRef} className="tasks-title__text" dir="auto" aria-hidden="true">
+              {titleValue}
+            </p>
+            <textarea
+              ref={titleRef}
+              className="tasks-title__input"
+              dir="auto"
+              aria-label="Task title"
+              title={titleIsLong && !titleExpanded && !editingTitle ? task.title : undefined}
+              rows={1}
+              value={titleValue}
+              onFocus={() => setTitle(task.title)}
+              onChange={(e) => setTitle(e.target.value.replace(/\n/g, " "))}
+              onBlur={commitTitle}
+              onKeyDown={onTitleKeyDown}
+            />
+          </div>
+          {titleIsLong && !editingTitle && (
+            <button
+              type="button"
+              className="tasks-title__more"
+              aria-expanded={titleExpanded}
+              onClick={() => setTitleExpanded((x) => !x)}
+            >
+              {titleExpanded ? "Show less" : "Show full title"}
+              <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
+            </button>
+          )}
+        </div>
         <button
           type="button"
           className="icon-btn tasks-details__close"
@@ -244,7 +315,9 @@ export function TaskDetails({
               aria-hidden="true"
             />
             <span className="tasks-field__list-text">
-              <span className="tasks-field__list-name">{list.name}</span>{" "}
+              <span className="tasks-field__list-name" dir="auto">
+                {list.name}
+              </span>{" "}
               {account && (
                 <span
                   className="tasks-field__list-account"
@@ -274,6 +347,7 @@ export function TaskDetails({
           id={`${id}-notes`}
           ref={notesRef}
           className="textarea tasks-details__notes"
+          dir="auto"
           placeholder="Add a note"
           value={notesValue}
           onFocus={() => setNotes(task.notes ?? "")}

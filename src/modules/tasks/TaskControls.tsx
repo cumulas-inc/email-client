@@ -6,9 +6,22 @@ import type { Task } from "../../api/types";
 
 interface ControlProps {
   task: Task;
-  onToggle: () => void;
+  /**
+   * Called on click. Rows in a task list leave it out: the list handles
+   * clicks on `data-action` buttons itself, so rows need no callbacks and
+   * stay memoized.
+   */
+  onToggle?: () => void;
   /** Keep out of the tab order (rows are navigated as a listbox instead). */
   tabbable?: boolean;
+}
+
+function clickHandler(onToggle: (() => void) | undefined) {
+  if (!onToggle) return undefined;
+  return (e: MouseEvent) => {
+    e.stopPropagation();
+    onToggle();
+  };
 }
 
 /** Round completion checkbox: teal fill with a check that draws in when done. */
@@ -28,10 +41,8 @@ export function TaskCheckbox({
       title={checked ? "Mark as not completed" : "Mark as completed"}
       tabIndex={tabbable ? undefined : -1}
       className={clsx("tasks-check", size === "lg" && "tasks-check--lg")}
-      onClick={(e: MouseEvent) => {
-        e.stopPropagation();
-        onToggle();
-      }}
+      data-action="complete"
+      onClick={clickHandler(onToggle)}
     >
       <svg viewBox="0 0 20 20" aria-hidden="true">
         <path d="M5.75 10.25l2.75 2.75 5.75-6" />
@@ -51,10 +62,8 @@ export function StarToggle({ task, onToggle, tabbable = true }: ControlProps) {
       aria-label={`Starred: ${task.title}`}
       title={starred ? "Remove star" : "Star"}
       tabIndex={tabbable ? undefined : -1}
-      onClick={(e: MouseEvent) => {
-        e.stopPropagation();
-        onToggle();
-      }}
+      data-action="star"
+      onClick={clickHandler(onToggle)}
     >
       <Star size={16} strokeWidth={1.75} fill={starred ? "currentColor" : "none"} />
     </button>

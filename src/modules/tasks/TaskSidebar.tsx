@@ -5,6 +5,8 @@ import { useEffect, useId, type KeyboardEvent, type ReactNode } from "react";
 import type { Account, TaskList } from "../../api/types";
 import { AccountBadge } from "../../components/AccountBadge";
 import { listboxTarget, scrollIdIntoView } from "../../components/listboxKeys";
+import { Count } from "./Count";
+import { exactCount, titleWhenCut } from "./fullText";
 import { smartListIcon } from "./smartIcons";
 import { SMART_LISTS, type TaskView } from "./taskUtils";
 
@@ -57,15 +59,17 @@ export function TaskSidebar({ accounts, lists, view, onSelect, counts }: TaskSid
         id={optionId(v)}
         role="option"
         aria-selected={selected}
-        aria-label={count > 0 ? `${label}, ${count} open` : label}
+        aria-label={count > 0 ? `${label}, ${exactCount(count)} open` : label}
         className={clsx("tasks-nav__item", v.kind === "smart" && `tasks-nav__item--${v.id}`)}
         onClick={() => onSelect(v)}
       >
         <span className="tasks-nav__icon" aria-hidden="true">
           {icon}
         </span>
-        <span className="tasks-nav__label">{label}</span>
-        {count > 0 && <span className="tasks-nav__count tnum">{count}</span>}
+        <span className="tasks-nav__label" dir="auto" onMouseEnter={titleWhenCut}>
+          {label}
+        </span>
+        {count > 0 && <Count n={count} className="tasks-nav__count" />}
       </div>
     );
   };
@@ -92,7 +96,9 @@ export function TaskSidebar({ accounts, lists, view, onSelect, counts }: TaskSid
             <div className="tasks-nav__account" title={`${account.displayName} (${account.email})`}>
               <AccountBadge name={account.displayName} color={account.color} />
               <span id={headerId} className="tasks-nav__account-text">
-                <span className="tasks-nav__account-name">{account.displayName}</span>{" "}
+                <span className="tasks-nav__account-name" dir="auto">
+                  {account.displayName}
+                </span>{" "}
                 <span className="tasks-nav__account-email">{account.email}</span>
               </span>
             </div>

@@ -26,14 +26,15 @@
   color: var(--fg-secondary);
   font-weight: var(--weight-medium);
   cursor: pointer;
+}
+
+/* Hover eases in; selecting (arrow keys, clicks) changes at once. */
+.tasks-nav__item:hover:not([aria-selected="true"]) {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
   transition:
     background-color var(--duration-fast) var(--ease),
     color var(--duration-fast) var(--ease);
-}
-
-.tasks-nav__item:hover {
-  background: var(--bg-hover);
-  color: var(--fg-primary);
 }
 
 .tasks-nav__item[aria-selected="true"] {
@@ -131,8 +132,11 @@
   padding: 20px var(--tasks-gutter) 14px;
 }
 
+/* Pinned beside the first line, so it stays put when a long list name wraps. */
 .tasks__search {
   grid-area: search;
+  align-self: start;
+  margin-top: 7px;
 }
 
 .tasks-header__titles {
@@ -141,10 +145,14 @@
   padding-left: var(--space-3);
 }
 
+/* A long list name wraps to a second line before it is clamped. */
 .tasks-header__title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 .tasks-header__subtitle {
@@ -163,11 +171,24 @@
   border-radius: 2.5px;
 }
 
-.tasks-header__subtitle-text {
+/* A long name and a long address share the line, so both still show. */
+.tasks-header__subtitle-name,
+.tasks-header__subtitle-email {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tasks-header__subtitle-name {
+  max-width: 60%;
+}
+
+.tasks-header__subtitle-sep {
+  flex-shrink: 0;
+  margin: 0 -2px;
+  color: var(--fg-tertiary);
 }
 
 /* "New task": a field that sits where the next task will appear. */
@@ -296,13 +317,15 @@
   border-radius: var(--radius-md);
   cursor: pointer;
   scroll-margin: 40px 0 8px;
+  transition: opacity 240ms var(--ease);
+}
+
+/* Hover eases in; selecting (arrow keys, clicks) changes at once. */
+.tasks-row:hover:not([aria-selected="true"]) {
+  background: var(--bg-hover);
   transition:
     background-color var(--duration-fast) var(--ease),
     opacity 240ms var(--ease);
-}
-
-.tasks-row:hover {
-  background: var(--bg-hover);
 }
 
 .tasks-row[aria-selected="true"] {
@@ -319,23 +342,38 @@
   outline-offset: -2px;
 }
 
-/* A task just checked off stays a moment, fading, before it moves to Completed. */
-.tasks-row--settling {
+/* A task just checked off stays a moment, fading, then its row closes up
+   (TaskRow) and it moves to Completed. */
+.tasks-listbox .tasks-row.tasks-row--settling {
+  overflow: hidden;
   opacity: 0.55;
-  transition-delay: 0ms, 120ms;
+  transition: opacity 240ms var(--ease) 120ms;
 }
 
 .tasks-row > .tasks-check {
   grid-area: check;
 }
 
+/* The title, then a note mark right after it (so it never drifts with the date). */
 .tasks-row__title {
+  display: flex;
   grid-area: title;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.tasks-row__text {
   min-width: 0;
   overflow: hidden;
-  font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tasks-row__note {
+  flex-shrink: 0;
+  color: var(--fg-tertiary);
 }
 
 .tasks-row--done .tasks-row__title {
@@ -375,14 +413,7 @@
   white-space: nowrap;
 }
 
-.tasks-row__note {
-  display: inline-flex;
-  flex-shrink: 0;
-  width: 14px;
-  color: var(--fg-tertiary);
-}
-
-/* Room for the widest short date, so note icons and list names line up too. */
+/* Room for the widest short date, so list names line up too. */
 .tasks-row__due {
   display: flex;
   flex-shrink: 0;
@@ -736,14 +767,18 @@
   flex-direction: column;
   flex-shrink: 0;
   width: 340px;
+}
+
+/* Slides in a little when a task is picked; moving between tasks, and
+   coming back to Tasks with one open, don't animate. */
+.tasks-details--enter {
   transition:
     opacity var(--duration-normal) var(--ease-out),
     transform var(--duration-normal) var(--ease-out);
 }
 
-/* Slides in a little when it opens; moving between tasks doesn't animate. */
 @starting-style {
-  .tasks-details {
+  .tasks-details--enter {
     opacity: 0;
     transform: translateX(8px);
   }
@@ -774,45 +809,133 @@
   margin: -1px -10px 0 0;
 }
 
-.tasks-details__title {
-  width: 100%;
+.tasks-details__title-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+/* The title: a serif heading clamped to three lines, with the field stacked
+   over it (same cell, same metrics) taking clicks. While editing, the field
+   shows and grows to the whole title. */
+.tasks-title {
+  display: grid;
+  align-self: stretch;
   min-width: 0;
   margin-left: -4px;
-  padding: 2px 6px;
-  overflow: hidden;
-  border: none;
   border-radius: var(--radius-sm);
-  background: transparent;
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
+}
+
+.tasks-title > * {
+  grid-area: 1 / 1;
+}
+
+.tasks-title__text,
+.tasks-title__input {
+  min-width: 0;
+  margin: 0;
+  padding: 2px 6px;
   font-family: var(--font-serif);
   font-feature-settings: normal;
   font-size: 22px;
   font-weight: 700;
   line-height: 1.25;
   letter-spacing: -0.005em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Keep in step with TITLE_LINES in TaskDetails.tsx. */
+.tasks-title__text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  color: var(--fg-primary);
+}
+
+.tasks-title--expanded .tasks-title__text {
+  display: block;
+}
+
+.tasks-title__input {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: none;
+  background: transparent;
+  color: var(--fg-primary);
+  opacity: 0;
   resize: none;
   user-select: text;
   cursor: text;
-  transition:
-    background-color var(--duration-fast) var(--ease),
-    box-shadow var(--duration-fast) var(--ease);
 }
 
-.tasks-details__title:hover {
+.tasks-title:hover {
   background: var(--bg-hover);
 }
 
-.tasks-details__title:focus {
+.tasks-title--editing .tasks-title__text {
+  visibility: hidden;
+}
+
+.tasks-title--editing .tasks-title__input {
+  opacity: 1;
+}
+
+.tasks-title__input:focus {
   outline: none;
+}
+
+.tasks-title:focus-within {
   background: var(--bg-input);
   box-shadow:
     inset 0 0 0 1px var(--brand),
     0 0 0 3px var(--brand-subtle);
 }
 
-.tasks-details__title--done {
+.tasks-title--done .tasks-title__text,
+.tasks-title--done .tasks-title__input {
   color: var(--fg-tertiary);
   text-decoration: line-through;
   text-decoration-thickness: 1.5px;
+}
+
+.tasks-title__more {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 24px;
+  /* Its text lines up with the title's. */
+  margin: 2px 0 0 -4px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.tasks-title__more:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.tasks-title__more svg {
+  transition: transform var(--duration-normal) var(--ease-in-out);
+}
+
+.tasks-title__more[aria-expanded="true"] svg {
+  transform: rotate(180deg);
 }
 
 .tasks-field {
@@ -1002,6 +1125,10 @@
     padding-top: var(--space-3);
   }
 
+  .tasks__search {
+    margin-top: 0;
+  }
+
   .tasks-row {
     grid-template-areas:
       "check title star"
@@ -1010,7 +1137,6 @@
     row-gap: 3px;
   }
 
-  .tasks-row__note:empty,
   .tasks-row__due:empty {
     display: none;
   }
@@ -1022,7 +1148,7 @@
 
 /* Reduced motion: fades stay, nothing slides or shrinks. */
 @media (prefers-reduced-motion: reduce) {
-  .tasks-details {
+  .tasks-details--enter {
     transition: opacity var(--duration-normal) var(--ease-out);
   }
 
@@ -1031,7 +1157,13 @@
     transform: none;
   }
 
-  .tasks-completed__chevron {
+  .tasks-completed__chevron,
+  .tasks-title__more svg {
     transition: none;
   }
+}
+
+/* Empty-state sentences wrap evenly ("…to add / another." left an orphan). */
+.tasks .empty-state__description {
+  text-wrap: balance;
 }

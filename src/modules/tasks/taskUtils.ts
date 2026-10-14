@@ -24,6 +24,12 @@ export const SMART_LISTS: { id: SmartListId; label: string }[] = [
   { id: "all", label: "All tasks" },
 ];
 
+/**
+ * How long a just-completed task stays in the open list: its check mark
+ * draws in, then its row closes up and it moves to Completed.
+ */
+export const SETTLE_MS = 450;
+
 export function isCompleted(task: Task): boolean {
   return task.status === "completed";
 }

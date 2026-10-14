@@ -14,10 +14,11 @@ import { useCreateTask, useDeleteTask, useTaskLists, useTasks, useUpdateTask } f
 import { useTasksStore } from "./store";
 import { TaskDetails, TaskDetailsPane } from "./TaskDetails";
 import type { ListTag, TaskGroup } from "./TaskListbox";
-import { TaskListView } from "./TaskListView";
+import { type ListSubtitle, TaskListView } from "./TaskListView";
 import { TaskSidebar } from "./TaskSidebar";
 import {
   DUE_GROUPS,
+  SETTLE_MS,
   SMART_LISTS,
   type TaskView,
   defaultTaskList,
@@ -29,9 +30,6 @@ import {
   toDateString,
 } from "./taskUtils";
 import "./tasks.css";
-
-/** How long a just-completed task stays in place so its check mark can animate. */
-const SETTLE_MS = 450;
 
 const EMPTY_TEXT = {
   starred: {
@@ -93,6 +91,11 @@ export function TasksModule() {
   const search = useAppStore((s) => (s.module === "tasks" ? s.search.trim() : ""));
   const now = new Date();
 
+  // The details card slides in when a task is picked, but not when Tasks
+  // opens (switching modules) with a task already showing.
+  const [detailsOpenAtStart, setDetailsOpenAtStart] = useState(selectedTaskId !== null);
+  if (detailsOpenAtStart && selectedTaskId === null) setDetailsOpenAtStart(false);
+
   const defaultList = defaultTaskList(lists, accounts);
   // The remembered list may have gone (account removed): fall back to the default list.
   const view: TaskView =
@@ -106,7 +109,8 @@ export function TasksModule() {
   const allQuery = useTasks(null, true);
   const viewQuery = useTasks(view.kind === "list" ? view.id : null, true);
 
-  const [settling, setSettling] = useState<Set<string>>(() => new Set());
+  /** Tasks just checked off, by the place they had in the open list. */
+  const [settling, setSettling] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [toDelete, setToDelete] = useState<Task | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const addRef = useRef<HTMLInputElement>(null);
@@ -134,7 +138,13 @@ export function TasksModule() {
   const matching = (viewQuery.data ?? [])
     .filter((t) => inView(t, view))
     .filter((t) => matchesSearch(t, search));
-  const open = matching.filter((t) => !isCompleted(t) || settling.has(t.id));
+  // A task being checked off keeps its place until it leaves, even when a
+  // refresh has already sorted it after the open tasks.
+  const open = matching.filter((t) => !isCompleted(t) && !settling.has(t.id));
+  for (const [id, at] of [...settling].sort((a, b) => a[1] - b[1])) {
+    const task = matching.find((t) => t.id === id);
+    if (task) open.splice(Math.min(at, open.length), 0, task);
+  }
   const completed = matching
     .filter((t) => isCompleted(t) && !settling.has(t.id))
     .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""));
@@ -160,35 +170,44 @@ export function TasksModule() {
   const smart = view.kind === "smart" ? SMART_LISTS.find((s) => s.id === view.id) : undefined;
   const title = smart?.label ?? currentList?.name ?? "Tasks";
   const listAccount = currentList ? accountOf(currentList.accountId) : undefined;
-  const subtitle = smart
+  const subtitle: ListSubtitle | null = smart
     ? accounts.length > 1
-      ? { text: "Across all your accounts" }
+      ? { name: "Across all your accounts" }
       : null
     : listAccount
-      ? { text: `${listAccount.displayName} · ${listAccount.email}`, color: listAccount.color }
+      ? { name: listAccount.displayName, email: listAccount.email, color: listAccount.color }
       : null;
   const addTarget = view.kind === "list" ? (currentList ?? null) : defaultList;
   const addHint =
     view.kind === "smart" && addTarget
-      ? `Adds to ${addTarget.name}${accounts.length > 1 ? ` · ${accountOf(addTarget.accountId)?.email ?? ""}` : ""}`
+      ? {
+          list: addTarget.name,
+          email: accounts.length > 1 ? (accountOf(addTarget.accountId)?.email ?? null) : null,
+        }
       : null;
 
   // --- actions -----------------------------------------------------------------------
 
   const patch = (task: Task, p: TaskPatch) => update.mutate({ id: task.id, patch: p });
 
+  const stopSettling = (id: string) =>
+    setSettling((s) => {
+      if (!s.has(id)) return s;
+      const next = new Map(s);
+      next.delete(id);
+      return next;
+    });
+
   const toggleComplete = (task: Task) => {
     const completing = !isCompleted(task);
     if (completing) {
       // Let the check mark animate in place before the task moves to Completed.
-      setSettling((s) => new Set(s).add(task.id));
-      setTimeout(() => {
-        setSettling((s) => {
-          const next = new Set(s);
-          next.delete(task.id);
-          return next;
-        });
-      }, SETTLE_MS);
+      const at = open.findIndex((t) => t.id === task.id);
+      setSettling((s) => new Map(s).set(task.id, at >= 0 ? at : open.length));
+      setTimeout(() => stopSettling(task.id), SETTLE_MS);
+    } else {
+      // Unchecked again before it left: it stays, at full strength.
+      stopSettling(task.id);
     }
     patch(task, { status: completing ? "completed" : "notStarted" });
   };
@@ -220,12 +239,26 @@ export function TasksModule() {
     if (el) setTimeout(() => el.isConnected && el.focus(), 0);
   };
 
+  /** The task that takes `task`'s place in its section once it's gone. */
+  const neighborOf = (task: Task): Task | null => {
+    const section = [open.filter((t) => !isCompleted(t)), completed].find((tasks) =>
+      tasks.some((t) => t.id === task.id),
+    );
+    if (!section) return null;
+    const i = section.findIndex((t) => t.id === task.id);
+    return section[i + 1] ?? section[i - 1] ?? null;
+  };
+
   const confirmDelete = () => {
     const task = toDelete;
     if (!task) return;
     setToDelete(null);
-    if (selectedTaskId === task.id) selectTask(null);
-    remove.mutate(task.id, { onSuccess: () => toast.success(`“${task.title}” was deleted`) });
+    // Like deleting a message, the next task opens, so the keyboard keeps its place.
+    if (selectedTaskId === task.id) selectTask(neighborOf(task)?.id ?? null);
+    // Isolate the title so a right-to-left one doesn't reorder the sentence.
+    remove.mutate(task.id, {
+      onSuccess: () => toast.success(`“\u2068${task.title}\u2069” was deleted`),
+    });
     refocus(listRef.current ?? addRef.current);
   };
 
@@ -329,7 +362,7 @@ export function TasksModule() {
           selectedId={selectedTask?.id ?? null}
           listTags={listTags}
           now={now}
-          settling={settling}
+          settling={new Set(settling.keys())}
           listRef={listRef}
           addRef={addRef}
           onSelect={(t) => selectTask(t.id)}
@@ -341,7 +374,7 @@ export function TasksModule() {
       </section>
 
       {selectedTask && (
-        <TaskDetailsPane onClose={closeDetails}>
+        <TaskDetailsPane enter={!detailsOpenAtStart} onClose={closeDetails}>
           <TaskDetails
             key={selectedTask.id}
             task={selectedTask}
@@ -364,7 +397,10 @@ export function TasksModule() {
         message={
           toDelete ? (
             <>
-              <strong>“{toDelete.title}”</strong> will be permanently deleted.
+              <strong>
+                “<bdi>{toDelete.title}</bdi>”
+              </strong>{" "}
+              will be permanently deleted.
             </>
           ) : null
         }

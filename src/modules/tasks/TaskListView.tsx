@@ -5,16 +5,24 @@ import type { Task } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { SearchField } from "../../components/SearchField";
 import { PaneSpinner } from "../../components/Spinner";
+import { Count } from "./Count";
+import { titleWhenCut } from "./fullText";
 import { type ListTag, type TaskActions, type TaskGroup, TaskListbox } from "./TaskListbox";
+
+/** Under the title: the list's account ("Alex Morgan · alex@…"), or "Across all your accounts". */
+export interface ListSubtitle {
+  name: string;
+  email?: string;
+  color?: string;
+}
 
 interface TaskListViewProps extends TaskActions {
   title: string;
-  /** Under the title: the list's account, or "Across all your accounts". */
-  subtitle: { text: string; color?: string } | null;
+  subtitle: ListSubtitle | null;
   /** Where "New task" saves to; null disables adding. */
   addTarget: { name: string } | null;
-  /** Shown in the add box in smart lists, e.g. "Tasks · alex@…". */
-  addHint: string | null;
+  /** Shown in the add box in smart lists: "Adds to Tasks · alex@…". */
+  addHint: { list: string; email: string | null } | null;
   onAdd: (title: string) => Promise<unknown>;
   openGroups: TaskGroup[];
   completed: Task[];
@@ -77,7 +85,12 @@ export function TaskListView(props: TaskListViewProps) {
       <EmptyState
         icon={<SearchX size={40} strokeWidth={1.5} />}
         title="No matching tasks"
-        description={`Nothing ${completed.length > 0 ? "open " : ""}matches “${search}” in ${title}.`}
+        description={
+          <>
+            Nothing {completed.length > 0 ? "open " : ""}matches “<bdi>{search}</bdi>” in{" "}
+            <bdi>{title}</bdi>.
+          </>
+        }
         action={
           onSearchAll && (
             <button type="button" className="btn" onClick={onSearchAll}>
@@ -99,6 +112,7 @@ export function TaskListView(props: TaskListViewProps) {
     body = (
       <TaskListbox
         label={title}
+        kind="open"
         groups={openGroups}
         selectedId={selectedId}
         listTags={listTags}
@@ -117,7 +131,8 @@ export function TaskListView(props: TaskListViewProps) {
           <SearchField placeholder="Search tasks" />
         </div>
         <div className="tasks-header__titles">
-          <h2 className="pane-title tasks-header__title" title={title}>
+          {/* Long list names wrap to a second line, then clamp; the tooltip has the rest. */}
+          <h2 className="pane-title tasks-header__title" dir="auto" onMouseEnter={titleWhenCut}>
             {title}
           </h2>
           {subtitle && (
@@ -129,7 +144,20 @@ export function TaskListView(props: TaskListViewProps) {
                   aria-hidden="true"
                 />
               )}
-              <span className="tasks-header__subtitle-text">{subtitle.text}</span>
+              <span className="tasks-header__subtitle-name" dir="auto" onMouseEnter={titleWhenCut}>
+                {subtitle.name}
+              </span>
+              {subtitle.email && (
+                <>
+                  {/* Spaces keep the words apart for screen readers; flex ignores them. */}{" "}
+                  <span className="tasks-header__subtitle-sep" aria-hidden="true">
+                    ·
+                  </span>{" "}
+                  <span className="tasks-header__subtitle-email" onMouseEnter={titleWhenCut}>
+                    {subtitle.email}
+                  </span>
+                </>
+              )}
             </p>
           )}
         </div>
@@ -144,6 +172,7 @@ export function TaskListView(props: TaskListViewProps) {
           <input
             ref={addRef}
             className="tasks-add__input"
+            dir="auto"
             placeholder={addTarget ? "New task" : "No list to add tasks to"}
             aria-label="New task"
             aria-describedby={addHint ? `${id}-hint` : undefined}
@@ -159,8 +188,9 @@ export function TaskListView(props: TaskListViewProps) {
             }}
           />
           {addHint && (
-            <span id={`${id}-hint`} className="tasks-add__hint">
-              {addHint}
+            <span id={`${id}-hint`} className="tasks-add__hint" onMouseEnter={titleWhenCut}>
+              Adds to <bdi>{addHint.list}</bdi>
+              {addHint.email && ` · ${addHint.email}`}
             </span>
           )}
           <span className="kbd tasks-add__enter" aria-hidden="true">
@@ -172,7 +202,7 @@ export function TaskListView(props: TaskListViewProps) {
       <div className="tasks-scroll">
         {search && openCount > 0 && (
           <p className="tasks-search-note" role="status">
-            Tasks matching “{search}”
+            Tasks matching “<bdi>{search}</bdi>”
           </p>
         )}
         {body}
@@ -191,12 +221,13 @@ export function TaskListView(props: TaskListViewProps) {
                 className="tasks-completed__chevron"
                 aria-hidden="true"
               />
-              Completed <span className="tasks-completed__count tnum">{completed.length}</span>
+              Completed <Count n={completed.length} className="tasks-completed__count" />
             </button>
             {showCompleted && (
               <TaskListbox
                 id={`${id}-completed`}
                 label="Completed tasks"
+                kind="completed"
                 groups={[{ key: "completed", label: null, tasks: completed }]}
                 selectedId={selectedId}
                 listTags={listTags}

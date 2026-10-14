@@ -82,8 +82,8 @@ describe("Task lists", () => {
   it("opens the first account's default list and navigates lists with the keyboard", async () => {
     const user = userEvent.setup();
     renderTasks();
-    expect(await screen.findByRole("heading", { name: "Tasks", level: 2 })).toBeInTheDocument();
-    expect(screen.getByText("Alex Morgan · alex.morgan@acme.example")).toBeInTheDocument();
+    const heading = await screen.findByRole("heading", { name: "Tasks", level: 2 });
+    expect(heading.nextElementSibling).toHaveTextContent("Alex Morgan · alex.morgan@acme.example");
     expect(taskTitles(openList("Tasks"))).toEqual([
       "Send Q3 metrics to Dana",
       "Add top three bets to planning doc",
@@ -208,7 +208,9 @@ describe("Adding tasks", () => {
     await screen.findByRole("listbox", { name: "Lists" });
 
     await pickList(user, /^Starred/);
-    expect(screen.getByText("Adds to Tasks · alex.morgan@acme.example")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "New task" })).toHaveAccessibleDescription(
+      "Adds to Tasks · alex.morgan@acme.example",
+    );
     await user.type(screen.getByRole("textbox", { name: "New task" }), "Call the auditors{Enter}");
     expect(
       await within(openList("Starred")).findByRole("option", { name: /^Call the auditors/ }),
@@ -387,8 +389,37 @@ describe("Completing and starring", () => {
         "completed",
       ),
     );
+    // The completed task leaves; the keyboard stays in place, on the next task.
+    expect(within(details()).getByRole("textbox", { name: "Task title" })).toHaveValue(
+      "Benefits enrollment",
+    );
+    await waitFor(() =>
+      expect(taskTitles(openList("Tasks"))).not.toContain("Add top three bets to planning doc"),
+    );
+    await user.keyboard("{ArrowDown}");
+    expect(within(details()).getByRole("textbox", { name: "Task title" })).toHaveValue(
+      "Expense Lisbon trip",
+    );
     await user.keyboard("{Enter}");
     expect(within(details()).getByRole("textbox", { name: "Task title" })).toHaveFocus();
+  });
+
+  it("marks titles and list names for right-to-left text", async () => {
+    renderTasks();
+    const list = await screen.findByRole("listbox", { name: "Tasks" });
+    const row = within(list).getByRole("option", { name: /^Benefits enrollment/ });
+    expect(row.querySelector(".tasks-row__text")).toHaveAttribute("dir", "auto");
+    expect(screen.getByRole("heading", { name: "Tasks", level: 2 })).toHaveAttribute("dir", "auto");
+    expect(within(sidebar()).getByText("Atlas launch")).toHaveAttribute("dir", "auto");
+    await userEvent.setup().click(row);
+    expect(within(details()).getByRole("textbox", { name: "Task title" })).toHaveAttribute(
+      "dir",
+      "auto",
+    );
+    expect(within(details()).getByRole("textbox", { name: "Notes" })).toHaveAttribute(
+      "dir",
+      "auto",
+    );
   });
 });
 
@@ -519,12 +550,18 @@ describe("Task details", () => {
     expect(dialog).toHaveTextContent("“Benefits enrollment” will be permanently deleted.");
     await user.click(within(dialog).getByRole("button", { name: "Delete task" }));
 
-    expect(screen.queryByRole("complementary", { name: "Task details" })).not.toBeInTheDocument();
+    // The next task takes its place, as the next message does in Mail.
+    expect(within(details()).getByRole("textbox", { name: "Task title" })).toHaveValue(
+      "Expense Lisbon trip",
+    );
     expect(taskTitles(openList("Tasks"))).not.toContain("Benefits enrollment");
     await waitFor(async () =>
       expect(await findTask(backend, "Benefits enrollment")).toBeUndefined(),
     );
-    expect(await screen.findByText("“Benefits enrollment” was deleted")).toBeInTheDocument();
+    // The title is isolated, so a right-to-left one keeps the sentence in order.
+    expect(
+      await screen.findByText("“\u2068Benefits enrollment\u2069” was deleted"),
+    ).toBeInTheDocument();
   });
 });
 
