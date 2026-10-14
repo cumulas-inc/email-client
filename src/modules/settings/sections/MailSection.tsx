@@ -52,7 +52,8 @@ export function MailSection() {
     { value: "never", label: "Never" },
   ];
   if (!markReadOptions.some((o) => o.value === markRead)) {
-    markReadOptions.splice(2, 0, { value: markRead, label: `After ${markRead} seconds` });
+    const unit = markRead === "1" ? "second" : "seconds";
+    markReadOptions.splice(2, 0, { value: markRead, label: `After ${markRead} ${unit}` });
   }
 
   return (

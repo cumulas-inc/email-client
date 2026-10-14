@@ -1,9 +1,8 @@
 /* First-run welcome screen. Tokens only; see styles/tokens.css.
 
    One card on the canvas. It is the one place in the app with a little
-   ceremony: the card rises in, the two clouds of the mark drift together,
-   and the back cloud keeps floating very slowly. Nothing moves when the
-   system asks for reduced motion. */
+   ceremony: the card rises in and the two clouds of the mark drift
+   together, once. Nothing moves when the system asks for reduced motion. */
 
 .welcome {
   display: flex;
@@ -209,37 +208,44 @@
     animation: welcome-rise 520ms var(--ease-out) both;
   }
 
+  /* The mark fades in as one piece, so neither cloud shows through the
+     other while they're half transparent; the clouds themselves only move. */
+  .welcome__mark {
+    animation: welcome-fade 600ms var(--ease-out) 80ms both;
+  }
+
   /* SVG user units: the mark is 22.8 wide, so 3 units is about 11px at this
      size. The pale back cloud (first shape) drifts in from the right, the
-     front one (last) from the left, and they meet. */
+     front one (last) from the left, and they meet. Once: an endless drift
+     would repaint the mark every frame for a movement nobody sees. */
   .welcome__mark .logo-mark__back {
-    animation:
-      cloud-back-in 1100ms var(--ease-out) 140ms both,
-      cloud-float 7s var(--ease-in-out) 1300ms infinite alternate;
+    animation: cloud-back-in 1000ms var(--ease-out) 80ms both;
   }
 
   .welcome__mark .logo-mark__front {
-    animation: cloud-front-in 900ms var(--ease-out) 80ms both;
+    animation: cloud-front-in 800ms var(--ease-out) 80ms both;
   }
 
+  /* The chips settle with the headline, before anyone reads down to the
+     choices, so nothing arrives late above them. */
   .welcome__feature {
-    animation: welcome-chip 420ms var(--ease-out) both;
+    animation: welcome-chip 320ms var(--ease-out) both;
   }
 
   .welcome__feature:nth-child(1) {
-    animation-delay: 260ms;
+    animation-delay: 120ms;
   }
 
   .welcome__feature:nth-child(2) {
-    animation-delay: 310ms;
+    animation-delay: 160ms;
   }
 
   .welcome__feature:nth-child(3) {
-    animation-delay: 360ms;
+    animation-delay: 200ms;
   }
 
   .welcome__feature:nth-child(4) {
-    animation-delay: 410ms;
+    animation-delay: 240ms;
   }
 
   /* A tile lifts toward the pointer. */
@@ -278,23 +284,21 @@
   }
 }
 
-@keyframes cloud-back-in {
+@keyframes welcome-fade {
   from {
     opacity: 0;
+  }
+}
+
+@keyframes cloud-back-in {
+  from {
     transform: translate(3px, 0.6px);
   }
 }
 
 @keyframes cloud-front-in {
   from {
-    opacity: 0;
     transform: translateX(-2px);
-  }
-}
-
-@keyframes cloud-float {
-  to {
-    transform: translateX(-0.7px);
   }
 }
 

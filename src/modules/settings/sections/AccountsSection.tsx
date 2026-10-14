@@ -11,7 +11,7 @@ import {
   TriangleAlert,
   Wrench,
 } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { useAccounts, useSettings, useSyncStatuses } from "../../../api/queries";
 import type { Account, SyncStatus } from "../../../api/types";
@@ -130,6 +130,18 @@ function AccountItem({
   const sync = useSyncAccount();
   const update = useUpdateAccount();
   const [editing, setEditing] = useState(false);
+  const itemRef = useRef<HTMLLIElement>(null);
+  /** Set when the user opens this account, so it's brought into view. */
+  const reveal = useRef(false);
+
+  useEffect(() => {
+    if (!expanded || !reveal.current) return;
+    reveal.current = false;
+    const item = itemRef.current;
+    if (!item || typeof item.scrollIntoView !== "function") return;
+    const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    item.scrollIntoView({ block: "nearest", behavior: still ? "auto" : "smooth" });
+  }, [expanded]);
 
   const state = status?.state ?? (account.syncError ? "error" : "idle");
   const lastSyncedAt = status?.lastSyncedAt ?? account.lastSyncedAt;
@@ -145,8 +157,14 @@ function AccountItem({
   const signInAgain = () =>
     openAddAccount({ step: "microsoft", email: account.email, autoStart: true });
 
+  const toggle = () => {
+    if (!expanded) reveal.current = true;
+    onToggle();
+  };
+
   // Opening the editor focuses its password field.
   const fix = () => {
+    if (!expanded) reveal.current = true;
     onExpand();
     setEditing(true);
   };
@@ -226,19 +244,25 @@ function AccountItem({
   }
 
   return (
-    <li className={clsx("account-item", expanded && "account-item--expanded")}>
+    <li ref={itemRef} className={clsx("account-item", expanded && "account-item--expanded")}>
       <div className="account-item__header">
         <AccountBadge name={account.displayName} color={account.color} size={36} />
         <div className="account-item__identity">
           <div className="account-item__line">
-            <span className="account-item__name">{account.displayName}</span>
+            <span className="account-item__name" dir="auto" title={account.displayName}>
+              {account.displayName}
+            </span>
             <span className="kind-badge">{microsoft ? "Microsoft 365" : "IMAP"}</span>
           </div>
-          <div className="account-item__email selectable">{account.email}</div>
+          <div className="account-item__email selectable" title={account.email}>
+            {account.email}
+          </div>
           <div className="account-item__status">{statusNode}</div>
         </div>
         <div className="account-item__actions">
+          {/* Hidden while its editor is open: it would do nothing. */}
           {syncError &&
+            !(expanded && editing) &&
             (microsoft ? (
               <button type="button" className="btn btn--sm" onClick={signInAgain}>
                 <LogIn size={14} aria-hidden="true" />
@@ -262,7 +286,7 @@ function AccountItem({
               aria-expanded={expanded}
               aria-controls={bodyId}
               aria-label={`Manage ${account.displayName}`}
-              onClick={onToggle}
+              onClick={toggle}
             >
               <ChevronDown size={18} strokeWidth={1.75} />
             </button>
@@ -321,7 +345,7 @@ function AccountItem({
           </div>
 
           <div className="account-field account-field--row">
-            <div>
+            <div className="account-field__text">
               <span className="account-field__label">Sync</span>
               <p className="account-field__hint">
                 {syncing ? "Syncing now…" : syncedLabel(lastSyncedAt)}
@@ -338,7 +362,7 @@ function AccountItem({
           {!syncError && servers}
 
           <div className="account-field account-field--row">
-            <div>
+            <div className="account-field__text">
               <span className="account-field__label">Remove account</span>
               <p className="account-field__hint">
                 Removes it and its data from this computer. Nothing changes on the server.

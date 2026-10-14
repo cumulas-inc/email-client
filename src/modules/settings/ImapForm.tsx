@@ -131,6 +131,8 @@ export function ImapForm({ initialEmail, onBack, onClose, onDone, onUseMicrosoft
     backend.openLink(url).catch((e: unknown) => toast.error(e));
   };
 
+  const serverSummary = `${server.imapHost}:${server.imapPort} · ${server.smtpHost}:${server.smtpPort}`;
+
   const passwordHint = preset?.appPassword
     ? `Use an ${preset.appPassword.term}, not your usual ${preset.name} password.`
     : preset?.bridge
@@ -157,7 +159,13 @@ export function ImapForm({ initialEmail, onBack, onClose, onDone, onUseMicrosoft
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="btn btn--primary" form={formId} disabled={isPending}>
+          <button
+            type="submit"
+            className={clsx("btn btn--primary", isPending && "btn--busy")}
+            form={formId}
+            disabled={isPending}
+            aria-busy={isPending || undefined}
+          >
             {isPending && <Spinner size={16} label="Checking" />}
             {isPending ? "Checking your settings…" : "Add account"}
           </button>
@@ -187,7 +195,7 @@ export function ImapForm({ initialEmail, onBack, onClose, onDone, onUseMicrosoft
           data-autofocus
         />
 
-        <div aria-live="polite">
+        <div className="imap-form__preset" aria-live="polite">
           {preset && (
             <PresetNote
               preset={preset}
@@ -228,8 +236,8 @@ export function ImapForm({ initialEmail, onBack, onClose, onDone, onUseMicrosoft
             <ChevronRight size={16} className="advanced__chevron" aria-hidden="true" />
             <span className="advanced__title">Advanced settings</span>
             {!advancedOpen && server.imapHost && (
-              <span className="advanced__summary">
-                {server.imapHost}:{server.imapPort} · {server.smtpHost}:{server.smtpPort}
+              <span className="advanced__summary" title={serverSummary}>
+                {serverSummary}
               </span>
             )}
           </button>

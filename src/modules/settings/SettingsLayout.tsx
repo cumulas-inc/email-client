@@ -86,10 +86,10 @@ export function SaveIndicator() {
     <>
       <div className="save-indicator" role="status" aria-live="polite">
         {state === "saving" && (
-          <>
+          <span className="save-indicator__saving">
             <LoaderCircle size={14} className="spin" aria-hidden="true" />
             Saving…
-          </>
+          </span>
         )}
         {state === "saved" && (
           <span className="save-indicator__saved">

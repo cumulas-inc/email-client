@@ -60,7 +60,7 @@ describe("Microsoft sign-in", () => {
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
 
     expect(
-      await screen.findByRole("heading", { name: "Finish signing in in your browser…" }),
+      await screen.findByRole("heading", { name: "Continue in your browser" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
 
@@ -84,7 +84,7 @@ describe("Microsoft sign-in", () => {
     await user.type(screen.getByLabelText("Email address (optional)"), "slow@contoso.example");
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
     expect(
-      await screen.findByRole("heading", { name: "Finish signing in in your browser…" }),
+      await screen.findByRole("heading", { name: "Continue in your browser" }),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
@@ -112,7 +112,7 @@ describe("Microsoft sign-in", () => {
     await user.type(screen.getByLabelText("Email address (optional)"), "slow@contoso.example");
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
     const dialog = await screen.findByRole("dialog", { name: "Add a Microsoft account" });
-    await screen.findByRole("heading", { name: "Finish signing in in your browser…" });
+    await screen.findByRole("heading", { name: "Continue in your browser" });
 
     // Escape on a <dialog> fires "cancel".
     fireEvent(dialog, new Event("cancel", { cancelable: true }));
@@ -132,7 +132,7 @@ describe("Microsoft sign-in", () => {
 
     await user.type(screen.getByLabelText("Email address (optional)"), "slow@contoso.example");
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
-    await screen.findByRole("heading", { name: "Finish signing in in your browser…" });
+    await screen.findByRole("heading", { name: "Continue in your browser" });
     await user.click(screen.getByRole("button", { name: "Close" }));
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

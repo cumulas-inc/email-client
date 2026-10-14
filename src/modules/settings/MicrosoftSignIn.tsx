@@ -134,7 +134,7 @@ export function MicrosoftSignIn({
           <ResultPanel
             icon={<Spinner size={30} label="Waiting for sign-in" />}
             tone="brand"
-            title="Finish signing in in your browser…"
+            title="Continue in your browser"
           >
             <p>
               We&apos;ve opened Microsoft&apos;s sign-in page in your web browser. When you&apos;re
@@ -290,7 +290,7 @@ export function MicrosoftSignIn({
           <p>
             {network
               ? "Check that you're connected to the internet, then try again."
-              : "Something went wrong while signing in. Please try again."}
+              : "The sign-in didn't finish. Try again, and if it keeps happening, share the details below with your IT team."}
           </p>
           <p className="result-panel__detail selectable">{errorMessage(error)}</p>
         </ResultPanel>

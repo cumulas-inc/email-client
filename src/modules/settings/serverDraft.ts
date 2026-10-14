@@ -182,7 +182,8 @@ export function describeImapFailure(
     errors: {},
     problem: {
       title: fallbackTitle,
-      detail: "Something went wrong while checking your settings. Please try again.",
+      detail:
+        "The check didn't finish. Try again, and if it keeps happening, the details below can help your provider.",
       technical: errorMessage(error),
     },
   };

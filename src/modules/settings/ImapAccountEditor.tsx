@@ -1,3 +1,4 @@
+import clsx from "clsx";
 import { useEffect, useId, useState, type FormEvent, type KeyboardEvent } from "react";
 
 import type { Account, ImapAccountUpdate, ImapSettings } from "../../api/types";
@@ -168,7 +169,12 @@ export function ImapAccountEditor({ account, settings, onDone, onCancel }: ImapA
         {problem && <ProblemCallout id={problemId} problem={problem} />}
       </fieldset>
       <div className="imap-editor__actions">
-        <button type="submit" className="btn btn--primary" disabled={isPending}>
+        <button
+          type="submit"
+          className={clsx("btn btn--primary", isPending && "btn--busy")}
+          disabled={isPending}
+          aria-busy={isPending || undefined}
+        >
           {isPending && <Spinner size={16} label="Checking" />}
           {isPending ? "Checking your settings…" : "Save"}
         </button>

@@ -160,6 +160,16 @@ describe("Mail", () => {
     await user.selectOptions(markRead, "After 3 seconds");
     await waitFor(() => expect(lastSaved()).toMatchObject({ markReadAfterSeconds: 3 }));
   });
+
+  it("names an unlisted mark-as-read delay with the right plural", async () => {
+    const backend = new MockBackend();
+    await backend.updateSettings({ ...(await backend.getSettings()), markReadAfterSeconds: 1 });
+    openAt("mail", backend);
+
+    const markRead = await screen.findByLabelText("Mark messages as read");
+    expect(markRead).toHaveValue("1");
+    expect(within(markRead).getByRole("option", { name: "After 1 second" })).toBeInTheDocument();
+  });
 });
 
 describe("Microsoft app registration", () => {
@@ -306,6 +316,12 @@ describe("Accounts", () => {
     await waitFor(() =>
       expect(within(confirm).getByRole("button", { name: "Cancel" })).toHaveFocus(),
     );
+    // Cancel comes first and the confirming button last, as in every confirmation.
+    const cancelButton = within(confirm).getByRole("button", { name: "Cancel" });
+    const removeButton = within(confirm).getByRole("button", { name: "Remove account" });
+    expect(cancelButton.compareDocumentPosition(removeButton)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
 
     await user.click(within(confirm).getByRole("button", { name: "Cancel" }));
     expect(remove).not.toHaveBeenCalled();
@@ -359,6 +375,8 @@ describe("Accounts", () => {
 
     await user.click(await screen.findByRole("button", { name: "Fix Alex (Personal)" }));
     expect(screen.getByText("This account can't sync right now")).toBeInTheDocument();
+    // Its editor is open, so the header's Fix button would do nothing.
+    expect(screen.queryByRole("button", { name: "Fix Alex (Personal)" })).not.toBeInTheDocument();
     const password = screen.getByLabelText("New password");
     await waitFor(() => expect(password).toHaveFocus());
     expect(password).toHaveValue("");

@@ -1,3 +1,4 @@
+import clsx from "clsx";
 import { useEffect, useRef, useState } from "react";
 
 import { errorMessage } from "../../api/errors";
@@ -59,23 +60,26 @@ function ConfirmRemove({
       width={480}
       footer={
         <>
-          <button
-            type="button"
-            className="btn btn--danger-solid"
-            onClick={() => void confirm()}
-            disabled={remove.isPending}
-          >
-            {remove.isPending ? "Removing…" : "Remove account"}
-          </button>
+          {/* Cancel first and the confirming button last, as in every confirmation. */}
           <button ref={cancelRef} type="button" className="btn" onClick={onClose}>
             Cancel
+          </button>
+          <button
+            type="button"
+            className={clsx("btn btn--destructive", remove.isPending && "btn--busy")}
+            onClick={() => void confirm()}
+            disabled={remove.isPending}
+            aria-busy={remove.isPending || undefined}
+          >
+            {remove.isPending ? "Removing…" : "Remove account"}
           </button>
         </>
       }
     >
       <div className="remove-account">
         <p>
-          <strong>{account.email}</strong> will be removed from Cumulas Mail on this computer.
+          <strong className="remove-account__address">{account.email}</strong> will be removed from
+          Cumulas Mail on this computer.
         </p>
         <ul className="remove-account__list">
           <li>

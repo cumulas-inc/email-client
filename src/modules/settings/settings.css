@@ -4,7 +4,6 @@
    the warm canvas with each group of settings on a floating card. The
    add-account steps are choice tiles and plain forms on the dialog. */
 
-/* A recessed panel (server groups, summaries) one step below its surface. */
 /* Lucide's default 2px stroke reads heavy next to Inter; 1.75 for 16px and
    up, as in the rest of the app. Small (14px) icons and explicit widths keep
    theirs. */
@@ -317,7 +316,7 @@
 
 /* Tips sit quietly on a recessed panel; warnings and errors take a tint. */
 .callout--info {
-  background: var(--sunken, var(--bg-field));
+  background: var(--bg-sunken);
   box-shadow: inset 0 0 0 1px var(--border-subtle);
 }
 
@@ -427,7 +426,7 @@
 }
 
 .result-panel__icon--neutral {
-  background: var(--sunken, var(--bg-field));
+  background: var(--bg-sunken);
   box-shadow: inset 0 0 0 1px var(--border-subtle);
   color: var(--fg-secondary);
 }
@@ -467,6 +466,8 @@
   max-width: 420px;
   color: var(--fg-secondary);
   text-wrap: pretty;
+  /* An organization's domain or an error can be one long word. */
+  overflow-wrap: anywhere;
 }
 
 .result-panel--start .result-panel__body {
@@ -522,7 +523,7 @@
   gap: 6px;
   padding: var(--space-3);
   border-radius: var(--radius-lg);
-  background: var(--sunken, var(--bg-field));
+  background: var(--bg-sunken);
   box-shadow: inset 0 0 0 1px var(--border-subtle);
 }
 
@@ -673,6 +674,32 @@
   outline: none;
 }
 
+/* The provider tip's live region stays in the page so new tips are
+   announced, but while it's empty it takes no gap in the form. */
+.imap-form__preset:empty {
+  position: absolute;
+}
+
+/* "Checking your settings…" is progress, not a disabled button: it keeps
+   its fill so the label stays readable. */
+.btn--primary.btn--busy:disabled {
+  background: var(--brand);
+  box-shadow: var(--shadow-button);
+  color: var(--on-brand);
+  cursor: progress;
+}
+
+.btn--destructive.btn--busy:disabled {
+  background: var(--danger);
+  color: var(--on-danger);
+  cursor: progress;
+}
+
+/* The spinner turns with the label's color, not teal on teal. */
+.btn--busy .spinner {
+  color: inherit;
+}
+
 .advanced {
   border-top: 1px solid var(--border-subtle);
 }
@@ -708,11 +735,15 @@
   rotate: 90deg;
 }
 
+/* The title never wraps; a long server summary gives way instead. */
 .advanced__title {
+  flex: none;
   font-weight: var(--weight-semibold);
+  white-space: nowrap;
 }
 
 .advanced__summary {
+  min-width: 0;
   margin-left: auto;
   overflow: hidden;
   font-family: var(--font-mono);
@@ -743,7 +774,7 @@
   padding: var(--space-3) 14px 14px;
   border: 0;
   border-radius: var(--radius-lg);
-  background: var(--sunken, var(--bg-field));
+  background: var(--bg-sunken);
   box-shadow: inset 0 0 0 1px var(--border-subtle);
 }
 
@@ -777,7 +808,8 @@
 .settings {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
-  height: min(640px, calc(100vh - 140px));
+  /* As tall as the dialog may be (100vh - 48px) under its 56px header. */
+  height: min(640px, calc(100vh - 104px));
   padding: var(--space-1) 10px 10px 10px;
 }
 
@@ -873,8 +905,16 @@
   min-height: 0;
   padding: var(--space-3) var(--space-6) var(--space-6);
   overflow-y: auto;
-  /* Content fades out under the title instead of being cut off. */
-  mask-image: linear-gradient(to bottom, transparent, #000 var(--space-3));
+  /* Content fades out under the title and at the panel's foot instead of
+     being cut off mid-line. Both fades sit in the padding, so nothing is
+     faded once it's scrolled into place. */
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--space-3),
+    #000 calc(100% - var(--space-5)),
+    transparent
+  );
 }
 
 /* Text straight on the canvas: secondary at least, for contrast. */
@@ -905,23 +945,35 @@
   white-space: nowrap;
 }
 
+.save-indicator__saving,
 .save-indicator__saved {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
+  transition: opacity var(--duration-normal) var(--ease-out);
+}
+
+/* Saves on this computer usually finish at once: "Saving…" only shows up
+   for a slow one, instead of flashing before every "Saved". */
+.save-indicator__saving {
+  transition-delay: 300ms;
+}
+
+.save-indicator__saved {
   gap: var(--space-1);
   color: var(--success);
-  animation: save-fade-in var(--duration-normal) var(--ease-out);
+}
+
+@starting-style {
+  .save-indicator__saving,
+  .save-indicator__saved {
+    opacity: 0;
+  }
 }
 
 .save-indicator--error {
   color: var(--danger);
   white-space: normal;
-}
-
-@keyframes save-fade-in {
-  from {
-    opacity: 0;
-  }
 }
 
 .settings-group {
@@ -1110,21 +1162,27 @@
 }
 
 .account-item {
+  /* Room above an account that's scrolled into view as it opens. */
+  scroll-margin: var(--space-3);
   border-radius: var(--radius-card);
   background: var(--bg-surface);
   box-shadow: var(--shadow-card);
 }
 
+/* The badge sits beside the name and address, not adrift in the middle
+   when an open account's name wraps; the actions stay centered. */
 .account-item__header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-3);
   min-height: 72px;
   padding: var(--space-3) var(--space-3) var(--space-3) 14px;
 }
 
-/* The account's mark in its own color, as in the folder list. Every color in
-   the palette is dark enough for white letters. */
+.account-item__header > .account-badge {
+  margin-top: 3px;
+}
+
 .account-item__identity {
   display: flex;
   flex-direction: column;
@@ -1133,9 +1191,10 @@
   min-width: 0;
 }
 
+/* Top-aligned, so the badge stays on the first line when the name wraps. */
 .account-item__line {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-2);
   min-width: 0;
 }
@@ -1152,6 +1211,15 @@
   color: var(--fg-secondary);
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* One line each in the list; the open account shows its name and address
+   in full. */
+.account-item--expanded .account-item__name,
+.account-item--expanded .account-item__email {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
 }
 
 .account-item__status {
@@ -1181,6 +1249,7 @@
 .account-item__actions {
   display: flex;
   align-items: center;
+  align-self: center;
   gap: var(--space-2);
 }
 
@@ -1252,6 +1321,13 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2) var(--space-4);
+}
+
+/* The text takes the line and wraps; its button stays on the right unless
+   the card gets truly narrow. */
+.account-field__text {
+  flex: 1 1 240px;
+  min-width: 0;
 }
 
 .account-field__head {
@@ -1456,6 +1532,11 @@
   gap: var(--space-3);
 }
 
+/* Addresses can be one long word; break it rather than run off the dialog. */
+.remove-account__address {
+  overflow-wrap: anywhere;
+}
+
 .remove-account__list {
   display: flex;
   flex-direction: column;
@@ -1463,39 +1544,6 @@
   margin: 0;
   padding-left: var(--space-5);
   color: var(--fg-secondary);
-}
-
-.btn--danger-solid {
-  background: var(--danger);
-  box-shadow: none;
-  color: var(--on-brand);
-}
-
-.btn--danger-solid:hover:not(:disabled) {
-  background: var(--danger);
-  filter: brightness(0.92);
-}
-
-.btn--danger-solid:active:not(:disabled) {
-  background: var(--danger);
-  filter: brightness(0.85);
-}
-
-.btn--danger-solid:disabled {
-  background: var(--bg-pressed);
-  color: var(--fg-disabled);
-}
-
-/* Dark mode's danger red is light enough to read as text, too light under
-   white text; deepen the fill toward the canvas. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .btn--danger-solid:not(:disabled) {
-    background: color-mix(in srgb, var(--danger) 72%, var(--bg-app));
-  }
-}
-
-:root[data-theme="dark"] .btn--danger-solid:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 72%, var(--bg-app));
 }
 
 /* --- Reduced motion -------------------------------------------------------- */
