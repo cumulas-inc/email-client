@@ -154,6 +154,36 @@ describe("Reading pane", () => {
     expect(
       screen.getByRole("button", { name: "Open Atlas-launch-checklist-v7.docx" }),
     ).toBeVisible();
+
+    // High importance reads "Important", in the row and on the letter.
+    expect(row(CHECKLIST).getAttribute("aria-label")).toContain(", Important");
+    expect(within(screen.getByRole("article")).getByText("Important")).toBeInTheDocument();
+
+    // Quick reply: the user's avatar in the account's color, as in the header.
+    const quick = screen.getByRole("button", { name: /Reply to Priya Raman/ });
+    const avatar = quick.querySelector<HTMLElement>(".avatar")!;
+    expect(avatar).toHaveClass("avatar--account");
+    expect(avatar.style.getPropertyValue("--account-color")).toBe("#0b7a75");
+    expect(avatar).toHaveTextContent("AM");
+    // A sender who's someone else keeps the hue of their address.
+    expect(
+      within(screen.getByRole("article")).getByText("PR", { selector: ".avatar" }),
+    ).not.toHaveClass("avatar--account");
+  });
+
+  it("shows the user's own sent mail with their account-colored avatar", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    const account = treeItem(/^Alex Morgan \(alex\.morgan@acme\.example\)$/);
+    await user.click(within(account).getByText("Sent Items"));
+    await openMessage(user, /Load test results/);
+    // The sender and the quick reply: both the user, both in the account's color.
+    const avatars = within(screen.getByRole("article")).getAllByText("AM", { selector: ".avatar" });
+    expect(avatars).toHaveLength(2);
+    for (const avatar of avatars) {
+      expect(avatar).toHaveClass("avatar--account");
+      expect(avatar.style.getPropertyValue("--account-color")).toBe("#0b7a75");
+    }
   });
 
   it("doesn't mark as read when the setting is 'never'", async () => {
@@ -232,6 +262,31 @@ describe("Reading pane", () => {
       "aria-expanded",
       "true",
     );
+  });
+
+  it("gives the list 45% of the height with the reading pane at the bottom", async () => {
+    // jsdom has no layout: the area below the header is 840px tall.
+    const height = vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (
+      this: Element,
+    ) {
+      return this.classList.contains("mail__main") ? 840 : 0;
+    });
+    try {
+      await renderMail({ settings: { readingPane: "bottom" } });
+      const root = document.querySelector<HTMLElement>(".mail--bottom")!;
+      expect(root.style.getPropertyValue("--mail-list-h")).toBe("378px");
+      const splitter = screen.getByRole("separator", { name: "Resize message list height" });
+      expect(splitter).toHaveAttribute("aria-valuenow", "378");
+      // The default isn't stored, so it can follow the window (and change later).
+      expect(window.localStorage.getItem("mail.bottomListHeight")).toBeNull();
+
+      // Once resized, the list keeps the user's height.
+      fireEvent.keyDown(splitter, { key: "ArrowDown" });
+      expect(root.style.getPropertyValue("--mail-list-h")).toBe("394px");
+      expect(window.localStorage.getItem("mail.bottomListHeight")).toBe("394");
+    } finally {
+      height.mockRestore();
+    }
   });
 
   it("shows the message full width with a back button when the reading pane is off", async () => {

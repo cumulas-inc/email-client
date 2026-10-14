@@ -1,7 +1,7 @@
 import "./mail.css";
 
 import { Pencil, SquarePen, X } from "lucide-react";
-import { type CSSProperties, useCallback, useEffect, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 
 import { ModuleSidebar } from "../../app/ModuleSidebar";
 import { useAppStore } from "../../app/store";
@@ -9,7 +9,7 @@ import { useAccounts, useSettings } from "../../api/queries";
 import { useMailActions } from "./actions";
 import { Compose, DiscardDialog } from "./Compose";
 import { FolderPane } from "./FolderPane";
-import { usePersistentNumber } from "./hooks";
+import { useHeight, usePersistentNumber, usePersistentSize } from "./hooks";
 import { ALL_INBOXES, useMailStore } from "./mailStore";
 import { MessageList } from "./MessageList";
 import { optionId } from "./dom";
@@ -17,6 +17,12 @@ import { useFolders } from "./queries";
 import { ReadingPane } from "./ReadingPane";
 import { useMailShortcuts } from "./shortcuts";
 import { Splitter } from "./Splitter";
+
+// With the reading pane at the bottom, the list's height. Until the user
+// drags it, the list takes this share of the height and follows the window.
+const LIST_SHARE = 0.45;
+const LIST_MIN_H = 160;
+const LIST_MAX_H = 720;
 
 /** A draft that is open but not on screen: one click brings it back. */
 function DraftBar() {
@@ -89,7 +95,18 @@ export function MailModule() {
 
   const [foldersWidth, setFoldersWidth] = usePersistentNumber("mail.foldersWidth", 260, 200, 420);
   const [listWidth, setListWidth] = usePersistentNumber("mail.listWidth", 420, 300, 760);
-  const [listHeight, setListHeight] = usePersistentNumber("mail.listHeight", 320, 160, 720);
+  const [listHeightSet, setListHeight] = usePersistentSize(
+    "mail.bottomListHeight",
+    LIST_MIN_H,
+    LIST_MAX_H,
+  );
+  const mainRef = useRef<HTMLDivElement>(null);
+  const mainHeight = useHeight(mainRef, readingPane === "bottom");
+  const listHeight =
+    listHeightSet ??
+    (mainHeight > 0
+      ? Math.min(LIST_MAX_H, Math.max(LIST_MIN_H, Math.round(mainHeight * LIST_SHARE)))
+      : null);
 
   useMailShortcuts(actions, readingPane);
 
@@ -149,7 +166,8 @@ export function MailModule() {
   const style = {
     "--mail-folders-w": `${foldersWidth}px`,
     "--mail-list-w": `${listWidth}px`,
-    "--mail-list-h": `${listHeight}px`,
+    // Before the first measurement, the style sheet's percentage stands in.
+    ...(listHeight !== null ? { "--mail-list-h": `${listHeight}px` } : {}),
   } as CSSProperties;
 
   return (
@@ -182,7 +200,7 @@ export function MailModule() {
         onChange={setFoldersWidth}
         label="Resize folder pane"
       />
-      <div className="mail__main">
+      <div className="mail__main" ref={mainRef}>
         {showList && (
           <div className="card mail__panel mail__list-panel">
             <MessageList
@@ -196,9 +214,9 @@ export function MailModule() {
         {showList && showReader && (
           <Splitter
             orientation={readingPane === "bottom" ? "horizontal" : "vertical"}
-            value={readingPane === "bottom" ? listHeight : listWidth}
-            min={readingPane === "bottom" ? 160 : 300}
-            max={readingPane === "bottom" ? 720 : 760}
+            value={readingPane === "bottom" ? (listHeight ?? LIST_MIN_H) : listWidth}
+            min={readingPane === "bottom" ? LIST_MIN_H : 300}
+            max={readingPane === "bottom" ? LIST_MAX_H : 760}
             onChange={readingPane === "bottom" ? setListHeight : setListWidth}
             label={readingPane === "bottom" ? "Resize message list height" : "Resize message list"}
           />

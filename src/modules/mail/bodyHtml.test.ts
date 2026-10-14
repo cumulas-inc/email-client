@@ -29,6 +29,13 @@ describe("message frame document", () => {
     expect(doc).toContain("img { max-width: 100%; height: auto; }");
     expect(doc).toContain("overflow-wrap: break-word");
     expect(doc).toContain(`<body dir="auto"><p>Hello</p></body>`);
+    // The quiet tone (the original under a reply) sets the text in secondary.
+    expect(buildSrcDoc("<p>x</p>", { allowRemote: false, appearance: "plain" })).toMatch(
+      /body \{[^}]*color: #1d1c1a;/,
+    );
+    expect(
+      buildSrcDoc("<p>x</p>", { allowRemote: false, appearance: "plain", tone: "quiet" }),
+    ).toMatch(/body \{[^}]*color: #57534c;/);
     // Dark mode inverts the page and turns images back.
     expect(buildSrcDoc("", { allowRemote: false, appearance: "dark" })).toContain(
       "filter: invert(1) hue-rotate(180deg)",

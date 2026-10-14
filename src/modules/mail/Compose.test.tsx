@@ -47,10 +47,21 @@ describe("Reply and forward", () => {
       "Re: Atlas launch checklist — final review today",
     );
     const quote = within(c).getByTitle("Original message").getAttribute("srcdoc") ?? "";
-    expect(quote).toContain("<b>From:</b> Priya Raman &lt;priya.raman@acme.example&gt;");
-    expect(quote).toContain("<b>Cc:</b> Jonas Becker");
-    expect(quote).toContain("<b>Subject:</b> Atlas launch checklist");
+    expect(quote).toMatch(/On Wed, Oct 14, 2026, at \d{1,2}:\d\d [AP]M, Priya Raman wrote:<\/p>/);
+    expect(quote).toContain('<blockquote type="cite"');
     expect(quote).toContain("rollback plan");
+    expect(quote).not.toContain("<b>From:</b>");
+    // Shown quieter than what's being written: secondary text.
+    expect(quote).toMatch(/body \{[^}]*color: #57534c;/);
+    // The original can be tucked away, and the toggle sits right under the editor.
+    const toggle = within(c).getByRole("button", { name: "Hide original message" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await user.click(toggle);
+    expect(within(c).queryByTitle("Original message")).not.toBeInTheDocument();
+    expect(within(c).getByRole("button", { name: "Show original message" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
   it("replies to all except the user's own address", async () => {
@@ -90,6 +101,12 @@ describe("Reply and forward", () => {
       "Fwd: Re: Load test results",
     );
     expect(chips("To")).toEqual([]);
+    // A forward passes the original on under a compact header, not a quote.
+    const quote = within(fwd).getByTitle("Original message").getAttribute("srcdoc") ?? "";
+    expect(quote).toContain(">Forwarded message</div>");
+    expect(quote).toMatch(/>From<\/span>Jonas Becker &lt;jonas\.becker@acme\.example&gt;/);
+    expect(quote).toMatch(/>Subject<\/span>Re: Load test results/);
+    expect(quote).not.toContain('<blockquote type="cite"');
   });
 
   it("sends a reply linked to the original", async () => {
@@ -195,7 +212,10 @@ describe("Sending", () => {
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
     await user.type(within(c).getByRole("textbox", { name: "Subject" }), "Lunch?");
-    await user.click(within(c).getByRole("button", { name: "High importance" }));
+    const important = within(c).getByRole("button", { name: "Important" });
+    expect(important).toHaveAttribute("aria-pressed", "false");
+    await user.click(important);
+    expect(important).toHaveAttribute("aria-pressed", "true");
     await user.click(within(c).getByRole("button", { name: "Send" }));
     await waitFor(() => expect((backend as MockBackend).sent).toHaveLength(1));
     const sent = (backend as MockBackend).sent[0]!;
@@ -249,6 +269,36 @@ describe("Sending", () => {
     expect(sent.attachments).toEqual([
       { name: "notes.txt", contentType: "text/plain", dataBase64: btoa("hello world") },
     ]);
+  });
+
+  it("sends low importance from the overflow menu", async () => {
+    const user = userEvent.setup();
+    const { backend } = await renderMail();
+    const c = await newMessage(user);
+    await user.type(within(c).getByRole("combobox", { name: "To" }), "ann@example.org{Enter}");
+    await user.type(within(c).getByRole("textbox", { name: "Subject" }), "FYI");
+    // The only importance control on the toolbar is "Important".
+    expect(within(c).queryByRole("button", { name: /importance/i })).not.toBeInTheDocument();
+
+    const important = within(c).getByRole("button", { name: "Important" });
+    await user.click(important);
+    await user.click(within(c).getByRole("button", { name: "More options" }));
+    const menu = screen.getByRole("menu", { name: "More options" });
+    const low = within(menu).getByRole("menuitemcheckbox", { name: "Low importance" });
+    expect(low).toHaveAttribute("aria-checked", "false");
+    await user.click(low);
+    // One or the other: low turns "Important" off.
+    expect(important).toHaveAttribute("aria-pressed", "false");
+    expect(within(c).getByText("Low importance")).toBeInTheDocument();
+    await user.click(within(c).getByRole("button", { name: "More options" }));
+    expect(
+      within(screen.getByRole("menu")).getByRole("menuitemcheckbox", { name: "Low importance" }),
+    ).toHaveAttribute("aria-checked", "true");
+    await user.keyboard("{Escape}");
+
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect((backend as MockBackend).sent).toHaveLength(1));
+    expect((backend as MockBackend).sent[0]!.importance).toBe("low");
   });
 
   it("reports send failures and keeps the draft", async () => {

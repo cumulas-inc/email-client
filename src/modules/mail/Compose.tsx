@@ -1,7 +1,7 @@
 import {
-  ArrowDown,
   ChevronDown,
   CircleAlert,
+  Ellipsis,
   Minimize2,
   Paperclip,
   Send,
@@ -13,6 +13,7 @@ import { type ChangeEvent, type KeyboardEvent, lazy, Suspense, useRef, useState 
 import { useAccounts } from "../../api/queries";
 import type { EmailAddress, Importance } from "../../api/types";
 import { Dialog } from "../../components/Dialog";
+import { Menu } from "../../components/Menu";
 import { toast } from "../../components/toast";
 import { formatBytes } from "../../lib/format";
 import { FileBadge, FileName } from "./Attachments";
@@ -228,26 +229,41 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
           data-testid="compose-file-input"
           onChange={(e) => void onFiles(e)}
         />
+        {/* Sent as importance "high". The name stays when the label is
+            hidden in a narrow composer. */}
         <button
           type="button"
-          className="icon-btn mail-compose__importance mail-compose__importance--high"
+          className="btn btn--subtle mail-tool mail-compose__important"
           aria-pressed={draft.importance === "high"}
-          aria-label="High importance"
-          title="High importance"
+          aria-label="Important"
+          title="Mark as important"
           onClick={() => setImportance("high")}
         >
-          <CircleAlert size={17} strokeWidth={1.75} />
+          <CircleAlert size={17} strokeWidth={1.75} aria-hidden="true" />
+          <span className="mail-tool__label">Important</span>
         </button>
-        <button
-          type="button"
-          className="icon-btn mail-compose__importance"
-          aria-pressed={draft.importance === "low"}
-          aria-label="Low importance"
-          title="Low importance"
-          onClick={() => setImportance("low")}
-        >
-          <ArrowDown size={17} strokeWidth={1.75} />
-        </button>
+        <Menu
+          label="More options"
+          align="end"
+          items={[
+            {
+              label: "Low importance",
+              checked: draft.importance === "low",
+              onSelect: () => setImportance("low"),
+            },
+          ]}
+          trigger={(props) => (
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="More options"
+              title="More options"
+              {...props}
+            >
+              <Ellipsis size={17} strokeWidth={1.75} />
+            </button>
+          )}
+        />
         <span className="toolbar__separator" />
         <button
           type="button"
@@ -280,7 +296,9 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
       </div>
 
       <div className="mail-compose__scroll">
-        <div className="mail-compose__page">
+        <div
+          className={`mail-compose__page${draft.quoteHtml ? " mail-compose__page--quoted" : ""}`}
+        >
           <div className="mail-compose__fields">
             {accounts.length > 1 && (
               <div className="mail-compose__field">
@@ -340,8 +358,11 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
                 value={draft.subject}
                 onChange={(e) => update({ subject: e.target.value })}
               />
+              {/* Says what the toolbar can't when its labels are hidden. */}
               {draft.importance === "high" && (
-                <span className="mail-tag mail-tag--danger">High importance</span>
+                <span className="mail-tag mail-tag--danger mail-compose__important-tag">
+                  Important
+                </span>
               )}
               {draft.importance === "low" && <span className="mail-tag">Low importance</span>}
             </div>
@@ -403,6 +424,7 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
                     html={draft.quoteHtml}
                     allowRemote={false}
                     appearance={quoteAppearance}
+                    tone="quiet"
                     title="Original message"
                     onLink={() => undefined}
                   />

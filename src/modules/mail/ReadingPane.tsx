@@ -237,6 +237,10 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
   const longSubject = visualLength(subject) > 90;
   const sender = message.from;
   const senderName = displayName(sender);
+  // Mail the user sent: their avatar in the account's color, as in the header.
+  const senderAccount = sender
+    ? accounts.find((a) => a.email.toLowerCase() === sender.address.toLowerCase())
+    : undefined;
   const date = fullDate(message.receivedAt);
   const sent = messageDate(message.receivedAt);
   const future = !!sent && isFutureDated(sent);
@@ -428,7 +432,7 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 {message.importance === "high" && (
                   <span className="mail-tag mail-tag--danger">
                     <CircleAlert size={14} strokeWidth={2} aria-hidden="true" />
-                    High importance
+                    Important
                   </span>
                 )}
                 {message.importance === "low" && (
@@ -462,7 +466,12 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
               </div>
             )}
             <div className="mail-reader__sender">
-              <Avatar name={senderName} colorKey={sender?.address} size={42} />
+              <Avatar
+                name={senderName}
+                colorKey={sender?.address}
+                color={senderAccount?.color}
+                size={42}
+              />
               <div className="mail-reader__people selectable">
                 <div className="mail-reader__from">
                   <span
@@ -569,7 +578,9 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
             title="Reply (Ctrl+R)"
             onClick={() => void actions.reply(message.id, "reply")}
           >
-            {account && <Avatar name={account.displayName} colorKey={account.email} size={26} />}
+            {account && (
+              <Avatar name={account.displayName || account.email} color={account.color} size={26} />
+            )}
             <span className="mail-quickreply__text">
               {sender ? (
                 <>

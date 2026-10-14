@@ -3,6 +3,7 @@
 
 import type { Account, EmailAddress, Message, ReplyKind } from "../../api/types";
 import { formatDate, formatTime } from "../../lib/datetime";
+import { displayName } from "../../lib/format";
 import { messageDate } from "./dates";
 import type { ComposeDraft } from "./mailStore";
 
@@ -110,29 +111,92 @@ function formatAddressHtml(a: EmailAddress): string {
   return a.name ? `${escapeHtml(a.name)} &lt;${escapeHtml(a.address)}&gt;` : escapeHtml(a.address);
 }
 
-/** The quote header's date: "Wednesday, October 14, 2026 3:05 PM". */
-function sentLine(date: Date): string {
-  return `${formatDate(date, "weekdayLongYear")} ${formatTime(date)}`;
+/** When the original was sent: "Wed, Oct 14, 2026, at 9:42 AM". */
+function quoteDate(date: Date): string {
+  return `${formatDate(date, "weekdayShortYear")}, at ${formatTime(date)}`;
 }
 
-/** The usual From/Sent/To/Subject block, followed by the original body. */
-export function quoteOriginal(original: Message): string {
+/**
+ * The line over a quoted reply: "On Wed, Oct 14, 2026, at 9:42 AM, Priya
+ * Raman wrote:". A message without a date (sent as 1 Jan 1970) gets no "On".
+ */
+export function attributionLine(original: Message): string {
   const sent = messageDate(original.receivedAt);
-  const rows: [string, string][] = [
-    ["From", original.from ? formatAddressHtml(original.from) : ""],
-    // A message without a date (sent as 1 Jan 1970) gets no "Sent" line.
-    ...(sent ? [["Sent", escapeHtml(sentLine(sent))] as [string, string]] : []),
-    ["To", original.to.map(formatAddressHtml).join("; ")],
-  ];
-  if (original.cc.length > 0) rows.push(["Cc", original.cc.map(formatAddressHtml).join("; ")]);
-  rows.push(["Subject", escapeHtml(original.subject)]);
-  const header = rows.map(([k, v]) => `<b>${k}:</b> ${v}`).join("<br>");
-  const body = original.bodyHtml ?? textToHtml(original.bodyText ?? "");
+  const who = original.from ? displayName(original.from) : null;
+  if (!sent) return `${who ?? "The sender"} wrote:`;
+  return `On ${quoteDate(sent)}, ${who ?? "the sender"} wrote:`;
+}
+
+// The quote is sent, so its styles are inline and its colors are fixed: the
+// light theme's hairline and tertiary text. The reader shows them as they
+// are on a light page and inverts them with the rest of the mail in dark.
+const QUOTE_RULE = "#d8d4cb";
+const QUOTE_LABEL = "#716c63";
+
+/**
+ * Removes `data-signature-stamp` from quoted HTML. The signature relay reads
+ * that marker as "already signed", so a stamp in the quoted original would
+ * stop the reply from getting the sender's own signature.
+ */
+export function stripSignatureStamps(html: string): string {
+  if (!/data-signature-stamp/i.test(html)) return html;
+  // A <template> parses without loading images or running anything.
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const strip = (root: DocumentFragment) => {
+    for (const el of root.querySelectorAll("[data-signature-stamp]")) {
+      el.removeAttribute("data-signature-stamp");
+    }
+    for (const inner of root.querySelectorAll("template")) strip(inner.content);
+  };
+  strip(template.content);
+  return template.innerHTML;
+}
+
+/** A forward's header: "Forwarded message", then From, Date, Subject, To and Cc. */
+function forwardHeader(original: Message): string {
+  const sent = messageDate(original.receivedAt);
+  const list = (addresses: EmailAddress[]) => addresses.map(formatAddressHtml).join(", ");
+  const rows: [string, string][] = [];
+  if (original.from) rows.push(["From", formatAddressHtml(original.from)]);
+  if (sent) rows.push(["Date", escapeHtml(quoteDate(sent))]);
+  if (original.subject.trim()) rows.push(["Subject", escapeHtml(original.subject)]);
+  if (original.to.length > 0) rows.push(["To", list(original.to)]);
+  if (original.cc.length > 0) rows.push(["Cc", list(original.cc)]);
+  // Quiet labels in a column, values in ink; long lists wrap under the value.
+  const row = ([label, value]: [string, string]) =>
+    `<div style="padding-left:4.5em;text-indent:-4.5em">` +
+    `<span style="display:inline-block;width:4.5em;text-indent:0;color:${QUOTE_LABEL}">${label}</span>` +
+    `${value}</div>`;
+  return (
+    `<div style="margin:0 0 16px;font-size:0.9375em;line-height:1.5">` +
+    `<div style="margin:0 0 2px;color:${QUOTE_LABEL}">Forwarded message</div>` +
+    rows.map(row).join("") +
+    `</div>`
+  );
+}
+
+/**
+ * The original under a reply or forward. A reply quotes it under one
+ * attribution line, in a <blockquote type="cite"> with a rule down its side.
+ * A forward passes it on as it is, under a compact header.
+ */
+export function quoteOriginal(original: Message, kind: ReplyKind = "reply"): string {
+  const body = stripSignatureStamps(original.bodyHtml ?? textToHtml(original.bodyText ?? ""));
+  if (kind === "forward") {
+    return (
+      `<div class="cumulas-quote cumulas-forward">` +
+      forwardHeader(original) +
+      `<div>${body}</div>` +
+      `</div>`
+    );
+  }
   return (
     `<div class="cumulas-quote">` +
-    `<hr style="border:none;border-top:1px solid #d8d4cb;margin:16px 0 8px">` +
-    `<p style="margin:0 0 12px">${header}</p>` +
-    `<div>${body}</div>` +
+    `<p style="margin:0 0 8px">${escapeHtml(attributionLine(original))}</p>` +
+    `<blockquote type="cite" style="margin:0;padding:0 0 0 12px;border-left:2px solid ${QUOTE_RULE}">` +
+    body +
+    `</blockquote>` +
     `</div>`
   );
 }
@@ -175,7 +239,7 @@ export function replyDraft(original: Message, kind: ReplyKind, accounts: Account
     showBcc: false,
     subject: prefixSubject(original.subject, kind),
     bodyHtml: "",
-    quoteHtml: quoteOriginal(original),
+    quoteHtml: quoteOriginal(original, kind),
     attachments: [],
     importance: "normal",
     replyToMessageId: original.id,

@@ -7,13 +7,15 @@
 
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { anchorOf, type BodyAppearance, buildSrcDoc, linkify } from "./bodyHtml";
+import { anchorOf, type BodyAppearance, type BodyTone, buildSrcDoc, linkify } from "./bodyHtml";
 import { plainTextBlocks } from "./text";
 
 interface MessageBodyProps {
   html: string;
   allowRemote: boolean;
   appearance: BodyAppearance;
+  /** "quiet": secondary text, for the original under a reply or forward. */
+  tone?: BodyTone;
   title: string;
   onLink: (href: string) => void;
   /** The URL under the pointer, to show where a link really goes. */
@@ -24,6 +26,7 @@ export function MessageBody({
   html,
   allowRemote,
   appearance,
+  tone = "normal",
   title,
   onLink,
   onHoverLink,
@@ -38,8 +41,8 @@ export function MessageBody({
   });
 
   const srcDoc = useMemo(
-    () => buildSrcDoc(html, { allowRemote, appearance }),
-    [html, allowRemote, appearance],
+    () => buildSrcDoc(html, { allowRemote, appearance, tone }),
+    [html, allowRemote, appearance, tone],
   );
 
   const observers = useRef<ResizeObserver[]>([]);

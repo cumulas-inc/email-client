@@ -74,7 +74,7 @@ export const MessageRow = memo(function MessageRow({
     date || "No date",
     m.isFlagged ? "Flagged" : null,
     m.hasAttachments ? "Has attachments" : null,
-    m.importance === "high" ? "High importance" : null,
+    m.importance === "high" ? "Important" : null,
     context,
   ]
     .filter(Boolean)
@@ -139,11 +139,7 @@ export const MessageRow = memo(function MessageRow({
           </span>
           <span className="mail-row__status">
             {m.importance === "high" && (
-              <CircleAlert
-                size={14}
-                className="mail-row__importance"
-                aria-label="High importance"
-              />
+              <CircleAlert size={14} className="mail-row__importance" aria-label="Important" />
             )}
             {m.importance === "low" && (
               <ArrowDown size={14} className="mail-row__low" aria-label="Low importance" />

@@ -120,7 +120,18 @@ export function bodyAppearance(
   return paintsOwnBackground(html) ? designed : "dark";
 }
 
-function baseCss(appearance: BodyAppearance, fontFamily: string, measure: boolean): string {
+/**
+ * "quiet" sets the text in the secondary color: the original under a reply
+ * or forward, shown below what's being written.
+ */
+export type BodyTone = "normal" | "quiet";
+
+function baseCss(
+  appearance: BodyAppearance,
+  fontFamily: string,
+  measure: boolean,
+  tone: BodyTone,
+): string {
   const colors = appearance === "dark" ? INVERTED : PAPER;
   const padding = appearance === "paper" ? "24px 28px" : "2px 0 16px";
   const background = appearance === "paper" ? "#ffffff" : colors.background;
@@ -142,7 +153,7 @@ function baseCss(appearance: BodyAppearance, fontFamily: string, measure: boolea
       font-family: ${fontFamily};
       font-size: 15.5px;
       line-height: 1.6;
-      color: ${colors.text};
+      color: ${tone === "quiet" ? colors.muted : colors.text};
       overflow-wrap: break-word;
       word-wrap: break-word;
       -webkit-text-size-adjust: 100%;
@@ -174,11 +185,17 @@ export interface SrcDocOptions {
   allowRemote: boolean;
   appearance: BodyAppearance;
   fontFamily?: string;
+  tone?: BodyTone;
 }
 
 export function buildSrcDoc(html: string, options: SrcDocOptions): string {
   const csp = contentSecurityPolicy(options.allowRemote);
-  const css = baseCss(options.appearance, options.fontFamily ?? DEFAULT_FONT, !isLaidOut(html));
+  const css = baseCss(
+    options.appearance,
+    options.fontFamily ?? DEFAULT_FONT,
+    !isLaidOut(html),
+    options.tone ?? "normal",
+  );
   return (
     "<!doctype html><html><head>" +
     '<meta charset="utf-8">' +

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 /** `value`, updated only after it stopped changing for `ms`. */
 export function useDebounced<T>(value: T, ms: number): T {
@@ -26,6 +33,35 @@ function writeStorage(key: string, value: string): void {
   }
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * A size the user set, persisted in localStorage and clamped to [min, max];
+ * null until they set one. Only a change is stored, so a default can still
+ * change later for everyone who never moved it.
+ */
+export function usePersistentSize(
+  key: string,
+  min: number,
+  max: number,
+): [number | null, (value: number) => void] {
+  const [value, setValue] = useState<number | null>(() => {
+    const stored = Number(readStorage(key) ?? NaN);
+    return Number.isFinite(stored) && stored > 0 ? clamp(stored, min, max) : null;
+  });
+  const update = useCallback(
+    (v: number) => {
+      const next = clamp(Math.round(v), min, max);
+      writeStorage(key, String(next));
+      setValue(next);
+    },
+    [key, min, max],
+  );
+  return [value, update];
+}
+
 /** A number persisted in localStorage, clamped to [min, max]. */
 export function usePersistentNumber(
   key: string,
@@ -33,16 +69,24 @@ export function usePersistentNumber(
   min: number,
   max: number,
 ): [number, (value: number) => void] {
-  const [value, setValue] = useState(() => {
-    const stored = Number(readStorage(key));
-    return Math.min(max, Math.max(min, Number.isFinite(stored) && stored > 0 ? stored : fallback));
-  });
-  useEffect(() => writeStorage(key, String(value)), [key, value]);
-  const update = useCallback(
-    (v: number) => setValue(Math.min(max, Math.max(min, Math.round(v)))),
-    [min, max],
-  );
-  return [value, update];
+  const [value, update] = usePersistentSize(key, min, max);
+  return [value ?? clamp(fallback, min, max), update];
+}
+
+/** The element's height, kept current while `enabled` (0 until measured). */
+export function useHeight(ref: RefObject<HTMLElement | null>, enabled: boolean): number {
+  const [height, setHeight] = useState(0);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!enabled || !el) return;
+    const measure = () => setHeight(el.clientHeight);
+    measure();
+    if (typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref, enabled]);
+  return height;
 }
 
 /** A string preference persisted in localStorage. */
