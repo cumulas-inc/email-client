@@ -77,9 +77,18 @@ under **Settings → Microsoft app registration**.
 
 ## Troubleshooting
 
-| Message                                        | Meaning                                                                                                   |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Need admin approval / AADSTS65001, AADSTS90094 | The organisation requires an administrator to approve the app; use the admin consent link the app shows.  |
-| AADSTS65004                                    | The permission prompt was declined. Sign in again and accept.                                             |
-| "Sign in again to keep … up to date"           | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy). |
-| Sign-in window never returns to the app        | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections.    |
+| What the user sees                                                                            | Meaning                                                                                                                                                    |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Your organisation needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981) | The organisation requires an administrator to approve the app. The app shows the admin consent link and an email to send to IT.                            |
+| Same screen, with "Request approval" mentioned (AADSTS90095)                                  | The organisation has the admin consent workflow enabled: the user can also request approval on Microsoft's page.                                           |
+| "Cumulas Mail needs your permission" (AADSTS65004)                                            | The permission prompt was declined. Microsoft also sends this when the user clicks "Back to app" after requesting approval, so retry once IT has approved. |
+| "Sign in again to keep … up to date"                                                          | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction).                            |
+| Sign-in never returns to the app                                                              | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again.                               |
+
+After an administrator grants consent through the link, Microsoft redirects
+their browser to `http://localhost`, which shows a "can't connect" page. The
+consent is recorded at that point; the user can select **Try again**. A
+friendlier landing page needs an extra redirect URI on the app registration
+(for example `https://cumulas.co/mail/consent-granted`) and the
+`ADMIN_CONSENT_REDIRECT_URI` constant in `crates/core/src/auth/microsoft.rs`
+changed to match.
