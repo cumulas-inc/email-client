@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>co.cumulas.Mail</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <!-- TODO: Flathub requires the project licence (SPDX), e.g. GPL-3.0-or-later or LicenseRef-proprietary. -->
+  <project_license>LicenseRef-TODO</project_license>
+
+  <name>Cumulas Mail</name>
+  <summary>Email, calendar, contacts and tasks</summary>
+  <developer id="co.cumulas">
+    <name>Cumulas</name>
+  </developer>
+
+  <description>
+    <p>
+      Cumulas Mail brings your email, calendar, contacts and tasks together in one fast,
+      familiar app. It works with Microsoft 365 and Outlook.com accounts as well as any
+      email provider that supports IMAP.
+    </p>
+    <ul>
+      <li>Microsoft 365 and Outlook.com mail, calendar, contacts and To Do</li>
+      <li>Gmail, Fastmail, iCloud, Yahoo and self-hosted mail over IMAP</li>
+      <li>Quick search across all your mail, even offline</li>
+      <li>Meeting invitations: accept, tentatively accept or decline</li>
+      <li>Remote images blocked by default to stop email tracking</li>
+      <li>Passwords and sign-ins kept in your system keyring</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">co.cumulas.Mail.desktop</launchable>
+  <provides>
+    <binary>cumulas-mail</binary>
+  </provides>
+
+  <url type="homepage">https://cumulas.co</url>
+  <url type="bugtracker">https://github.com/cumulas-inc/email-client/issues</url>
+  <url type="vcs-browser">https://github.com/cumulas-inc/email-client</url>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#cfe4fa</color>
+    <color type="primary" scheme_preference="dark">#0e2f4f</color>
+  </branding>
+
+  <!-- Screenshot URLs must be publicly reachable when submitting to Flathub. -->
+  <screenshots>
+    <screenshot type="default">
+      <caption>Mail with the reading pane</caption>
+      <image>https://raw.githubusercontent.com/cumulas-inc/email-client/main/docs/screenshots/mail-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Work week calendar</caption>
+      <image>https://raw.githubusercontent.com/cumulas-inc/email-client/main/docs/screenshots/calendar-week-light.png</image>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+  </content_rating>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <categories>
+    <category>Office</category>
+    <category>Email</category>
+  </categories>
+  <keywords>
+    <keyword>email</keyword>
+    <keyword>calendar</keyword>
+    <keyword>Microsoft 365</keyword>
+    <keyword>Exchange</keyword>
+    <keyword>IMAP</keyword>
+  </keywords>
+
+  <releases>
+    <release version="0.1.0" date="2026-10-14">
+      <description>
+        <p>First preview release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

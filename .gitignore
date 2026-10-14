@@ -25,3 +25,11 @@ src-tauri/gen/schemas/
 # Local env
 .env
 .env.local
+
+# Flatpak (generated)
+packaging/flatpak/*-sources.json
+.flatpak-builder/
+build-dir/
+
+# Claude Code agent worktrees
+.claude/worktrees/

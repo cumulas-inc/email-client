@@ -1,0 +1,66 @@
+# Flatpak manifest for local and CI builds (`sources: dir`). For the Flathub
+# submission, copy this to the flathub/co.cumulas.Mail repository and replace
+# the `dir` source with a `git` source pinned to a release tag and commit.
+#
+# Rust crates and npm packages are vendored by cargo-sources.json and
+# node-sources.json (generate with ./generate-sources.sh) because Flathub
+# builds have no network access.
+id: co.cumulas.Mail
+runtime: org.gnome.Platform
+runtime-version: "50"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node22
+command: cumulas-mail
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Mail, calendar and sign-in servers.
+  - --share=network
+  # New-mail notifications.
+  - --talk-name=org.freedesktop.Notifications
+  # Passwords and tokens use the Secret portal, files the FileChooser portal
+  # and links the OpenURI portal, so no keyring or filesystem access is needed.
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
+
+modules:
+  - name: cumulas-mail
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/cumulas-mail/cargo
+        CARGO_NET_OFFLINE: "true"
+        XDG_CACHE_HOME: /run/build/cumulas-mail/flatpak-node/cache
+        npm_config_cache: /run/build/cumulas-mail/flatpak-node/npm-cache
+        npm_config_offline: "true"
+        # Application (client) ID of the published Entra app registration;
+        # leave empty to require users to enter one in Settings.
+        CUMULAS_MS_CLIENT_ID: ""
+    build-commands:
+      - npm ci --offline
+      - npm run build
+      # `tauri build` enables custom-protocol automatically; plain cargo must
+      # ask for it so the bundled UI is served instead of the dev server.
+      - cargo build --release --offline --locked -p cumulas-mail --features tauri/custom-protocol
+      - install -Dm755 target/release/cumulas-mail -t /app/bin/
+      - install -Dm644 packaging/flatpak/co.cumulas.Mail.desktop -t /app/share/applications/
+      - install -Dm644 packaging/flatpak/co.cumulas.Mail.metainfo.xml -t /app/share/metainfo/
+      - install -Dm644 public/icon.svg /app/share/icons/hicolor/scalable/apps/co.cumulas.Mail.svg
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/co.cumulas.Mail.png
+      - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/co.cumulas.Mail.png
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - node_modules
+          - dist
+          - .flatpak-builder
+      - cargo-sources.json
+      - node-sources.json

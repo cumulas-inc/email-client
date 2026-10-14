@@ -52,3 +52,23 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  flatpak:
+    name: Flatpak build
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate offline Cargo and npm sources
+        run: |
+          dnf install -y python3-pip python3-aiohttp python3-tomlkit git
+          git clone --depth 1 https://github.com/flatpak/flatpak-builder-tools /tmp/flatpak-builder-tools
+          pip install /tmp/flatpak-builder-tools/node
+          FLATPAK_BUILDER_TOOLS=/tmp/flatpak-builder-tools packaging/flatpak/generate-sources.sh
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
+        with:
+          bundle: cumulas-mail.flatpak
+          manifest-path: packaging/flatpak/co.cumulas.Mail.yml
+          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'package-lock.json') }}
