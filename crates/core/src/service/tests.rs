@@ -792,3 +792,46 @@ async fn microsoft_sign_in_can_be_cancelled() {
     service.cancel_microsoft_sign_in();
     assert!(service.list_accounts().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn appearance_settings_are_validated_and_saved() {
+    use crate::model::{InterfaceFont, ReadingFont, TextSize};
+
+    let h = harness();
+    let chosen = Settings {
+        interface_font: InterfaceFont::Family {
+            family: "Noto Sans".into(),
+        },
+        reading_font: ReadingFont::Interface,
+        text_size: TextSize::Larger,
+        ..Settings::default()
+    };
+    assert_eq!(
+        h.service.update_settings(chosen.clone()).await.unwrap(),
+        chosen
+    );
+    assert_eq!(h.service.get_settings().unwrap(), chosen);
+
+    for family in ["", " Noto Sans", "Noto\nSans", "Noto\u{202E}Sans"] {
+        let bad = Settings {
+            reading_font: ReadingFont::Family {
+                family: family.into(),
+            },
+            ..chosen.clone()
+        };
+        let err = h.service.update_settings(bad).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{family:?}");
+    }
+    let bad = Settings {
+        interface_font: InterfaceFont::Family {
+            family: "x".repeat(500),
+        },
+        ..Settings::default()
+    };
+    assert_eq!(
+        h.service.update_settings(bad).await.unwrap_err().code,
+        ErrorCode::InvalidInput
+    );
+    // A rejected change leaves the saved settings alone.
+    assert_eq!(h.service.get_settings().unwrap(), chosen);
+}

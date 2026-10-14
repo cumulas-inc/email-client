@@ -692,6 +692,101 @@ pub enum ReadingPane {
     Off,
 }
 
+/// The typeface for the interface: menus, lists, buttons and labels.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum InterfaceFont {
+    /// Inter, which ships with the app.
+    #[default]
+    Default,
+    /// The desktop's interface font (CSS `system-ui`).
+    System,
+    /// An installed font family, by name.
+    Family { family: String },
+}
+
+impl InterfaceFont {
+    pub fn family(&self) -> Option<&str> {
+        match self {
+            Self::Family { family } => Some(family),
+            Self::Default | Self::System => None,
+        }
+    }
+}
+
+/// The typeface for what people read: subjects, pane titles, the open
+/// message and the compose editor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ReadingFont {
+    /// Charis SIL, which ships with the app.
+    #[default]
+    Default,
+    /// The same typeface as the interface.
+    Interface,
+    /// An installed font family, by name.
+    Family { family: String },
+}
+
+impl ReadingFont {
+    pub fn family(&self) -> Option<&str> {
+        match self {
+            Self::Family { family } => Some(family),
+            Self::Default | Self::Interface => None,
+        }
+    }
+}
+
+/// Scales the whole window, text and controls alike.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextSize {
+    Smaller,
+    #[default]
+    Default,
+    Larger,
+    Largest,
+}
+
+impl TextSize {
+    /// The webview zoom factor. `TEXT_SCALE` in `src/lib/fonts.ts` must match.
+    pub fn zoom(self) -> f64 {
+        match self {
+            Self::Smaller => 0.92,
+            Self::Default => 1.0,
+            Self::Larger => 1.1,
+            Self::Largest => 1.2,
+        }
+    }
+}
+
+/// The longest font family name accepted, in characters. Real names stay
+/// well under 100.
+pub const FONT_FAMILY_MAX_CHARS: usize = 200;
+
+/// Whether `name` can be stored and used as a font family name: not blank,
+/// no surrounding spaces, not absurdly long, and no control characters,
+/// line separators or bidirectional controls. The UI also quotes and
+/// escapes the name wherever it goes into CSS.
+pub fn is_valid_font_family(name: &str) -> bool {
+    !name.is_empty()
+        && name.trim() == name
+        && name.chars().count() <= FONT_FAMILY_MAX_CHARS
+        && !name.chars().any(is_disallowed_in_font_family)
+}
+
+fn is_disallowed_in_font_family(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            // Line and paragraph separators.
+            '\u{2028}' | '\u{2029}'
+            // Bidirectional marks, embeddings, overrides and isolates: they
+            // would reorder the text around the name in the UI.
+            | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -707,6 +802,9 @@ pub struct Settings {
     /// `common` (default), `organizations`, `consumers` or a tenant id/domain.
     pub microsoft_tenant: Option<String>,
     pub notifications_enabled: bool,
+    pub interface_font: InterfaceFont,
+    pub reading_font: ReadingFont,
+    pub text_size: TextSize,
 }
 
 impl Default for Settings {
@@ -720,7 +818,60 @@ impl Default for Settings {
             microsoft_client_id: None,
             microsoft_tenant: None,
             notifications_enabled: true,
+            interface_font: InterfaceFont::default(),
+            reading_font: ReadingFont::default(),
+            text_size: TextSize::default(),
         }
+    }
+}
+
+impl Settings {
+    /// Reads settings saved by this or any other version. Missing fields take
+    /// their defaults (settings saved before a field existed), and a field
+    /// whose stored value can't be read (an option from a newer version, a
+    /// font name that fails validation) falls back to its own default instead
+    /// of resetting every setting. Unknown fields are dropped.
+    pub fn from_stored_json(json: &str) -> Settings {
+        use serde_json::Value;
+
+        let Ok(Value::Object(stored)) = serde_json::from_str::<Value>(json) else {
+            return Settings::default();
+        };
+        let Ok(Value::Object(mut merged)) = serde_json::to_value(Settings::default()) else {
+            return Settings::default();
+        };
+        for (key, value) in stored {
+            let Some(default) = merged.get(&key).cloned() else {
+                continue;
+            };
+            merged.insert(key.clone(), value);
+            if serde_json::from_value::<Settings>(Value::Object(merged.clone())).is_err() {
+                merged.insert(key, default);
+            }
+        }
+        serde_json::from_value::<Settings>(Value::Object(merged))
+            .unwrap_or_default()
+            .with_valid_fonts()
+    }
+
+    /// Replaces font families that fail [`is_valid_font_family`] with the
+    /// defaults.
+    fn with_valid_fonts(mut self) -> Self {
+        if self
+            .interface_font
+            .family()
+            .is_some_and(|f| !is_valid_font_family(f))
+        {
+            self.interface_font = InterfaceFont::default();
+        }
+        if self
+            .reading_font
+            .family()
+            .is_some_and(|f| !is_valid_font_family(f))
+        {
+            self.reading_font = ReadingFont::default();
+        }
+        self
     }
 }
 
@@ -752,5 +903,146 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         assert_eq!(s.theme, Theme::Dark);
         assert_eq!(s.sync_interval_minutes, 5);
+    }
+
+    #[test]
+    fn appearance_defaults_to_the_bundled_fonts_at_normal_size() {
+        let s = Settings::default();
+        assert_eq!(s.interface_font, InterfaceFont::Default);
+        assert_eq!(s.reading_font, ReadingFont::Default);
+        assert_eq!(s.text_size, TextSize::Default);
+        assert_eq!(s.text_size.zoom(), 1.0);
+
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            json["interfaceFont"],
+            serde_json::json!({ "kind": "default" })
+        );
+        assert_eq!(
+            json["readingFont"],
+            serde_json::json!({ "kind": "default" })
+        );
+        assert_eq!(json["textSize"], "default");
+    }
+
+    #[test]
+    fn font_choices_serialize_with_a_kind_tag() {
+        let family = InterfaceFont::Family {
+            family: "Fira Sans".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&family).unwrap(),
+            serde_json::json!({ "kind": "family", "family": "Fira Sans" })
+        );
+        assert_eq!(
+            serde_json::to_value(InterfaceFont::System).unwrap(),
+            serde_json::json!({ "kind": "system" })
+        );
+        assert_eq!(
+            serde_json::to_value(ReadingFont::Interface).unwrap(),
+            serde_json::json!({ "kind": "interface" })
+        );
+        let parsed: ReadingFont =
+            serde_json::from_str(r#"{"kind":"family","family":"Literata"}"#).unwrap();
+        assert_eq!(parsed.family(), Some("Literata"));
+        assert_eq!(ReadingFont::Default.family(), None);
+    }
+
+    #[test]
+    fn text_sizes_grow_in_order() {
+        let zooms: Vec<f64> = [
+            TextSize::Smaller,
+            TextSize::Default,
+            TextSize::Larger,
+            TextSize::Largest,
+        ]
+        .map(TextSize::zoom)
+        .to_vec();
+        assert_eq!(zooms, vec![0.92, 1.0, 1.1, 1.2]);
+        let parsed: TextSize = serde_json::from_str(r#""largest""#).unwrap();
+        assert_eq!(parsed, TextSize::Largest);
+    }
+
+    #[test]
+    fn font_family_names_are_validated() {
+        for ok in [
+            "Inter",
+            "Noto Sans CJK JP",
+            "文泉驿正黑",
+            "Source Serif 4",
+            "O'Reilly \"Mono\"",
+            r"Back\slash",
+            "</style><b>x",
+        ] {
+            assert!(is_valid_font_family(ok), "{ok:?} should be valid");
+        }
+        let long = "a".repeat(FONT_FAMILY_MAX_CHARS + 1);
+        for bad in [
+            "",
+            " ",
+            " Inter",
+            "Inter ",
+            "Inter\nBold",
+            "Tab\there",
+            "Nul\0",
+            "Del\u{7f}",
+            "C1\u{85}",
+            "Line\u{2028}sep",
+            "Over\u{202E}ride",
+            "Iso\u{2066}late",
+            long.as_str(),
+        ] {
+            assert!(!is_valid_font_family(bad), "{bad:?} should be invalid");
+        }
+        assert!(is_valid_font_family(&"a".repeat(FONT_FAMILY_MAX_CHARS)));
+    }
+
+    #[test]
+    fn stored_settings_from_before_fonts_keep_their_values() {
+        let old = r#"{"theme":"dark","readingPane":"bottom","remoteContent":"allow",
+            "markReadAfterSeconds":null,"syncIntervalMinutes":15,"microsoftClientId":null,
+            "microsoftTenant":"organizations","notificationsEnabled":false}"#;
+        let s = Settings::from_stored_json(old);
+        assert_eq!(s.theme, Theme::Dark);
+        assert_eq!(s.reading_pane, ReadingPane::Bottom);
+        assert_eq!(s.remote_content, RemoteContentPolicy::Allow);
+        assert_eq!(s.mark_read_after_seconds, None);
+        assert_eq!(s.sync_interval_minutes, 15);
+        assert_eq!(s.microsoft_tenant.as_deref(), Some("organizations"));
+        assert!(!s.notifications_enabled);
+        assert_eq!(s.interface_font, InterfaceFont::Default);
+        assert_eq!(s.reading_font, ReadingFont::Default);
+        assert_eq!(s.text_size, TextSize::Default);
+    }
+
+    #[test]
+    fn an_unreadable_stored_field_falls_back_on_its_own() {
+        let s = Settings::from_stored_json(
+            r#"{"theme":"dark","textSize":"enormous","readingFont":{"kind":"handwriting"},
+                "interfaceFont":{"kind":"family","family":"Fira Sans"},"futureField":1}"#,
+        );
+        assert_eq!(s.theme, Theme::Dark);
+        assert_eq!(s.text_size, TextSize::Default);
+        assert_eq!(s.reading_font, ReadingFont::Default);
+        assert_eq!(s.interface_font.family(), Some("Fira Sans"));
+    }
+
+    #[test]
+    fn invalid_stored_font_names_reset_to_the_defaults() {
+        let s = Settings::from_stored_json(
+            r#"{"theme":"light","interfaceFont":{"kind":"family","family":"Bad\u0007Name"},
+                "readingFont":{"kind":"family","family":""},"textSize":"larger"}"#,
+        );
+        assert_eq!(s.theme, Theme::Light);
+        assert_eq!(s.interface_font, InterfaceFont::Default);
+        assert_eq!(s.reading_font, ReadingFont::Default);
+        assert_eq!(s.text_size, TextSize::Larger);
+    }
+
+    #[test]
+    fn unreadable_stored_settings_are_the_defaults() {
+        assert_eq!(Settings::from_stored_json("not json"), Settings::default());
+        assert_eq!(Settings::from_stored_json("[1, 2]"), Settings::default());
+        assert_eq!(Settings::from_stored_json("{}"), Settings::default());
     }
 }

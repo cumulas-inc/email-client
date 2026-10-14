@@ -24,7 +24,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
     Account, AccountKind, AccountSettings, Calendar, DataKind, EntityKind, ImapAccountUpdate,
     ImapSettings, MessageSummary, MicrosoftSettings, NewImapAccount, Settings, SyncState,
-    SyncStatus, TaskList, TlsMode, local_id,
+    SyncStatus, TaskList, TlsMode, is_valid_font_family, local_id,
 };
 use crate::providers::imap::ImapCredentials;
 use crate::secrets::{SecretStore, keys};
@@ -386,11 +386,7 @@ impl CoreService {
     }
 
     pub async fn update_settings(&self, settings: Settings) -> Result<Settings> {
-        if settings.sync_interval_minutes == 0 {
-            return Err(Error::invalid_input(
-                "Sync interval must be at least one minute.",
-            ));
-        }
+        validate_settings(&settings)?;
         let previous = self.store.get_settings()?;
         self.store.save_settings(&settings)?;
         if previous.microsoft_client_id != settings.microsoft_client_id
@@ -431,6 +427,25 @@ impl CoreService {
             .unwrap()
             .insert(status.account_id.clone(), status);
     }
+}
+
+fn validate_settings(s: &Settings) -> Result<()> {
+    if s.sync_interval_minutes == 0 {
+        return Err(Error::invalid_input(
+            "Sync interval must be at least one minute.",
+        ));
+    }
+    let families = [s.interface_font.family(), s.reading_font.family()];
+    if families
+        .into_iter()
+        .flatten()
+        .any(|f| !is_valid_font_family(f))
+    {
+        return Err(Error::invalid_input(
+            "That font name can't be used. Choose a font from the list.",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_imap_settings(s: &ImapSettings) -> Result<()> {
