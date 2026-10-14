@@ -1,0 +1,421 @@
+/* People module: list pane on the left, contact card on the right. */
+
+.people {
+  display: flex;
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+}
+
+/* --- List pane -------------------------------------------------------------- */
+
+.people__list-pane {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 340px;
+  min-height: 0;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.people__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-2);
+}
+
+.people__list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 40px;
+  padding: 0 var(--space-2) 0 var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.people__title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.people__count {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  color: var(--fg-tertiary);
+}
+
+.people .people__account-filter {
+  width: auto;
+  max-width: 190px;
+  min-height: 28px;
+  height: 28px;
+  padding: 0 var(--space-1);
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
+.people .people__account-filter:hover {
+  border-color: transparent;
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.people .people__account-filter:focus {
+  padding-bottom: 0;
+}
+
+.people__search-note {
+  padding: var(--space-2) var(--space-4) 0;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.people__list-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.people-list {
+  flex: 1;
+  padding-bottom: var(--space-2);
+  overflow-y: auto;
+  outline: none;
+}
+
+.people-list__letter {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--space-3) var(--space-4) var(--space-1);
+  background: var(--bg-surface);
+  color: var(--brand);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.people-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 48px;
+  margin: 0 var(--space-2);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  scroll-margin-top: 36px;
+  transition: background var(--duration-fast) var(--ease);
+}
+
+.people-row:hover {
+  background: var(--bg-hover);
+}
+
+.people-row[aria-selected="true"] {
+  background: var(--bg-selected);
+}
+
+.people-row[aria-selected="true"]:hover {
+  background: var(--bg-selected-hover);
+}
+
+.people-list:focus-visible .people-row[aria-selected="true"] {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.people-row__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.people-row__name,
+.people-row__secondary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people-row__name {
+  font-weight: var(--weight-medium);
+}
+
+.people-row[aria-selected="true"] .people-row__name {
+  font-weight: var(--weight-semibold);
+}
+
+.people-row__secondary {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+/* --- Details pane ------------------------------------------------------------- */
+
+.people__details-pane {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--bg-app);
+}
+
+.people-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 760px;
+  margin: 0 auto;
+  padding: var(--space-6);
+}
+
+.people-card {
+  padding: var(--space-4) var(--space-6) var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.people-card__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.people-card__title svg {
+  color: var(--fg-tertiary);
+}
+
+.people-card__empty {
+  color: var(--fg-secondary);
+}
+
+.people-details__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-6);
+  padding: var(--space-6);
+}
+
+.people-details__identity {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.people-details__name {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.people-details__subtitle {
+  margin-top: 2px;
+  color: var(--fg-secondary);
+  font-size: var(--text-lg);
+}
+
+.people-details__account {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.people-details__account-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-round);
+}
+
+.people-details__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.people-details__notes {
+  white-space: pre-wrap;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.people-fields {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.people-field {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  align-items: start;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.people-field:first-child {
+  border-top: none;
+}
+
+.people-field__label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 40px;
+  color: var(--fg-secondary);
+}
+
+.people-field__icon {
+  display: inline-flex;
+  color: var(--fg-tertiary);
+}
+
+.people-field__value {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 40px;
+  margin: 0;
+}
+
+.people-field__text {
+  overflow-wrap: anywhere;
+}
+
+.people-field__multiline {
+  padding: 10px 0;
+  white-space: pre-line;
+  line-height: 1.45;
+}
+
+.people .people-field__copy {
+  color: var(--fg-tertiary);
+}
+
+.people-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg-link);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.people-link:hover {
+  text-decoration: underline;
+}
+
+/* --- Editor dialog ------------------------------------------------------------- */
+
+.people-form__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3) var(--space-4);
+}
+
+.people-form__full {
+  grid-column: 1 / -1;
+}
+
+.people-form__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.people-form__group > legend {
+  margin-bottom: var(--space-1);
+  padding: 0;
+}
+
+.people-form__row-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.people-form__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.people .people-form__row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.people .people-form__kind {
+  flex-shrink: 0;
+  width: 112px;
+}
+
+.people .people-form__add {
+  align-self: flex-start;
+  color: var(--fg-link);
+}
+
+.people .people-form__add:hover:not(:disabled) {
+  color: var(--brand-hover);
+}
+
+.people-form__alert {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.people-form__account {
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
+.people .people-form__address {
+  min-height: 76px;
+}
+
+@media (max-width: 900px) {
+  .people__list-pane {
+    width: 280px;
+  }
+
+  .people-details {
+    padding: var(--space-4);
+  }
+
+  .people-field {
+    grid-template-columns: 112px minmax(0, 1fr);
+  }
+}
+
+/* The listbox shows focus on its selected row instead of around itself. */
+.people-list:focus-visible {
+  outline: none;
+}

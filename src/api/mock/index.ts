@@ -663,6 +663,9 @@ export class MockBackend implements Backend {
     await this.delay();
     const index = this.state.contacts.findIndex((c) => c.id === contactId);
     if (index < 0) fail("notFound", "contact not found");
+    if (this.state.contacts[index]!.accountId !== draft.accountId) {
+      fail("unsupported", "Contacts cannot be moved between accounts.");
+    }
     const contact = this.contactFromDraft(contactId, draft);
     this.state.contacts[index] = contact;
     this.emit(["contacts"], contact.accountId);

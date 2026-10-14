@@ -690,12 +690,21 @@ export function createDemoState(): MockState {
       company: "Acme",
       jobTitle: "Program Manager",
       department: "Atlas",
-      phones: [{ kind: "mobile", number: "+44 7700 900123" }],
+      phones: [
+        { kind: "mobile", number: "+44 7700 900123" },
+        { kind: "business", number: "+44 20 7946 0110" },
+      ],
+      address: "Acme Ltd\n1 Canal Street\nLondon EC1V 4AB",
+      birthday: "1989-11-06",
+      notes:
+        "Runs the Atlas launch. Prefers a quick chat over long email threads.\nOut of office on Fridays in December.",
     }),
     contact(WORK, "c-jonas", people.jonas, {
       company: "Acme",
       jobTitle: "Staff Engineer",
       department: "Platform",
+      phones: [{ kind: "business", number: "+49 30 901820" }],
+      address: "Acme GmbH\nFriedrichstraße 68\n10117 Berlin",
     }),
     contact(WORK, "c-mei", people.mei, { company: "Acme", jobTitle: "Product Marketing Lead" }),
     contact(WORK, "c-sam", people.sam, {
@@ -703,22 +712,94 @@ export function createDemoState(): MockState {
       jobTitle: "Support Engineer",
       phones: [{ kind: "business", number: "+44 20 7946 0321" }],
     }),
-    contact(WORK, "c-dana", people.dana, { company: "Acme", jobTitle: "VP Engineering" }),
+    contact(WORK, "c-dana", people.dana, {
+      company: "Acme",
+      jobTitle: "VP Engineering",
+      department: "Engineering",
+    }),
     contact(WORK, "c-lucia", people.lucia, {
       company: "Northwind Design Studio",
       jobTitle: "Illustrator",
       address: "Calle Mayor 12, Madrid",
     }),
     contact(WORK, "c-it", people.it, { company: "Acme" }),
+    contact(
+      WORK,
+      "c-aisha",
+      { name: "Aisha Khan", address: "aisha.khan@contoso-partners.example" },
+      {
+        emails: [
+          { name: null, address: "aisha.khan@contoso-partners.example" },
+          { name: null, address: "aisha@khan-advisory.example" },
+        ],
+        company: "Contoso Partners",
+        jobTitle: "Account Director",
+        phones: [
+          { kind: "mobile", number: "+44 7700 900789" },
+          { kind: "business", number: "+44 161 496 0222" },
+        ],
+        address: "Contoso Partners\n22 King Street\nManchester M2 6AG",
+        notes: "Main contact for the Contoso reseller agreement. Renewal talks start in January.",
+      },
+    ),
+    contact(
+      WORK,
+      "c-carlos",
+      { name: "Carlos Mendes", address: "carlos.mendes@fabrikam.example" },
+      {
+        company: "Fabrikam",
+        jobTitle: "Data Scientist",
+        department: "Analytics",
+        phones: [{ kind: "mobile", number: "+351 912 345 678" }],
+      },
+    ),
+    contact(
+      WORK,
+      "c-elena",
+      { name: "Elena Petrova", address: "elena.petrova@fabrikam.example" },
+      { company: "Fabrikam", jobTitle: "Procurement Lead", department: "Purchasing" },
+    ),
+    contact(
+      WORK,
+      "c-oliver",
+      { name: "Oliver Grant", address: "oliver.grant@woodgrove-legal.example" },
+      {
+        company: "Woodgrove Legal",
+        jobTitle: "Senior Counsel",
+        phones: [{ kind: "business", number: "+44 20 7946 0987" }],
+      },
+    ),
     contact(HOME, "c-mum", people.mum, {
       givenName: "Helen",
       surname: "Morgan",
       displayName: "Helen Morgan (Mum)",
       phones: [{ kind: "home", number: "+44 1632 960555" }],
-      birthday: dateOnly(23),
+      address: "14 Orchard Lane\nYork YO1 7HH",
+      birthday: dateOnly(23).replace(/^\d{4}/, "1961"),
     }),
     contact(HOME, "c-ben", people.ben, { phones: [{ kind: "mobile", number: "+44 7700 900456" }] }),
     contact(HOME, "c-club", people.club, { notes: "Membership renews in March." }),
+    contact(
+      HOME,
+      "c-zoe",
+      { name: "Zoë Adeyemi", address: "zoe.adeyemi@mailbox.example" },
+      {
+        phones: [{ kind: "mobile", number: "+44 7700 900321" }],
+        birthday: "1991-04-27",
+        notes: "Climbing partner. Allergic to peanuts.",
+      },
+    ),
+    contact(
+      HOME,
+      "c-plumber",
+      { name: "24/7 Emergency Plumbing", address: "help@247plumbing.example" },
+      {
+        givenName: null,
+        surname: null,
+        company: "24/7 Emergency Plumbing",
+        phones: [{ kind: "business", number: "+44 800 046 0247" }],
+      },
+    ),
   ];
 
   const taskLists: TaskList[] = [
@@ -731,6 +812,13 @@ export function createDemoState(): MockState {
       isDefault: false,
     },
     { id: "tl-home", accountId: HOME, remoteId: "local:tasks", name: "Tasks", isDefault: true },
+    {
+      id: "tl-groceries",
+      accountId: HOME,
+      remoteId: "local:groceries",
+      name: "Groceries",
+      isDefault: false,
+    },
   ];
 
   const now = iso(new Date());
@@ -755,6 +843,7 @@ export function createDemoState(): MockState {
     updatedAt: now,
     ...extra,
   });
+  const created = (daysAgo: number) => ({ createdAt: iso(at(-daysAgo, 9)) });
   const tasks: Task[] = [
     task("tl-atlas", WORK, "Review rollback plan", { dueDate: dateOnly(0), importance: "high" }),
     task("tl-atlas", WORK, "Confirm launch-week on-call rota", { dueDate: dateOnly(1) }),
@@ -776,6 +865,36 @@ export function createDemoState(): MockState {
     task("tl-home", HOME, "Buy flowers for Sunday", { dueDate: dateOnly(nextWeekday(0) - 1) }),
     task("tl-home", HOME, "Renew climbing membership", { dueDate: dateOnly(20) }),
     task("tl-home", HOME, "Back up photos"),
+    // More variety for the To Do views: overdue, notes, completed, another list.
+    task("tl-work", WORK, "Send Q3 metrics to Dana", {
+      dueDate: dateOnly(-2),
+      importance: "high",
+      notes: "Use the dashboard export, not the spreadsheet.\nInclude churn by region.",
+      ...created(6),
+    }),
+    task("tl-atlas", WORK, "Update status page copy", { dueDate: dateOnly(-1), ...created(4) }),
+    task("tl-work", WORK, "Submit timesheet", {
+      status: "completed",
+      completedAt: iso(at(-2, 17)),
+      ...created(7),
+    }),
+    task("tl-work", WORK, "Reply to Contoso about renewal terms", {
+      importance: "high",
+      ...created(2),
+    }),
+    task("tl-home", HOME, "Book car service", {
+      dueDate: dateOnly(9),
+      notes: "Ask about the rattle in the boot.",
+      ...created(3),
+    }),
+    task("tl-home", HOME, "Pay council tax", {
+      status: "completed",
+      completedAt: iso(at(-3, 20)),
+      ...created(10),
+    }),
+    task("tl-groceries", HOME, "Oat milk", created(1)),
+    task("tl-groceries", HOME, "Coffee beans", created(1)),
+    task("tl-groceries", HOME, "Lemons", created(1)),
   ];
 
   const state: MockState = {
