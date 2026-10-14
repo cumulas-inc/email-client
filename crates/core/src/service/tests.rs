@@ -1,0 +1,661 @@
+//! Service tests against an in-memory fake server.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use chrono::{Duration, NaiveDate, Utc};
+
+use super::*;
+use crate::auth::microsoft::SignInResult;
+use crate::error::ErrorCode;
+use crate::model::{
+    AttachmentMeta, EmailAddress, EventDraft, Folder, FolderRole, ImapSettings, Importance,
+    Message, MessageQuery, OutgoingMessage, ShowAs, TaskDraft, TaskPatch, TaskStatus,
+};
+use crate::providers::{MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow};
+use crate::secrets::MemorySecretStore;
+
+/// A tiny IMAP-like server: folders by remote id, messages by remote id.
+#[derive(Default)]
+pub(crate) struct FakeServer {
+    pub folders: Vec<(String, FolderRole)>,
+    pub messages: HashMap<String, (String, MessageSummary)>,
+    pub sent: Vec<OutgoingMessage>,
+    pub fail_sync: bool,
+    next_uid: u32,
+}
+
+pub(crate) struct FakeMail {
+    account_id: String,
+    pub server: Arc<Mutex<FakeServer>>,
+}
+
+impl FakeMail {
+    fn folder_id(&self, remote: &str) -> String {
+        local_id(&self.account_id, EntityKind::Folder, remote)
+    }
+}
+
+pub(crate) fn summary(
+    account_id: &str,
+    folder_remote: &str,
+    remote: &str,
+    subject: &str,
+) -> MessageSummary {
+    MessageSummary {
+        id: local_id(account_id, EntityKind::Message, remote),
+        account_id: account_id.into(),
+        folder_id: local_id(account_id, EntityKind::Folder, folder_remote),
+        remote_id: remote.into(),
+        conversation_id: None,
+        subject: subject.into(),
+        from: Some(EmailAddress::new(
+            Some("Grace Hopper"),
+            "grace@navy.example",
+        )),
+        to: vec![EmailAddress::new(None, "me@example.com")],
+        cc: vec![],
+        preview: "preview".into(),
+        received_at: Utc::now(),
+        is_read: false,
+        is_flagged: false,
+        is_draft: false,
+        has_attachments: true,
+        importance: Importance::Normal,
+    }
+}
+
+#[async_trait]
+impl MailProvider for FakeMail {
+    async fn list_folders(&self) -> Result<Vec<Folder>> {
+        let server = self.server.lock().unwrap();
+        Ok(server
+            .folders
+            .iter()
+            .map(|(remote, role)| Folder {
+                id: self.folder_id(remote),
+                account_id: self.account_id.clone(),
+                remote_id: remote.clone(),
+                parent_id: None,
+                name: remote.clone(),
+                role: *role,
+                unread_count: server
+                    .messages
+                    .values()
+                    .filter(|(f, m)| f == remote && !m.is_read)
+                    .count() as u32,
+                total_count: 0,
+            })
+            .collect())
+    }
+
+    async fn sync_messages(
+        &self,
+        folder: &Folder,
+        _state: Option<&str>,
+        _window: SyncWindow,
+    ) -> Result<MessageBatch> {
+        let server = self.server.lock().unwrap();
+        if server.fail_sync {
+            return Err(Error::new(ErrorCode::AuthRequired, "token expired"));
+        }
+        Ok(MessageBatch {
+            upserts: server
+                .messages
+                .values()
+                .filter(|(f, _)| *f == folder.remote_id)
+                .map(|(_, m)| m.clone())
+                .collect(),
+            full_resync: true,
+            sync_state: Some("state".into()),
+            ..Default::default()
+        })
+    }
+
+    async fn fetch_message(&self, m: &MessageLocator) -> Result<MessageContent> {
+        assert!(
+            self.server
+                .lock()
+                .unwrap()
+                .messages
+                .contains_key(&m.remote_id)
+        );
+        Ok(MessageContent {
+            body_html: Some(
+                r#"<p>Hello <img src="https://tracker.example/p.gif"></p><script>x()</script>"#
+                    .into(),
+            ),
+            attachments: vec![AttachmentMeta {
+                id: "att1".into(),
+                name: "report.pdf".into(),
+                content_type: "application/pdf".into(),
+                size: 3,
+                is_inline: false,
+                content_id: None,
+            }],
+            ..Default::default()
+        })
+    }
+
+    async fn fetch_attachment(&self, _: &MessageLocator, id: &str) -> Result<Vec<u8>> {
+        assert_eq!(id, "att1");
+        Ok(b"pdf".to_vec())
+    }
+
+    async fn set_read(&self, ms: &[MessageLocator], read: bool) -> Result<()> {
+        let mut server = self.server.lock().unwrap();
+        for m in ms {
+            server.messages.get_mut(&m.remote_id).unwrap().1.is_read = read;
+        }
+        Ok(())
+    }
+
+    async fn set_flagged(&self, ms: &[MessageLocator], flagged: bool) -> Result<()> {
+        let mut server = self.server.lock().unwrap();
+        for m in ms {
+            server.messages.get_mut(&m.remote_id).unwrap().1.is_flagged = flagged;
+        }
+        Ok(())
+    }
+
+    async fn move_messages(
+        &self,
+        ms: &[MessageLocator],
+        dest: &str,
+    ) -> Result<Vec<Option<String>>> {
+        let mut server = self.server.lock().unwrap();
+        let mut out = Vec::new();
+        for m in ms {
+            let (_, mut summary) = server.messages.remove(&m.remote_id).unwrap();
+            server.next_uid += 1;
+            let new_remote = format!("{dest}:{}", server.next_uid);
+            summary.remote_id = new_remote.clone();
+            summary.id = local_id(&self.account_id, EntityKind::Message, &new_remote);
+            summary.folder_id = self.folder_id(dest);
+            server
+                .messages
+                .insert(new_remote.clone(), (dest.to_owned(), summary));
+            out.push(Some(new_remote));
+        }
+        Ok(out)
+    }
+
+    async fn delete_messages(&self, ms: &[MessageLocator]) -> Result<()> {
+        let mut server = self.server.lock().unwrap();
+        for m in ms {
+            server.messages.remove(&m.remote_id);
+        }
+        Ok(())
+    }
+
+    async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {
+        if message.reply_to_message_id.is_some() {
+            assert!(original.is_some());
+        }
+        self.server.lock().unwrap().sent.push(message.clone());
+        Ok(())
+    }
+}
+
+pub(crate) struct FakeConnector {
+    pub server: Arc<Mutex<FakeServer>>,
+    pub reject_login: bool,
+}
+
+#[async_trait]
+impl Connector for FakeConnector {
+    async fn providers(&self, account: &Account) -> Result<ProviderSet> {
+        Ok(ProviderSet {
+            mail: Arc::new(FakeMail {
+                account_id: account.id.clone(),
+                server: Arc::clone(&self.server),
+            }),
+            calendar: None,
+            contacts: None,
+            tasks: None,
+        })
+    }
+
+    async fn verify_imap(&self, _: &ImapCredentials) -> Result<()> {
+        if self.reject_login {
+            Err(Error::auth_required("Authentication failed"))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn microsoft_sign_in(&self, _: &BrowserOpener, _: Option<&str>) -> Result<SignInResult> {
+        Err(Error::unsupported("not in tests"))
+    }
+}
+
+#[derive(Default)]
+struct RecordingSink {
+    new_mail: Mutex<Vec<String>>,
+}
+
+impl EventSink for RecordingSink {
+    fn data_changed(&self, _: &[DataKind], _: Option<&str>) {}
+    fn sync_status(&self, _: &SyncStatus) {}
+    fn new_mail(&self, _: &Account, messages: &[MessageSummary]) {
+        let mut seen = self.new_mail.lock().unwrap();
+        seen.extend(messages.iter().map(|m| m.subject.clone()));
+    }
+}
+
+struct Harness {
+    service: CoreService,
+    server: Arc<Mutex<FakeServer>>,
+    secrets: Arc<MemorySecretStore>,
+    sink: Arc<RecordingSink>,
+}
+
+fn harness() -> Harness {
+    let server = Arc::new(Mutex::new(FakeServer {
+        folders: vec![
+            ("INBOX".into(), FolderRole::Inbox),
+            ("Archive".into(), FolderRole::Archive),
+            ("Trash".into(), FolderRole::Trash),
+        ],
+        ..Default::default()
+    }));
+    let secrets = Arc::new(MemorySecretStore::default());
+    let sink = Arc::new(RecordingSink::default());
+    let service = CoreService::new(
+        Arc::new(Store::open_in_memory().unwrap()),
+        secrets.clone(),
+        Arc::new(FakeConnector {
+            server: Arc::clone(&server),
+            reject_login: false,
+        }),
+        sink.clone(),
+    );
+    Harness {
+        service,
+        server,
+        secrets,
+        sink,
+    }
+}
+
+fn new_imap_account(email: &str) -> NewImapAccount {
+    NewImapAccount {
+        display_name: "Me".into(),
+        email: email.into(),
+        password: "hunter2".into(),
+        settings: ImapSettings {
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_tls: TlsMode::Tls,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 587,
+            smtp_tls: TlsMode::StartTls,
+            username: email.into(),
+        },
+    }
+}
+
+async fn account_with_mail(h: &Harness) -> Account {
+    let account = h
+        .service
+        .add_imap_account(new_imap_account("me@example.com"))
+        .await
+        .unwrap();
+    {
+        let mut server = h.server.lock().unwrap();
+        for (remote, subject) in [("INBOX:1", "Welcome"), ("INBOX:2", "Invoice")] {
+            let m = summary(&account.id, "INBOX", remote, subject);
+            server.messages.insert(remote.into(), ("INBOX".into(), m));
+        }
+    }
+    h.service.sync_account(&account.id).await.unwrap();
+    account
+}
+
+fn inbox(h: &Harness, account: &Account) -> Folder {
+    h.service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Inbox)
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn adding_imap_account_stores_password_and_local_containers() {
+    let h = harness();
+    let account = h
+        .service
+        .add_imap_account(new_imap_account("me@example.com"))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.secrets
+            .get(&keys::imap_password(&account.id))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("hunter2")
+    );
+    assert_eq!(h.service.list_calendars().unwrap().len(), 1);
+    assert_eq!(h.service.list_task_lists().unwrap().len(), 1);
+
+    let dup = h
+        .service
+        .add_imap_account(new_imap_account("ME@example.com"))
+        .await
+        .unwrap_err();
+    assert_eq!(dup.code, ErrorCode::InvalidInput);
+
+    let mut insecure = new_imap_account("other@example.com");
+    insecure.settings.imap_tls = TlsMode::None;
+    assert_eq!(
+        h.service.add_imap_account(insecure).await.unwrap_err().code,
+        ErrorCode::InvalidInput
+    );
+
+    h.service.remove_account(&account.id).await.unwrap();
+    assert!(h.service.list_accounts().unwrap().is_empty());
+    assert!(h.service.list_calendars().unwrap().is_empty());
+    assert_eq!(
+        h.secrets
+            .get(&keys::imap_password(&account.id))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn rejected_login_does_not_create_account() {
+    let h = harness();
+    let service = CoreService::new(
+        Arc::new(Store::open_in_memory().unwrap()),
+        h.secrets.clone(),
+        Arc::new(FakeConnector {
+            server: h.server.clone(),
+            reject_login: true,
+        }),
+        Arc::new(NullSink),
+    );
+    let err = service
+        .add_imap_account(new_imap_account("me@example.com"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    assert!(service.list_accounts().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sync_populates_folders_and_messages_and_reports_new_mail() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let inbox = inbox(&h, &account);
+    assert_eq!(inbox.unread_count, 2);
+    let page = h
+        .service
+        .list_messages(
+            &inbox.id,
+            &MessageQuery {
+                limit: 50,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(page.total, 2);
+    // Initial sync is not "new mail".
+    assert!(h.sink.new_mail.lock().unwrap().is_empty());
+
+    let m = summary(&account.id, "INBOX", "INBOX:3", "Fresh");
+    h.server
+        .lock()
+        .unwrap()
+        .messages
+        .insert("INBOX:3".into(), ("INBOX".into(), m));
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(*h.sink.new_mail.lock().unwrap(), vec!["Fresh".to_string()]);
+
+    let statuses = h.service.sync_statuses().unwrap();
+    assert_eq!(statuses[0].state, SyncState::Idle);
+    assert!(statuses[0].last_synced_at.is_some());
+}
+
+#[tokio::test]
+async fn sync_failure_is_recorded_on_the_account() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    h.server.lock().unwrap().fail_sync = true;
+    let err = h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::AuthRequired);
+    let account = h.service.store().get_account(&account.id).unwrap();
+    assert!(account.sync_error.unwrap().contains("Sign in again"));
+    assert_eq!(
+        h.service.sync_statuses().unwrap()[0].state,
+        SyncState::Error
+    );
+}
+
+#[tokio::test]
+async fn reading_a_message_fetches_sanitises_and_caches_it() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let id = h.service.search_messages("welcome", None).unwrap()[0]
+        .id
+        .clone();
+
+    let message = h.service.get_message(&id, false).await.unwrap();
+    let html = message.body_html.unwrap();
+    assert!(html.contains("Hello"));
+    assert!(!html.contains("script"));
+    assert!(!html.contains("tracker"));
+    assert!(message.has_blocked_content);
+
+    let with_images = h.service.get_message(&id, true).await.unwrap();
+    assert!(with_images.body_html.unwrap().contains("tracker"));
+
+    let attachment = h.service.get_attachment(&id, "att1").await.unwrap();
+    assert_eq!(attachment.data, b"pdf");
+    assert_eq!(attachment.meta.name, "report.pdf");
+    let _ = account;
+}
+
+#[tokio::test]
+async fn flags_moves_and_deletes_go_to_server_then_store() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let inbox = inbox(&h, &account);
+    let ids: Vec<String> = h
+        .service
+        .list_messages(&inbox.id, &MessageQuery::default())
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+
+    h.service.set_read(&ids, true).await.unwrap();
+    assert!(
+        h.server
+            .lock()
+            .unwrap()
+            .messages
+            .values()
+            .all(|(_, m)| m.is_read)
+    );
+    assert_eq!(
+        h.service
+            .store()
+            .get_folder(&inbox.id)
+            .unwrap()
+            .unread_count,
+        0
+    );
+
+    h.service.set_flagged(&ids[..1], true).await.unwrap();
+    assert!(
+        h.service
+            .store()
+            .get_message_summary(&ids[0])
+            .unwrap()
+            .is_flagged
+    );
+
+    h.service.archive_messages(&ids[..1]).await.unwrap();
+    let archive = h
+        .service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Archive)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        h.service
+            .list_messages(&archive.id, &MessageQuery::default())
+            .unwrap()
+            .total,
+        1
+    );
+
+    // Delete from inbox moves to trash; deleting from trash removes it.
+    h.service.delete_messages(&ids[1..]).await.unwrap();
+    let trash = h
+        .service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Trash)
+        .unwrap()
+        .unwrap();
+    let in_trash = h
+        .service
+        .list_messages(&trash.id, &MessageQuery::default())
+        .unwrap();
+    assert_eq!(in_trash.total, 1);
+    h.service
+        .delete_messages(&[in_trash.items[0].id.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        h.service
+            .list_messages(&trash.id, &MessageQuery::default())
+            .unwrap()
+            .total,
+        0
+    );
+    assert_eq!(h.server.lock().unwrap().messages.len(), 1);
+}
+
+#[tokio::test]
+async fn sending_validates_recipients_and_links_replies() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let original = h.service.search_messages("invoice", None).unwrap()[0]
+        .id
+        .clone();
+    let mut message = OutgoingMessage {
+        account_id: account.id.clone(),
+        to: vec![],
+        cc: vec![],
+        bcc: vec![],
+        subject: "Re: Invoice".into(),
+        body_html: "<p>Paid</p>".into(),
+        attachments: vec![],
+        importance: None,
+        reply_to_message_id: Some(original),
+        reply_kind: Some(crate::model::ReplyKind::Reply),
+    };
+    assert_eq!(
+        h.service
+            .send_message(message.clone())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidInput
+    );
+    message.to = vec![EmailAddress::new(None, "not an address")];
+    assert!(h.service.send_message(message.clone()).await.is_err());
+    message.to = vec![EmailAddress::new(Some("Grace"), "grace@navy.example")];
+    h.service.send_message(message).await.unwrap();
+    assert_eq!(h.server.lock().unwrap().sent.len(), 1);
+}
+
+#[tokio::test]
+async fn local_calendar_and_tasks_for_imap_accounts() {
+    let h = harness();
+    h.service
+        .add_imap_account(new_imap_account("me@example.com"))
+        .await
+        .unwrap();
+    let calendar = h.service.list_calendars().unwrap().remove(0);
+    let start = Utc::now();
+    let draft = EventDraft {
+        calendar_id: calendar.id.clone(),
+        subject: "Dentist".into(),
+        location: Some("Main St".into()),
+        body_html: None,
+        start,
+        end: start + Duration::hours(1),
+        is_all_day: false,
+        attendees: vec![],
+        reminder_minutes: Some(15),
+        show_as: ShowAs::Busy,
+        is_online_meeting: false,
+    };
+    let event = h.service.create_event(draft.clone()).await.unwrap();
+    assert_eq!(
+        h.service
+            .list_events(start - Duration::hours(1), start + Duration::hours(2), None)
+            .unwrap(),
+        vec![event.clone()]
+    );
+    let bad = EventDraft {
+        end: start - Duration::hours(1),
+        ..draft.clone()
+    };
+    assert!(h.service.create_event(bad).await.is_err());
+    let moved = h
+        .service
+        .update_event(
+            &event.id,
+            EventDraft {
+                subject: "Dentist (moved)".into(),
+                ..draft
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved.id, event.id);
+    h.service.delete_event(&event.id).await.unwrap();
+
+    let list = h.service.list_task_lists().unwrap().remove(0);
+    let task = h
+        .service
+        .create_task(TaskDraft {
+            list_id: list.id.clone(),
+            title: "Renew passport".into(),
+            notes: None,
+            importance: Some(Importance::High),
+            due_date: NaiveDate::from_ymd_opt(2026, 11, 1),
+        })
+        .await
+        .unwrap();
+    let done = h
+        .service
+        .update_task(
+            &task.id,
+            TaskPatch {
+                status: Some(TaskStatus::Completed),
+                clear_due_date: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(done.status, TaskStatus::Completed);
+    assert!(done.completed_at.is_some());
+    assert_eq!(done.due_date, None);
+    assert!(
+        h.service
+            .list_tasks(Some(&list.id), false)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(h.service.list_tasks(Some(&list.id), true).unwrap().len(), 1);
+}

@@ -1,0 +1,37 @@
+import { describe, expect, it } from "vitest";
+
+import { colorFor, displayName, formatBytes, formatListDate, initials } from "./format";
+
+describe("format helpers", () => {
+  it("derives initials from names and addresses", () => {
+    expect(initials("Priya Raman")).toBe("PR");
+    expect(initials("Lucía Fernández")).toBe("LF");
+    expect(initials("servicedesk@acme.example")).toBe("SE");
+    expect(initials("john.smith@acme.example")).toBe("JS");
+    expect(initials("")).toBe("?");
+  });
+
+  it("falls back to the address for display", () => {
+    expect(displayName({ name: null, address: "a@b.example" })).toBe("a@b.example");
+    expect(displayName({ name: "Ann", address: "a@b.example" })).toBe("Ann");
+    expect(displayName(null)).toBe("(no sender)");
+  });
+
+  it("gives stable colours", () => {
+    expect(colorFor("A@b.example")).toBe(colorFor("a@B.example"));
+  });
+
+  it("formats list dates relative to now", () => {
+    const now = new Date(2026, 9, 14, 15, 0);
+    expect(formatListDate(new Date(2026, 9, 14, 9, 5).toISOString(), now)).toMatch(/^\d\d:\d\d$/);
+    expect(formatListDate(new Date(2026, 9, 12, 9, 5).toISOString(), now)).toBe("Mon 09:05");
+    expect(formatListDate(new Date(2026, 6, 1, 9, 5).toISOString(), now)).toBe("1 Jul");
+    expect(formatListDate(new Date(2024, 6, 1, 9, 5).toISOString(), now)).toBe("1 Jul 2024");
+  });
+
+  it("formats sizes", () => {
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(184_320)).toBe("180 KB");
+    expect(formatBytes(8_412_220)).toBe("8.0 MB");
+  });
+});

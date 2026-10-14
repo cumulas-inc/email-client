@@ -1,0 +1,50 @@
+[package]
+name = "cumulas-core"
+description = "Accounts, sync, storage and protocol providers (Microsoft Graph, IMAP/SMTP) for Cumulas Mail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cumulas_core"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+# Storage
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# HTTP / Microsoft Graph / OAuth
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls", "http2", "charset", "gzip"] }
+sha2 = "0.10"
+rand = "0.9"
+
+# IMAP / SMTP / MIME
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = "0.26"
+rustls-platform-verifier = "0.7"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-platform-verifier", "hostname"] }
+mail-parser = "0.11"
+
+# HTML sanitising for message bodies
+ammonia = "4"
+
+# Secrets (Secret Service / Flatpak secret portal)
+oo7 = { version = "0.6", default-features = false, features = ["tokio", "native_crypto"] }
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"
+tokio = { workspace = true, features = ["test-util"] }
