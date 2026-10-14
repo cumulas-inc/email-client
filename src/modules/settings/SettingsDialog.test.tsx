@@ -397,7 +397,7 @@ describe("Accounts", () => {
     await user.click(await screen.findByRole("button", { name: "Fix Alex (Personal)" }));
     const password = screen.getByLabelText("New password");
     await user.type(password, "wrong");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     expect(screen.getByRole("button", { name: /Checking your settings…/ })).toBeDisabled();
     expect(password).toBeDisabled();
@@ -423,7 +423,7 @@ describe("Accounts", () => {
     const imapHost = screen.getByLabelText("IMAP server");
     await user.clear(imapHost);
     await user.type(imapHost, "mail.morgan-family.example");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(updateImap).toHaveBeenCalledTimes(1));
     expect(updateImap).toHaveBeenCalledWith("acct-home", {
@@ -460,7 +460,7 @@ describe("Accounts", () => {
     await user.click(screen.getByRole("button", { name: "Change password or servers" }));
     const [, smtpTls] = screen.getAllByLabelText("Security");
     await user.selectOptions(smtpTls!, "startTls");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(updateImap).toHaveBeenCalledTimes(1));
     const [accountId, update] = updateImap.mock.calls[0]!;
@@ -495,7 +495,7 @@ describe("Accounts", () => {
     await user.click(await screen.findByRole("button", { name: "Manage Alex (Personal)" }));
     await user.click(screen.getByRole("button", { name: "Change password or servers" }));
     await user.type(screen.getByLabelText("New password"), "pw");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     const alert = await screen.findByRole("alert");
     expect(within(alert).getByText("Couldn't connect to the mail server")).toBeInTheDocument();

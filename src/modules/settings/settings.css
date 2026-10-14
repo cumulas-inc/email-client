@@ -566,7 +566,7 @@
   color: var(--fg-secondary);
 }
 
-/* "What Cumulas Mail will ask for": a quiet disclosure. */
+/* "What Cumulas Mail asks for": a quiet disclosure. */
 .permissions {
   width: 100%;
   border-radius: var(--radius-lg);

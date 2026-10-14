@@ -179,6 +179,11 @@ describe("Microsoft sign-in", () => {
     const signIn = vi.spyOn(backend, "addMicrosoftAccount");
     openFlow({ step: "microsoft" }, backend);
 
+    // The permissions disclosure has one name, before sign-in and after.
+    const disclosure = () =>
+      screen.getByText("What Cumulas Mail asks for", { selector: "summary" });
+    expect(disclosure()).toBeInTheDocument();
+
     await user.type(screen.getByLabelText("Email address (optional)"), "admin@contoso.example");
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
 
@@ -186,6 +191,7 @@ describe("Microsoft sign-in", () => {
       name: "Your organization needs to approve Cumulas Mail",
     });
     await waitFor(() => expect(heading).toHaveFocus());
+    expect(disclosure()).toBeInTheDocument();
     expect(screen.getByText(/isn't something you did wrong, and nothing is broken/)).toBeVisible();
     expect(screen.getByText("contoso.example")).toBeInTheDocument();
 

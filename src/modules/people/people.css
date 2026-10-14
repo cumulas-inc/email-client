@@ -531,6 +531,16 @@
   color: var(--brand-text);
 }
 
+/* Delete turns red under the pointer, as Delete does in Calendar and Tasks,
+   and asks before it deletes anything. */
+.people-actions__btn--danger:hover:not(:disabled) {
+  background: var(--danger-subtle);
+}
+
+.people-actions__btn--danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-subtle), var(--danger) 10%);
+}
+
 .people-actions__btn--danger:hover:not(:disabled),
 .people-actions__btn--danger:hover:not(:disabled) svg {
   color: var(--danger);

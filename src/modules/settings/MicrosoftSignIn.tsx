@@ -344,7 +344,7 @@ export function MicrosoftSignIn({
         </p>
       </div>
       <details className="permissions">
-        <summary>What Cumulas Mail will ask for</summary>
+        <summary>What Cumulas Mail asks for</summary>
         <PermissionList />
       </details>
     </StepLayout>

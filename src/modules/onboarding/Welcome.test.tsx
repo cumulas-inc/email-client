@@ -28,6 +28,14 @@ describe("Welcome", () => {
   it("introduces the app and offers both kinds of account", () => {
     renderOnboarding();
     expect(screen.getByRole("heading", { name: "Welcome to Cumulas Mail" })).toBeInTheDocument();
+    // What's included is plain text, not controls.
+    const included = screen.getByRole("list", { name: "Included" });
+    expect(
+      within(included)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ).toEqual(["Mail", "Calendar", "Contacts", "Tasks"]);
+    expect(within(included).queryByRole("button")).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Microsoft 365 or Outlook.com" }),
     ).toHaveAccessibleDescription(/Work, school or personal Microsoft account/);

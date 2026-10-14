@@ -176,7 +176,7 @@ export function ImapAccountEditor({ account, settings, onDone, onCancel }: ImapA
           aria-busy={isPending || undefined}
         >
           {isPending && <Spinner size={16} label="Checking" />}
-          {isPending ? "Checking your settings…" : "Save"}
+          {isPending ? "Checking your settings…" : "Save changes"}
         </button>
         <button type="button" className="btn" onClick={onCancel} disabled={isPending}>
           Cancel

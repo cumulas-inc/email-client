@@ -275,7 +275,7 @@ const scenes = [
       await openSettings(page, "Accounts");
       await page.getByRole("button", { name: "Fix Alex (Personal)" }).click();
       await page.getByLabel("New password").fill("wrong");
-      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await page.getByRole("button", { name: "Save changes", exact: true }).click();
       await page.getByText(/didn't accept this email address and password/).waitFor();
       await page.locator(".settings__content").evaluate((el) => (el.scrollTop = 120));
       await shot("settings-account-fix");
