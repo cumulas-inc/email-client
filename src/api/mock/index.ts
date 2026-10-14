@@ -16,6 +16,7 @@ import type {
   SyncStatus,
   Task,
 } from "../types";
+import { cleanFamily } from "../../lib/fonts";
 import { type MockState, createDemoState, recount } from "./data";
 import { createWorstState } from "./worst";
 
@@ -28,7 +29,57 @@ const DEFAULT_SETTINGS: Settings = {
   microsoftClientId: null,
   microsoftTenant: null,
   notificationsEnabled: true,
+  interfaceFont: { kind: "default" },
+  readingFont: { kind: "default" },
+  textSize: "default",
 };
+
+/** What a GNOME desktop with a few extra fonts reports, sorted as the Rust side sorts. */
+export const DEMO_FONTS = [
+  "Adwaita Mono",
+  "Adwaita Sans",
+  "Atkinson Hyperlegible Next",
+  "Cantarell",
+  "DejaVu Sans",
+  "DejaVu Sans Mono",
+  "DejaVu Serif",
+  "EB Garamond",
+  "Fira Code",
+  "Fira Sans",
+  "IBM Plex Sans",
+  "IBM Plex Serif",
+  "Inter",
+  "JetBrains Mono",
+  "Lato",
+  "Liberation Mono",
+  "Liberation Sans",
+  "Liberation Serif",
+  "Literata",
+  "Merriweather",
+  "Noto Naskh Arabic",
+  "Noto Sans",
+  "Noto Sans Arabic",
+  "Noto Sans CJK JP",
+  "Noto Sans Devanagari",
+  "Noto Sans Hebrew",
+  "Noto Sans Mono",
+  "Noto Serif",
+  "Noto Serif CJK JP",
+  "Open Sans",
+  "Roboto",
+  "Roboto Slab",
+  "Source Code Pro",
+  "Source Sans 3",
+  "Source Serif 4",
+  "Ubuntu",
+  "Ubuntu Mono",
+  "Ubuntu Sans",
+];
+
+/** Mirrors `is_valid_font_family` in crates/core/src/model.rs. */
+function validFamily(family: string | undefined): boolean {
+  return family === undefined || cleanFamily(family) === family;
+}
 
 function fail(code: ErrorCode, message: string, details?: BackendError["details"]): never {
   const error: BackendError = { code, message, ...(details ? { details } : {}) };
@@ -308,8 +359,24 @@ export class MockBackend implements Backend {
     await this.delay();
     if (settings.syncIntervalMinutes < 1)
       fail("invalidInput", "Sync interval must be at least one minute.");
+    const families = [settings.interfaceFont, settings.readingFont].map((f) =>
+      f.kind === "family" ? f.family : undefined,
+    );
+    if (!families.every(validFamily))
+      fail("invalidInput", "That font name can't be used. Choose a font from the list.");
     this.settings = clone(settings);
     return clone(settings);
+  }
+
+  async listFonts() {
+    await this.delay();
+    return [...DEMO_FONTS];
+  }
+
+  async setZoom(factor: number) {
+    // A page can't zoom itself the way the desktop webview does; CSS zoom on
+    // the root comes close enough for the demo.
+    document.documentElement.style.setProperty("zoom", factor === 1 ? null : String(factor));
   }
 
   async syncAccount(accountId: string) {

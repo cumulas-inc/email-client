@@ -6,6 +6,8 @@ import charis400 from "@fontsource/charis-sil/files/charis-sil-latin-400-normal.
 import charis700Italic from "@fontsource/charis-sil/files/charis-sil-latin-700-italic.woff2?inline";
 import charis700 from "@fontsource/charis-sil/files/charis-sil-latin-700-normal.woff2?inline";
 
+import { cssString, SERIF_STACK } from "../../lib/fonts";
+
 /**
  * How the message is painted. Emails are authored for light backgrounds:
  * - "plain": light theme, blends into the pane.
@@ -27,8 +29,9 @@ export function contentSecurityPolicy(allowRemote: boolean): string {
 }
 
 // The frame is a separate document: the app's tokens and @font-face rules
-// don't reach it, and it has its own CSP (font-src data:). So the reading
-// serif travels inside it as data: URLs. That is the Latin subset of Charis
+// don't reach it, and it has its own CSP (font-src data:). So the bundled
+// reading serif travels inside it as data: URLs (an installed font chosen as
+// the reading font is just named; see bodyFont.ts). That is the Latin subset of Charis
 // SIL in four styles, about 92 KB of WOFF2 (124 KB as base64) that every
 // message document carries. Measured in Chromium, it adds about 5 ms to
 // opening a message, which buys the same letter face as the subject above it.
@@ -36,6 +39,14 @@ export function contentSecurityPolicy(allowRemote: boolean): string {
 const LATIN_RANGE =
   "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, " +
   "U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD";
+
+/** An @font-face rule for the frame: Latin `src` (a data: URL) as `family`. */
+export function dataFace(family: string, src: string, style: string, weight: string): string {
+  return (
+    `@font-face { font-family: ${cssString(family)}; font-style: ${style}; font-weight: ${weight};` +
+    ` font-display: block; src: url(${src}) format("woff2"); unicode-range: ${LATIN_RANGE}; }`
+  );
+}
 
 const SERIF_FACES = (
   [
@@ -45,15 +56,19 @@ const SERIF_FACES = (
     [charis700Italic, 700, "italic"],
   ] as const
 )
-  .map(
-    ([src, weight, style]) =>
-      `@font-face { font-family: "Charis SIL"; font-style: ${style}; font-weight: ${weight};` +
-      ` font-display: block; src: url(${src}) format("woff2"); unicode-range: ${LATIN_RANGE}; }`,
-  )
+  .map(([src, weight, style]) => dataFace("Charis SIL", src, style, String(weight)))
   .join("\n");
 
-/** The default face for message text that doesn't choose its own. */
-export const DEFAULT_FONT = '"Charis SIL", Charter, "Bitstream Charter", Georgia, serif';
+/** The face for message text that doesn't choose its own. */
+export interface BodyFont {
+  /** A `font-family` value, with any family name already quoted and escaped. */
+  family: string;
+  /** @font-face rules that travel inside the frame (data: URLs), or "". */
+  faces: string;
+}
+
+/** The reading serif, Charis SIL, carried inside the frame. */
+export const DEFAULT_BODY_FONT: BodyFont = { family: SERIF_STACK, faces: SERIF_FACES };
 
 interface Palette {
   text: string;
@@ -128,7 +143,7 @@ export type BodyTone = "normal" | "quiet";
 
 function baseCss(
   appearance: BodyAppearance,
-  fontFamily: string,
+  font: BodyFont,
   measure: boolean,
   tone: BodyTone,
 ): string {
@@ -142,7 +157,7 @@ function baseCss(
          }`
       : "";
   return `
-    ${SERIF_FACES}
+    ${font.faces}
     :root { color-scheme: light; }
     html { background: ${background}; overflow-y: hidden; }
     html:has(> body:dir(rtl)) { direction: rtl; }
@@ -150,7 +165,7 @@ function baseCss(
       margin: 0;
       padding: ${padding};
       ${measure ? "max-width: 72ch;" : ""}
-      font-family: ${fontFamily};
+      font-family: ${font.family};
       font-size: 15.5px;
       line-height: 1.6;
       color: ${tone === "quiet" ? colors.muted : colors.text};
@@ -184,7 +199,8 @@ function baseCss(
 export interface SrcDocOptions {
   allowRemote: boolean;
   appearance: BodyAppearance;
-  fontFamily?: string;
+  /** The reading font, for text the mail doesn't set itself (default Charis SIL). */
+  font?: BodyFont;
   tone?: BodyTone;
 }
 
@@ -192,7 +208,7 @@ export function buildSrcDoc(html: string, options: SrcDocOptions): string {
   const csp = contentSecurityPolicy(options.allowRemote);
   const css = baseCss(
     options.appearance,
-    options.fontFamily ?? DEFAULT_FONT,
+    options.font ?? DEFAULT_BODY_FONT,
     !isLaidOut(html),
     options.tone ?? "normal",
   );

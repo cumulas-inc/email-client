@@ -51,6 +51,14 @@ export interface Backend {
   removeAccount(accountId: string): Promise<void>;
   getSettings(): Promise<Settings>;
   updateSettings(settings: Settings): Promise<Settings>;
+  /** Installed font families, sorted, for the font settings. */
+  listFonts(): Promise<string[]>;
+  /**
+   * Scales the whole window, like a browser's zoom (the text size setting).
+   * The desktop app zooms its webview, so layout, pointer positions and the
+   * message frame all follow; the browser demo approximates it with CSS zoom.
+   */
+  setZoom(factor: number): Promise<void>;
   syncAccount(accountId: string): Promise<void>;
   syncAll(): Promise<void>;
   getSyncStatuses(): Promise<SyncStatus[]>;

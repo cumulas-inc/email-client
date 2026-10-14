@@ -11,6 +11,7 @@ export const qk = {
 
   accounts: () => ["accounts", "list"] as const,
   settings: () => ["accounts", "settings"] as const,
+  fonts: () => ["accounts", "fonts"] as const,
   appInfo: () => ["accounts", "app-info"] as const,
   syncStatuses: () => ["accounts", "sync-statuses"] as const,
 
@@ -49,6 +50,16 @@ export function useAppInfo() {
 export function useSettings() {
   const backend = useBackend();
   return useQuery({ queryKey: qk.settings(), queryFn: () => backend.getSettings() });
+}
+
+/** Installed font families; the list only changes when the app restarts. */
+export function useFonts() {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: qk.fonts(),
+    queryFn: () => backend.listFonts(),
+    staleTime: Infinity,
+  });
 }
 
 export function useUpdateSettings() {

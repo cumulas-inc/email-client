@@ -7,6 +7,7 @@
 
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { useBodyFont } from "./bodyFont";
 import { anchorOf, type BodyAppearance, type BodyTone, buildSrcDoc, linkify } from "./bodyHtml";
 import { plainTextBlocks } from "./text";
 
@@ -40,9 +41,11 @@ export function MessageBody({
     handlers.current = { onLink, onHoverLink };
   });
 
+  // The reading font is only the default: mail that sets its own fonts keeps them.
+  const font = useBodyFont();
   const srcDoc = useMemo(
-    () => buildSrcDoc(html, { allowRemote, appearance, tone }),
-    [html, allowRemote, appearance, tone],
+    () => (font ? buildSrcDoc(html, { allowRemote, appearance, tone, font }) : null),
+    [html, allowRemote, appearance, tone, font],
   );
 
   const observers = useRef<ResizeObserver[]>([]);
@@ -141,16 +144,21 @@ export function MessageBody({
       data-more-left={hidden.left || undefined}
       data-more-right={hidden.right || undefined}
     >
-      <iframe
-        ref={frameRef}
-        className={`mail-body-frame mail-body-frame--${appearance}`}
-        title={title}
-        sandbox="allow-same-origin"
-        referrerPolicy="no-referrer"
-        srcDoc={srcDoc}
-        onLoad={onLoad}
-        style={{ height }}
-      />
+      {srcDoc === null ? (
+        // The reading font's faces are still loading (only ever the first time).
+        <div className="mail-body-frame" style={{ height }} />
+      ) : (
+        <iframe
+          ref={frameRef}
+          className={`mail-body-frame mail-body-frame--${appearance}`}
+          title={title}
+          sandbox="allow-same-origin"
+          referrerPolicy="no-referrer"
+          srcDoc={srcDoc}
+          onLoad={onLoad}
+          style={{ height }}
+        />
+      )}
     </div>
   );
 }

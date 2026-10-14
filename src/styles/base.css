@@ -32,6 +32,11 @@ body {
   cursor: default;
 }
 
+/* Inter's alternates mean other things in other families (useAppearance). */
+:root[data-interface-font="custom"] body {
+  font-feature-settings: normal;
+}
+
 input,
 textarea,
 select,

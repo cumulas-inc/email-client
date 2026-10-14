@@ -310,6 +310,21 @@ export type RemoteContentPolicy = "block" | "allowContacts" | "allow";
 export type Theme = "system" | "light" | "dark";
 export type ReadingPane = "right" | "bottom" | "off";
 
+/** The typeface for the interface: Inter (bundled), the desktop's, or an installed family. */
+export type InterfaceFont =
+  { kind: "default" } | { kind: "system" } | { kind: "family"; family: string };
+
+/**
+ * The typeface for what people read (subjects, pane titles, the open message,
+ * the compose editor): Charis SIL (bundled), the interface's, or an installed
+ * family.
+ */
+export type ReadingFont =
+  { kind: "default" } | { kind: "interface" } | { kind: "family"; family: string };
+
+/** Scales the whole window; see TEXT_SCALE in src/lib/fonts.ts. */
+export type TextSize = "smaller" | "default" | "larger" | "largest";
+
 export interface Settings {
   theme: Theme;
   readingPane: ReadingPane;
@@ -319,6 +334,9 @@ export interface Settings {
   microsoftClientId: string | null;
   microsoftTenant: string | null;
   notificationsEnabled: boolean;
+  interfaceFont: InterfaceFont;
+  readingFont: ReadingFont;
+  textSize: TextSize;
 }
 
 export interface AppInfo {

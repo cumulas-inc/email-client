@@ -312,8 +312,10 @@ export function isEmptyHtml(html: string): boolean {
   return html.replace(/<(p|br|\/p)\s*\/?>/gi, "").trim() === "";
 }
 
-// The serif the editor shows, so recipients see what was written. Charter
-// and Georgia stand in where Charis SIL isn't installed.
+// The default reading serif, so recipients see the letter as it was set.
+// Charter and Georgia stand in where Charis SIL isn't installed. A reading
+// font chosen in Settings only changes how this computer shows mail; it
+// isn't sent.
 const BODY_STYLE =
   "font-family:'Charis SIL',Charter,'Bitstream Charter',Georgia,serif;font-size:12pt;line-height:1.5";
 

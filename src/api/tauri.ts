@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import type { Backend, Unsubscribe } from "./backend";
 import type { DataChangedEvent, SyncStatus } from "./types";
@@ -37,6 +38,8 @@ export const tauriBackend: Backend = {
   removeAccount: (accountId) => invoke("remove_account", { accountId }),
   getSettings: () => invoke("get_settings"),
   updateSettings: (settings) => invoke("update_settings", { settings }),
+  listFonts: () => invoke("list_fonts"),
+  setZoom: (factor) => getCurrentWebview().setZoom(factor),
   syncAccount: (accountId) => invoke("sync_account", { accountId }),
   syncAll: () => invoke("sync_all"),
   getSyncStatuses: () => invoke("get_sync_statuses"),

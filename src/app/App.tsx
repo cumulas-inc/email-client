@@ -12,6 +12,7 @@ import { AddAccountDialog } from "../modules/settings/AddAccountDialog";
 import { SettingsDialog } from "../modules/settings/SettingsDialog";
 import { AppHeader } from "./AppHeader";
 import { type Module, useAppStore } from "./store";
+import { useAppearance } from "./useAppearance";
 import { useBackendEvents } from "./useBackendEvents";
 import { useTheme } from "./useTheme";
 
@@ -62,6 +63,7 @@ function useGlobalShortcuts() {
 function Shell() {
   useBackendEvents();
   useTheme();
+  useAppearance();
   useGlobalShortcuts();
   const module = useAppStore((s) => s.module);
   const { data: accounts, isLoading } = useAccounts();
