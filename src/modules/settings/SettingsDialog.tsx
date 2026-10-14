@@ -123,7 +123,8 @@ function SettingsBody({
           <h3 className="settings__title pane-title">{current.label}</h3>
           <SaveIndicator />
         </div>
-        <div className="settings__content">
+        {/* Keyed, so each section opens scrolled to its top. */}
+        <div key={section} className="settings__content">
           {section === "accounts" && <AccountsSection onRemove={onRemoveAccount} />}
           {section === "general" && <GeneralSection />}
           {section === "mail" && <MailSection />}
