@@ -109,12 +109,12 @@ function formatAddressHtml(a: EmailAddress): string {
   return a.name ? `${escapeHtml(a.name)} &lt;${escapeHtml(a.address)}&gt;` : escapeHtml(a.address);
 }
 
-/** Outlook's quote header date: "Wednesday, October 14, 2026 3:05 PM". */
+/** The quote header's date: "Wednesday, October 14, 2026 3:05 PM". */
 function sentLine(date: Date): string {
   return `${formatDate(date, "weekdayLongYear")} ${formatTime(date)}`;
 }
 
-/** Outlook-style header block followed by the original body. */
+/** The usual From/Sent/To/Subject block, followed by the original body. */
 export function quoteOriginal(original: Message): string {
   const rows: [string, string][] = [
     ["From", original.from ? formatAddressHtml(original.from) : ""],
@@ -127,7 +127,7 @@ export function quoteOriginal(original: Message): string {
   const body = original.bodyHtml ?? textToHtml(original.bodyText ?? "");
   return (
     `<div class="cumulas-quote">` +
-    `<hr style="border:none;border-top:1px solid #b5b5b5;margin:16px 0 8px">` +
+    `<hr style="border:none;border-top:1px solid #d8d4cb;margin:16px 0 8px">` +
     `<p style="margin:0 0 12px">${header}</p>` +
     `<div>${body}</div>` +
     `</div>`
@@ -245,12 +245,15 @@ export function isEmptyHtml(html: string): boolean {
   return html.replace(/<(p|br|\/p)\s*\/?>/gi, "").trim() === "";
 }
 
-const BODY_STYLE = "font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:11pt";
+// The serif the editor shows, so recipients see what was written. Charter
+// and Georgia stand in where Charis SIL isn't installed.
+const BODY_STYLE =
+  "font-family:'Charis SIL',Charter,'Bitstream Charter',Georgia,serif;font-size:12pt;line-height:1.5";
 
 /**
  * The HTML that gets sent: the editor content, then the quoted original.
- * Paragraphs get no margins (each Enter is one line, as in Outlook) and
- * empty ones keep their height.
+ * Paragraphs get no margins (each Enter is one line, as in most mail
+ * programs) and empty ones keep their height.
  */
 export function composeBodyHtml(bodyHtml: string, quoteHtml: string | null): string {
   const body = (isEmptyHtml(bodyHtml) ? "<p></p>" : bodyHtml)

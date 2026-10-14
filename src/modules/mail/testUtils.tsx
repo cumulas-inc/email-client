@@ -83,6 +83,11 @@ export function toolbarButton(name: string | RegExp) {
   return within(messageToolbar()).getByRole("button", { name });
 }
 
+/** Reply, Reply all or Forward: the group beside the sender. */
+export function respondButton(name: string | RegExp) {
+  return within(screen.getByRole("group", { name: "Respond" })).getByRole("button", { name });
+}
+
 export async function setSearch(text: string) {
   await act(async () => {
     useAppStore.getState().setSearch(text);

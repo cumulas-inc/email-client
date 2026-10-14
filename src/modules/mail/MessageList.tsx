@@ -74,6 +74,15 @@ function SelectionBar({ ids, actions, folders, messages }: SelectionBarProps) {
   const targets = accountId ? moveTargets(folders, accountId, exclude) : [];
   return (
     <div className="mail-selection" role="toolbar" aria-label="Selected messages">
+      <button
+        type="button"
+        className="icon-btn icon-btn--sm"
+        aria-label="Clear selection"
+        title="Clear selection (Esc)"
+        onClick={clearSelection}
+      >
+        <X size={15} />
+      </button>
       <span className="mail-selection__count">{ids.length} selected</span>
       <span className="toolbar__spacer" />
       <button
@@ -137,21 +146,12 @@ function SelectionBar({ ids, actions, folders, messages }: SelectionBarProps) {
       </button>
       <button
         type="button"
-        className="icon-btn"
+        className="icon-btn mail-selection__delete"
         aria-label="Delete"
         title="Delete (Delete)"
         onClick={() => actions.remove(ids)}
       >
         <Trash2 size={16} />
-      </button>
-      <button
-        type="button"
-        className="icon-btn"
-        aria-label="Clear selection"
-        title="Clear selection (Esc)"
-        onClick={clearSelection}
-      >
-        <X size={16} />
       </button>
     </div>
   );
@@ -198,7 +198,8 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   }, [searching, results.data, filter, list.data]);
 
   // In the Unread/Flagged views the open message stays listed after it is
-  // read or unflagged, like Outlook, until another message is opened.
+  // read or unflagged, until another message is opened, so it doesn't vanish
+  // from under the reader.
   const activeFetched = activeId ? (fetched.find((m) => m.id === activeId) ?? null) : null;
   const [sticky, setSticky] = useState<MessageSummary | null>(null);
   if (activeFetched && activeFetched !== sticky) setSticky(activeFetched);
@@ -224,9 +225,19 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     return insertByDate(fetched, current);
   }, [fetched, filter, sticky, activeId, activeFetched, activeMessage, searching, folderId]);
 
+  // How many messages the list holds, for "3 of 76" in the reading pane: the
+  // server's count while more pages wait to load, else what is listed.
+  const lastPage = list.data?.pages[list.data.pages.length - 1];
+  const listTotal =
+    !searching && list.hasNextPage && lastPage
+      ? Math.max(items.length, lastPage.total)
+      : items.length;
   useEffect(() => {
-    setVisibleIds(items.map((m) => m.id));
-  }, [items, setVisibleIds]);
+    setVisibleIds(
+      items.map((m) => m.id),
+      listTotal,
+    );
+  }, [items, listTotal, setVisibleIds]);
 
   const folder = folders.find((f) => f.id === folderId) ?? null;
   const accountById = useMemo(() => {
@@ -388,6 +399,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   const accountName = (id: string) => accountById.get(id)?.displayName ?? "";
   let title = "Mail";
   let subtitle: string | null = null;
+  let titleAccount: Account | null = null;
   if (searching) {
     title = "Search results";
     subtitle = results.data ? `${items.length} for “${search.trim()}”` : null;
@@ -395,7 +407,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     title = "All inboxes";
   } else if (folder) {
     title = folder.name;
-    subtitle = accounts.length > 1 ? accountName(folder.accountId) : null;
+    titleAccount = accounts.length > 1 ? (accountById.get(folder.accountId) ?? null) : null;
   }
 
   const contextFor = (m: MessageSummary): string | null => {
@@ -549,10 +561,35 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
         <SearchField placeholder="Search mail" />
         <div className="mail-list__title-row">
           <div className="mail-list__titles">
-            <h2 className="mail-list__title" title={title}>
+            <h2 className="pane-title mail-list__title" title={title}>
               {title}
             </h2>
+            {titleAccount && (
+              <span className="mail-chip-account" title={titleAccount.email}>
+                <span
+                  className="mail-chip-account__dot"
+                  style={{ background: titleAccount.color }}
+                  aria-hidden="true"
+                />
+                <span className="mail-chip-account__name">{titleAccount.displayName}</span>
+              </span>
+            )}
             {subtitle && <span className="mail-list__subtitle">{subtitle}</span>}
+          </div>
+          <div className="segmented mail-filter" role="group" aria-label="Filter messages">
+            {FILTERS.map((f) => (
+              <button
+                key={f.value}
+                type="button"
+                className={`segmented__option mail-filter__option${
+                  filter === f.value ? " segmented__option--selected" : ""
+                }`}
+                aria-pressed={filter === f.value}
+                onClick={() => setFilter(f.value)}
+              >
+                {f.label}
+              </button>
+            ))}
           </div>
           {searching && (
             <button
@@ -565,19 +602,6 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
               <X size={16} />
             </button>
           )}
-        </div>
-        <div className="mail-filter" role="group" aria-label="Filter messages">
-          {FILTERS.map((f) => (
-            <button
-              key={f.value}
-              type="button"
-              className="mail-filter__pill"
-              aria-pressed={filter === f.value}
-              onClick={() => setFilter(f.value)}
-            >
-              {f.label}
-            </button>
-          ))}
         </div>
       </header>
       {checkMode && (

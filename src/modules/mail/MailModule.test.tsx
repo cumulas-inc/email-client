@@ -237,7 +237,7 @@ describe("Reading pane", () => {
   it("shows the message full width with a back button when the reading pane is off", async () => {
     const user = userEvent.setup();
     await renderMail({ settings: { readingPane: "off" } });
-    expect(screen.queryByText("Select an item to read")).not.toBeInTheDocument();
+    expect(screen.queryByText("No message open")).not.toBeInTheDocument();
     await openMessage(user, CHECKLIST);
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Back to message list" }));

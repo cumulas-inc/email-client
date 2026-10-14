@@ -54,6 +54,8 @@ interface MailState {
   anchorId: string | null;
   /** Ids in the order the list currently shows them. */
   visibleIds: string[];
+  /** Messages in the list, including pages not loaded yet. */
+  listTotal: number;
   /** Reading pane "off": the message or composer is shown instead of the list. */
   readerOpen: boolean;
   /** Messages the user allowed remote content for in this session. */
@@ -72,7 +74,7 @@ interface MailState {
   setSelection: (ids: string[], activeId: string | null) => void;
   selectAll: () => void;
   clearSelection: () => void;
-  setVisibleIds: (ids: string[]) => void;
+  setVisibleIds: (ids: string[], total?: number) => void;
   /** Moves the cursor by `delta` rows (extending the selection with Shift). */
   moveActive: (delta: number, extend?: boolean) => string | null;
   setReaderOpen: (open: boolean) => void;
@@ -98,6 +100,7 @@ const INITIAL = {
   activeId: null,
   anchorId: null,
   visibleIds: [],
+  listTotal: 0,
   readerOpen: false,
   remoteAllowed: {},
   collapsed: {},
@@ -152,7 +155,8 @@ export const useMailStore = create<MailState>((set, get) => ({
     set({ selectedIds: activeId ? [activeId] : [], anchorId: activeId });
   },
 
-  setVisibleIds: (visibleIds) => set({ visibleIds }),
+  setVisibleIds: (visibleIds, total) =>
+    set({ visibleIds, listTotal: Math.max(total ?? 0, visibleIds.length) }),
 
   moveActive: (delta, extend = false) => {
     const { visibleIds, activeId, select } = get();

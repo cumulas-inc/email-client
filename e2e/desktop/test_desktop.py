@@ -176,7 +176,7 @@ def first_run(driver) -> None:
         by_text(driver, "contract.pdf")
 
         # Send a message through SMTP.
-        button(driver, "New mail").click()
+        button(driver, "New message").click()
         to = wait_for(lambda: driver.switch_to.active_element, what="focused To field")
         to.send_keys("bob@example.com", Keys.ENTER)
         subject = driver.find_element(By.CSS_SELECTOR, "input[aria-label='Subject']")

@@ -134,7 +134,7 @@ describe("reply helpers", () => {
     ).toEqual([]);
   });
 
-  it("quotes the original with an Outlook-style header", () => {
+  it("quotes the original under a From/Sent/To/Subject header", () => {
     const html = quoteOriginal(message());
     expect(html).toContain("<b>From:</b> Priya Raman &lt;priya.raman@acme.example&gt;");
     expect(html).toContain("<b>To:</b> Alex Morgan &lt;alex.morgan@acme.example&gt;; Mei Tanaka");

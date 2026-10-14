@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { buildSrcDoc, classifyLink, contentSecurityPolicy, linkify } from "./bodyHtml";
+import {
+  bodyAppearance,
+  buildSrcDoc,
+  classifyLink,
+  contentSecurityPolicy,
+  linkify,
+  paintsOwnBackground,
+} from "./bodyHtml";
 
 describe("message frame document", () => {
   it("blocks everything but inline styles and embedded images by default", () => {
@@ -26,6 +33,34 @@ describe("message frame document", () => {
     expect(buildSrcDoc("", { allowRemote: false, appearance: "dark" })).toContain(
       "filter: invert(1) hue-rotate(180deg)",
     );
+  });
+});
+
+describe("dark theme", () => {
+  it("tells designed mail (own backgrounds) from mail that only sets text colors", () => {
+    expect(paintsOwnBackground('<p style="color:#605e5c">— Priya</p>')).toBe(false);
+    expect(
+      paintsOwnBackground('<table style="background:#f7f4ee"><tr><td>x</td></tr></table>'),
+    ).toBe(true);
+    expect(paintsOwnBackground('<td bgcolor="#fff">x</td>')).toBe(true);
+    expect(paintsOwnBackground("<style>p { margin: 0 }</style><p>x</p>")).toBe(true);
+  });
+
+  it("inverts plain mail and lets the reader choose a sheet for designed mail", () => {
+    const plain = "<p>Hi Alex,</p>";
+    const designed = '<div style="background-color:#003">News</div>';
+    expect(bodyAppearance(plain, false)).toBe("plain");
+    expect(bodyAppearance(designed, false)).toBe("plain");
+    expect(bodyAppearance(plain, true)).toBe("dark");
+    expect(bodyAppearance(designed, true)).toBe("paper");
+    expect(bodyAppearance(designed, true, "dark")).toBe("dark");
+  });
+
+  it("paints the inverted frame so it comes out in the dark theme's colors", () => {
+    const doc = buildSrcDoc("<p>x</p>", { allowRemote: false, appearance: "dark" });
+    // invert(1) hue-rotate(180deg) turns these into the card #22211e and ink #edebe6.
+    expect(doc).toContain("background: #dfdedb");
+    expect(doc).toContain("color: #16140f");
   });
 });
 

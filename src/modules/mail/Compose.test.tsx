@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { MockBackend } from "../../api/mock";
 import { useAppStore } from "../../app/store";
-import { renderMail, row, toolbarButton } from "./testUtils";
+import { renderMail, respondButton, row } from "./testUtils";
 
 // Full-module tests in jsdom; allow for slow, busy CI machines.
 vi.setConfig({ testTimeout: 20_000 });
@@ -30,7 +30,7 @@ function chips(label: "To" | "Cc" | "Bcc") {
 }
 
 async function newMessage(user: User) {
-  await user.click(screen.getByRole("button", { name: "New mail" }));
+  await user.click(screen.getByRole("button", { name: "New message" }));
   return screen.findByRole("region", { name: "New message" });
 }
 
@@ -39,7 +39,7 @@ describe("Reply and forward", () => {
     const user = userEvent.setup();
     await renderMail();
     await open(user, CHECKLIST);
-    await user.click(toolbarButton("Reply"));
+    await user.click(respondButton("Reply"));
     const c = await screen.findByRole("region", { name: "Reply" });
     expect(chips("To")).toEqual(["Priya Raman"]);
     expect(within(c).queryByRole("combobox", { name: "Cc" })).not.toBeInTheDocument();
@@ -57,7 +57,7 @@ describe("Reply and forward", () => {
     const user = userEvent.setup();
     await renderMail();
     await open(user, /Quarterly planning/);
-    await user.click(toolbarButton("Reply all"));
+    await user.click(respondButton("Reply all"));
     await screen.findByRole("region", { name: "Reply" });
     expect(chips("To")).toEqual([
       "Dana Whitfield",
@@ -73,7 +73,7 @@ describe("Reply and forward", () => {
     const user = userEvent.setup();
     await renderMail();
     await open(user, /Re: Load test results/);
-    await user.click(toolbarButton("Reply"));
+    await user.click(respondButton("Reply"));
     expect(
       within(await screen.findByRole("region", { name: "Reply" })).getByRole("textbox", {
         name: "Subject",
@@ -297,7 +297,7 @@ describe("Drafts", () => {
     expect(within(tab).getByText("Offsite ideas")).toBeInTheDocument();
 
     // Starting another message asks first.
-    await user.click(screen.getByRole("button", { name: "New mail" }));
+    await user.click(screen.getByRole("button", { name: "New message" }));
     const dialog = await screen.findByRole("dialog", { name: "Discard this draft?" });
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
 

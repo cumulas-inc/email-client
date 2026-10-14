@@ -97,7 +97,7 @@ function para(...lines: string[]): string {
 }
 
 function signature(name: string, title?: string): string {
-  return `<p style="color:#605e5c;margin-top:16px">— ${name}${title ? `<br>${title}` : ""}</p>`;
+  return `<p style="color:#716c63;margin-top:16px">— ${name}${title ? `<br>${title}` : ""}</p>`;
 }
 
 let messageSeq = 0;
@@ -230,7 +230,7 @@ function workMessages(): Message[] {
           "Numbers from last night's run look good: p95 latency stayed under 180 ms up to 4× expected peak. The one regression was the export endpoint — I've opened a ticket.",
           'Full report on the <a href="https://wiki.acme.example/atlas/load-tests">wiki</a>.',
         ) +
-        `<blockquote style="border-left:3px solid #c8c6c4;margin:0;padding-left:12px;color:#605e5c">On Monday, Alex Morgan wrote:<br>Can we get a load test in before the review?</blockquote>` +
+        `<blockquote style="border-left:3px solid #e1ddd5;margin:0;padding-left:12px;color:#716c63">On Monday, Alex Morgan wrote:<br>Can we get a load test in before the review?</blockquote>` +
         signature("Jonas"),
       received: at(-1, 17, 31),
     }),

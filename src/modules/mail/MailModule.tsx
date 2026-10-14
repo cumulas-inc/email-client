@@ -1,6 +1,6 @@
 import "./mail.css";
 
-import { Pencil, X } from "lucide-react";
+import { Pencil, SquarePen, X } from "lucide-react";
 import { type CSSProperties, useCallback, useEffect, useState } from "react";
 
 import { ModuleSidebar } from "../../app/ModuleSidebar";
@@ -18,7 +18,7 @@ import { ReadingPane } from "./ReadingPane";
 import { useMailShortcuts } from "./shortcuts";
 import { Splitter } from "./Splitter";
 
-/** Tab for a draft that is open but not on screen, like Outlook's draft tabs. */
+/** A draft that is open but not on screen: one click brings it back. */
 function DraftBar() {
   const compose = useMailStore((s) => s.compose);
   const showCompose = useMailStore((s) => s.showCompose);
@@ -81,8 +81,8 @@ export function MailModule() {
   const composeVisible = useMailStore((s) => s.composeVisible);
   const hideCompose = useMailStore((s) => s.hideCompose);
 
-  const [foldersWidth, setFoldersWidth] = usePersistentNumber("mail.foldersWidth", 232, 180, 420);
-  const [listWidth, setListWidth] = usePersistentNumber("mail.listWidth", 400, 300, 760);
+  const [foldersWidth, setFoldersWidth] = usePersistentNumber("mail.foldersWidth", 260, 200, 420);
+  const [listWidth, setListWidth] = usePersistentNumber("mail.listWidth", 420, 300, 760);
   const [listHeight, setListHeight] = usePersistentNumber("mail.listHeight", 320, 160, 720);
 
   useMailShortcuts(actions, readingPane);
@@ -147,21 +147,38 @@ export function MailModule() {
   } as CSSProperties;
 
   return (
-    <div className={`mail mail--${readingPane}`} style={style}>
-      <ModuleSidebar label="Mail folders" className="mail__folders">
+    <div className={`mail module-layout mail--${readingPane}`} style={style}>
+      <ModuleSidebar
+        label="Mail folders"
+        className="mail__folders"
+        action={
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={() => actions.newMessage()}
+            title="New message (Ctrl+N)"
+          >
+            <SquarePen size={18} strokeWidth={1.75} aria-hidden="true" />
+            <span>New message</span>
+            <span className="kbd" aria-hidden="true">
+              Ctrl N
+            </span>
+          </button>
+        }
+      >
         <FolderPane actions={actions} />
       </ModuleSidebar>
       <Splitter
         orientation="vertical"
         value={foldersWidth}
-        min={180}
+        min={200}
         max={420}
         onChange={setFoldersWidth}
         label="Resize folder pane"
       />
       <div className="mail__main">
         {showList && (
-          <div className="mail__panel mail__list-panel">
+          <div className="card mail__panel mail__list-panel">
             <MessageList
               actions={actions}
               readingPane={readingPane}
@@ -181,7 +198,7 @@ export function MailModule() {
           />
         )}
         {showReader && (
-          <div className="mail__panel mail__reader-panel">
+          <div className="card mail__panel mail__reader-panel">
             {composerOnScreen && compose ? (
               <Compose key={compose.id} onMinimize={minimizeCompose} />
             ) : (

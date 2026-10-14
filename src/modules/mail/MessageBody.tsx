@@ -7,7 +7,7 @@
 
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { anchorOf, type BodyAppearance, buildSrcDoc, DEFAULT_FONT, linkify } from "./bodyHtml";
+import { anchorOf, type BodyAppearance, buildSrcDoc, linkify } from "./bodyHtml";
 
 interface MessageBodyProps {
   html: string;
@@ -34,14 +34,9 @@ export function MessageBody({
     handlers.current = { onLink, onHoverLink };
   });
 
-  const fontFamily = useMemo(() => {
-    const family = typeof window !== "undefined" ? getComputedStyle(document.body).fontFamily : "";
-    return family || DEFAULT_FONT;
-  }, []);
-
   const srcDoc = useMemo(
-    () => buildSrcDoc(html, { allowRemote, appearance, fontFamily }),
-    [html, allowRemote, appearance, fontFamily],
+    () => buildSrcDoc(html, { allowRemote, appearance }),
+    [html, allowRemote, appearance],
   );
 
   const observers = useRef<ResizeObserver[]>([]);

@@ -1,4 +1,5 @@
-// Outlook-style keyboard shortcuts for the Mail module. The app shell owns
+// Keyboard shortcuts for the Mail module, the ones people know from other
+// desktop mail programs. The app shell owns
 // Ctrl+1–4 (modules) and Ctrl+E / Ctrl+Shift+F (search).
 
 import { useEffect } from "react";

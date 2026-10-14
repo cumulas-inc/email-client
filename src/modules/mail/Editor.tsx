@@ -60,7 +60,7 @@ export function RichTextEditor({
   initialHtml,
   onChange,
   autoFocus,
-  placeholder = "Type your message here",
+  placeholder = "Write your message",
   ref,
 }: RichTextEditorProps) {
   const onChangeRef = useRef(onChange);
@@ -99,9 +99,10 @@ export function RichTextEditor({
       handleKeyDown: (_view, event) => {
         // Ctrl+Enter sends (handled by the composer), not a line break.
         if ((event.ctrlKey || event.metaKey) && event.key === "Enter") return true;
-        // Ctrl+K: insert link (Outlook).
+        // Ctrl+K: insert link. Elsewhere it jumps to search, so keep it here.
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
           event.preventDefault();
+          event.stopPropagation();
           openLinkDialog();
           return true;
         }

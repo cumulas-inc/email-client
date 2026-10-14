@@ -43,6 +43,24 @@ export function FileTypeIcon({ kind, size = 20 }: { kind: FileKind; size?: numbe
   }
 }
 
+/** "DOCX" for "plan-v7.docx"; nothing when there is no short extension. */
+function extensionOf(name: string): string | null {
+  const match = /\.([a-z0-9]{1,4})$/i.exec(name);
+  return match ? match[1]!.toUpperCase() : null;
+}
+
+/** A small page with the file's kind on it, tinted by type. */
+export function FileBadge({ name, contentType }: { name: string; contentType: string }) {
+  const kind = fileKind(name, contentType);
+  const ext = extensionOf(name);
+  return (
+    <span className={`mail-file-badge mail-file-badge--${kind}`} aria-hidden="true">
+      <FileTypeIcon kind={kind} size={ext ? 14 : 18} />
+      {ext && <span className="mail-file-badge__ext">{ext}</span>}
+    </span>
+  );
+}
+
 export function Attachments({
   messageId,
   attachments,
@@ -94,51 +112,45 @@ export function Attachments({
 
   return (
     <section className="mail-attachments" aria-label="Attachments">
-      <div className="mail-attachments__summary">
-        <span>
-          {files.length === 1 ? "1 attachment" : `${files.length} attachments`} ·{" "}
-          {formatBytes(total)}
-        </span>
-        {files.length > 1 && (
+      {files.length > 1 && (
+        <div className="mail-attachments__summary">
+          <span>
+            {files.length} attachments · {formatBytes(total)}
+          </span>
           <button type="button" className="btn btn--subtle btn--sm" onClick={() => void saveAll()}>
             <Download size={14} aria-hidden="true" />
             Save all
           </button>
-        )}
-      </div>
+        </div>
+      )}
       <ul className="mail-attachments__list">
-        {files.map((a) => {
-          const kind = fileKind(a.name, a.contentType);
-          return (
-            <li key={a.id} className="mail-attachment">
-              <button
-                type="button"
-                className="mail-attachment__open"
-                title={`Open ${a.name}`}
-                aria-label={`Open ${a.name}`}
-                disabled={busy === a.id}
-                onClick={() => void open(a)}
-              >
-                <span className={`mail-attachment__icon mail-attachment__icon--${kind}`}>
-                  <FileTypeIcon kind={kind} />
-                </span>
-                <span className="mail-attachment__text">
-                  <span className="mail-attachment__name">{a.name}</span>
-                  <span className="mail-attachment__size">{formatBytes(a.size)}</span>
-                </span>
-              </button>
-              <button
-                type="button"
-                className="icon-btn icon-btn--sm mail-attachment__save"
-                aria-label={`Save ${a.name}`}
-                title="Save"
-                onClick={() => void save(a)}
-              >
-                <Download size={15} />
-              </button>
-            </li>
-          );
-        })}
+        {files.map((a) => (
+          <li key={a.id} className="mail-attachment">
+            <button
+              type="button"
+              className="mail-attachment__open"
+              title={`Open ${a.name}`}
+              aria-label={`Open ${a.name}`}
+              disabled={busy === a.id}
+              onClick={() => void open(a)}
+            >
+              <FileBadge name={a.name} contentType={a.contentType} />
+              <span className="mail-attachment__text">
+                <span className="mail-attachment__name">{a.name}</span>
+                <span className="mail-attachment__size">{formatBytes(a.size)}</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="icon-btn mail-attachment__save"
+              aria-label={`Save ${a.name}`}
+              title="Save"
+              onClick={() => void save(a)}
+            >
+              <Download size={16} strokeWidth={1.75} />
+            </button>
+          </li>
+        ))}
       </ul>
     </section>
   );

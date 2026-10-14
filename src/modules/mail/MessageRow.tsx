@@ -1,4 +1,13 @@
-import { ArrowDown, Check, Flag, Mail, MailOpen, Paperclip, Trash2 } from "lucide-react";
+import {
+  ArrowDown,
+  Check,
+  CircleAlert,
+  Flag,
+  Mail,
+  MailOpen,
+  Paperclip,
+  Trash2,
+} from "lucide-react";
 import { type DragEvent, type MouseEvent, memo } from "react";
 
 import type { MessageSummary } from "../../api/types";
@@ -107,11 +116,11 @@ export const MessageRow = memo(function MessageRow({
           <Avatar
             name={displayName(showRecipients ? m.to[0] : m.from)}
             colorKey={(showRecipients ? m.to[0] : m.from)?.address}
-            size={32}
+            size={34}
           />
         </span>
         <span className={`mail-row__check${selected ? " is-checked" : ""}`} aria-hidden="true">
-          {selected && <Check size={14} />}
+          {selected && <Check size={13} strokeWidth={2.75} />}
         </span>
       </div>
       <div className="mail-row__body">
@@ -121,15 +130,24 @@ export const MessageRow = memo(function MessageRow({
           </span>
           <span className="mail-row__status">
             {m.importance === "high" && (
-              <span className="mail-row__importance" title="High importance">
-                !
-              </span>
+              <CircleAlert
+                size={14}
+                className="mail-row__importance"
+                aria-label="High importance"
+              />
             )}
             {m.importance === "low" && (
               <ArrowDown size={14} className="mail-row__low" aria-label="Low importance" />
             )}
             {m.hasAttachments && <Paperclip size={14} aria-label="Has attachments" />}
             {m.isFlagged && <Flag size={14} className="mail-row__flag" aria-label="Flagged" />}
+          </span>
+          <span className="mail-row__date">{date}</span>
+        </div>
+        <div className="mail-row__line">
+          <span className="mail-row__subject" title={subject}>
+            {m.isDraft && <span className="mail-row__draft">Draft · </span>}
+            {subject}
           </span>
           <span className="mail-row__actions" onClick={stop} onDoubleClick={stop}>
             <button
@@ -156,7 +174,7 @@ export const MessageRow = memo(function MessageRow({
               type="button"
               className="icon-btn icon-btn--sm mail-row__flag-btn"
               tabIndex={-1}
-              aria-label={m.isFlagged ? "Unflag" : "Flag"}
+              aria-label="Flag"
               aria-pressed={m.isFlagged}
               title={m.isFlagged ? "Unflag" : "Flag"}
               onClick={() => handlers.onToggleFlag(m.id, !m.isFlagged)}
@@ -164,13 +182,6 @@ export const MessageRow = memo(function MessageRow({
               <Flag size={15} />
             </button>
           </span>
-        </div>
-        <div className="mail-row__line">
-          <span className="mail-row__subject" title={subject}>
-            {m.isDraft && <span className="mail-row__draft">[Draft] </span>}
-            {subject}
-          </span>
-          <span className="mail-row__date">{date}</span>
         </div>
         <div className="mail-row__preview">
           {context && (

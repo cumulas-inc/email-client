@@ -1,5 +1,6 @@
-import { ChevronDown, ChevronRight, SquarePen } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import {
+  type CSSProperties,
   type DragEvent,
   type KeyboardEvent,
   type ReactNode,
@@ -28,6 +29,12 @@ function folderCount(folder: Folder): number {
   return folder.role === "drafts" ? folder.totalCount : folder.unreadCount;
 }
 
+/** The letter on an account's badge: "W" for Work. Its color tells accounts apart. */
+function accountInitial(name: string): string {
+  const letter = name.match(/[\p{L}\p{N}]/u)?.[0] ?? "?";
+  return letter.toLocaleUpperCase();
+}
+
 function countLabel(folder: Folder): string {
   const n = folderCount(folder);
   if (n === 0) return "";
@@ -40,6 +47,8 @@ interface ItemProps {
   parentKey: string | null;
   level: number;
   label: string;
+  /** Shown before the label, quieter: "Work ·" in "Work · Inbox". */
+  prefix?: string;
   ariaLabel: string;
   icon: ReactNode;
   count?: number;
@@ -51,7 +60,8 @@ interface ItemProps {
   expanded?: boolean;
   focused: boolean;
   dropFolder?: Folder;
-  heading?: boolean;
+  /** "section": a small label (Favorites); "account": badge, name and address. */
+  heading?: "section" | "account";
   onActivate: () => void;
   onToggle?: () => void;
   onFocusKey: (key: string) => void;
@@ -65,6 +75,7 @@ function TreeItem(props: ItemProps) {
     parentKey,
     level,
     label,
+    prefix,
     ariaLabel,
     icon,
     count,
@@ -143,13 +154,13 @@ function TreeItem(props: ItemProps) {
       <div
         className={[
           "mail-tree__row",
-          heading && "mail-tree__row--heading",
+          heading && `mail-tree__row--${heading}`,
           selected && "is-selected",
           dropping && "is-drop-target",
         ]
           .filter(Boolean)
           .join(" ")}
-        style={{ paddingInlineStart: `calc(var(--space-1) + ${(level - 1) * 14}px)` }}
+        style={heading ? undefined : ({ "--depth": level - 2 } as CSSProperties)}
         title={title}
         onClick={(e) => {
           e.stopPropagation();
@@ -158,23 +169,27 @@ function TreeItem(props: ItemProps) {
         }}
         {...dropHandlers}
       >
-        <span
-          className="mail-tree__chevron"
-          onClick={(e) => {
-            if (!expandable) return;
-            e.stopPropagation();
-            onToggle?.();
-          }}
-          aria-hidden="true"
-        >
-          {expandable && (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />)}
-        </span>
         {icon && <span className="mail-tree__icon">{icon}</span>}
-        <span className="mail-tree__label">{label}</span>
+        <span className="mail-tree__label">
+          {prefix && <span className="mail-tree__prefix">{prefix} · </span>}
+          {label}
+        </span>
         {secondary && <span className="mail-tree__secondary">{secondary}</span>}
         {!!count && (
           <span className={`mail-tree__count${countMuted ? " mail-tree__count--muted" : ""}`}>
             {count}
+          </span>
+        )}
+        {expandable && (
+          <span
+            className={`mail-tree__chevron${expanded ? "" : " is-collapsed"}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle?.();
+            }}
+            aria-hidden="true"
+          >
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </span>
         )}
       </div>
@@ -253,7 +268,7 @@ export function FolderPane({ actions }: FolderPaneProps) {
           level={level}
           label={f.name}
           ariaLabel={`${f.name}${countLabel(f)}`}
-          icon={<FolderIcon role={f.role} open={kids.length > 0 && expanded} />}
+          icon={<FolderIcon role={f.role} size={17} open={kids.length > 0 && expanded} />}
           count={folderCount(f)}
           countMuted={f.role === "drafts"}
           selected={selectedKey === key}
@@ -332,17 +347,6 @@ export function FolderPane({ actions }: FolderPaneProps) {
 
   return (
     <div className="mail-folders">
-      <div className="mail-folders__top">
-        <button
-          type="button"
-          className="btn btn--primary mail-folders__new"
-          onClick={() => actions.newMessage()}
-          title="New mail (Ctrl+N)"
-        >
-          <SquarePen size={16} aria-hidden="true" />
-          New mail
-        </button>
-      </div>
       <ul
         ref={treeRef}
         role="tree"
@@ -358,7 +362,7 @@ export function FolderPane({ actions }: FolderPaneProps) {
           label="Favorites"
           ariaLabel="Favorites"
           icon={null}
-          heading
+          heading="section"
           expandable
           expanded={favExpanded}
           focused={activeKey === "favorites"}
@@ -373,7 +377,7 @@ export function FolderPane({ actions }: FolderPaneProps) {
               level={2}
               label="All inboxes"
               ariaLabel={`All inboxes${totalUnifiedUnread ? `, ${totalUnifiedUnread} unread` : ""}`}
-              icon={<FolderIcon role="unified" />}
+              icon={<FolderIcon role="unified" size={17} />}
               count={totalUnifiedUnread}
               selected={selectedKey === `fav:${ALL_INBOXES}`}
               focused={activeKey === `fav:${ALL_INBOXES}`}
@@ -391,9 +395,9 @@ export function FolderPane({ actions }: FolderPaneProps) {
                 parentKey="favorites"
                 level={2}
                 label={f.name}
-                secondary={accounts.length > 1 ? name : undefined}
+                prefix={accounts.length > 1 ? name : undefined}
                 ariaLabel={`${f.name}${accounts.length > 1 ? ` (${name})` : ""}${countLabel(f)}`}
-                icon={<FolderIcon role="inbox" />}
+                icon={<FolderIcon role="inbox" size={17} />}
                 count={folderCount(f)}
                 selected={selectedKey === key}
                 focused={activeKey === key}
@@ -414,16 +418,19 @@ export function FolderPane({ actions }: FolderPaneProps) {
               parentKey={null}
               level={1}
               label={account.displayName}
-              title={account.email}
+              secondary={account.email}
+              title={`${account.displayName} (${account.email})`}
               ariaLabel={`${account.displayName} (${account.email})`}
               icon={
                 <span
-                  className="mail-tree__dot"
+                  className="mail-tree__badge"
                   style={{ background: account.color }}
                   aria-hidden="true"
-                />
+                >
+                  {accountInitial(account.displayName)}
+                </span>
               }
-              heading
+              heading="account"
               expandable
               expanded={expanded}
               focused={activeKey === key}
