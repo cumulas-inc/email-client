@@ -6,23 +6,22 @@ import { useToasts } from "./toast";
 export function Toaster() {
   const { toasts, dismiss } = useToasts();
   const ref = useRef<HTMLDivElement>(null);
-  // The toaster is a manual popover: showing it again whenever a toast
-  // arrives puts it at the top of the top layer, above any open dialog.
+  // Where popovers are supported the toaster is a manual one: showing it
+  // again whenever a toast arrives puts it at the top of the top layer,
+  // above any open dialog. Elsewhere it stays an ordinary fixed element.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el || typeof el.showPopover !== "function") return;
-    if (el.matches(":popover-open")) el.hidePopover();
-    if (toasts.length > 0) el.showPopover();
+    try {
+      if (!el.popover) el.popover = "manual";
+      if (el.matches(":popover-open")) el.hidePopover();
+      if (toasts.length > 0) el.showPopover();
+    } catch {
+      el.removeAttribute("popover");
+    }
   }, [toasts.length]);
   return (
-    <div
-      ref={ref}
-      popover="manual"
-      className="toaster"
-      role="region"
-      aria-label="Notifications"
-      aria-live="polite"
-    >
+    <div ref={ref} className="toaster" role="region" aria-label="Notifications" aria-live="polite">
       {toasts.map((t) => (
         <div
           key={t.id}
