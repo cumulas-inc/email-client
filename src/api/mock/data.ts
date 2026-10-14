@@ -3,6 +3,7 @@
 
 import type {
   Account,
+  Attendee,
   Calendar,
   CalendarEvent,
   Contact,
@@ -682,6 +683,104 @@ export function createDemoState(): MockState {
     event(nextId(), "cal-home", HOME, "Dentist", at(5, 8, 30), 45, {
       organizer: null,
       reminderMinutes: 60,
+    }),
+  );
+
+  // A busy current week: overlapping meetings, every "show as" state, a
+  // cancelled and a declined meeting, an event across midnight, multi-day bars.
+  const attending = (...list: [EmailAddress, Attendee["response"]][]): Attendee[] =>
+    list.map(([email, response]) => ({ email, kind: "required", response }));
+  events.push(
+    event(nextId(), "cal-team", WORK, "Atlas launch week", new Date(allDay(-2)), 5 * 24 * 60, {
+      isAllDay: true,
+      showAs: "free",
+      reminderMinutes: null,
+      organizer: people.priya,
+      responseStatus: "accepted",
+    }),
+    event(nextId(), "cal-work", WORK, "Sprint planning", at(-2, 10), 90, {
+      organizer: people.priya,
+      responseStatus: "accepted",
+      isOnlineMeeting: true,
+      onlineMeetingUrl: "https://meet.example/sprint-planning",
+      attendees: attending(
+        [people.priya, "organizer"],
+        [people.jonas, "accepted"],
+        [people.mei, "accepted"],
+        [ME_WORK, "accepted"],
+      ),
+    }),
+    event(nextId(), "cal-work", WORK, "Lunch & learn: Rust async", at(-2, 12), 60, {
+      location: "Auditorium",
+      showAs: "free",
+      organizer: people.jonas,
+      responseStatus: "accepted",
+    }),
+    event(nextId(), "cal-work", WORK, "Hiring sync", at(-1, 11), 30, {
+      organizer: people.dana,
+      responseStatus: "accepted",
+      isRecurring: true,
+    }),
+    event(nextId(), "cal-work", WORK, "Architecture forum", at(-1, 16), 60, {
+      location: "Room 2.04",
+      organizer: people.jonas,
+      responseStatus: "accepted",
+      isCancelled: true,
+    }),
+    event(nextId(), "cal-work", WORK, "Security review", at(0, 11), 60, {
+      location: "Room 3.01",
+      organizer: people.jonas,
+      responseStatus: "tentative",
+      showAs: "tentative",
+      attendees: attending(
+        [people.jonas, "organizer"],
+        [people.it, "accepted"],
+        [ME_WORK, "tentative"],
+      ),
+    }),
+    event(nextId(), "cal-work", WORK, "Customer escalation: Contoso", at(0, 14, 30), 45, {
+      organizer: people.sam,
+      responseStatus: "notResponded",
+      isOnlineMeeting: true,
+      onlineMeetingUrl: "https://meet.example/contoso-escalation",
+      bodyHtml:
+        "<p>Contoso reported intermittent sync failures after the 4.2 rollout. Let's agree on next steps.</p>" +
+        "<ul><li>Timeline and impact</li><li>Workaround status</li><li>Customer communication</li></ul>" +
+        '<p>Incident: <a href="https://status.example/incidents/4821">INC-4821</a></p>',
+      bodyPreview: "Contoso reported intermittent sync failures after the 4.2 rollout.",
+      attendees: [
+        { email: people.sam, kind: "required", response: "organizer" },
+        { email: people.jonas, kind: "required", response: "accepted" },
+        { email: ME_WORK, kind: "required", response: "notResponded" },
+        { email: people.dana, kind: "optional", response: "tentative" },
+        { email: people.priya, kind: "optional", response: "declined" },
+      ],
+    }),
+    event(nextId(), "cal-work", WORK, "Coffee with Mei", at(0, 16), 30, {
+      location: "Kitchen, 4th floor",
+      showAs: "free",
+      reminderMinutes: 5,
+      attendees: attending([people.mei, "accepted"]),
+    }),
+    event(nextId(), "cal-work", WORK, "School pickup", at(1, 15, 30), 90, {
+      showAs: "outOfOffice",
+      reminderMinutes: 30,
+    }),
+    event(nextId(), "cal-work", WORK, "Team social planning", at(1, 16), 30, {
+      organizer: people.mei,
+      responseStatus: "declined",
+    }),
+    event(nextId(), "cal-work", WORK, "Working from home", new Date(allDay(2)), 24 * 60, {
+      isAllDay: true,
+      showAs: "workingElsewhere",
+      reminderMinutes: null,
+    }),
+    event(nextId(), "cal-team", WORK, "Release window", at(2, 22), 180, {
+      location: "On-call bridge",
+      organizer: people.priya,
+      responseStatus: "accepted",
+      isOnlineMeeting: true,
+      onlineMeetingUrl: "https://meet.example/release-bridge",
     }),
   );
 

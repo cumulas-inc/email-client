@@ -576,10 +576,23 @@ export class MockBackend implements Backend {
     const index = this.state.events.findIndex((e) => e.id === eventId);
     if (index < 0) fail("notFound", "event not found");
     const existing = this.state.events[index]!;
-    const event = {
-      ...this.eventFromDraft(eventId, draft),
+    const updated = this.eventFromDraft(eventId, draft);
+    const event: CalendarEvent = {
+      ...updated,
       isRecurring: existing.isRecurring,
+      isCancelled: existing.isCancelled,
       organizer: existing.organizer,
+      // Editing keeps the user's own response and what attendees answered.
+      responseStatus: existing.responseStatus,
+      attendees: updated.attendees.map(
+        (a) =>
+          existing.attendees.find(
+            (old) => old.email.address.toLowerCase() === a.email.address.toLowerCase(),
+          ) ?? a,
+      ),
+      onlineMeetingUrl: updated.isOnlineMeeting
+        ? (existing.onlineMeetingUrl ?? updated.onlineMeetingUrl)
+        : null,
     };
     this.state.events[index] = event;
     this.emit(["calendar"], event.accountId);
@@ -600,9 +613,14 @@ export class MockBackend implements Backend {
       fail("unsupported", "Meeting responses need a Microsoft account.");
     }
     if (response === "decline") {
+      // Like Exchange: a declined meeting is removed from the calendar.
       this.state.events = this.state.events.filter((e) => e.id !== eventId);
     } else {
       event.responseStatus = response === "accept" ? "accepted" : "tentative";
+      const me = this.account(event.accountId).email.toLowerCase();
+      for (const a of event.attendees) {
+        if (a.email.address.toLowerCase() === me) a.response = event.responseStatus;
+      }
     }
     this.emit(["calendar"], event.accountId);
     return clone(event);
