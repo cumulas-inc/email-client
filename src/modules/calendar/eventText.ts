@@ -4,7 +4,7 @@ import { format } from "date-fns";
 
 import type { CalendarEvent, ResponseStatus, ShowAs } from "../../api/types";
 import { formatTimeRange } from "../../lib/format";
-import { displayInstants, eventRange } from "./dates";
+import { eventRange } from "./dates";
 
 export const SHOW_AS_LABELS: Record<ShowAs, string> = {
   free: "Free",
@@ -47,8 +47,7 @@ export function displayShowAs(event: CalendarEvent): ShowAs {
 
 /** Time range for display, all-day events read as local days. */
 export function eventTimeRange(event: CalendarEvent): string {
-  const { start, end } = displayInstants(event);
-  return formatTimeRange(start, end, event.isAllDay);
+  return formatTimeRange(event.start, event.end, event.isAllDay);
 }
 
 /** "Wednesday, 14 October 2026" or "Wed 14 Oct – Fri 16 Oct" for long events. */

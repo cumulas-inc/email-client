@@ -77,15 +77,28 @@ export function dateGroup(isoDate: string, now = new Date()): string {
   return format(d, "MMMM yyyy");
 }
 
+/** The local calendar day an all-day boundary (stored as midnight UTC) means. */
+function allDayToLocal(iso: string): Date {
+  const d = new Date(iso);
+  return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+/**
+ * "09:30 – 10:00", "All day", "8 Oct – 11 Oct". Timed events are shown in
+ * local time; all-day events use the stored dates (midnight UTC of the first
+ * day to midnight UTC of the day after the last), whatever the time zone.
+ */
 export function formatTimeRange(startIso: string, endIso: string, allDay: boolean): string {
-  const start = new Date(startIso);
-  const end = new Date(endIso);
   if (allDay) {
-    const lastDay = new Date(end.getTime() - 1);
+    const start = allDayToLocal(startIso);
+    const end = allDayToLocal(endIso);
+    const lastDay = end > start ? new Date(end.getTime() - 1) : start;
     return isSameDay(start, lastDay)
       ? "All day"
       : `${format(start, "d MMM")} – ${format(lastDay, "d MMM")}`;
   }
+  const start = new Date(startIso);
+  const end = new Date(endIso);
   if (isSameDay(start, end)) return `${format(start, "HH:mm")} – ${format(end, "HH:mm")}`;
   return `${format(start, "d MMM HH:mm")} – ${format(end, "d MMM HH:mm")}`;
 }

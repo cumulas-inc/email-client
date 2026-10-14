@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { colorFor, displayName, formatBytes, formatListDate, initials } from "./format";
+import {
+  colorFor,
+  displayName,
+  formatBytes,
+  formatListDate,
+  formatTimeRange,
+  initials,
+} from "./format";
 
 describe("format helpers", () => {
   it("derives initials from names and addresses", () => {
@@ -27,6 +34,16 @@ describe("format helpers", () => {
     expect(formatListDate(new Date(2026, 9, 12, 9, 5).toISOString(), now)).toBe("Mon 09:05");
     expect(formatListDate(new Date(2026, 6, 1, 9, 5).toISOString(), now)).toBe("1 Jul");
     expect(formatListDate(new Date(2024, 6, 1, 9, 5).toISOString(), now)).toBe("1 Jul 2024");
+  });
+
+  it("reads all-day ranges from their stored UTC dates", () => {
+    // Stored as midnight UTC; must not shift a day in time zones west of UTC.
+    expect(formatTimeRange("2026-10-20T00:00:00.000Z", "2026-10-21T00:00:00.000Z", true)).toBe(
+      "All day",
+    );
+    expect(formatTimeRange("2026-10-20T00:00:00.000Z", "2026-10-24T00:00:00.000Z", true)).toBe(
+      "20 Oct – 23 Oct",
+    );
   });
 
   it("formats sizes", () => {

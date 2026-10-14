@@ -51,15 +51,6 @@ export function isAllDayLike(event: EventTimesLike): boolean {
   return new Date(event.end).getTime() - new Date(event.start).getTime() >= DAY;
 }
 
-/**
- * ISO instants whose *local* reading gives the event's displayed bounds, for
- * formatters such as `formatTimeRange` that read dates in local time.
- */
-export function displayInstants(event: EventTimesLike): { start: string; end: string } {
-  const { start, end } = eventRange(event);
-  return { start: start.toISOString(), end: end.toISOString() };
-}
-
 /** Minutes since local midnight on the wall clock. */
 export function minutesOfDay(d: Date): number {
   return d.getHours() * 60 + d.getMinutes();
