@@ -1,5 +1,5 @@
-/* Design tokens. Components use these variables only — never raw colours —
-   so light/dark themes and future accent colours stay consistent. */
+/* Design tokens. Components use these variables only — never raw colors —
+   so light/dark themes and future accent colors stay consistent. */
 
 :root {
   color-scheme: light;

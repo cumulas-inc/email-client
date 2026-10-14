@@ -42,7 +42,7 @@ const AVATAR_COLORS = [
   "#a4262c",
 ];
 
-/** Stable colour for a person, derived from their address. */
+/** Stable color for a person, derived from their address. */
 export function colorFor(key: string): string {
   let hash = 0;
   for (const ch of key.toLowerCase()) hash = (hash * 31 + ch.charCodeAt(0)) | 0;

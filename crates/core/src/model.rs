@@ -1,6 +1,6 @@
 //! Domain model shared by the store, the providers and the UI.
 //!
-//! Every type here is serialised to the frontend with `camelCase` field names;
+//! Every type here is serialized to the frontend with `camelCase` field names;
 //! `src/api/types.ts` mirrors these definitions and must be kept in sync.
 //!
 //! Identifiers: every entity has a local `id` that is stable and unique across
@@ -110,7 +110,7 @@ pub struct Account {
     pub kind: AccountKind,
     pub display_name: String,
     pub email: String,
-    /// Accent colour used in the UI (`#rrggbb`).
+    /// Accent color used in the UI (`#rrggbb`).
     pub color: String,
     pub settings: AccountSettings,
     pub created_at: DateTime<Utc>,
@@ -297,7 +297,7 @@ pub struct Message {
     pub summary: MessageSummary,
     pub bcc: Vec<EmailAddress>,
     pub reply_to: Vec<EmailAddress>,
-    /// Sanitised HTML body (scripts, forms and event handlers removed; remote
+    /// Sanitized HTML body (scripts, forms and event handlers removed; remote
     /// resources blocked unless the user allowed them). `None` for plain-text
     /// messages.
     pub body_html: Option<String>,

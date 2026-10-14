@@ -1,6 +1,6 @@
 // Mail commands shared by the list, the reading pane and keyboard shortcuts.
 // The returned object is stable: it reads current data from the query cache
-// and the mail store at call time, so memoised rows don't re-render.
+// and the mail store at call time, so memoized rows don't re-render.
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";

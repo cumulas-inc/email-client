@@ -623,7 +623,7 @@ async fn greet(mut client: Client<MailStream>) -> Result<Client<MailStream>> {
 }
 
 /// TLS client configuration that trusts the system's certificate store,
-/// including CAs installed by an organisation.
+/// including CAs installed by an organization.
 pub(super) fn tls_config() -> Result<Arc<ClientConfig>> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = ClientConfig::builder_with_provider(provider)

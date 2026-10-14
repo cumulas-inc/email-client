@@ -43,7 +43,7 @@ interface ResultPanelProps {
   tone: "brand" | "neutral" | "warning" | "danger";
   title: string;
   children?: ReactNode;
-  /** Centre short messages; align longer explanations to the start. */
+  /** Center short messages; align longer explanations to the start. */
   align?: "center" | "start";
 }
 

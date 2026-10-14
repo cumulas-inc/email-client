@@ -1,5 +1,5 @@
 // What Cumulas Mail asks Microsoft for, in plain language, and the request
-// a user can forward to IT when their organisation requires admin approval.
+// a user can forward to IT when their organization requires admin approval.
 // Keep in step with SCOPES in crates/core/src/auth/microsoft.rs.
 
 export interface Permission {
@@ -50,8 +50,8 @@ export const MICROSOFT_PERMISSIONS: Permission[] = [
   },
 ];
 
-/** A readable organisation name from the tenant hint, if it is a domain. */
-export function organisationName(tenant: string | undefined): string | null {
+/** A readable organization name from the tenant hint, if it is a domain. */
+export function organizationName(tenant: string | undefined): string | null {
   if (!tenant) return null;
   const t = tenant.trim();
   if (["common", "organizations", "consumers"].includes(t.toLowerCase())) return null;
@@ -66,7 +66,7 @@ interface AdminConsentRequest {
 }
 
 export function adminConsentEmail({ adminConsentUrl, email, tenant }: AdminConsentRequest) {
-  const org = organisationName(tenant);
+  const org = organizationName(tenant);
   const subject = "Please approve Cumulas Mail for Microsoft 365";
   const account = email ? ` (${email})` : "";
   const lines = [
@@ -81,7 +81,7 @@ export function adminConsentEmail({ adminConsentUrl, email, tenant }: AdminConse
     "Cumulas Mail only asks for delegated permissions, so it acts as the signed-in person and can only reach their own data:",
     ...MICROSOFT_PERMISSIONS.map((p) => `- ${p.request} (${p.scopes.join(", ")})`),
     "",
-    "The app runs on my computer and keeps mail there. It connects only to Microsoft 365, has no servers of its own and sends no telemetry. Approving it once makes it available to everyone in the organisation, so nobody else will need to ask.",
+    "The app runs on my computer and keeps mail there. It connects only to Microsoft 365, has no servers of its own and sends no telemetry. Approving it once makes it available to everyone in the organization, so nobody else will need to ask.",
     "",
     "Thank you!",
   ];

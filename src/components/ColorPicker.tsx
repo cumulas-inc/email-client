@@ -4,7 +4,7 @@ import { useId, type CSSProperties } from "react";
 import "./controls.css";
 
 export interface ColorOption {
-  /** CSS colour, e.g. "#0f6cbd". */
+  /** CSS color, e.g. "#0f6cbd". */
   value: string;
   /** Accessible name, e.g. "Blue". */
   name: string;
@@ -19,7 +19,7 @@ interface ColorPickerProps {
   disabled?: boolean;
 }
 
-/** A row of colour swatches; native radios, so arrow keys work. */
+/** A row of color swatches; native radios, so arrow keys work. */
 export function ColorPicker({
   value,
   options,
@@ -31,7 +31,7 @@ export function ColorPicker({
   const name = useId();
   const current = value.toLowerCase();
   const known = options.some((o) => o.value.toLowerCase() === current);
-  const all = known || !value ? options : [{ value, name: "Current colour" }, ...options];
+  const all = known || !value ? options : [{ value, name: "Current color" }, ...options];
   return (
     <div
       role="radiogroup"

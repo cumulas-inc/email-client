@@ -72,7 +72,7 @@ pub struct MessageBatch {
 /// Body and full headers of a message, as fetched from the server.
 #[derive(Debug, Clone, Default)]
 pub struct MessageContent {
-    /// Raw (unsanitised) HTML body. `cid:` references to inline images should
+    /// Raw (unsanitized) HTML body. `cid:` references to inline images should
     /// already be rewritten to `data:` URIs by the provider where possible.
     pub body_html: Option<String>,
     pub body_text: Option<String>,

@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState } from "react";
 
 import { useBackend } from "../../api/context";
 import { toast } from "../../components/toast";
-import { adminConsentMailto, organisationName } from "./microsoft";
+import { adminConsentMailto, organizationName } from "./microsoft";
 import { PermissionList } from "./PermissionList";
 import { ResultPanel } from "./StepLayout";
 
@@ -17,7 +17,7 @@ interface AdminConsentProps {
 }
 
 /**
- * Shown when the organisation only allows apps an administrator approved.
+ * Shown when the organization only allows apps an administrator approved.
  * Explains that nothing is wrong and makes forwarding the approval link easy.
  */
 export function AdminConsent({
@@ -30,7 +30,7 @@ export function AdminConsent({
   const linkId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [copied, setCopied] = useState(false);
-  const org = organisationName(tenant);
+  const org = organizationName(tenant);
 
   useEffect(() => {
     if (!copied) return;
@@ -60,7 +60,7 @@ export function AdminConsent({
       icon={<ShieldCheck size={28} />}
       tone="brand"
       align="start"
-      title="Your organisation needs to approve Cumulas Mail"
+      title="Your organization needs to approve Cumulas Mail"
     >
       <p>
         This isn&apos;t something you did wrong, and nothing is broken.{" "}
@@ -69,7 +69,7 @@ export function AdminConsent({
             <strong>{org}</strong> only allows
           </>
         ) : (
-          "Your organisation only allows"
+          "Your organization only allows"
         )}{" "}
         apps that its IT team has approved. An administrator can approve Cumulas Mail for everyone
         in a couple of minutes.

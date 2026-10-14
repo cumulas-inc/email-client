@@ -80,7 +80,7 @@ describe("Microsoft sign-in", () => {
     const cancel = vi.spyOn(backend, "cancelMicrosoftSignIn");
     openFlow({ step: "microsoft" }, backend);
 
-    // "slow@…" waits in the demo backend until the sign-in is cancelled.
+    // "slow@…" waits in the demo backend until the sign-in is canceled.
     await user.type(screen.getByLabelText("Email address (optional)"), "slow@contoso.example");
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
     expect(
@@ -96,7 +96,7 @@ describe("Microsoft sign-in", () => {
 
     expect(useAppStore.getState().addAccountOpen).toBe(true);
     expect(
-      screen.queryByRole("heading", { name: "Sign-in was cancelled" }),
+      screen.queryByRole("heading", { name: "Sign-in was canceled" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in with Microsoft" })).toBeInTheDocument();
     const email = screen.getByLabelText("Email address (optional)");
@@ -145,7 +145,7 @@ describe("Microsoft sign-in", () => {
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 
-  it("lets a cancelled 'Sign in again' start over", async () => {
+  it("lets a canceled 'Sign in again' start over", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend();
     const signIn = vi.spyOn(backend, "addMicrosoftAccount");
@@ -185,7 +185,7 @@ describe("Microsoft sign-in", () => {
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
 
     const heading = await screen.findByRole("heading", {
-      name: "Your organisation needs to approve Cumulas Mail",
+      name: "Your organization needs to approve Cumulas Mail",
     });
     await waitFor(() => expect(heading).toHaveFocus());
     expect(screen.getByText(/isn't something you did wrong, and nothing is broken/)).toBeVisible();
@@ -217,12 +217,12 @@ describe("Microsoft sign-in", () => {
     expect(signIn).toHaveBeenCalledWith("admin@contoso.example");
     expect(
       await screen.findByRole("heading", {
-        name: "Your organisation needs to approve Cumulas Mail",
+        name: "Your organization needs to approve Cumulas Mail",
       }),
     ).toBeInTheDocument();
   });
 
-  it("mentions Microsoft's Request approval button when the organisation offers it", async () => {
+  it("mentions Microsoft's Request approval button when the organization offers it", async () => {
     const user = userEvent.setup();
     const { backend } = openFlow({ step: "microsoft" });
     const details = { adminConsentUrl: ADMIN_URL, tenant: "contoso.example" };
@@ -234,7 +234,7 @@ describe("Microsoft sign-in", () => {
     vi.spyOn(backend, "addMicrosoftAccount")
       .mockRejectedValueOnce(needsApproval(true))
       .mockRejectedValueOnce(needsApproval(false));
-    const heading = { name: "Your organisation needs to approve Cumulas Mail" };
+    const heading = { name: "Your organization needs to approve Cumulas Mail" };
 
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
     await screen.findByRole("heading", heading);
@@ -247,7 +247,7 @@ describe("Microsoft sign-in", () => {
     expect(screen.queryByText(/Request approval/)).not.toBeInTheDocument();
   });
 
-  it("handles a cancelled browser sign-in quietly", async () => {
+  it("handles a canceled browser sign-in quietly", async () => {
     const user = userEvent.setup();
     const { backend } = openFlow({ step: "microsoft" });
     const signIn = vi.spyOn(backend, "addMicrosoftAccount");
@@ -256,7 +256,7 @@ describe("Microsoft sign-in", () => {
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
 
     expect(
-      await screen.findByRole("heading", { name: "Sign-in was cancelled" }),
+      await screen.findByRole("heading", { name: "Sign-in was canceled" }),
     ).toBeInTheDocument();
     expect(screen.getByText(/Nothing was changed/)).toBeInTheDocument();
 

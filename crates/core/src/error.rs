@@ -1,4 +1,4 @@
-//! Error type shared by the whole core. It serialises to
+//! Error type shared by the whole core. It serializes to
 //! `{ code, message, details? }` so the UI can branch on `code`.
 
 use serde::Serialize;
@@ -10,12 +10,12 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum ErrorCode {
     /// Stored credentials are missing or were rejected; the user must sign in again.
     AuthRequired,
-    /// The user's organisation does not allow users to consent to this app.
+    /// The user's organization does not allow users to consent to this app.
     /// `details` carries `{ adminConsentUrl, tenant }`.
     AdminConsentRequired,
     /// The user declined the permission prompt.
     ConsentDeclined,
-    /// Sign-in was cancelled or timed out before the browser redirected back.
+    /// Sign-in was canceled or timed out before the browser redirected back.
     SignInCancelled,
     /// A required setting (e.g. the Microsoft client id) is missing.
     NotConfigured,
@@ -95,7 +95,7 @@ impl From<rusqlite::Error> for Error {
 
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
-        Error::internal(format!("serialisation error: {e}"))
+        Error::internal(format!("serialization error: {e}"))
     }
 }
 

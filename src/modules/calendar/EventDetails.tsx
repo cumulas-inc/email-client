@@ -409,7 +409,7 @@ export function EventDetails({
               <div
                 className="cal-details__description"
                 onClick={onDescriptionClick}
-                // Sanitised above with DOMPurify (no scripts, styles, forms or images).
+                // Sanitized above with DOMPurify (no scripts, styles, forms or images).
                 dangerouslySetInnerHTML={{ __html: description }}
               />
             ) : (

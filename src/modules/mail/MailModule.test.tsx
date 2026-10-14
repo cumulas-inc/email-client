@@ -22,11 +22,11 @@ async function openMessage(user: ReturnType<typeof userEvent.setup>, name: RegEx
 }
 
 describe("Mail folders", () => {
-  it("shows favourites and account trees with unread badges, and switches folders", async () => {
+  it("shows favorites and account trees with unread badges, and switches folders", async () => {
     const user = userEvent.setup();
     await renderMail();
 
-    // Favourites: unified inbox plus each account's inbox.
+    // Favorites: unified inbox plus each account's inbox.
     expect(treeItem(/^All inboxes, 5 unread$/)).toBeInTheDocument();
     expect(treeItem(/^Inbox \(Alex Morgan\), 3 unread$/)).toHaveAttribute("aria-selected", "true");
     expect(treeItem(/^Inbox \(Alex \(Personal\)\), 2 unread$/)).toBeInTheDocument();

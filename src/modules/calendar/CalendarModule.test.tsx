@@ -312,7 +312,7 @@ describe("CalendarModule", () => {
     );
   });
 
-  it("renders descriptions sanitised and opens links through the backend", async () => {
+  it("renders descriptions sanitized and opens links through the backend", async () => {
     const backend = new MockBackend();
     await backend.createEvent({
       calendarId: "cal-work",

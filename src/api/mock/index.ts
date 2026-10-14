@@ -1,5 +1,5 @@
 // In-memory implementation of the Backend, mirroring the Rust service's
-// behaviour closely enough for UI development, tests and demos.
+// behavior closely enough for UI development, tests and demos.
 
 import type { Backend, Unsubscribe } from "../backend";
 import type {
@@ -191,7 +191,7 @@ export class MockBackend implements Backend {
     await this.delay();
     const hint = loginHint?.trim() ?? "";
     // Demo hooks: "admin@..." simulates a tenant that blocks user consent,
-    // "cancel@..." a cancelled browser sign-in.
+    // "cancel@..." a canceled browser sign-in.
     if (hint.startsWith("admin")) {
       const tenant = hint.split("@")[1] ?? "organizations";
       fail(
@@ -203,13 +203,13 @@ export class MockBackend implements Backend {
         },
       );
     }
-    if (hint.startsWith("cancel")) fail("signInCancelled", "Sign-in was cancelled.");
+    if (hint.startsWith("cancel")) fail("signInCancelled", "Sign-in was canceled.");
     if (hint.startsWith("slow")) {
       // Never finishes on its own, like a browser tab the user walked away from.
       await new Promise<void>((resolve) => {
         this.pendingSignIn = resolve;
       });
-      fail("signInCancelled", "Sign-in was cancelled.");
+      fail("signInCancelled", "Sign-in was canceled.");
     }
     const email = hint.includes("@") ? hint : "new.user@contoso.example";
     const account: Account = {

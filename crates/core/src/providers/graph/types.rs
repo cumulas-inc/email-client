@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::model::EmailAddress;
 
-/// Deserialises `null` like a missing field (Graph sends both).
+/// Deserializes `null` like a missing field (Graph sends both).
 pub(super) fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,

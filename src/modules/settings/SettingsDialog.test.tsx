@@ -208,12 +208,12 @@ describe("Microsoft app registration", () => {
     expect(tenant).not.toHaveAttribute("aria-invalid");
   });
 
-  it("states the licence and links to it from About", async () => {
+  it("states the license and links to it from About", async () => {
     const backend = new MockBackend();
     const openLink = vi.spyOn(backend, "openLink").mockResolvedValue();
     openAt("about", backend);
     expect(await screen.findByText("Free software")).toBeInTheDocument();
-    await userEvent.setup().click(screen.getByRole("button", { name: "Read the licence" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Read the license" }));
     expect(openLink).toHaveBeenCalledWith("https://www.gnu.org/licenses/gpl-3.0.html");
   });
 
@@ -276,19 +276,19 @@ describe("Accounts", () => {
     expect(useAppStore.getState().settingsOpen).toBe("accounts");
   });
 
-  it("changes an account's colour", async () => {
+  it("changes an account's color", async () => {
     const user = userEvent.setup();
     const { backend } = openAt("accounts");
     const update = vi.spyOn(backend, "updateAccount");
 
     await user.click(await screen.findByRole("button", { name: "Manage Alex (Personal)" }));
-    const colours = screen.getByRole("radiogroup", { name: "Colour" });
-    expect(within(colours).getAllByRole("radio")).toHaveLength(8);
-    expect(within(colours).getByRole("radio", { name: "Berry" })).toBeChecked();
+    const colors = screen.getByRole("radiogroup", { name: "Color" });
+    expect(within(colors).getAllByRole("radio")).toHaveLength(8);
+    expect(within(colors).getByRole("radio", { name: "Berry" })).toBeChecked();
 
-    await user.click(within(colours).getByRole("radio", { name: "Green" }));
+    await user.click(within(colors).getByRole("radio", { name: "Green" }));
     expect(update).toHaveBeenCalledWith("acct-home", undefined, "#107c10");
-    expect(within(colours).getByRole("radio", { name: "Green" })).toBeChecked();
+    expect(within(colors).getByRole("radio", { name: "Green" })).toBeChecked();
   });
 
   it("removes an account after confirmation", async () => {

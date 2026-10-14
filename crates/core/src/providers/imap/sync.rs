@@ -1,4 +1,4 @@
-//! Folder synchronisation.
+//! Folder synchronization.
 //!
 //! The cursor stored between syncs is `v1:{uidvalidity}:{uidnext}:{modseq}:
 //! {low}:{exists}`. `low` is the lowest UID the local cache may hold for the

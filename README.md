@@ -17,7 +17,7 @@ React, packaged for Flathub as `co.cumulas.Mail`.
 
 ## Features
 
-- **Mail**: folders and favourites, unified inbox, reading pane (right,
+- **Mail**: folders and favorites, unified inbox, reading pane (right,
   bottom or off), rich-text compose with attachments,
   reply/reply all/forward, flag, archive, move (drag and drop), undo, instant
   offline search, Outlook keyboard shortcuts.
@@ -32,7 +32,7 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   Yahoo and Proton Mail Bridge. IMAP accounts get a local calendar, contacts
   and task list.
 - **Privacy and security**: remote images and tracking pixels blocked by
-  default; message HTML sanitised and shown in a sandbox without scripts;
+  default; message HTML sanitized and shown in a sandbox without scripts;
   passwords and tokens kept in the system keyring (Secret portal in Flatpak);
   no telemetry.
 
@@ -84,7 +84,7 @@ event editing (single occurrence vs series), CalDAV/CardDAV for IMAP accounts,
 IMAP IDLE push, `mailto:` handling, and OAuth for Gmail/Yahoo IMAP (app
 passwords work today).
 
-## Licence
+## License
 
 Copyright © 2026 Cumulas and contributors.
 

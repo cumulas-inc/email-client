@@ -45,7 +45,7 @@ describe("Welcome", () => {
     expect(screen.getByRole("button", { name: "Sign in with Microsoft" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Email address (optional)")).toHaveFocus());
 
-    // Cancelling returns to the welcome screen where it left off.
+    // Canceling returns to the welcome screen where it left off.
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Microsoft 365 or Outlook.com" })).toHaveFocus();

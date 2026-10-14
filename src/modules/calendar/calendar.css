@@ -1,7 +1,7 @@
-/* Calendar module. Design tokens only; calendar colours come from data and
+/* Calendar module. Design tokens only; calendar colors come from data and
    reach CSS as --tint-* custom properties (see colors.ts). */
 
-/* --- Calendar colour tints ------------------------------------------------- */
+/* --- Calendar color tints ------------------------------------------------- */
 
 .cal-tint {
   --tint-bg: var(--tint-l-bg);

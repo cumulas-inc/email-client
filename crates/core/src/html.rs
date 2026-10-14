@@ -1,6 +1,6 @@
 //! Handling of untrusted HTML from email bodies.
 //!
-//! Defence in depth: bodies are sanitised here (no scripts, event handlers,
+//! Defense in depth: bodies are sanitized here (no scripts, event handlers,
 //! forms, frames or `javascript:` URLs), then the UI renders them inside a
 //! sandboxed `<iframe>` without `allow-scripts`, with a Content Security
 //! Policy that blocks remote loads unless the user allowed them.
@@ -31,7 +31,7 @@ fn css_has_remote_url(css: &str) -> bool {
     }) || lower.contains("@import")
 }
 
-/// Sanitises an HTML email body for display.
+/// Sanitizes an HTML email body for display.
 pub fn sanitize_email_html(html: &str, allow_remote: bool) -> SanitizedHtml {
     let blocked = Arc::new(AtomicBool::new(false));
     let blocked_in_filter = Arc::clone(&blocked);

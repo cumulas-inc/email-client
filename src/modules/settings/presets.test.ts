@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adminConsentEmail, adminConsentMailto, organisationName } from "./microsoft";
+import { adminConsentEmail, adminConsentMailto, organizationName } from "./microsoft";
 import { emailDomain, findPreset, isLoopbackHost, suggestedSettings } from "./presets";
 import { validateClientId, validatePort, validateTenant } from "./validation";
 
@@ -39,7 +39,7 @@ describe("provider presets", () => {
     },
   );
 
-  it("recognises providers that need an app password or a bridge", () => {
+  it("recognizes providers that need an app password or a bridge", () => {
     expect(findPreset("a@gmail.com")?.appPassword?.term).toBe("app password");
     expect(findPreset("a@me.com")?.appPassword?.term).toBe("app-specific password");
     expect(findPreset("a@proton.me")?.bridge).toBe(true);
@@ -92,10 +92,10 @@ describe("validation", () => {
 describe("admin consent request", () => {
   const url = "https://login.microsoftonline.com/contoso.example/v2.0/adminconsent?client_id=abc";
 
-  it("names the organisation only when the tenant is a domain", () => {
-    expect(organisationName("contoso.example")).toBe("contoso.example");
-    expect(organisationName("organizations")).toBeNull();
-    expect(organisationName(undefined)).toBeNull();
+  it("names the organization only when the tenant is a domain", () => {
+    expect(organizationName("contoso.example")).toBe("contoso.example");
+    expect(organizationName("organizations")).toBeNull();
+    expect(organizationName(undefined)).toBeNull();
   });
 
   it("writes a polite request with the link and every permission", () => {

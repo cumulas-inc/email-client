@@ -4,8 +4,8 @@
 /**
  * How the message is painted. Emails are authored for light backgrounds:
  * - "plain": light theme, blends into the pane.
- * - "paper": dark theme, shown on a light sheet so the original colours stay readable.
- * - "dark": dark theme, colours inverted (images are inverted back).
+ * - "paper": dark theme, shown on a light sheet so the original colors stay readable.
+ * - "dark": dark theme, colors inverted (images are inverted back).
  */
 export type BodyAppearance = "plain" | "paper" | "dark";
 
@@ -22,7 +22,7 @@ export function contentSecurityPolicy(allowRemote: boolean): string {
 }
 
 // The frame is a separate document: tokens from the app don't reach it, and
-// the email needs light-theme colours whatever the app theme is.
+// the email needs light-theme colors whatever the app theme is.
 const PAPER = {
   text: "#242424",
   muted: "#616161",

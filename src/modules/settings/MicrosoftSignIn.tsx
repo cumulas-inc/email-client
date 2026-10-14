@@ -198,7 +198,7 @@ export function MicrosoftSignIn({
             </>
           }
         >
-          <ResultPanel icon={<CircleX size={28} />} tone="neutral" title="Sign-in was cancelled">
+          <ResultPanel icon={<CircleX size={28} />} tone="neutral" title="Sign-in was canceled">
             <p>Nothing was changed. You can try again whenever you&apos;re ready.</p>
           </ResultPanel>
         </StepLayout>

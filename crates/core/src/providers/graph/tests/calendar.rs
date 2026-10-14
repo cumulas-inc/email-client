@@ -127,7 +127,7 @@ async fn events_are_read_from_the_calendar_view_in_utc() {
     assert!(standup.is_recurring);
     assert!(!standup.is_cancelled);
 
-    // All-day, returned shifted by the organiser's offset: dates recovered.
+    // All-day, returned shifted by the organizer's offset: dates recovered.
     let offsite = &events[1];
     assert!(offsite.is_all_day);
     assert_eq!(
@@ -157,17 +157,17 @@ async fn events_are_read_from_the_calendar_view_in_utc() {
     assert_eq!(holiday.show_as, ShowAs::OutOfOffice);
     assert!(holiday.attendees.is_empty());
 
-    let cancelled = &events[3];
-    assert!(cancelled.is_cancelled);
-    assert_eq!(cancelled.show_as, ShowAs::Busy, "unknown shows as busy");
-    assert_eq!(cancelled.response_status, ResponseStatus::NotResponded);
-    assert!(cancelled.is_recurring, "exceptions belong to a series");
+    let canceled = &events[3];
+    assert!(canceled.is_cancelled);
+    assert_eq!(canceled.show_as, ShowAs::Busy, "unknown shows as busy");
+    assert_eq!(canceled.response_status, ResponseStatus::NotResponded);
+    assert!(canceled.is_recurring, "exceptions belong to a series");
     assert_eq!(
-        cancelled.body_html.as_deref(),
+        canceled.body_html.as_deref(),
         Some("<div style=\"white-space: pre-wrap\">Moved to next week &lt;sorry&gt;</div>")
     );
     assert_eq!(
-        cancelled.online_meeting_url.as_deref(),
+        canceled.online_meeting_url.as_deref(),
         Some("https://meet.example.com/legacy")
     );
 }

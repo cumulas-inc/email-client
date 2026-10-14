@@ -42,7 +42,7 @@ rustls-platform-verifier = "0.7"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-platform-verifier", "hostname"] }
 mail-parser = "0.11"
 
-# HTML sanitising for message bodies
+# HTML sanitizing for message bodies
 ammonia = "4"
 
 # Secrets (Secret Service / Flatpak secret portal)

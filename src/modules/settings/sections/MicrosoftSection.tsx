@@ -15,7 +15,7 @@ const TENANT_OPTIONS: { value: TenantMode; label: string }[] = [
   { value: "common", label: "Any Microsoft account (common)" },
   { value: "organizations", label: "Work or school accounts only (organizations)" },
   { value: "consumers", label: "Personal accounts only (consumers)" },
-  { value: "custom", label: "One organisation (tenant ID or domain)" },
+  { value: "custom", label: "One organization (tenant ID or domain)" },
 ];
 
 function tenantMode(tenant: string | null): TenantMode {
@@ -79,14 +79,14 @@ function MicrosoftForm({ settings, builtIn }: { settings: Settings; builtIn: boo
     <>
       <p className="settings-intro">
         Cumulas Mail signs in to Microsoft 365 and Outlook.com as a registered app. Most people
-        never need to change this. Your IT team may ask you to use your organisation&apos;s own
+        never need to change this. Your IT team may ask you to use your organization&apos;s own
         registration.
       </p>
 
       {missing && (
         <Callout tone="warning" title="Microsoft sign-in needs an application ID">
           <p>
-            This build of Cumulas Mail doesn&apos;t include one, so add your organisation&apos;s
+            This build of Cumulas Mail doesn&apos;t include one, so add your organization&apos;s
             application ID below before signing in.
           </p>
         </Callout>
@@ -127,7 +127,7 @@ function MicrosoftForm({ settings, builtIn }: { settings: Settings; builtIn: boo
             id={tenantModeId}
             label="Who can sign in"
             value={mode}
-            hint="Leave this on “Any Microsoft account” unless your organisation tells you otherwise."
+            hint="Leave this on “Any Microsoft account” unless your organization tells you otherwise."
             onChange={(e) => {
               const next = e.target.value as TenantMode;
               setMode(next);

@@ -1,5 +1,5 @@
-// Renders untrusted email HTML. The HTML was sanitised by the backend; as
-// defence in depth it is shown in an <iframe sandbox="allow-same-origin">
+// Renders untrusted email HTML. The HTML was sanitized by the backend; as
+// defense in depth it is shown in an <iframe sandbox="allow-same-origin">
 // (no scripts, forms, popups or top navigation) with a Content Security
 // Policy that only allows inline styles and data:/cid: images, unless the
 // user allowed remote content. allow-same-origin lets this component reach

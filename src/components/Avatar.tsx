@@ -2,7 +2,7 @@ import { colorFor, initials } from "../lib/format";
 
 interface AvatarProps {
   name: string;
-  /** Used for the colour; defaults to the name. */
+  /** Used for the color; defaults to the name. */
   colorKey?: string;
   size?: number;
 }

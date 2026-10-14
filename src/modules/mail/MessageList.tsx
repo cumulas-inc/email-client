@@ -258,7 +258,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     !!folder &&
     (folder.role === "sent" || folder.role === "drafts" || folder.role === "outbox");
 
-  // --- handlers (stable, so memoised rows don't re-render) ---------------------
+  // --- handlers (stable, so memoized rows don't re-render) ---------------------
 
   const handlers = useMemo<RowHandlers>(
     () => ({

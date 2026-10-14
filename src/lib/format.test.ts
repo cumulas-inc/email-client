@@ -24,7 +24,7 @@ describe("format helpers", () => {
     expect(displayName(null)).toBe("(no sender)");
   });
 
-  it("gives stable colours", () => {
+  it("gives stable colors", () => {
     expect(colorFor("A@b.example")).toBe(colorFor("a@B.example"));
   });
 

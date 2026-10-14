@@ -23,7 +23,7 @@ system webview (WebKitGTK on Linux).
 │     └─ imap/   IMAP + SMTP                                         │
 │  auth/      Microsoft OAuth (PKCE, loopback redirect)              │
 │  secrets.rs Secret Service / Flatpak secret portal (oo7)           │
-│  html.rs    sanitising untrusted email HTML                        │
+│  html.rs    sanitizing untrusted email HTML                        │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -43,14 +43,14 @@ system webview (WebKitGTK on Linux).
   `(account, kind, remote id)` (`model::local_id`). The UI only uses local ids.
   Graph requests use immutable ids (`Prefer: IdType="ImmutableId"`) so messages
   keep their id when moved.
-- **Errors are typed.** Rust `Error { code, message, details }` is serialised
+- **Errors are typed.** Rust `Error { code, message, details }` is serialized
   to the UI as-is; the UI branches on `code` (e.g. `adminConsentRequired`).
 - **The core does not depend on Tauri** and is tested headless with fakes
   (`service/tests.rs`) and mock HTTP servers (wiremock).
 
 ## Security
 
-- Email HTML is sanitised in Rust (`html.rs`: no scripts, event handlers,
+- Email HTML is sanitized in Rust (`html.rs`: no scripts, event handlers,
   forms, frames or `javascript:`/`data:` links), then rendered in an
   `<iframe sandbox>` **without** `allow-scripts`, with a Content Security Policy
   that blocks remote images and styles unless the user allows them (tracking
@@ -68,7 +68,7 @@ system webview (WebKitGTK on Linux).
 The app requests only delegated permissions that users can grant themselves:
 `User.Read`, `offline_access`, `Mail.ReadWrite`, `Mail.Send`,
 `MailboxSettings.Read`, `Calendars.ReadWrite`, `Contacts.ReadWrite`,
-`Tasks.ReadWrite`. Whether a user may consent is the organisation's policy;
+`Tasks.ReadWrite`. Whether a user may consent is the organization's policy;
 when it is blocked the app shows an admin-consent link to forward to IT. See
 [microsoft-365.md](microsoft-365.md).
 

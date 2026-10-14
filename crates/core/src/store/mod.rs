@@ -70,7 +70,7 @@ pub(crate) fn date_str(d: &NaiveDate) -> String {
 }
 
 pub(crate) fn to_json<T: Serialize + ?Sized>(value: &T) -> String {
-    serde_json::to_string(value).expect("model types always serialise")
+    serde_json::to_string(value).expect("model types always serialize")
 }
 
 pub(crate) fn from_json<T: DeserializeOwned + Default>(s: &str) -> T {

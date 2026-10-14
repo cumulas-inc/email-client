@@ -8,7 +8,7 @@ export function Spinner({ size = 20, label = "Loading" }: { size?: number; label
   );
 }
 
-/** Centred spinner filling its container. */
+/** Centered spinner filling its container. */
 export function PaneSpinner() {
   return (
     <div className="pane-spinner">

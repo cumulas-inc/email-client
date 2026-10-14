@@ -765,7 +765,7 @@ fn sign_in_error(
     login_hint: Option<&str>,
     error: &OAuthError,
 ) -> Error {
-    let cancelled = error
+    let canceled = error
         .error_subcode
         .as_deref()
         .is_some_and(|s| s.eq_ignore_ascii_case("cancel"));
@@ -778,11 +778,11 @@ fn sign_in_error(
         // user send an approval request themselves.
         let can_request_approval = error.has_code(ADMIN_CONSENT_WORKFLOW_CODE);
         let message = if can_request_approval {
-            "Your organisation requires an administrator to approve Cumulas Mail before \
+            "Your organization requires an administrator to approve Cumulas Mail before \
              you can sign in. You can request approval on Microsoft's sign-in page, or send \
              the approval link to your IT department."
         } else {
-            "Your organisation requires an administrator to approve Cumulas Mail before \
+            "Your organization requires an administrator to approve Cumulas Mail before \
              you can sign in. Send the approval link to your IT department."
         };
         return Error::new(ErrorCode::AdminConsentRequired, message).with_details(json!({
@@ -795,15 +795,15 @@ fn sign_in_error(
         return consent_declined();
     }
     if error.error == "access_denied" {
-        // Microsoft's own example of a cancelled sign-in carries no subcode
+        // Microsoft's own example of a canceled sign-in carries no subcode
         // but says so in the description.
-        if cancelled
+        if canceled
             || error
                 .error_description
                 .to_ascii_lowercase()
                 .contains("cancel")
         {
-            return Error::new(ErrorCode::SignInCancelled, "Sign-in was cancelled.");
+            return Error::new(ErrorCode::SignInCancelled, "Sign-in was canceled.");
         }
         return consent_declined();
     }

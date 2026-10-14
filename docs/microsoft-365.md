@@ -13,7 +13,7 @@ retiring EWS in Exchange Online.
 ## Permissions
 
 All permissions are **delegated** (the app acts as the signed-in user, never
-on behalf of the whole organisation) and are ones Microsoft lets users grant
+on behalf of the whole organization) and are ones Microsoft lets users grant
 themselves by default:
 
 | Permission                                | Used for                                           |
@@ -30,7 +30,7 @@ themselves by default:
 ## "Need admin approval"
 
 Whether a user may grant these permissions is decided by **their
-organisation's consent settings**, not by the app. Organisations commonly:
+organization's consent settings**, not by the app. Organizations commonly:
 
 - allow users to consent to any app;
 - allow consent only for apps from **verified publishers**, and only for
@@ -40,7 +40,7 @@ organisation's consent settings**, not by the app. Organisations commonly:
 In the last two cases the user sees "Need admin approval" in the browser. The
 app detects this and shows a screen with an **admin consent link** and a
 ready-to-send email to IT. An administrator opening the link can approve the
-app once for the whole organisation. If the organisation has the admin consent
+app once for the whole organization. If the organization has the admin consent
 workflow enabled, users can also request approval directly from Microsoft's
 page.
 
@@ -62,15 +62,15 @@ secret.
    `http://localhost` (any port is accepted for localhost).
 4. **API permissions → Add a permission → Microsoft Graph → Delegated**: add
    the permissions in the table above. Do not grant admin consent for other
-   organisations; each organisation decides for itself.
+   organizations; each organization decides for itself.
 5. **Branding & properties**: set the publisher domain to `cumulas.co`, then
    complete **publisher verification** with a Microsoft AI Cloud Partner
-   Program ID. Verification is what lets users in organisations that only
+   Program ID. Verification is what lets users in organizations that only
    allow verified publishers sign in without an administrator.
 
-## Using your organisation's own registration (IT admins)
+## Using your organization's own registration (IT admins)
 
-Organisations that prefer to control the app themselves can register it in
+Organizations that prefer to control the app themselves can register it in
 their own tenant (single-tenant, same redirect URI and permissions as above),
 grant admin consent once, and have users enter the client ID and tenant ID
 under **Settings → Microsoft app registration**.
@@ -79,8 +79,8 @@ under **Settings → Microsoft app registration**.
 
 | What the user sees                                                                            | Meaning                                                                                                                                                    |
 | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "Your organisation needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981) | The organisation requires an administrator to approve the app. The app shows the admin consent link and an email to send to IT.                            |
-| Same screen, with "Request approval" mentioned (AADSTS90095)                                  | The organisation has the admin consent workflow enabled: the user can also request approval on Microsoft's page.                                           |
+| "Your organization needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981) | The organization requires an administrator to approve the app. The app shows the admin consent link and an email to send to IT.                            |
+| Same screen, with "Request approval" mentioned (AADSTS90095)                                  | The organization has the admin consent workflow enabled: the user can also request approval on Microsoft's page.                                           |
 | "Cumulas Mail needs your permission" (AADSTS65004)                                            | The permission prompt was declined. Microsoft also sends this when the user clicks "Back to app" after requesting approval, so retry once IT has approved. |
 | "Sign in again to keep … up to date"                                                          | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction).                            |
 | Sign-in never returns to the app                                                              | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again.                               |

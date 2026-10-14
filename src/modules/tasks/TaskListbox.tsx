@@ -9,7 +9,7 @@ import { dueLabel } from "./taskUtils";
 
 export interface TaskGroup {
   key: string;
-  /** Group header; null for an unlabelled group. */
+  /** Group header; null for an unlabeled group. */
   label: string | null;
   tasks: Task[];
 }

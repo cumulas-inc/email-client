@@ -68,7 +68,7 @@ export function AboutSection() {
               className="btn btn--subtle btn--sm about-card__link"
               onClick={() => void backend.openLink(LICENSE_URL)}
             >
-              Read the licence
+              Read the license
             </button>
           </div>
         </div>

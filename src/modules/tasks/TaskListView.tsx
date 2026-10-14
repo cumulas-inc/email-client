@@ -32,7 +32,7 @@ interface TaskListViewProps extends TaskActions {
   addRef: Ref<HTMLInputElement>;
 }
 
-/** Centre pane: list title, "Add a task", open tasks and the Completed section. */
+/** Center pane: list title, "Add a task", open tasks and the Completed section. */
 export function TaskListView(props: TaskListViewProps) {
   const {
     title,

@@ -57,7 +57,7 @@ export function ImapForm({ initialEmail, onBack, onClose, onDone, onUseMicrosoft
 
   const preset = findPreset(email);
   const server: ServerDraft = { ...toDraft(suggestedSettings(email)), ...overrides };
-  const customised = Object.keys(overrides).length > 0;
+  const customized = Object.keys(overrides).length > 0;
 
   const clearErrors = (fields: string[]) =>
     setErrors((e) => {
@@ -241,7 +241,7 @@ export function ImapForm({ initialEmail, onBack, onClose, onDone, onUseMicrosoft
                 errors={errors}
                 onChange={changeServer}
                 onReset={
-                  customised
+                  customized
                     ? () => {
                         setOverrides({});
                         clearErrors(SERVER_FIELDS);

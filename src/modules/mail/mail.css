@@ -427,7 +427,7 @@
   border-bottom: 1px solid var(--border-subtle);
   outline: none;
   cursor: pointer;
-  /* Cheap virtualisation: off-screen rows skip layout and paint. */
+  /* Cheap virtualization: off-screen rows skip layout and paint. */
   content-visibility: auto;
   contain-intrinsic-size: auto 78px;
 }

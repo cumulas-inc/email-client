@@ -43,7 +43,7 @@ struct GraphCalendar {
 }
 
 impl GraphCalendar {
-    /// `hexColor` when the user picked a colour, else the `color` preset.
+    /// `hexColor` when the user picked a color, else the `color` preset.
     fn color(&self) -> String {
         self.hex_color
             .as_deref()
@@ -436,7 +436,7 @@ impl CalendarProvider for GraphProvider {
     }
 
     async fn delete_event(&self, calendar: &Calendar, remote_id: &str) -> Result<()> {
-        // Deleting a meeting the user organises sends the cancellations.
+        // Deleting a meeting the user organizes sends the cancellations.
         self.client
             .send_no_content(
                 Method::DELETE,

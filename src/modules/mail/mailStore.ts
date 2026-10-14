@@ -7,7 +7,7 @@ import type { EmailAddress, Importance, ReplyKind } from "../../api/types";
 
 export type MailFilter = "all" | "unread" | "flagged";
 
-/** Virtual folder id for the unified "All inboxes" favourite. */
+/** Virtual folder id for the unified "All inboxes" favorite. */
 export const ALL_INBOXES = "all-inboxes";
 
 export interface DraftAttachment {

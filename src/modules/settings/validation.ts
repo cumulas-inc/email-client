@@ -47,7 +47,7 @@ export function validateClientId(value: string): string | null {
 
 export function validateTenant(value: string): string | null {
   const v = value.trim();
-  if (!v) return "Enter your organisation's tenant ID or domain.";
+  if (!v) return "Enter your organization's tenant ID or domain.";
   if (isGuid(v) || DOMAIN.test(v)) return null;
   return "Enter a tenant ID (like 00000000-0000-0000-0000-000000000000) or a domain (like contoso.com).";
 }

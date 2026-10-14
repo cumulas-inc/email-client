@@ -788,7 +788,7 @@ async fn microsoft_sign_in_can_be_cancelled() {
         service.cancel_microsoft_sign_in();
     });
     assert_eq!(result.unwrap_err().code, ErrorCode::SignInCancelled);
-    // Nothing left pending; cancelling again is a no-op.
+    // Nothing left pending; canceling again is a no-op.
     service.cancel_microsoft_sign_in();
     assert!(service.list_accounts().unwrap().is_empty());
 }

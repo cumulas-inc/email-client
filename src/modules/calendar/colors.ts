@@ -1,12 +1,12 @@
-// Readable tints derived from a calendar's colour (which comes from data, so
-// it cannot be a design token). Each colour yields a light and a dark theme
+// Readable tints derived from a calendar's color (which comes from data, so
+// it cannot be a design token). Each color yields a light and a dark theme
 // variant; calendar.css picks one with the same selectors as tokens.css.
 
 import type { CSSProperties } from "react";
 
 type Rgb = [number, number, number];
 
-/** Surface colours of the two themes (tokens.css --bg-surface). */
+/** Surface colors of the two themes (tokens.css --bg-surface). */
 const LIGHT_SURFACE: Rgb = [255, 255, 255];
 const DARK_SURFACE: Rgb = [31, 31, 31];
 const BLACK: Rgb = [0, 0, 0];
@@ -63,7 +63,7 @@ function readable(color: Rgb, target: Rgb, backgrounds: Rgb[], minimum: number, 
   return target;
 }
 
-/** `amount` of the colour on the surface, reduced until `text` stays readable on it. */
+/** `amount` of the color on the surface, reduced until `text` stays readable on it. */
 function tintBackground(base: Rgb, surface: Rgb, amount: number, text: Rgb, minimum: number): Rgb {
   for (let a = amount; a > 0; a -= 0.02) {
     const bg = mix(base, surface, a);
@@ -97,7 +97,7 @@ function tint(base: Rgb, surface: Rgb, dark: boolean): Tint {
   const bg = tintBackground(base, surface, dark ? 0.3 : 0.16, text, dark ? 8 : 9);
   const bgHover = tintBackground(base, surface, dark ? 0.4 : 0.26, text, dark ? 7 : 8);
   const fg = readable(base, text, [bg, bgHover], TEXT_CONTRAST, 0.35);
-  // Selected events: the calendar colour, darkened until white text reads well.
+  // Selected events: the calendar color, darkened until white text reads well.
   const solid = readable(dark ? mix(bar, base, 0.5) : base, BLACK, [WHITE], 4.6);
   return {
     bg: toHex(bg),

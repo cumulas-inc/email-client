@@ -1,4 +1,4 @@
-/* To Do module: lists on the left, tasks in the centre, details on the right. */
+/* To Do module: lists on the left, tasks in the center, details on the right. */
 
 .tasks {
   display: flex;
@@ -137,7 +137,7 @@
   white-space: nowrap;
 }
 
-/* --- Centre ---------------------------------------------------------------------- */
+/* --- Center ---------------------------------------------------------------------- */
 
 .tasks__main {
   display: flex;

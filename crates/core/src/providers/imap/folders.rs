@@ -281,7 +281,7 @@ fn special_use_role(mailbox: &ListedMailbox) -> Option<FolderRole> {
     .map(|(_, role)| role)
 }
 
-/// Common folder names (English first, then frequent localisations), most
+/// Common folder names (English first, then frequent localizations), most
 /// common first; the index is used as rank between competing candidates.
 const ROLE_NAMES: &[(FolderRole, &[&str])] = &[
     (

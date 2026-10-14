@@ -48,7 +48,7 @@ impl EventSink for NullSink {
     fn new_mail(&self, _: &Account, _: &[MessageSummary]) {}
 }
 
-/// Accent colours assigned to new accounts in turn.
+/// Accent colors assigned to new accounts in turn.
 const ACCOUNT_COLORS: &[&str] = &[
     "#0f6cbd", "#c239b3", "#038387", "#ca5010", "#4f6bed", "#498205", "#8764b8", "#d13438",
 ];
@@ -272,7 +272,7 @@ impl CoreService {
         }
         let outcome = tokio::select! {
             result = self.connector.microsoft_sign_in(open_browser, login_hint) => result,
-            _ = cancel_rx => Err(Error::new(ErrorCode::SignInCancelled, "Sign-in was cancelled.")),
+            _ = cancel_rx => Err(Error::new(ErrorCode::SignInCancelled, "Sign-in was canceled.")),
         };
         {
             let mut pending = self.pending_sign_in.lock().unwrap();
@@ -340,7 +340,7 @@ impl CoreService {
         }
         if let Some(color) = color {
             if !is_hex_color(&color) {
-                return Err(Error::invalid_input("Colour must look like #1a2b3c."));
+                return Err(Error::invalid_input("Color must look like #1a2b3c."));
             }
             account.color = color;
         }

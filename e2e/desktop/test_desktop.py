@@ -158,7 +158,7 @@ def first_run(driver) -> None:
         subjects = " ".join(r.get_attribute("textContent") for r in message_rows(driver))
         assert "Quarterly numbers" in subjects and "Signed contract" in subjects, subjects
 
-        # Reading a message renders the sanitised body in the sandboxed frame,
+        # Reading a message renders the sanitized body in the sandboxed frame,
         # with the tracking pixel blocked.
         by_text(driver, "Quarterly numbers").click()
         frame = wait_for(lambda: driver.find_element(By.CSS_SELECTOR, "iframe"), what="message frame")

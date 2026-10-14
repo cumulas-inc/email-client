@@ -68,7 +68,7 @@ export interface Backend {
   deleteMessages(messageIds: string[]): Promise<void>;
   sendMessage(message: OutgoingMessage): Promise<void>;
   suggestAddresses(text: string): Promise<EmailAddress[]>;
-  /** Resolves to the saved path, or null if the user cancelled. */
+  /** Resolves to the saved path, or null if the user canceled. */
   saveAttachment(messageId: string, attachmentId: string): Promise<string | null>;
   openAttachment(messageId: string, attachmentId: string): Promise<void>;
 

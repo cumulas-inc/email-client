@@ -81,7 +81,7 @@ export function Attachments({
     for (const a of files) {
       try {
         const path = await backend.saveAttachment(messageId, a.id);
-        if (!path) return; // Cancelled.
+        if (!path) return; // Canceled.
         saved.push(path);
       } catch (e) {
         toast.error(e);

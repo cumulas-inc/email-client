@@ -15,11 +15,11 @@ const SAMPLES = [
   "#abc",
 ];
 
-describe("calendar colour tints", () => {
-  it("parses hex colours", () => {
+describe("calendar color tints", () => {
+  it("parses hex colors", () => {
     expect(parseColor("#0f6cbd")).toEqual([15, 108, 189]);
     expect(parseColor("abc")).toEqual([170, 187, 204]);
-    expect(parseColor("not a colour")).toBeNull();
+    expect(parseColor("not a color")).toBeNull();
   });
 
   it.each(SAMPLES)("keeps event text readable on %s in both themes", (color) => {
@@ -36,7 +36,7 @@ describe("calendar colour tints", () => {
     expect(contrast(dark.bar, "#1f1f1f")).toBeGreaterThanOrEqual(3);
   });
 
-  it("falls back to the brand colour for missing colours", () => {
+  it("falls back to the brand color for missing colors", () => {
     expect(calendarTints(undefined)).toEqual(calendarTints("#0f6cbd"));
     expect(calendarTints("bogus").light.bar).toBe("#0f6cbd");
   });

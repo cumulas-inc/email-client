@@ -97,7 +97,7 @@ export interface AttachmentMeta {
 export interface Message extends MessageSummary {
   bcc: EmailAddress[];
   replyTo: EmailAddress[];
-  /** Sanitised HTML; render only inside the sandboxed MessageBody frame. */
+  /** Sanitized HTML; render only inside the sandboxed MessageBody frame. */
   bodyHtml: string | null;
   bodyText: string | null;
   hasBlockedContent: boolean;

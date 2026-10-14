@@ -34,7 +34,7 @@ interface TextFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "id
   fieldClassName?: string;
 }
 
-/** Labelled input with its hint and error linked through aria-describedby. */
+/** Labeled input with its hint and error linked through aria-describedby. */
 export function TextField({
   id,
   label,

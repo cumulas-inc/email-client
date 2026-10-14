@@ -1,6 +1,6 @@
 import type { ColorOption } from "../../components/ColorPicker";
 
-/** Account colours: readable with white text and on light and dark backgrounds. */
+/** Account colors: readable with white text and on light and dark backgrounds. */
 export const ACCOUNT_COLORS: ColorOption[] = [
   { value: "#0f6cbd", name: "Blue" },
   { value: "#038387", name: "Teal" },

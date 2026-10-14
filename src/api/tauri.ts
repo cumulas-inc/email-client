@@ -6,13 +6,13 @@ import type { DataChangedEvent, SyncStatus } from "./types";
 
 function subscribe<T>(event: string, handler: (payload: T) => void): Unsubscribe {
   let unlisten: (() => void) | null = null;
-  let cancelled = false;
+  let canceled = false;
   void listen<T>(event, (e) => handler(e.payload)).then((fn) => {
-    if (cancelled) fn();
+    if (canceled) fn();
     else unlisten = fn;
   });
   return () => {
-    cancelled = true;
+    canceled = true;
     unlisten?.();
   };
 }

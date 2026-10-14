@@ -41,7 +41,7 @@ describe("People list", () => {
     renderPeople();
     const list = await screen.findByRole("listbox", { name: "Contacts" });
 
-    // Each group is labelled by its letter header.
+    // Each group is labeled by its letter header.
     const letters = within(list)
       .getAllByRole("group")
       .map((g) => document.getElementById(g.getAttribute("aria-labelledby")!)?.textContent);
@@ -374,7 +374,7 @@ describe("Deleting contacts", () => {
     expect(await screen.findByText("Ben Morgan was deleted")).toBeInTheDocument();
   });
 
-  it("keeps the contact when cancelled, and supports the Delete key", async () => {
+  it("keeps the contact when canceled, and supports the Delete key", async () => {
     const user = userEvent.setup();
     const { backend } = renderPeople();
     await user.click(await screen.findByRole("option", { name: /^Elena Petrova/ }));

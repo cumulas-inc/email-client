@@ -305,11 +305,11 @@ function AccountItem({
           <AccountNameField account={account} />
 
           <div className="account-field">
-            <span id={`${id}-colour`} className="field__label">
-              Colour
+            <span id={`${id}-color`} className="field__label">
+              Color
             </span>
             <ColorPicker
-              labelledBy={`${id}-colour`}
+              labelledBy={`${id}-color`}
               value={account.color}
               options={ACCOUNT_COLORS}
               onChange={(color) =>

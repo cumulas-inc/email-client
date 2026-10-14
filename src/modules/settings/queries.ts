@@ -65,7 +65,7 @@ export function useUpdateAccount() {
   return useMutation({
     mutationFn: ({ accountId, displayName, color }: AccountUpdate) =>
       backend.updateAccount(accountId, displayName, color),
-    // Show the new name or colour straight away; roll back if it fails.
+    // Show the new name or color straight away; roll back if it fails.
     onMutate: async ({ accountId, displayName, color }) => {
       await client.cancelQueries({ queryKey: qk.accounts() });
       const previous = client.getQueryData<Account[]>(qk.accounts());

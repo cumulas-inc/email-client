@@ -275,7 +275,7 @@ fn safe_file_name(name: &str) -> String {
 }
 
 /// Asks where to save an attachment (through the file chooser portal) and
-/// writes it there. Returns the saved path, or `None` if cancelled.
+/// writes it there. Returns the saved path, or `None` if canceled.
 #[tauri::command]
 pub async fn save_attachment(
     app: AppHandle,

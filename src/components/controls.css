@@ -195,7 +195,7 @@
   font-size: var(--text-sm);
 }
 
-/* --- Colour picker --------------------------------------------------------- */
+/* --- Color picker --------------------------------------------------------- */
 
 .color-picker {
   display: flex;
@@ -230,7 +230,7 @@
   height: 100%;
   border-radius: var(--radius-round);
   background: var(--swatch);
-  /* The check mark sits on the account colour, which is always dark enough. */
+  /* The check mark sits on the account color, which is always dark enough. */
   color: #fff;
   transition: box-shadow var(--duration-fast) var(--ease);
 }

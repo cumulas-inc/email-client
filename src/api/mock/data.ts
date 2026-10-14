@@ -437,7 +437,7 @@ function homeMessages(): Message[] {
       folderId: "h-inbox",
       from: people.ben,
       subject: "Photos from the hike",
-      html: para("Finally got round to sorting the photos — a few favourites attached!"),
+      html: para("Finally got round to sorting the photos — a few favorites attached!"),
       received: at(-8, 21, 13),
       attachments: [
         { name: "summit.jpg", contentType: "image/jpeg", size: 2_412_004 },
@@ -505,7 +505,7 @@ function olderWorkMessages(): Message[] {
     ["Onboarding buddy", "Would you be the onboarding buddy for our new engineer starting Monday?"],
     [
       "Accessibility audit results",
-      "The audit found 12 issues, mostly colour contrast. Details in the report.",
+      "The audit found 12 issues, mostly color contrast. Details in the report.",
     ],
   ];
   const out: Message[] = [];
@@ -797,7 +797,7 @@ export function createDemoState(): MockState {
   );
 
   // A busy current week: overlapping meetings, every "show as" state, a
-  // cancelled and a declined meeting, an event across midnight, multi-day bars.
+  // canceled and a declined meeting, an event across midnight, multi-day bars.
   const attending = (...list: [EmailAddress, Attendee["response"]][]): Attendee[] =>
     list.map(([email, response]) => ({ email, kind: "required", response }));
   events.push(
