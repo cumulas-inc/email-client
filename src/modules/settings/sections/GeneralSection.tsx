@@ -1,18 +1,9 @@
-import { Monitor, Moon, Sun } from "lucide-react";
-
 import { useSettings } from "../../../api/queries";
-import type { Theme } from "../../../api/types";
-import { SegmentedControl, type SegmentedOption } from "../../../components/SegmentedControl";
 import { PaneSpinner } from "../../../components/Spinner";
 import { Switch } from "../../../components/Switch";
 import { useSaveSettings } from "../saveStatus";
 import { SettingRow, SettingsGroup } from "../SettingsLayout";
-
-const THEMES: SegmentedOption<Theme>[] = [
-  { value: "system", label: "System", icon: <Monitor size={20} /> },
-  { value: "light", label: "Light", icon: <Sun size={20} /> },
-  { value: "dark", label: "Dark", icon: <Moon size={20} /> },
-];
+import { AppearanceGroup } from "./AppearanceGroup";
 
 const SYNC_INTERVALS = [1, 5, 15, 30, 60];
 
@@ -33,24 +24,7 @@ export function GeneralSection() {
 
   return (
     <>
-      <SettingsGroup title="Appearance">
-        <SettingRow
-          label="Theme"
-          labelFor={false}
-          description="System follows your desktop's light or dark style."
-        >
-          {({ labelId, descriptionId }) => (
-            <SegmentedControl
-              variant="tiles"
-              labelledBy={labelId}
-              describedBy={descriptionId}
-              value={settings.theme}
-              options={THEMES}
-              onChange={(theme) => void save({ theme })}
-            />
-          )}
-        </SettingRow>
-      </SettingsGroup>
+      <AppearanceGroup settings={settings} save={save} />
 
       <SettingsGroup title="Notifications">
         <div className="setting-row">
