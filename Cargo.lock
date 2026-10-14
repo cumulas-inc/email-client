@@ -877,6 +877,7 @@ dependencies = [
  "rand 0.9.5",
  "reqwest",
  "rusqlite",
+ "rustls",
  "rustls-platform-verifier",
  "serde",
  "serde_json",

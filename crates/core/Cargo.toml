@@ -34,6 +34,9 @@ rand = "0.9"
 # IMAP / SMTP / MIME
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 tokio-rustls = "0.26"
+# Named directly to pick the `ring` provider explicitly: with both ring and
+# aws-lc-rs compiled in, rustls has no default provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "0.7"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-platform-verifier", "hostname"] }
 mail-parser = "0.11"
