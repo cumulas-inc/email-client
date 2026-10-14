@@ -24,7 +24,7 @@ function viewKey(view: TaskView): string {
   return `${view.kind}:${view.id}`;
 }
 
-/** Smart lists, then each account's lists, as one listbox of tiles. */
+/** Smart lists under a small label, then each account's lists, as one listbox of tiles. */
 export function TaskSidebar({ accounts, lists, view, onSelect, counts }: TaskSidebarProps) {
   const baseId = useId();
   const groups = accounts
@@ -83,7 +83,16 @@ export function TaskSidebar({ accounts, lists, view, onSelect, counts }: TaskSid
       className="tasks-nav"
       onKeyDown={onKeyDown}
     >
-      {SMART_LISTS.map((s) => option({ kind: "smart", id: s.id }, smartListIcon(s.id), s.label))}
+      <div
+        role="group"
+        aria-labelledby={`${baseId}-smart`}
+        className="tasks-nav__group tasks-nav__group--smart"
+      >
+        <div id={`${baseId}-smart`} className="tasks-nav__section">
+          Smart lists
+        </div>
+        {SMART_LISTS.map((s) => option({ kind: "smart", id: s.id }, smartListIcon(s.id), s.label))}
+      </div>
       {groups.map(({ account, lists: accountLists }) => {
         const headerId = `${baseId}-account-${account.id}`;
         return (

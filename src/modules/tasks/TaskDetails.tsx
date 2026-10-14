@@ -228,15 +228,26 @@ export function TaskDetails({
             </button>
           )}
         </div>
-        <button
-          type="button"
-          className="icon-btn tasks-details__close"
-          aria-label="Close details"
-          title="Close details (Esc)"
-          onClick={onClose}
-        >
-          <X size={18} strokeWidth={1.75} />
-        </button>
+        <div className="tasks-details__actions">
+          <button
+            type="button"
+            className="icon-btn tasks-details__delete"
+            aria-label="Delete task"
+            title="Delete task"
+            onClick={onDelete}
+          >
+            <Trash2 size={18} strokeWidth={1.75} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label="Close details"
+            title="Close details (Esc)"
+            onClick={onClose}
+          >
+            <X size={18} strokeWidth={1.75} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <div className="tasks-field">
@@ -356,21 +367,15 @@ export function TaskDetails({
         />
       </div>
 
-      <footer className="tasks-details__foot">
-        <span className="tasks-details__stamp">
-          {done && task.completedAt
-            ? `Completed ${shortDate(task.completedAt, now)}`
-            : `Created ${shortDate(task.createdAt, now)}`}
-        </span>
-        <button
-          type="button"
-          className="btn btn--subtle btn--sm tasks-details__delete"
-          onClick={onDelete}
-        >
-          <Trash2 size={15} strokeWidth={1.75} aria-hidden="true" />
-          Delete task
-        </button>
-      </footer>
+      {/* Quiet metadata under the notes: "Created Oct 8 · Completed Oct 14". */}
+      <p className="tasks-details__stamp">
+        {[
+          `Created ${shortDate(task.createdAt, now)}`,
+          done && task.completedAt && `Completed ${shortDate(task.completedAt, now)}`,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+      </p>
     </div>
   );
 }

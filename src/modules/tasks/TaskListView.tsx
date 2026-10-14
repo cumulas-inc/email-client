@@ -126,10 +126,9 @@ export function TaskListView(props: TaskListViewProps) {
 
   return (
     <>
+      {/* Search first, at the top of the card, where Ctrl+K lands in Mail and Contacts too. */}
       <header className="tasks-header">
-        <div className="tasks__search">
-          <SearchField placeholder="Search tasks" />
-        </div>
+        <SearchField placeholder="Search tasks" />
         <div className="tasks-header__titles">
           {/* Long list names wrap to a second line, then clamp; the tooltip has the rest. */}
           <h2 className="pane-title tasks-header__title" dir="auto" onMouseEnter={titleWhenCut}>

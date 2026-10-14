@@ -142,10 +142,10 @@ export function longDate(date: Date, now = new Date()): string {
   return formatDate(date, isSameYear(date, now) ? "weekdayLong" : "weekdayLongYear");
 }
 
-/** "Wed, Oct 14" (+ year if needed) for created / completed stamps. */
+/** "Oct 14" (+ year if needed) for the created / completed stamp. */
 export function shortDate(iso: string, now = new Date()): string {
   const d = new Date(iso);
-  return formatDate(d, isSameYear(d, now) ? "weekdayShort" : "weekdayShortYear");
+  return formatDate(d, isSameYear(d, now) ? "short" : "shortYear");
 }
 
 export interface QuickDue {

@@ -74,6 +74,13 @@ describe("Task lists", () => {
       "Tasks, 4 open",
       "Groceries, 3 open",
     ]);
+    // The smart lists sit under a small "Smart lists" label, like Mail's Favorites.
+    const smart = within(nav).getByRole("group", { name: "Smart lists" });
+    expect(
+      within(smart)
+        .getAllByRole("option")
+        .map((o) => o.getAttribute("aria-label")),
+    ).toEqual(["Starred, 4 open", "Scheduled, 11 open", "All tasks, 17 open"]);
     const work = within(nav).getByRole("group", { name: /Alex Morgan/ });
     expect(within(work).getAllByRole("option")).toHaveLength(2);
     expect(within(nav).getByRole("group", { name: /Alex \(Personal\)/ })).toBeInTheDocument();
@@ -430,7 +437,7 @@ describe("Task details", () => {
     const list = await screen.findByRole("listbox", { name: "Tasks" });
     await user.click(within(list).getByRole("option", { name: /^Read load test report/ }));
     const pane = details();
-    expect(within(pane).getByText("Created Wed, Oct 14")).toBeInTheDocument();
+    expect(within(pane).getByText("Created Oct 14")).toBeInTheDocument();
     expect(within(pane).getByLabelText("Due date")).toHaveValue("");
     expect(within(pane).getByText("None")).toBeInTheDocument();
 
@@ -526,7 +533,9 @@ describe("Task details", () => {
     await user.click(
       within(pane).getByRole("checkbox", { name: "Completed: Expense Lisbon trip" }),
     );
-    expect(await within(pane).findByText("Completed Wed, Oct 14")).toBeInTheDocument();
+    expect(
+      await within(pane).findByText(/^Created \w+ \d+ · Completed Oct 14$/),
+    ).toBeInTheDocument();
     await waitFor(async () =>
       expect(await findTask(backend, "Expense Lisbon trip")).toMatchObject({
         status: "completed",
@@ -545,7 +554,13 @@ describe("Task details", () => {
     expect(screen.queryByRole("complementary", { name: "Task details" })).not.toBeInTheDocument();
 
     await user.click(within(list).getByRole("option", { name: /^Benefits enrollment/ }));
-    await user.click(within(details()).getByRole("button", { name: "Delete task" }));
+    // A trash button in the header, next to Close.
+    const del = within(details()).getByRole("button", { name: "Delete task" });
+    expect(del).toHaveAttribute("title", "Delete task");
+    expect(del.nextElementSibling).toBe(
+      within(details()).getByRole("button", { name: "Close details" }),
+    );
+    await user.click(del);
     const dialog = screen.getByRole("dialog", { name: "Delete task?" });
     expect(dialog).toHaveTextContent("“Benefits enrollment” will be permanently deleted.");
     await user.click(within(dialog).getByRole("button", { name: "Delete task" }));
@@ -584,6 +599,18 @@ describe("Completed section and search", () => {
     expect(within(done).getByRole("option")).toHaveClass("tasks-row--done");
     await user.click(toggle);
     expect(screen.queryByRole("listbox", { name: "Completed tasks" })).not.toBeInTheDocument();
+  });
+
+  it("puts the search at the top of the list card, above the title", async () => {
+    renderTasks();
+    const card = await screen.findByRole("region", { name: "Tasks" });
+    const search = within(card).getByRole("searchbox", { name: "Search tasks" });
+    // The shared search box that Ctrl+K focuses in every module.
+    expect(search).toHaveAttribute("id", "global-search");
+    const title = within(card).getByRole("heading", { name: "Tasks", level: 2 });
+    const add = within(card).getByRole("textbox", { name: "New task" });
+    expect(search.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(title.compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("filters the current list by the search box", async () => {

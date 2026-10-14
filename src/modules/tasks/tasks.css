@@ -79,6 +79,22 @@
   margin-top: 10px;
 }
 
+.tasks-nav__group--smart {
+  margin-top: 0;
+}
+
+/* "Smart lists", like Mail's "Favorites" and Contacts' "Address books". */
+.tasks-nav__section {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 var(--space-2);
+  color: var(--fg-tertiary);
+  font-size: 11.5px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.01em;
+}
+
 .tasks-nav__account {
   display: flex;
   align-items: center;
@@ -119,30 +135,25 @@
   flex: 1;
   flex-direction: column;
   container: tasks-main / inline-size;
-  /* Side padding that centers the task column on a wide card. */
+  /* Side padding that centers the task column on a wide card. Rows are tiles
+     8px in; the search and "New task" fields sit 4px further in. */
   --tasks-gutter: max(var(--space-2), calc((100% - var(--tasks-measure)) / 2));
+  --tasks-inset: calc(var(--tasks-gutter) + 4px);
 }
 
+/* The search spans the top of the card, 12px in, as in Mail and Contacts, so
+   Ctrl+K lands in the same place everywhere. The title row sits under it. On
+   a wide card both keep to the task column. */
 .tasks-header {
-  display: grid;
-  grid-template-areas: "titles search";
-  grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
-  align-items: center;
-  column-gap: var(--space-4);
-  padding: 20px var(--tasks-gutter) 14px;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-3) var(--tasks-inset) 0;
 }
 
-/* Pinned beside the first line, so it stays put when a long list name wraps. */
-.tasks__search {
-  grid-area: search;
-  align-self: start;
-  margin-top: 7px;
-}
-
+/* The title lines up with the tasks' check circles. */
 .tasks-header__titles {
-  grid-area: titles;
   min-width: 0;
-  padding-left: var(--space-3);
+  padding: 14px 4px 10px var(--space-2);
 }
 
 /* A long list name wraps to a second line before it is clamped. */
@@ -192,8 +203,9 @@
 }
 
 /* "New task": a field that sits where the next task will appear. */
+/* Lined up with the search above it; the plus lines up with the check circles. */
 .tasks-add {
-  padding: 0 var(--tasks-gutter) var(--space-2);
+  padding: 0 var(--tasks-inset) var(--space-2);
 }
 
 .tasks-add__field {
@@ -201,7 +213,7 @@
   align-items: center;
   gap: var(--space-3);
   height: 42px;
-  padding: 0 var(--space-2) 0 var(--space-3);
+  padding: 0 var(--space-2);
   border-radius: var(--radius-lg);
   background: var(--bg-field);
   box-shadow: inset 0 0 0 1px var(--border-subtle);
@@ -795,7 +807,7 @@
 
 .tasks-details__head {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) 32px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: start;
   column-gap: 10px;
   padding-bottom: var(--space-4);
@@ -805,8 +817,17 @@
   margin-top: 6px;
 }
 
-.tasks .tasks-details__close {
-  margin: -1px -10px 0 0;
+/* Delete and Close, as in Calendar's event details. The close glyph lines
+   up with the card's content edge. */
+.tasks-details__actions {
+  display: flex;
+  margin: -1px -10px 0 -4px;
+}
+
+/* Destructive: red on hover, and it asks first (ConfirmDialog). */
+.tasks .tasks-details__delete:hover:not(:disabled) {
+  background: var(--danger-subtle);
+  color: var(--danger);
 }
 
 .tasks-details__title-col {
@@ -1061,28 +1082,12 @@
   resize: none;
 }
 
-.tasks-details__foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  margin-top: auto;
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border-subtle);
-}
-
+/* "Created Oct 8": quiet metadata right under the notes, not a pinned footer. */
 .tasks-details__stamp {
+  margin-top: -4px;
+  padding-bottom: var(--space-2);
   font-size: var(--text-sm);
   color: var(--fg-tertiary);
-}
-
-.tasks .tasks-details__delete {
-  margin-right: calc(-1 * var(--space-2));
-}
-
-.tasks .tasks-details__delete:hover:not(:disabled) {
-  background: var(--danger-subtle);
-  color: var(--danger);
 }
 
 /* --- Focus ------------------------------------------------------------------------------- */
@@ -1107,28 +1112,29 @@
 
 /* --- Narrow windows and cards -------------------------------------------------------------- */
 
+/* A narrower details card: a little less padding and a slightly smaller title,
+   so a short title still fits beside Delete and Close in two lines. */
 @media (max-width: 1100px) {
   .tasks-details {
     width: 300px;
   }
+
+  .tasks-details__scroll {
+    padding-inline: var(--space-4);
+  }
+
+  .tasks-title__text,
+  .tasks-title__input {
+    font-size: 20px;
+  }
+
+  .tasks-details__head > .tasks-check {
+    margin-top: 4px;
+  }
 }
 
-/* A narrow main card stacks the search over the title and puts the due date
-   and list under each task's title. */
+/* A narrow main card puts the due date and list under each task's title. */
 @container tasks-main (max-width: 540px) {
-  .tasks-header {
-    grid-template-areas:
-      "search"
-      "titles";
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 14px;
-    padding-top: var(--space-3);
-  }
-
-  .tasks__search {
-    margin-top: 0;
-  }
-
   .tasks-row {
     grid-template-areas:
       "check title star"
