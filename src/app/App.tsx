@@ -1,23 +1,31 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 
 import type { Backend } from "../api/backend";
 import { BackendProvider } from "../api/BackendProvider";
 import { useAccounts } from "../api/queries";
 import { PaneSpinner } from "../components/Spinner";
 import { Toaster } from "../components/Toaster";
-import { CalendarModule } from "../modules/calendar/CalendarModule";
 import { MailModule } from "../modules/mail/MailModule";
 import { Welcome } from "../modules/onboarding/Welcome";
-import { PeopleModule } from "../modules/people/PeopleModule";
 import { AddAccountDialog } from "../modules/settings/AddAccountDialog";
 import { SettingsDialog } from "../modules/settings/SettingsDialog";
-import { TasksModule } from "../modules/tasks/TasksModule";
 import { NavRail } from "./NavRail";
 import { type Module, useAppStore } from "./store";
 import { TitleBar } from "./TitleBar";
 import { useBackendEvents } from "./useBackendEvents";
 import { useTheme } from "./useTheme";
+
+// Mail is the start screen; the other modules load on first use.
+const CalendarModule = lazy(() =>
+  import("../modules/calendar/CalendarModule").then((m) => ({ default: m.CalendarModule })),
+);
+const PeopleModule = lazy(() =>
+  import("../modules/people/PeopleModule").then((m) => ({ default: m.PeopleModule })),
+);
+const TasksModule = lazy(() =>
+  import("../modules/tasks/TasksModule").then((m) => ({ default: m.TasksModule })),
+);
 
 const MODULE_KEYS: Record<string, Module> = {
   "1": "mail",
@@ -61,12 +69,12 @@ function Shell() {
   else if (!accounts || accounts.length === 0) content = <Welcome />;
   else
     content = (
-      <>
+      <Suspense fallback={<PaneSpinner />}>
         {module === "mail" && <MailModule />}
         {module === "calendar" && <CalendarModule />}
         {module === "people" && <PeopleModule />}
         {module === "tasks" && <TasksModule />}
-      </>
+      </Suspense>
     );
 
   return (

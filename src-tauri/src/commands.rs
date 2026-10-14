@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use cumulas_core::model::{
     Account, Calendar, Contact, ContactDraft, EmailAddress, Event, EventDraft, EventResponse,
-    Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount, OutgoingMessage,
-    Settings, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
+    Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount,
+    OutgoingMessage, Settings, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::service::BUILTIN_MICROSOFT_CLIENT_ID;
 use cumulas_core::{Error, Result};
