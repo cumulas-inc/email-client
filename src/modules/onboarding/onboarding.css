@@ -1,0 +1,107 @@
+/* First-run welcome screen. Tokens only; see styles/tokens.css. */
+
+.welcome {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  align-items: safe center;
+  min-height: 0;
+  padding: var(--space-8) var(--space-6);
+  overflow-y: auto;
+  background:
+    radial-gradient(ellipse 70% 55% at 50% 0%, var(--brand-subtle), transparent 70%), var(--bg-app);
+}
+
+.welcome__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 780px;
+  text-align: center;
+  animation: welcome-in 360ms var(--ease);
+}
+
+.welcome__logo {
+  margin-bottom: var(--space-5);
+}
+
+.welcome__title {
+  font-size: calc(var(--text-2xl) * 1.45);
+  font-weight: var(--weight-semibold);
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+
+.welcome__lead {
+  max-width: 640px;
+  text-wrap: balance;
+  margin-top: var(--space-3);
+  font-size: var(--text-lg);
+  line-height: 1.5;
+  color: var(--fg-secondary);
+}
+
+.welcome__features {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  margin: var(--space-5) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.welcome__feature {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-round);
+  background: var(--bg-surface-raised);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg-secondary);
+}
+
+.welcome__feature svg {
+  display: block;
+  color: var(--brand);
+}
+
+.welcome__choices {
+  width: 100%;
+  margin-top: calc(var(--space-8) + var(--space-2));
+  text-align: left;
+}
+
+.welcome__choose {
+  margin-bottom: var(--space-3);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+  text-align: center;
+}
+
+.welcome__privacy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--space-6);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.welcome__privacy svg {
+  flex: none;
+  color: var(--success);
+}
+
+@keyframes welcome-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
