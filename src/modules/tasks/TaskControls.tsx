@@ -1,22 +1,24 @@
 import { clsx } from "clsx";
 import { Star } from "lucide-react";
-import { useState, type MouseEvent } from "react";
+import type { MouseEvent } from "react";
 
 import type { Task } from "../../api/types";
 
 interface ControlProps {
   task: Task;
   onToggle: () => void;
-  size?: "md" | "lg";
   /** Keep out of the tab order (rows are navigated as a listbox instead). */
   tabbable?: boolean;
 }
 
-/** Round completion checkbox; the check mark draws in when the task is completed. */
-export function TaskCheckbox({ task, onToggle, size = "md", tabbable = true }: ControlProps) {
+/** Round completion checkbox: teal fill with a check that draws in when done. */
+export function TaskCheckbox({
+  task,
+  onToggle,
+  size = "md",
+  tabbable = true,
+}: ControlProps & { size?: "md" | "lg" }) {
   const checked = task.status === "completed";
-  // Only animate after a click, not when a completed task first renders.
-  const [animate, setAnimate] = useState(false);
   return (
     <button
       type="button"
@@ -25,37 +27,54 @@ export function TaskCheckbox({ task, onToggle, size = "md", tabbable = true }: C
       aria-label={`Completed: ${task.title}`}
       title={checked ? "Mark as not completed" : "Mark as completed"}
       tabIndex={tabbable ? undefined : -1}
-      className={clsx("tasks-check", `tasks-check--${size}`, animate && "tasks-check--animate")}
+      className={clsx("tasks-check", size === "lg" && "tasks-check--lg")}
       onClick={(e: MouseEvent) => {
         e.stopPropagation();
-        setAnimate(!checked);
         onToggle();
       }}
     >
       <svg viewBox="0 0 20 20" aria-hidden="true">
-        <path d="M5.5 10.5l3 3 6-6.5" />
+        <path d="M5.75 10.25l2.75 2.75 5.75-6" />
       </svg>
     </button>
   );
 }
 
-/** Star toggle for importance. */
-export function ImportanceStar({ task, onToggle, size = "md", tabbable = true }: ControlProps) {
-  const important = task.importance === "high";
+/** The star on a task row. Starred tasks collect in the Starred list. */
+export function StarToggle({ task, onToggle, tabbable = true }: ControlProps) {
+  const starred = task.importance === "high";
   return (
     <button
       type="button"
-      className={clsx("icon-btn tasks-star", size === "lg" ? null : "icon-btn--sm")}
-      aria-pressed={important}
-      aria-label={`Important: ${task.title}`}
-      title={important ? "Remove importance" : "Mark as important"}
+      className="icon-btn icon-btn--sm tasks-star"
+      aria-pressed={starred}
+      aria-label={`Starred: ${task.title}`}
+      title={starred ? "Remove star" : "Star"}
       tabIndex={tabbable ? undefined : -1}
       onClick={(e: MouseEvent) => {
         e.stopPropagation();
         onToggle();
       }}
     >
-      <Star size={size === "lg" ? 20 : 17} fill={important ? "currentColor" : "none"} />
+      <Star size={16} strokeWidth={1.75} fill={starred ? "currentColor" : "none"} />
+    </button>
+  );
+}
+
+/** The star in the details pane: "Star" or "Starred", with its state. */
+export function StarField({ task, onToggle }: Omit<ControlProps, "tabbable">) {
+  const starred = task.importance === "high";
+  return (
+    <button
+      type="button"
+      className="tasks-star-field"
+      aria-pressed={starred}
+      aria-label="Starred"
+      title={starred ? "Remove star" : "Star this task"}
+      onClick={onToggle}
+    >
+      <Star size={16} strokeWidth={1.75} fill={starred ? "currentColor" : "none"} />
+      {starred ? "Starred" : "Star"}
     </button>
   );
 }

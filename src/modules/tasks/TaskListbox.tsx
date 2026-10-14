@@ -1,10 +1,10 @@
 import { clsx } from "clsx";
-import { CalendarDays, StickyNote } from "lucide-react";
+import { CalendarDays, NotebookText } from "lucide-react";
 import { useEffect, useId, type KeyboardEvent, type Ref } from "react";
 
 import type { Task } from "../../api/types";
 import { listboxTarget, scrollIdIntoView } from "../../components/listboxKeys";
-import { ImportanceStar, TaskCheckbox } from "./TaskControls";
+import { StarToggle, TaskCheckbox } from "./TaskControls";
 import { dueLabel } from "./taskUtils";
 
 export interface TaskGroup {
@@ -14,10 +14,18 @@ export interface TaskGroup {
   tasks: Task[];
 }
 
+/** Which list a task is in, shown on rows in smart lists. */
+export interface ListTag {
+  /** "Tasks", or "Tasks · Alex Morgan" when two accounts have a list of that name. */
+  name: string;
+  /** The account's color. */
+  color: string;
+}
+
 export interface TaskActions {
   onSelect: (task: Task) => void;
   onToggleComplete: (task: Task) => void;
-  onToggleImportant: (task: Task) => void;
+  onToggleStar: (task: Task) => void;
   onDelete: (task: Task) => void;
   /** Enter: move focus to the details pane. */
   onOpen: (task: Task) => void;
@@ -27,8 +35,8 @@ interface TaskListboxProps extends TaskActions {
   label: string;
   groups: TaskGroup[];
   selectedId: string | null;
-  /** List names by id, shown on rows in smart lists. */
-  listNames: Map<string, string> | null;
+  /** List tags by list id, shown on rows in smart lists. */
+  listTags: Map<string, ListTag> | null;
   now: Date;
   id?: string;
   listRef?: Ref<HTMLDivElement>;
@@ -37,14 +45,14 @@ interface TaskListboxProps extends TaskActions {
 }
 
 /**
- * Tasks as a listbox: one tab stop, ↑/↓ to select (the details pane
- * follows), Space to complete, Enter to edit, Delete to delete.
+ * Tasks as a listbox of tiles: one tab stop, ↑/↓ to select (the details
+ * pane follows), Space to complete, Enter to edit, Delete to delete.
  */
 export function TaskListbox({
   label,
   groups,
   selectedId,
-  listNames,
+  listTags,
   now,
   id,
   listRef,
@@ -85,16 +93,16 @@ export function TaskListbox({
 
   const renderRow = (task: Task) => {
     const done = task.status === "completed";
-    const important = task.importance === "high";
+    const starred = task.importance === "high";
     const due = task.dueDate ? dueLabel(task.dueDate, now) : null;
-    const listName = listNames?.get(task.listId) ?? null;
+    const listTag = listTags?.get(task.listId) ?? null;
     const name = [
       task.title,
       done ? "completed" : null,
-      important ? "important" : null,
+      starred ? "starred" : null,
       due ? `due ${due.text}${due.overdue && !done ? ", overdue" : ""}` : null,
       task.notes ? "has notes" : null,
-      listName ? `in ${listName}` : null,
+      listTag ? `in ${listTag.name}` : null,
     ]
       .filter(Boolean)
       .join(", ");
@@ -117,11 +125,26 @@ export function TaskListbox({
           tabbable={false}
           onToggle={() => actions.onToggleComplete(task)}
         />
-        <span className="tasks-row__body">
-          <span className="tasks-row__title">{task.title}</span>
-          {(listName || due || task.notes) && (
-            <span className="tasks-row__meta">
-              {listName && <span className="tasks-row__list">{listName}</span>}
+        <span className="tasks-row__title" title={task.title}>
+          {task.title}
+        </span>
+        {(listTag || due || task.notes) && (
+          <span className="tasks-row__meta">
+            {listTag && (
+              <span className="tasks-row__list" title={listTag.name}>
+                <span
+                  className="tasks-row__list-dot"
+                  style={{ background: listTag.color }}
+                  aria-hidden="true"
+                />
+                <span className="tasks-row__list-name">{listTag.name}</span>
+              </span>
+            )}
+            {/* Notes and due date keep their slots, so they line up from row to row. */}
+            <span className="tasks-row__note" title={task.notes ? "Has notes" : undefined}>
+              {task.notes && <NotebookText size={14} strokeWidth={1.75} aria-hidden="true" />}
+            </span>
+            <span className="tasks-row__due">
               {due && (
                 <span
                   className={clsx(
@@ -130,24 +153,14 @@ export function TaskListbox({
                     due.today && !done && "tasks-due--today",
                   )}
                 >
-                  <CalendarDays size={12} aria-hidden="true" />
+                  <CalendarDays size={13} strokeWidth={1.9} aria-hidden="true" />
                   {due.text}
                 </span>
               )}
-              {task.notes && (
-                <span className="tasks-row__note" title="Has notes">
-                  <StickyNote size={12} aria-hidden="true" />
-                  Note
-                </span>
-              )}
             </span>
-          )}
-        </span>
-        <ImportanceStar
-          task={task}
-          tabbable={false}
-          onToggle={() => actions.onToggleImportant(task)}
-        />
+          </span>
+        )}
+        <StarToggle task={task} tabbable={false} onToggle={() => actions.onToggleStar(task)} />
       </div>
     );
   };
@@ -179,8 +192,7 @@ export function TaskListbox({
               className={clsx("tasks-group", `tasks-group--${group.key}`)}
             >
               <div id={headerId} className="tasks-group__header">
-                {group.label}
-                <span className="tasks-group__count">{group.tasks.length}</span>
+                {group.label} <span className="tasks-group__count tnum">{group.tasks.length}</span>
               </div>
               {group.tasks.map(renderRow)}
             </div>

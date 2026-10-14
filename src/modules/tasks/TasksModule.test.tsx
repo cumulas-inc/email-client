@@ -66,8 +66,8 @@ describe("Task lists", () => {
       .getAllByRole("option")
       .map((o) => o.getAttribute("aria-label"));
     expect(names).toEqual([
-      "Important, 4 open",
-      "Planned, 11 open",
+      "Starred, 4 open",
+      "Scheduled, 11 open",
       "All tasks, 17 open",
       "Tasks, 6 open",
       "Atlas launch, 4 open",
@@ -98,15 +98,15 @@ describe("Task lists", () => {
     await user.keyboard("{ArrowDown}");
     expect(screen.getByRole("heading", { name: "Atlas launch", level: 2 })).toBeInTheDocument();
     await user.keyboard("{Home}");
-    expect(screen.getByRole("heading", { name: "Important", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Starred", level: 2 })).toBeInTheDocument();
   });
 
-  it("lists Important tasks across accounts with their list names", async () => {
+  it("lists Starred tasks across accounts with their list names", async () => {
     const user = userEvent.setup();
     renderTasks();
     await screen.findByRole("listbox", { name: "Lists" });
-    await pickList(user, /^Important/);
-    const list = openList("Important");
+    await pickList(user, /^Starred/);
+    const list = openList("Starred");
     expect(taskTitles(list)).toEqual([
       "Send Q3 metrics to Dana",
       "Review rollback plan",
@@ -122,12 +122,12 @@ describe("Task lists", () => {
     );
   });
 
-  it("groups Planned tasks into Overdue, Today, Tomorrow, This week and Later", async () => {
+  it("groups Scheduled tasks into Overdue, Today, Tomorrow, This week and Later", async () => {
     const user = userEvent.setup();
     renderTasks();
     await screen.findByRole("listbox", { name: "Lists" });
-    await pickList(user, /^Planned/);
-    const list = openList("Planned");
+    await pickList(user, /^Scheduled/);
+    const list = openList("Scheduled");
     const group = (name: string) =>
       taskTitles(within(list).getByRole("group", { name: new RegExp(`^${name}`) }));
 
@@ -176,8 +176,8 @@ describe("Task lists", () => {
     const user = userEvent.setup();
     renderTasks(backend);
     await screen.findByRole("listbox", { name: "Lists" });
-    await pickList(user, /^Important/);
-    expect(await screen.findByText("Nothing important yet")).toBeInTheDocument();
+    await pickList(user, /^Starred/);
+    expect(await screen.findByText("No starred tasks")).toBeInTheDocument();
   });
 });
 
@@ -188,7 +188,7 @@ describe("Adding tasks", () => {
     await screen.findByRole("heading", { name: "Tasks", level: 2 });
     await pickList(user, /^Atlas launch/);
 
-    const input = screen.getByRole("textbox", { name: "Add a task" });
+    const input = screen.getByRole("textbox", { name: "New task" });
     await user.type(input, "Write release notes{Enter}");
     expect(input).toHaveValue("");
     expect(input).toHaveFocus();
@@ -207,22 +207,19 @@ describe("Adding tasks", () => {
     const { backend } = renderTasks();
     await screen.findByRole("listbox", { name: "Lists" });
 
-    await pickList(user, /^Important/);
+    await pickList(user, /^Starred/);
     expect(screen.getByText("Adds to Tasks · alex.morgan@acme.example")).toBeInTheDocument();
-    await user.type(
-      screen.getByRole("textbox", { name: "Add a task" }),
-      "Call the auditors{Enter}",
-    );
+    await user.type(screen.getByRole("textbox", { name: "New task" }), "Call the auditors{Enter}");
     expect(
-      await within(openList("Important")).findByRole("option", { name: /^Call the auditors/ }),
+      await within(openList("Starred")).findByRole("option", { name: /^Call the auditors/ }),
     ).toBeInTheDocument();
     expect(await findTask(backend, "Call the auditors")).toMatchObject({
       listId: "tl-work",
       importance: "high",
     });
 
-    await pickList(user, /^Planned/);
-    await user.type(screen.getByRole("textbox", { name: "Add a task" }), "Water plants{Enter}");
+    await pickList(user, /^Scheduled/);
+    await user.type(screen.getByRole("textbox", { name: "New task" }), "Water plants{Enter}");
     await waitFor(async () =>
       expect(await findTask(backend, "Water plants")).toMatchObject({
         listId: "tl-work",
@@ -230,8 +227,23 @@ describe("Adding tasks", () => {
       }),
     );
     expect(
-      taskTitles(within(openList("Planned")).getByRole("group", { name: /^Today/ })),
+      taskTitles(within(openList("Scheduled")).getByRole("group", { name: /^Today/ })),
     ).toContain("Water plants");
+  });
+
+  it("starts a new task from the sidebar button or Ctrl+N", async () => {
+    const user = userEvent.setup();
+    renderTasks();
+    const input = await screen.findByRole("textbox", { name: "New task" });
+    const button = screen.getByRole("button", { name: /^New task/ });
+    expect(button).toHaveAttribute("aria-keyshortcuts", "Control+N");
+
+    await user.click(button);
+    expect(input).toHaveFocus();
+
+    sidebar().focus();
+    await user.keyboard("{Control>}n{/Control}");
+    expect(input).toHaveFocus();
   });
 
   it("keeps the text and shows an error when adding fails", async () => {
@@ -242,7 +254,7 @@ describe("Adding tasks", () => {
       message: "Couldn't reach the server.",
     });
     renderTasks(backend);
-    const input = await screen.findByRole("textbox", { name: "Add a task" });
+    const input = await screen.findByRole("textbox", { name: "New task" });
     await user.type(input, "Flaky{Enter}");
     expect(await screen.findByText("Couldn't reach the server.")).toBeInTheDocument();
     expect(input).toHaveValue("Flaky");
@@ -298,11 +310,11 @@ describe("Completing and starring", () => {
     );
   });
 
-  it("stars a task and it appears in Important", async () => {
+  it("stars a task and it appears in Starred", async () => {
     const user = userEvent.setup();
     const { backend } = renderTasks();
     const list = await screen.findByRole("listbox", { name: "Tasks" });
-    const star = within(list).getByRole("button", { name: "Important: Benefits enrollment" });
+    const star = within(list).getByRole("button", { name: "Starred: Benefits enrollment" });
     expect(star).toHaveAttribute("aria-pressed", "false");
     await user.click(star);
     expect(star).toHaveAttribute("aria-pressed", "true");
@@ -312,8 +324,8 @@ describe("Completing and starring", () => {
     // Starring does not open the details pane.
     expect(screen.queryByRole("complementary", { name: "Task details" })).not.toBeInTheDocument();
 
-    await pickList(user, /^Important/);
-    expect(taskTitles(openList("Important"))).toContain("Benefits enrollment");
+    await pickList(user, /^Starred/);
+    expect(taskTitles(openList("Starred"))).toContain("Benefits enrollment");
   });
 
   it("rolls back and shows an error when the backend rejects an update", async () => {
@@ -325,10 +337,10 @@ describe("Completing and starring", () => {
     });
     renderTasks(backend);
     const list = await screen.findByRole("listbox", { name: "Tasks" });
-    await user.click(within(list).getByRole("button", { name: "Important: Benefits enrollment" }));
+    await user.click(within(list).getByRole("button", { name: "Starred: Benefits enrollment" }));
     expect(await screen.findByText("You're offline.")).toBeInTheDocument();
     expect(
-      within(list).getByRole("button", { name: "Important: Benefits enrollment" }),
+      within(list).getByRole("button", { name: "Starred: Benefits enrollment" }),
     ).toHaveAttribute("aria-pressed", "false");
     expect((await findTask(backend, "Benefits enrollment"))?.importance).toBe("normal");
   });
@@ -343,8 +355,7 @@ describe("Completing and starring", () => {
     vi.spyOn(backend, "updateTask").mockReturnValueOnce(failing);
     renderTasks(backend);
     const list = await screen.findByRole("listbox", { name: "Tasks" });
-    const star = (title: string) =>
-      within(list).getByRole("button", { name: `Important: ${title}` });
+    const star = (title: string) => within(list).getByRole("button", { name: `Starred: ${title}` });
 
     await user.click(star("Benefits enrollment"));
     await user.click(star("Expense Lisbon trip"));
@@ -389,7 +400,8 @@ describe("Task details", () => {
     await user.click(within(list).getByRole("option", { name: /^Read load test report/ }));
     const pane = details();
     expect(within(pane).getByText("Created Wed, Oct 14")).toBeInTheDocument();
-    expect(within(pane).getByRole("heading", { name: "Add due date" })).toBeInTheDocument();
+    expect(within(pane).getByLabelText("Due date")).toHaveValue("");
+    expect(within(pane).getByText("None")).toBeInTheDocument();
 
     // Title: saved on blur.
     const title = within(pane).getByRole("textbox", { name: "Task title" });
@@ -410,7 +422,7 @@ describe("Task details", () => {
       "aria-pressed",
       "true",
     );
-    expect(within(pane).getByRole("heading", { name: "Due Thursday, October 15" })).toBeVisible();
+    expect(within(pane).getByText("Thursday, October 15")).toBeVisible();
     await user.click(within(pane).getByRole("button", { name: "Next week" }));
     await waitFor(async () =>
       expect((await findTask(backend, "Read the load test report"))?.dueDate).toBe("2026-10-19"),
@@ -441,6 +453,16 @@ describe("Task details", () => {
     );
   });
 
+  it("says when a task is overdue or due today", async () => {
+    const user = userEvent.setup();
+    renderTasks();
+    const list = await screen.findByRole("listbox", { name: "Tasks" });
+    await user.click(within(list).getByRole("option", { name: /^Send Q3 metrics/ }));
+    expect(within(details()).getByText("Monday, October 12 · Overdue")).toBeInTheDocument();
+    await user.click(within(details()).getByRole("button", { name: "Today" }));
+    expect(await within(details()).findByText("Wednesday, October 14 · Today")).toBeInTheDocument();
+  });
+
   it("reverts the title on Escape and never saves an empty one", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend();
@@ -466,7 +488,10 @@ describe("Task details", () => {
     const list = await screen.findByRole("listbox", { name: "Tasks" });
     await user.click(within(list).getByRole("option", { name: /^Expense Lisbon trip/ }));
     const pane = details();
-    await user.click(within(pane).getByRole("button", { name: "Important: Expense Lisbon trip" }));
+    const star = within(pane).getByRole("button", { name: "Starred" });
+    expect(star).toHaveAttribute("aria-pressed", "false");
+    await user.click(star);
+    expect(star).toHaveAttribute("aria-pressed", "true");
     await user.click(
       within(pane).getByRole("checkbox", { name: "Completed: Expense Lisbon trip" }),
     );
@@ -492,7 +517,7 @@ describe("Task details", () => {
     await user.click(within(details()).getByRole("button", { name: "Delete task" }));
     const dialog = screen.getByRole("dialog", { name: "Delete task?" });
     expect(dialog).toHaveTextContent("“Benefits enrollment” will be permanently deleted.");
-    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await user.click(within(dialog).getByRole("button", { name: "Delete task" }));
 
     expect(screen.queryByRole("complementary", { name: "Task details" })).not.toBeInTheDocument();
     expect(taskTitles(openList("Tasks"))).not.toContain("Benefits enrollment");

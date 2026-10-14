@@ -1,9 +1,10 @@
 import { clsx } from "clsx";
-import { List } from "lucide-react";
+import { ListChecks } from "lucide-react";
 import { useEffect, useId, type KeyboardEvent, type ReactNode } from "react";
 
 import type { Account, TaskList } from "../../api/types";
 import { listboxTarget, scrollIdIntoView } from "../../components/listboxKeys";
+import { initials } from "../../lib/format";
 import { smartListIcon } from "./smartIcons";
 import { SMART_LISTS, type TaskView } from "./taskUtils";
 
@@ -21,7 +22,7 @@ function viewKey(view: TaskView): string {
   return `${view.kind}:${view.id}`;
 }
 
-/** Smart lists, then each account's lists, as one listbox. */
+/** Smart lists, then each account's lists, as one listbox of tiles. */
 export function TaskSidebar({ accounts, lists, view, onSelect, counts }: TaskSidebarProps) {
   const baseId = useId();
   const groups = accounts
@@ -64,48 +65,54 @@ export function TaskSidebar({ accounts, lists, view, onSelect, counts }: TaskSid
           {icon}
         </span>
         <span className="tasks-nav__label">{label}</span>
-        {count > 0 && <span className="tasks-nav__count">{count}</span>}
+        {count > 0 && <span className="tasks-nav__count tnum">{count}</span>}
       </div>
     );
   };
 
   return (
-    <nav className="tasks-sidebar" aria-label="Task lists">
-      <h1 className="tasks-sidebar__title">Tasks</h1>
-      <div
-        role="listbox"
-        aria-label="Lists"
-        aria-activedescendant={activeId}
-        tabIndex={0}
-        className="tasks-nav"
-        onKeyDown={onKeyDown}
-      >
-        {SMART_LISTS.map((s) => option({ kind: "smart", id: s.id }, smartListIcon(s.id), s.label))}
-        {groups.map(({ account, lists: accountLists }) => {
-          const headerId = `${baseId}-account-${account.id}`;
-          return (
-            <div
-              key={account.id}
-              role="group"
-              aria-labelledby={headerId}
-              className="tasks-nav__group"
-            >
-              <div id={headerId} className="tasks-nav__account" title={account.email}>
-                <span
-                  className="tasks-nav__account-dot"
-                  style={{ background: account.color }}
-                  aria-hidden="true"
-                />
-                <span className="tasks-nav__account-name">{account.displayName}</span>
+    <div
+      role="listbox"
+      aria-label="Lists"
+      aria-activedescendant={activeId}
+      tabIndex={0}
+      className="tasks-nav"
+      onKeyDown={onKeyDown}
+    >
+      {SMART_LISTS.map((s) => option({ kind: "smart", id: s.id }, smartListIcon(s.id), s.label))}
+      {groups.map(({ account, lists: accountLists }) => {
+        const headerId = `${baseId}-account-${account.id}`;
+        return (
+          <div
+            key={account.id}
+            role="group"
+            aria-labelledby={headerId}
+            className="tasks-nav__group"
+          >
+            <div className="tasks-nav__account" title={`${account.displayName} (${account.email})`}>
+              {/* White on the account color: every color in the palette is dark enough. */}
+              <span
+                className="tasks-nav__badge"
+                style={{ background: account.color }}
+                aria-hidden="true"
+              >
+                {initials(account.displayName)}
+              </span>
+              <span id={headerId} className="tasks-nav__account-text">
+                <span className="tasks-nav__account-name">{account.displayName}</span>{" "}
                 <span className="tasks-nav__account-email">{account.email}</span>
-              </div>
-              {accountLists.map((l) =>
-                option({ kind: "list", id: l.id }, <List size={18} />, l.name),
-              )}
+              </span>
             </div>
-          );
-        })}
-      </div>
-    </nav>
+            {accountLists.map((l) =>
+              option(
+                { kind: "list", id: l.id },
+                <ListChecks size={17} strokeWidth={1.75} />,
+                l.name,
+              ),
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }

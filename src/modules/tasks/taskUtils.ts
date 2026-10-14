@@ -14,13 +14,13 @@ import { formatDate, weekStartsOn } from "../../lib/datetime";
 
 // --- Views -------------------------------------------------------------------
 
-export type SmartListId = "important" | "planned" | "all";
+export type SmartListId = "starred" | "scheduled" | "all";
 
 export type TaskView = { kind: "smart"; id: SmartListId } | { kind: "list"; id: string };
 
 export const SMART_LISTS: { id: SmartListId; label: string }[] = [
-  { id: "important", label: "Important" },
-  { id: "planned", label: "Planned" },
+  { id: "starred", label: "Starred" },
+  { id: "scheduled", label: "Scheduled" },
   { id: "all", label: "All tasks" },
 ];
 
@@ -32,9 +32,9 @@ export function isCompleted(task: Task): boolean {
 export function inView(task: Task, view: TaskView): boolean {
   if (view.kind === "list") return task.listId === view.id;
   switch (view.id) {
-    case "important":
+    case "starred":
       return task.importance === "high";
-    case "planned":
+    case "scheduled":
       return task.dueDate !== null;
     case "all":
       return true;
@@ -101,7 +101,7 @@ export const DUE_GROUPS: { id: DueGroup; label: string }[] = [
   { id: "later", label: "Later" },
 ];
 
-/** Planned group of a due date. "This week" runs to Sunday (weeks start on Monday). */
+/** Scheduled group of a due date. "This week" runs to Sunday (weeks start on Monday). */
 export function dueGroup(dueDate: string, now = new Date()): DueGroup {
   const due = parseDue(dueDate);
   const days = differenceInCalendarDays(due, now);

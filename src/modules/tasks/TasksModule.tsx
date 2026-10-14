@@ -1,21 +1,19 @@
-import { CalendarDays, CircleCheckBig, List, Star } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { CalendarClock, CircleCheckBig, ListChecks, Plus, Star } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { errorMessage } from "../../api/errors";
 import { useAccounts } from "../../api/queries";
-import type { Task, TaskList, TaskPatch } from "../../api/types";
+import type { Account, Task, TaskList, TaskPatch } from "../../api/types";
 import { ModuleSidebar } from "../../app/ModuleSidebar";
 import { useAppStore } from "../../app/store";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { EmptyState } from "../../components/EmptyState";
-import { SearchField } from "../../components/SearchField";
 import { PaneSpinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
 import { useCreateTask, useDeleteTask, useTaskLists, useTasks, useUpdateTask } from "./queries";
-import { smartListIcon } from "./smartIcons";
 import { useTasksStore } from "./store";
-import { TaskDetails } from "./TaskDetails";
-import type { TaskGroup } from "./TaskListbox";
+import { TaskDetails, TaskDetailsPane } from "./TaskDetails";
+import type { ListTag, TaskGroup } from "./TaskListbox";
 import { TaskListView } from "./TaskListView";
 import { TaskSidebar } from "./TaskSidebar";
 import {
@@ -36,38 +34,44 @@ import "./tasks.css";
 const SETTLE_MS = 450;
 
 const EMPTY_TEXT = {
-  important: {
-    title: "Nothing important yet",
-    description: "Star a task to mark it as important and it shows up here.",
+  starred: {
+    title: "No starred tasks",
+    description: "Star a task in any list to keep it here.",
     icon: <Star size={40} strokeWidth={1.5} />,
   },
-  planned: {
-    title: "Nothing planned",
-    description: "Tasks with a due date show up here, grouped by when they're due.",
-    icon: <CalendarDays size={40} strokeWidth={1.5} />,
+  scheduled: {
+    title: "Nothing scheduled",
+    description: "Give a task a due date and it shows up here, grouped by when it's due.",
+    icon: <CalendarClock size={40} strokeWidth={1.5} />,
   },
   all: {
-    title: "No tasks",
-    description: "Tasks from all your lists show up here.",
+    title: "No tasks yet",
+    description: "Type a task above and press Enter to add it.",
     icon: <CircleCheckBig size={40} strokeWidth={1.5} />,
   },
   list: {
     title: "No tasks yet",
-    description: "Type in the box above and press Enter to add one.",
+    description: "Type a task above and press Enter to add it.",
     icon: <CircleCheckBig size={40} strokeWidth={1.5} />,
   },
 };
 
-/** Names for list chips in smart lists; adds the account when names repeat. */
-function listLabels(lists: TaskList[], accountName: (id: string) => string): Map<string, string> {
+/** List tags for rows in smart lists; names that repeat get their account's name. */
+function listTagsFor(lists: TaskList[], accountOf: (id: string) => Account | undefined) {
   const repeated = new Set(
     lists.map((l) => l.name).filter((name, i, all) => all.indexOf(name) !== i),
   );
-  return new Map(
-    lists.map((l) => [
-      l.id,
-      repeated.has(l.name) ? `${l.name} · ${accountName(l.accountId)}` : l.name,
-    ]),
+  return new Map<string, ListTag>(
+    lists.map((l) => {
+      const account = accountOf(l.accountId);
+      return [
+        l.id,
+        {
+          name: repeated.has(l.name) ? `${l.name} · ${account?.displayName ?? ""}` : l.name,
+          color: account?.color ?? "var(--fg-tertiary)",
+        },
+      ];
+    }),
   );
 }
 
@@ -123,8 +127,8 @@ export function TasksModule() {
     if (isCompleted(t)) continue;
     bump(t.listId);
     bump("all");
-    if (t.importance === "high") bump("important");
-    if (t.dueDate) bump("planned");
+    if (t.importance === "high") bump("starred");
+    if (t.dueDate) bump("scheduled");
   }
 
   const matching = (viewQuery.data ?? [])
@@ -136,7 +140,7 @@ export function TasksModule() {
     .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""));
 
   const openGroups: TaskGroup[] =
-    view.kind === "smart" && view.id === "planned"
+    view.kind === "smart" && view.id === "scheduled"
       ? DUE_GROUPS.map((g) => ({
           key: g.id,
           label: g.label,
@@ -144,8 +148,7 @@ export function TasksModule() {
         })).filter((g) => g.tasks.length > 0)
       : [{ key: "open", label: null, tasks: open }];
 
-  const listNames =
-    view.kind === "smart" ? listLabels(lists, (id) => accountOf(id)?.displayName ?? "") : null;
+  const listTags = view.kind === "smart" ? listTagsFor(lists, accountOf) : null;
 
   const selectedTask =
     (viewQuery.data ?? []).find((t) => t.id === selectedTaskId) ??
@@ -159,10 +162,10 @@ export function TasksModule() {
   const listAccount = currentList ? accountOf(currentList.accountId) : undefined;
   const subtitle = smart
     ? accounts.length > 1
-      ? "Across all your accounts"
+      ? { text: "Across all your accounts" }
       : null
     : listAccount
-      ? `${listAccount.displayName} · ${listAccount.email}`
+      ? { text: `${listAccount.displayName} · ${listAccount.email}`, color: listAccount.color }
       : null;
   const addTarget = view.kind === "list" ? (currentList ?? null) : defaultList;
   const addHint =
@@ -190,7 +193,7 @@ export function TasksModule() {
     patch(task, { status: completing ? "completed" : "notStarted" });
   };
 
-  const toggleImportant = (task: Task) =>
+  const toggleStar = (task: Task) =>
     patch(task, { importance: task.importance === "high" ? "normal" : "high" });
 
   const addTask = (text: string) => {
@@ -199,8 +202,8 @@ export function TasksModule() {
       .mutateAsync({
         listId: addTarget.id,
         title: text,
-        importance: view.kind === "smart" && view.id === "important" ? "high" : null,
-        dueDate: view.kind === "smart" && view.id === "planned" ? toDateString(now) : null,
+        importance: view.kind === "smart" && view.id === "starred" ? "high" : null,
+        dueDate: view.kind === "smart" && view.id === "scheduled" ? toDateString(now) : null,
       })
       .catch((e: unknown) => {
         toast.error(e);
@@ -231,6 +234,23 @@ export function TasksModule() {
     refocus(listRef.current ?? addRef.current);
   };
 
+  const focusAdd = () => addRef.current?.focus();
+
+  // Ctrl+N starts a new task, as it starts a message in Mail.
+  const canAdd = addTarget !== null;
+  useEffect(() => {
+    if (!canAdd) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || document.querySelector("dialog[open]")) return;
+      if (e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        addRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canAdd]);
+
   // --- render ------------------------------------------------------------------------
 
   if (listsQuery.isLoading) return <PaneSpinner />;
@@ -253,7 +273,25 @@ export function TasksModule() {
 
   return (
     <div className="tasks module-layout">
-      <ModuleSidebar label="Tasks" className="tasks__sidebar">
+      <ModuleSidebar
+        label="Task lists"
+        className="tasks__sidebar"
+        action={
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={focusAdd}
+            disabled={!canAdd}
+            aria-keyshortcuts="Control+N"
+          >
+            <Plus size={18} strokeWidth={1.75} aria-hidden="true" />
+            New task
+            <span className="kbd" aria-hidden="true">
+              Ctrl N
+            </span>
+          </button>
+        }
+      >
         <TaskSidebar
           accounts={accounts}
           lists={lists}
@@ -264,13 +302,9 @@ export function TasksModule() {
       </ModuleSidebar>
 
       <section className="tasks__main card" aria-label={title}>
-        <div className="tasks__search">
-          <SearchField placeholder="Search tasks" />
-        </div>
         <TaskListView
           title={title}
           subtitle={subtitle}
-          icon={smart ? smartListIcon(smart.id, 22) : <List size={22} />}
           addTarget={addTarget}
           addHint={addHint}
           onAdd={addTask}
@@ -282,7 +316,7 @@ export function TasksModule() {
             emptyText ?? {
               title: "No task lists yet",
               description: "Task lists from your accounts show up here once they've synced.",
-              icon: <List size={40} strokeWidth={1.5} />,
+              icon: <ListChecks size={40} strokeWidth={1.5} />,
             }
           }
           onSearchAll={
@@ -293,37 +327,40 @@ export function TasksModule() {
           showCompleted={showCompleted}
           onShowCompleted={setShowCompleted}
           selectedId={selectedTask?.id ?? null}
-          listNames={listNames}
+          listTags={listTags}
           now={now}
           settling={settling}
           listRef={listRef}
           addRef={addRef}
           onSelect={(t) => selectTask(t.id)}
           onToggleComplete={toggleComplete}
-          onToggleImportant={toggleImportant}
+          onToggleStar={toggleStar}
           onDelete={askDelete}
           onOpen={() => titleRef.current?.focus()}
         />
       </section>
 
       {selectedTask && (
-        <TaskDetails
-          key={selectedTask.id}
-          task={selectedTask}
-          list={lists.find((l) => l.id === selectedTask.listId)}
-          account={accountOf(selectedTask.accountId)}
-          now={now}
-          titleRef={titleRef}
-          onUpdate={(p) => patch(selectedTask, p)}
-          onToggleComplete={() => toggleComplete(selectedTask)}
-          onDelete={() => askDelete(selectedTask)}
-          onClose={closeDetails}
-        />
+        <TaskDetailsPane onClose={closeDetails}>
+          <TaskDetails
+            key={selectedTask.id}
+            task={selectedTask}
+            list={lists.find((l) => l.id === selectedTask.listId)}
+            account={accountOf(selectedTask.accountId)}
+            now={now}
+            titleRef={titleRef}
+            onUpdate={(p) => patch(selectedTask, p)}
+            onToggleComplete={() => toggleComplete(selectedTask)}
+            onDelete={() => askDelete(selectedTask)}
+            onClose={closeDetails}
+          />
+        </TaskDetailsPane>
       )}
 
       <ConfirmDialog
         open={toDelete !== null}
         title="Delete task?"
+        confirmLabel="Delete task"
         message={
           toDelete ? (
             <>

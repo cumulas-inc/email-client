@@ -3,14 +3,15 @@ import { useId, useState, type FormEvent, type ReactNode, type Ref } from "react
 
 import type { Task } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
+import { SearchField } from "../../components/SearchField";
 import { PaneSpinner } from "../../components/Spinner";
-import { type TaskActions, type TaskGroup, TaskListbox } from "./TaskListbox";
+import { type ListTag, type TaskActions, type TaskGroup, TaskListbox } from "./TaskListbox";
 
 interface TaskListViewProps extends TaskActions {
   title: string;
-  subtitle: string | null;
-  icon: ReactNode;
-  /** Where "Add a task" saves to; null disables adding. */
+  /** Under the title: the list's account, or "Across all your accounts". */
+  subtitle: { text: string; color?: string } | null;
+  /** Where "New task" saves to; null disables adding. */
   addTarget: { name: string } | null;
   /** Shown in the add box in smart lists, e.g. "Tasks · alex@…". */
   addHint: string | null;
@@ -25,19 +26,18 @@ interface TaskListViewProps extends TaskActions {
   showCompleted: boolean;
   onShowCompleted: (show: boolean) => void;
   selectedId: string | null;
-  listNames: Map<string, string> | null;
+  listTags: Map<string, ListTag> | null;
   now: Date;
   settling: Set<string>;
   listRef: Ref<HTMLDivElement>;
   addRef: Ref<HTMLInputElement>;
 }
 
-/** Center pane: list title, "Add a task", open tasks and the Completed section. */
+/** Center card: search, list title, "New task", open tasks and the Completed section. */
 export function TaskListView(props: TaskListViewProps) {
   const {
     title,
     subtitle,
-    icon,
     addTarget,
     addHint,
     onAdd,
@@ -50,7 +50,7 @@ export function TaskListView(props: TaskListViewProps) {
     showCompleted,
     onShowCompleted,
     selectedId,
-    listNames,
+    listTags,
     now,
     settling,
     listRef,
@@ -90,7 +90,7 @@ export function TaskListView(props: TaskListViewProps) {
       <EmptyState
         icon={empty.icon}
         title="All done"
-        description="Everything in this list is complete. Nice work."
+        description="Everything here is complete. Type a task above to add another."
       />
     ) : (
       <EmptyState icon={empty.icon} title={empty.title} description={empty.description} />
@@ -101,7 +101,7 @@ export function TaskListView(props: TaskListViewProps) {
         label={title}
         groups={openGroups}
         selectedId={selectedId}
-        listNames={listNames}
+        listTags={listTags}
         now={now}
         settling={settling}
         listRef={listRef}
@@ -113,45 +113,60 @@ export function TaskListView(props: TaskListViewProps) {
   return (
     <>
       <header className="tasks-header">
-        <div className="tasks-header__row">
-          <span className="tasks-header__icon" aria-hidden="true">
-            {icon}
-          </span>
-          <h2 className="tasks-header__title">{title}</h2>
+        <div className="tasks__search">
+          <SearchField placeholder="Search tasks" />
         </div>
-        {subtitle && <p className="tasks-header__subtitle">{subtitle}</p>}
+        <div className="tasks-header__titles">
+          <h2 className="pane-title tasks-header__title" title={title}>
+            {title}
+          </h2>
+          {subtitle && (
+            <p className="tasks-header__subtitle">
+              {subtitle.color && (
+                <span
+                  className="tasks-header__dot"
+                  style={{ background: subtitle.color }}
+                  aria-hidden="true"
+                />
+              )}
+              <span className="tasks-header__subtitle-text">{subtitle.text}</span>
+            </p>
+          )}
+        </div>
       </header>
 
       <form className="tasks-add" onSubmit={submit}>
-        <span className="tasks-add__icon" aria-hidden="true">
-          <Plus size={20} />
-        </span>
-        <input
-          ref={addRef}
-          className="tasks-add__input"
-          placeholder={addTarget ? "Add a task" : "No list to add tasks to"}
-          aria-label="Add a task"
-          aria-describedby={addHint ? `${id}-hint` : undefined}
-          disabled={!addTarget}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape" && draft) {
-              e.preventDefault();
-              setDraft("");
-            }
-          }}
-        />
-        {addHint && (
-          <span id={`${id}-hint`} className="tasks-add__hint">
-            {addHint}
+        {/* The whole field is a label, so a click anywhere in it starts typing. */}
+        <label className="tasks-add__field">
+          <span className="tasks-add__icon" aria-hidden="true">
+            <Plus size={18} strokeWidth={2} />
           </span>
-        )}
-        {draft.trim() && (
-          <button type="submit" className="btn btn--sm">
-            Add
-          </button>
-        )}
+          <input
+            ref={addRef}
+            className="tasks-add__input"
+            placeholder={addTarget ? "New task" : "No list to add tasks to"}
+            aria-label="New task"
+            aria-describedby={addHint ? `${id}-hint` : undefined}
+            aria-keyshortcuts="Control+N"
+            disabled={!addTarget}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && draft) {
+                e.preventDefault();
+                setDraft("");
+              }
+            }}
+          />
+          {addHint && (
+            <span id={`${id}-hint`} className="tasks-add__hint">
+              {addHint}
+            </span>
+          )}
+          <span className="kbd tasks-add__enter" aria-hidden="true">
+            Enter
+          </span>
+        </label>
       </form>
 
       <div className="tasks-scroll">
@@ -170,8 +185,13 @@ export function TaskListView(props: TaskListViewProps) {
               aria-controls={showCompleted ? `${id}-completed` : undefined}
               onClick={() => onShowCompleted(!showCompleted)}
             >
-              <ChevronRight size={16} className="tasks-completed__chevron" aria-hidden="true" />
-              Completed <span className="tasks-completed__count">{completed.length}</span>
+              <ChevronRight
+                size={14}
+                strokeWidth={2}
+                className="tasks-completed__chevron"
+                aria-hidden="true"
+              />
+              Completed <span className="tasks-completed__count tnum">{completed.length}</span>
             </button>
             {showCompleted && (
               <TaskListbox
@@ -179,7 +199,7 @@ export function TaskListView(props: TaskListViewProps) {
                 label="Completed tasks"
                 groups={[{ key: "completed", label: null, tasks: completed }]}
                 selectedId={selectedId}
-                listNames={listNames}
+                listTags={listTags}
                 now={now}
                 {...actions}
               />

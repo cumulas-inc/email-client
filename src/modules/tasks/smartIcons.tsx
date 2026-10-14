@@ -1,15 +1,15 @@
-import { CalendarDays, Infinity as InfinityIcon, Star } from "lucide-react";
+import { CalendarClock, Layers, Star } from "lucide-react";
 
 import type { SmartListId } from "./taskUtils";
 
-/** Icon of a smart list, as used in the sidebar and the list header. */
-export function smartListIcon(id: SmartListId, size = 18) {
+/** Icon of a smart list in the sidebar. */
+export function smartListIcon(id: SmartListId, size = 17) {
   switch (id) {
-    case "important":
-      return <Star size={size} />;
-    case "planned":
-      return <CalendarDays size={size} />;
+    case "starred":
+      return <Star size={size} strokeWidth={1.75} />;
+    case "scheduled":
+      return <CalendarClock size={size} strokeWidth={1.75} />;
     case "all":
-      return <InfinityIcon size={size} />;
+      return <Layers size={size} strokeWidth={1.75} />;
   }
 }

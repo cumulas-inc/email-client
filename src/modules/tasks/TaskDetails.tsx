@@ -1,16 +1,17 @@
 import { clsx } from "clsx";
-import { CalendarDays, List, PanelRightClose, StickyNote, Trash2, X } from "lucide-react";
+import { Trash2, X } from "lucide-react";
 import {
   useId,
   useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
 } from "react";
 
 import type { Account, Task, TaskList, TaskPatch } from "../../api/types";
-import { ImportanceStar, TaskCheckbox } from "./TaskControls";
+import { StarField, TaskCheckbox } from "./TaskControls";
 import {
   dueLabel,
   isValidDateString,
@@ -42,7 +43,33 @@ function useAutoSize(ref: RefObject<HTMLTextAreaElement | null>, value: string) 
   }, [ref, value]);
 }
 
-/** Right-hand pane: title, completion, importance, due date, notes. */
+/**
+ * The details card. It stays mounted while the selection moves from task to
+ * task, so it only animates in when it opens.
+ */
+export function TaskDetailsPane({
+  children,
+  onClose,
+}: {
+  children: ReactNode;
+  onClose: () => void;
+}) {
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key === "Escape" && !e.defaultPrevented) {
+      e.preventDefault();
+      // Blur first so a note being typed is saved.
+      (document.activeElement as HTMLElement | null)?.blur();
+      onClose();
+    }
+  };
+  return (
+    <aside className="tasks-details card" aria-label="Task details" onKeyDown={onKeyDown}>
+      {children}
+    </aside>
+  );
+}
+
+/** Contents of the details card: title, completion, due date, list, star, notes. */
 export function TaskDetails({
   task,
   list,
@@ -112,142 +139,150 @@ export function TaskDetails({
     }
   };
 
-  const onPaneKeyDown = (e: KeyboardEvent<HTMLElement>) => {
-    if (e.key === "Escape" && !e.defaultPrevented) {
-      e.preventDefault();
-      // Blur first so a note being typed is saved.
-      (document.activeElement as HTMLElement | null)?.blur();
-      onClose();
-    }
-  };
-
   const dueInfo = task.dueDate ? dueLabel(task.dueDate, now) : null;
   const quick = quickDueDates(now);
 
   return (
-    <aside className="tasks-details" aria-label="Task details" onKeyDown={onPaneKeyDown}>
-      <div className="tasks-details__scroll">
-        <div className="tasks-card tasks-details__title-card">
-          <TaskCheckbox task={task} size="lg" onToggle={onToggleComplete} />
-          <textarea
-            ref={titleRef}
-            className={clsx("tasks-details__title", done && "tasks-details__title--done")}
-            aria-label="Task title"
-            rows={1}
-            value={titleValue}
-            onFocus={() => setTitle(task.title)}
-            onChange={(e) => setTitle(e.target.value.replace(/\n/g, " "))}
-            onBlur={commitTitle}
-            onKeyDown={onTitleKeyDown}
-          />
-          <ImportanceStar
-            task={task}
-            size="lg"
-            onToggle={() =>
-              onUpdate({ importance: task.importance === "high" ? "normal" : "high" })
-            }
-          />
-        </div>
-
-        <section className="tasks-card tasks-details__due" aria-labelledby={`${id}-due`}>
-          <h3 id={`${id}-due`} className="tasks-details__section-title">
-            <CalendarDays size={16} aria-hidden="true" />
-            <span
-              className={clsx(
-                dueInfo?.overdue && !done && "tasks-due--overdue",
-                dueInfo?.today && !done && "tasks-due--today",
-              )}
-            >
-              {task.dueDate ? `Due ${longDate(parseDue(task.dueDate), now)}` : "Add due date"}
-            </span>
-          </h3>
-          <div className="tasks-details__quick" role="group" aria-label="Quick due dates">
-            {quick.map((q) => (
-              <button
-                key={q.label}
-                type="button"
-                className="tasks-chip"
-                aria-pressed={task.dueDate === q.date}
-                onClick={() => setDueDate(q.date)}
-              >
-                {q.label}
-              </button>
-            ))}
-          </div>
-          <div className="tasks-details__date-row">
-            <label className="visually-hidden" htmlFor={`${id}-date`}>
-              Due date
-            </label>
-            <input
-              id={`${id}-date`}
-              type="date"
-              className="input tasks-details__date"
-              value={dueValue}
-              onFocus={() => setDue(task.dueDate ?? "")}
-              onChange={(e) => {
-                const value = e.target.value;
-                setDue(value);
-                // Commit complete dates right away; partial typing waits for blur.
-                if (isValidDateString(value) && Number(value.slice(0, 4)) >= 1900) {
-                  setDueDate(value);
-                }
-              }}
-              onBlur={() => {
-                if (due === "") setDueDate(null);
-                setDue(null);
-              }}
-            />
-            {task.dueDate && (
-              <button
-                type="button"
-                className="btn btn--subtle btn--sm tasks-details__remove"
-                onClick={() => setDueDate(null)}
-              >
-                <X size={14} aria-hidden="true" />
-                Remove due date
-              </button>
-            )}
-          </div>
-        </section>
-
-        <section className="tasks-card tasks-details__notes-card">
-          <label className="tasks-details__section-title" htmlFor={`${id}-notes`}>
-            <StickyNote size={16} aria-hidden="true" />
-            Notes
-          </label>
-          <textarea
-            id={`${id}-notes`}
-            ref={notesRef}
-            className="tasks-details__notes"
-            placeholder="Add a note"
-            value={notesValue}
-            onFocus={() => setNotes(task.notes ?? "")}
-            onChange={(e) => setNotes(e.target.value)}
-            onBlur={commitNotes}
-          />
-        </section>
-
-        {list && (
-          <p className="tasks-details__list">
-            <List size={14} aria-hidden="true" />
-            <span>
-              In <strong>{list.name}</strong>
-              {account && <> · {account.email}</>}
-            </span>
-          </p>
-        )}
-      </div>
-
-      <footer className="tasks-details__footer">
+    <div className="tasks-details__scroll">
+      <div className="tasks-details__head">
+        <TaskCheckbox task={task} size="lg" onToggle={onToggleComplete} />
+        <textarea
+          ref={titleRef}
+          className={clsx("tasks-details__title", done && "tasks-details__title--done")}
+          aria-label="Task title"
+          rows={1}
+          value={titleValue}
+          onFocus={() => setTitle(task.title)}
+          onChange={(e) => setTitle(e.target.value.replace(/\n/g, " "))}
+          onBlur={commitTitle}
+          onKeyDown={onTitleKeyDown}
+        />
         <button
           type="button"
-          className="icon-btn"
+          className="icon-btn tasks-details__close"
           aria-label="Close details"
           title="Close details (Esc)"
           onClick={onClose}
         >
-          <PanelRightClose size={18} />
+          <X size={18} strokeWidth={1.75} />
         </button>
+      </div>
+
+      <div className="tasks-field">
+        <div className="tasks-field__head">
+          <label className="tasks-field__label" htmlFor={`${id}-date`}>
+            Due date
+          </label>
+          <span
+            className={clsx(
+              "tasks-field__value",
+              !task.dueDate && "tasks-field__value--empty",
+              dueInfo?.overdue && !done && "tasks-field__value--overdue",
+              dueInfo?.today && !done && "tasks-field__value--today",
+            )}
+          >
+            {task.dueDate ? longDate(parseDue(task.dueDate), now) : "None"}
+            {dueInfo?.overdue && !done && " · Overdue"}
+            {dueInfo?.today && !done && " · Today"}
+          </span>
+        </div>
+        <div className="tasks-quick" role="group" aria-label="Quick due dates">
+          {quick.map((q) => (
+            <button
+              key={q.label}
+              type="button"
+              className="tasks-quick__option"
+              aria-pressed={task.dueDate === q.date}
+              onClick={() => setDueDate(q.date)}
+            >
+              {q.label}
+            </button>
+          ))}
+        </div>
+        <div className="tasks-details__date-row">
+          <input
+            id={`${id}-date`}
+            type="date"
+            className="input tasks-details__date"
+            value={dueValue}
+            onFocus={() => setDue(task.dueDate ?? "")}
+            onChange={(e) => {
+              const value = e.target.value;
+              setDue(value);
+              // Commit complete dates right away; partial typing waits for blur.
+              if (isValidDateString(value) && Number(value.slice(0, 4)) >= 1900) {
+                setDueDate(value);
+              }
+            }}
+            onBlur={() => {
+              if (due === "") setDueDate(null);
+              setDue(null);
+            }}
+          />
+          {task.dueDate && (
+            <button
+              type="button"
+              className="btn btn--subtle btn--sm tasks-details__remove"
+              aria-label="Remove due date"
+              title="Remove due date"
+              onClick={() => setDueDate(null)}
+            >
+              <X size={14} strokeWidth={2} aria-hidden="true" />
+              Remove
+            </button>
+          )}
+        </div>
+      </div>
+
+      {list && (
+        <div className="tasks-field tasks-field--row">
+          <span className="tasks-field__label">List</span>
+          <p className="tasks-field__list">
+            <span
+              className="tasks-field__dot"
+              style={account ? { background: account.color } : undefined}
+              aria-hidden="true"
+            />
+            <span className="tasks-field__list-text">
+              <span className="tasks-field__list-name">{list.name}</span>{" "}
+              {account && (
+                <span
+                  className="tasks-field__list-account"
+                  title={`${account.displayName} (${account.email})`}
+                >
+                  {account.email}
+                </span>
+              )}
+            </span>
+          </p>
+        </div>
+      )}
+
+      <div className="tasks-field tasks-field--row">
+        <span className="tasks-field__label">Star</span>
+        <StarField
+          task={task}
+          onToggle={() => onUpdate({ importance: task.importance === "high" ? "normal" : "high" })}
+        />
+      </div>
+
+      <div className="tasks-field tasks-field--notes">
+        <label className="tasks-field__label" htmlFor={`${id}-notes`}>
+          Notes
+        </label>
+        <textarea
+          id={`${id}-notes`}
+          ref={notesRef}
+          className="textarea tasks-details__notes"
+          placeholder="Add a note"
+          value={notesValue}
+          onFocus={() => setNotes(task.notes ?? "")}
+          onChange={(e) => setNotes(e.target.value)}
+          onBlur={commitNotes}
+        />
+      </div>
+
+      <footer className="tasks-details__foot">
         <span className="tasks-details__stamp">
           {done && task.completedAt
             ? `Completed ${shortDate(task.completedAt, now)}`
@@ -255,14 +290,13 @@ export function TaskDetails({
         </span>
         <button
           type="button"
-          className="icon-btn tasks-details__delete"
-          aria-label="Delete task"
-          title="Delete task"
+          className="btn btn--subtle btn--sm tasks-details__delete"
           onClick={onDelete}
         >
-          <Trash2 size={18} />
+          <Trash2 size={15} strokeWidth={1.75} aria-hidden="true" />
+          Delete task
         </button>
       </footer>
-    </aside>
+    </div>
   );
 }
