@@ -1,0 +1,48 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('48d31887-5fad-4d73-a9f5-3c356e68a038')/messages('AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAIgAA')/attachments(id,name,contentType,size,isInline)",
+  "value": [
+    {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      "@odata.mediaContentType": "image/png",
+      "id": "AAMkAtt-image",
+      "name": "image001.png",
+      "contentType": "image/png",
+      "size": 1024,
+      "isInline": true
+    },
+    {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      "@odata.mediaContentType": "application/pdf",
+      "id": "AAMkAtt-report",
+      "name": "report.pdf",
+      "contentType": "application/pdf",
+      "size": 52000,
+      "isInline": false
+    },
+    {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      "@odata.mediaContentType": "application/octet-stream",
+      "id": "AAMkAtt-logo",
+      "name": "logo.gif",
+      "contentType": "application/octet-stream",
+      "size": 800,
+      "isInline": false
+    },
+    {
+      "@odata.type": "#microsoft.graph.fileAttachment",
+      "id": "AAMkAtt-huge",
+      "name": "poster.jpg",
+      "contentType": "image/jpeg",
+      "size": 9000000,
+      "isInline": true
+    },
+    {
+      "@odata.type": "#microsoft.graph.itemAttachment",
+      "id": "AAMkAtt-item",
+      "name": "Meeting notes",
+      "contentType": null,
+      "size": 3000,
+      "isInline": false
+    }
+  ]
+}

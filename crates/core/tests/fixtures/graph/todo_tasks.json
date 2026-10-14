@@ -1,0 +1,54 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('48d31887-5fad-4d73-a9f5-3c356e68a038')/todo/lists('AAMkList-tasks')/tasks",
+  "value": [
+    {
+      "@odata.etag": "W/\"xzyPKP0BiUGgld+lMKXwbQAAgdhkVw==\"",
+      "importance": "high",
+      "isReminderOn": false,
+      "status": "waitingOnOthers",
+      "title": "Get the signed contract back",
+      "createdDateTime": "2026-10-01T09:12:44.6164567Z",
+      "lastModifiedDateTime": "2026-10-02T10:00:00.1234567Z",
+      "hasAttachments": false,
+      "categories": [],
+      "id": "AAMkTask-contract",
+      "body": {
+        "content": "<html><body><p>Ask <b>Pat</b> &amp; legal.</p></body></html>",
+        "contentType": "html"
+      },
+      "dueDateTime": {
+        "dateTime": "2026-10-19T22:00:00.0000000",
+        "timeZone": "UTC"
+      }
+    },
+    {
+      "@odata.etag": "W/\"xzyPKP0BiUGgld+lMKXwbQAAgdhkWA==\"",
+      "importance": "normal",
+      "isReminderOn": false,
+      "status": "completed",
+      "title": "Book flights",
+      "createdDateTime": "2026-09-20T08:00:00Z",
+      "lastModifiedDateTime": "2026-09-21T08:00:00Z",
+      "id": "AAMkTask-flights",
+      "body": { "content": "", "contentType": "text" },
+      "completedDateTime": {
+        "dateTime": "2026-09-21T00:00:00.0000000",
+        "timeZone": "UTC"
+      },
+      "dueDateTime": {
+        "dateTime": "2026-09-25T00:00:00.0000000",
+        "timeZone": "Pacific Standard Time"
+      }
+    },
+    {
+      "@odata.etag": "W/\"xzyPKP0BiUGgld+lMKXwbQAAgdhkWQ==\"",
+      "importance": "low",
+      "status": "deferred",
+      "title": "Clean the garage",
+      "createdDateTime": "2026-08-01T08:00:00Z",
+      "lastModifiedDateTime": "2026-08-01T08:00:00Z",
+      "id": "AAMkTask-garage",
+      "body": { "content": "Some day.", "contentType": "text" }
+    }
+  ]
+}

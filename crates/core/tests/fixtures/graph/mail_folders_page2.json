@@ -1,0 +1,37 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('48d31887-5fad-4d73-a9f5-3c356e68a038')/mailFolders(id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount)",
+  "value": [
+    {
+      "id": "AAMkDeleted",
+      "displayName": "Deleted Items",
+      "parentFolderId": "AAMkRoot",
+      "childFolderCount": 0,
+      "unreadItemCount": 0,
+      "totalItemCount": 12
+    },
+    {
+      "id": "AAMkJunk",
+      "displayName": "Junk Email",
+      "parentFolderId": "AAMkRoot",
+      "childFolderCount": 0,
+      "unreadItemCount": 5,
+      "totalItemCount": 5
+    },
+    {
+      "id": "AAMkOutbox",
+      "displayName": "Outbox",
+      "parentFolderId": "AAMkRoot",
+      "childFolderCount": 0,
+      "unreadItemCount": 0,
+      "totalItemCount": 0
+    },
+    {
+      "id": "AAMkProjects",
+      "displayName": "Projects",
+      "parentFolderId": "AAMkRoot",
+      "childFolderCount": 0,
+      "unreadItemCount": 0,
+      "totalItemCount": 48
+    }
+  ]
+}

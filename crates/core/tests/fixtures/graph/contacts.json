@@ -1,0 +1,53 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('48d31887-5fad-4d73-a9f5-3c356e68a038')/contacts",
+  "value": [
+    {
+      "@odata.etag": "W/\"EQAAABYAAAAiIsqMbYjsT5e-T7KzowPTAAAYNKwC\"",
+      "id": "AAMkContact-pat",
+      "displayName": "Pat Kim",
+      "givenName": "Pat",
+      "surname": "Kim",
+      "emailAddresses": [
+        { "name": "Pat Kim", "address": "pat.kim@fabrikam.com" },
+        { "name": "pat@example.org", "address": "pat@example.org" }
+      ],
+      "businessPhones": ["+1 425 555 0100", "  "],
+      "homePhones": ["+1 425 555 0199"],
+      "mobilePhone": "+1 425 555 0142",
+      "companyName": "Fabrikam",
+      "jobTitle": "Buyer",
+      "department": "Purchasing",
+      "businessAddress": {
+        "street": "1 Microsoft Way\nBuilding 4",
+        "city": "Redmond",
+        "state": "WA",
+        "countryOrRegion": "United States",
+        "postalCode": "98052"
+      },
+      "homeAddress": {},
+      "otherAddress": {},
+      "birthday": "1984-03-08T23:00:00Z",
+      "personalNotes": "Met at the trade fair."
+    },
+    {
+      "@odata.etag": "W/\"EQAAABYAAAAiIsqMbYjsT5e-T7KzowPTAAAYNKwD\"",
+      "id": "AAMkContact-sam",
+      "displayName": "",
+      "givenName": "Sam",
+      "surname": null,
+      "emailAddresses": [],
+      "businessPhones": [],
+      "homePhones": [],
+      "mobilePhone": null,
+      "companyName": null,
+      "jobTitle": null,
+      "department": null,
+      "businessAddress": {},
+      "homeAddress": { "city": "Leeds", "countryOrRegion": "United Kingdom" },
+      "otherAddress": {},
+      "birthday": "1990-11-30T11:59:59Z",
+      "personalNotes": ""
+    }
+  ],
+  "@odata.nextLink": "{{base}}/me/contacts?%24select=id&%24top=2&%24skip=2"
+}
