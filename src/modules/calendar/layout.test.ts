@@ -180,7 +180,7 @@ describe("view ranges", () => {
     expect(shiftAnchor("month", new Date(2026, 0, 31), 1)).toEqual(new Date(2026, 1, 28));
   });
 
-  it("titles ranges like Outlook", () => {
+  it("titles ranges in American style", () => {
     expect(rangeTitle("day", wednesday)).toBe("Wednesday, October 14, 2026");
     expect(rangeTitle("workweek", wednesday)).toBe("October 12 – 16, 2026");
     expect(rangeTitle("week", wednesday)).toBe("October 11 – 17, 2026");
@@ -192,7 +192,8 @@ describe("view ranges", () => {
   it("titles ranges in the locale's own style", () => {
     setLocaleForTesting("en-GB");
     expect(rangeTitle("day", wednesday)).toBe("Wednesday, 14 October 2026");
-    expect(rangeTitle("workweek", wednesday)).toBe("12–16 October 2026");
+    // Newer ICU data puts spaces around the dash; either is the British style.
+    expect(rangeTitle("workweek", wednesday)).toMatch(/^12 ?– ?16 October 2026$/);
   });
 
   it("keeps whole days across daylight-saving changes", () => {
