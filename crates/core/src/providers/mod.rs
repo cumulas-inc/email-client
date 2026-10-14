@@ -38,13 +38,28 @@ pub struct SyncWindow {
     pub max_messages: u32,
 }
 
+/// Read/flag state change of a message whose other fields did not change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlagUpdate {
+    pub remote_id: String,
+    pub is_read: bool,
+    pub is_flagged: bool,
+}
+
 /// Result of syncing one folder.
 #[derive(Debug, Clone, Default)]
 pub struct MessageBatch {
     /// New or changed messages (summaries only; bodies are fetched lazily).
+    /// An empty `preview` keeps the preview already stored for the message.
     pub upserts: Vec<MessageSummary>,
+    /// Read/flagged changes for messages already stored; unknown ids are ignored.
+    pub flag_updates: Vec<FlagUpdate>,
     /// Remote ids of messages that disappeared from the folder.
     pub removed_remote_ids: Vec<String>,
+    /// When set, the complete list of remote ids currently in the folder: any
+    /// stored message of the folder not listed is removed. Lets providers that
+    /// cannot report deletions (IMAP without QRESYNC) reconcile cheaply.
+    pub retain_only: Option<Vec<String>>,
     /// When true, `upserts` is the complete content of the folder within the
     /// sync window and anything else stored locally for it must be dropped
     /// (e.g. IMAP UIDVALIDITY changed or a Graph delta token expired).

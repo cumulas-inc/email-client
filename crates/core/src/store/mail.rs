@@ -118,7 +118,8 @@ fn upsert_summary(tx: &Transaction<'_>, m: &MessageSummary) -> rusqlite::Result<
                folder_id = excluded.folder_id, remote_id = excluded.remote_id,
                conversation_id = excluded.conversation_id, subject = excluded.subject,
                from_name = excluded.from_name, from_address = excluded.from_address,
-               to_json = excluded.to_json, cc_json = excluded.cc_json, preview = excluded.preview,
+               to_json = excluded.to_json, cc_json = excluded.cc_json,
+               preview = COALESCE(NULLIF(excluded.preview, ''), messages.preview),
                received_at = excluded.received_at, is_read = excluded.is_read,
                is_flagged = excluded.is_flagged, is_draft = excluded.is_draft,
                has_attachments = excluded.has_attachments, importance = excluded.importance"
@@ -306,16 +307,36 @@ impl Store {
                 .collect();
             delete_message_rows(&tx, &stale)?;
         }
-        let removed: Vec<String> = batch
+        let mut removed: Vec<String> = batch
             .removed_remote_ids
             .iter()
             .map(|r| local_id(&folder.account_id, EntityKind::Message, r))
             .collect();
+        if let Some(retain) = &batch.retain_only {
+            let keep: HashSet<&str> = retain.iter().map(String::as_str).collect();
+            let mut stmt = tx.prepare("SELECT id, remote_id FROM messages WHERE folder_id = ?1")?;
+            let rows = stmt.query_map([&folder.id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, remote_id) = row?;
+                if !keep.contains(remote_id.as_str()) {
+                    removed.push(id);
+                }
+            }
+        }
         delete_message_rows(&tx, &removed)?;
         for m in &batch.upserts {
             if upsert_summary(&tx, m)? {
                 inserted.push(m.clone());
             }
+        }
+        for update in &batch.flag_updates {
+            let id = local_id(&folder.account_id, EntityKind::Message, &update.remote_id);
+            tx.execute(
+                "UPDATE messages SET is_read = ?2, is_flagged = ?3 WHERE id = ?1",
+                params![id, update.is_read, update.is_flagged],
+            )?;
         }
         tx.execute(
             "UPDATE folders SET sync_state = ?2 WHERE id = ?1",
@@ -745,6 +766,45 @@ mod tests {
     }
 
     #[test]
+    fn flag_updates_retain_only_and_preview_preservation() {
+        let (store, inbox, _) = setup();
+        let batch = MessageBatch {
+            upserts: vec![
+                message(&inbox, "1", "One", false),
+                message(&inbox, "2", "Two", false),
+                message(&inbox, "3", "Three", false),
+            ],
+            ..Default::default()
+        };
+        store.apply_message_batch(&inbox, &batch).unwrap();
+
+        let mut changed = message(&inbox, "1", "One (edited)", false);
+        changed.preview = String::new();
+        let update = MessageBatch {
+            upserts: vec![changed],
+            flag_updates: vec![crate::providers::FlagUpdate {
+                remote_id: "2".into(),
+                is_read: true,
+                is_flagged: true,
+            }],
+            retain_only: Some(vec!["1".into(), "2".into()]),
+            ..Default::default()
+        };
+        store.apply_message_batch(&inbox, &update).unwrap();
+
+        let page = store
+            .list_messages(&inbox.id, &MessageQuery::default())
+            .unwrap();
+        assert_eq!(page.total, 2);
+        let one = page.items.iter().find(|m| m.remote_id == "1").unwrap();
+        assert_eq!(one.subject, "One (edited)");
+        assert_eq!(one.preview, "preview of One");
+        let two = page.items.iter().find(|m| m.remote_id == "2").unwrap();
+        assert!(two.is_read && two.is_flagged);
+        assert!(store.search_messages("three", None, 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn search_finds_subject_sender_and_fetched_body() {
         let (store, inbox, _) = setup();
         let m = message(&inbox, "1", "Quarterly report", false);
@@ -801,7 +861,9 @@ mod tests {
                 },
             )
             .unwrap();
-        let deltas = store.set_messages_read(std::slice::from_ref(&m.id), true).unwrap();
+        let deltas = store
+            .set_messages_read(std::slice::from_ref(&m.id), true)
+            .unwrap();
         assert_eq!(
             deltas,
             vec![FolderUnreadDelta {
