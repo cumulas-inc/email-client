@@ -793,6 +793,12 @@
   padding: var(--space-1) 10px 10px 10px;
 }
 
+@media (max-width: 900px) {
+  .settings {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+}
+
 .settings__nav {
   display: flex;
   flex-direction: column;
@@ -982,12 +988,15 @@
   box-shadow: var(--shadow-card);
 }
 
+/* When the text would get narrower than 200px (a small window at a larger
+   text size), the control moves under it. */
 .setting-row {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-6);
+  gap: 10px var(--space-6);
   min-height: 60px;
   padding: var(--space-3) var(--space-4);
 }
@@ -1012,7 +1021,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  flex: 1;
+  flex: 1 1 200px;
   min-width: 0;
 }
 
@@ -1032,9 +1041,14 @@
 
 .setting-row--stacked {
   flex-direction: column;
+  flex-wrap: nowrap;
   align-items: stretch;
   gap: var(--space-3);
   padding-bottom: var(--space-4);
+}
+
+.setting-row--stacked > .setting-row__text {
+  flex: none;
 }
 
 .setting-select {

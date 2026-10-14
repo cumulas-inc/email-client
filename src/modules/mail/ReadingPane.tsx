@@ -374,7 +374,7 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
         )}
         <button
           type="button"
-          className="icon-btn"
+          className="icon-btn mail-reader__step"
           aria-label="Previous message"
           title="Previous message (K)"
           disabled={position <= 0}
@@ -384,7 +384,7 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
         </button>
         <button
           type="button"
-          className="icon-btn"
+          className="icon-btn mail-reader__step"
           aria-label="Next message"
           title="Next message (J)"
           disabled={position < 0 || position >= listed - 1}

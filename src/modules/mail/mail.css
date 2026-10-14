@@ -85,6 +85,47 @@
   min-height: 200px;
 }
 
+/* A small window at a larger text size (see app.css): all three cards
+   still fit side by side, the folders giving way first. */
+@media (max-width: 900px) {
+  .mail__folders {
+    min-width: 180px;
+  }
+
+  .mail__list-panel {
+    min-width: 250px;
+  }
+
+  .mail__reader-panel {
+    min-width: 310px;
+  }
+
+  .mail--right .mail__main {
+    min-width: calc(250px + var(--pane-gap) + 310px);
+  }
+
+  .mail--bottom .mail__main,
+  .mail--off .mail__main {
+    min-width: 310px;
+  }
+
+  /* The reading pane is at its narrowest, so its actions keep their room;
+     the list beside it and J / K still move between messages. (A media
+     query: WebKit measures containers in zoomed pixels.) */
+  .mail--right .mail-reader__toolbar {
+    padding: 0 6px 0 8px;
+  }
+
+  .mail--right .mail-tool {
+    padding: 0 7px;
+  }
+
+  .mail--right .mail-tool__caret,
+  .mail--right .mail-reader__step {
+    display: none;
+  }
+}
+
 /* --- Splitters ---------------------------------------------------------------- */
 
 /* Each splitter fills the gap between two cards (the negative margins cancel

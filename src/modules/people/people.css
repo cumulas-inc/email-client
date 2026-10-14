@@ -160,6 +160,14 @@
   width: clamp(280px, 25vw, 360px);
 }
 
+/* A small window at a larger text size (see app.css): the details keep
+   room for a name and an address. */
+@media (max-width: 900px) {
+  .people__list-pane {
+    width: 248px;
+  }
+}
+
 .people__list-head {
   padding: var(--space-3) var(--space-3) 0;
 }
@@ -680,6 +688,29 @@
 
   .people-field--block .people-field__multiline {
     padding-top: 6px;
+  }
+}
+
+/* A small window at a larger text size (see app.css): the avatar sits
+   above the name, and each label above its value. (A media query: WebKit
+   measures containers in zoomed pixels.) */
+@media (max-width: 900px) {
+  .people-details__header {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .people-field {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .people-field__label {
+    min-height: 0;
+    padding-top: 12px;
+  }
+
+  .people-field__value {
+    min-height: 36px;
   }
 }
 

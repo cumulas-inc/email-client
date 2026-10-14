@@ -190,8 +190,10 @@ export function CalendarModule() {
   const settled = eventsQuery.isSuccess && !eventsQuery.isPlaceholderData;
   const nothingScheduled = settled && !allHidden && events.length === 0;
   const title = rangeTitle(view, anchor);
-  // Narrow windows shorten titles that wouldn't fit ("Wed, Oct 14, 2026").
-  const shortTitle = title.length > SHORT_TITLE_AFTER ? rangeTitle(view, anchor, true) : title;
+  // Narrow windows shorten titles that wouldn't fit ("Wed, Oct 14, 2026");
+  // shorter ones only in the narrowest (a small window at a larger text size).
+  const shortTitle = rangeTitle(view, anchor, true);
+  const shortenEarly = title.length > SHORT_TITLE_AFTER;
   // In month view the mini month highlights the month itself, not the 6-week grid.
   const miniRange =
     view === "month"
@@ -258,6 +260,7 @@ export function CalendarModule() {
           view={view}
           title={title}
           shortTitle={shortTitle}
+          shortenEarly={shortenEarly}
           weekLabel={weekLabel(view, anchor)}
           busy={eventsQuery.isFetching && !eventsQuery.isLoading}
           onToday={goToday}

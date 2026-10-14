@@ -21,6 +21,17 @@
   min-height: 0;
 }
 
+/* The larger text sizes zoom the whole window, so the smallest window
+   (960 x 600) can be as narrow as 800 CSS pixels. The cards keep more of
+   it; each module narrows its own panes below the same width. */
+@media (max-width: 900px) {
+  :root {
+    --canvas-padding: 8px;
+    --pane-gap: 8px;
+    --sidebar-width: 220px;
+  }
+}
+
 /* --- Header ---------------------------------------------------------------- */
 
 .app-header {

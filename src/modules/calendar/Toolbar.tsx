@@ -9,6 +9,8 @@ interface ToolbarProps {
   title: string;
   /** The same range in fewer characters, for narrow windows. */
   shortTitle: string;
+  /** Use the short title as soon as the toolbar narrows, not only when it's at its narrowest. */
+  shortenEarly: boolean;
   /** "Week 42" where the locale numbers its weeks, else null. */
   weekLabel: string | null;
   busy: boolean;
@@ -21,6 +23,7 @@ export function Toolbar({
   view,
   title,
   shortTitle,
+  shortenEarly,
   weekLabel,
   busy,
   onToday,
@@ -57,7 +60,11 @@ export function Toolbar({
           <ChevronRight size={18} strokeWidth={1.75} />
         </button>
       </div>
-      <h1 className="cal-toolbar__title" aria-live="polite">
+      <h1
+        className="cal-toolbar__title"
+        aria-live="polite"
+        data-shorten={shortenEarly ? "early" : undefined}
+      >
         {/* calendar.css shows one of the two by the width of the toolbar. */}
         <span className="cal-toolbar__title-long">{title}</span>
         {shortTitle !== title && (
