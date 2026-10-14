@@ -103,7 +103,9 @@ export function AttendeeInput({ id, value, onChange, placeholder }: AttendeeInpu
           {value.map((a) => (
             <li key={a.address} className="cal-chip" title={a.address}>
               <Avatar name={displayName(a)} colorKey={a.address} size={20} />
-              <span className="cal-chip__name">{displayName(a)}</span>
+              <span className="cal-chip__name" dir="auto">
+                {displayName(a)}
+              </span>
               <button
                 type="button"
                 className="cal-chip__remove"
@@ -164,7 +166,9 @@ export function AttendeeInput({ id, value, onChange, placeholder }: AttendeeInpu
             >
               <Avatar name={displayName(o)} colorKey={o.address} size={28} />
               <span className="cal-suggest__text">
-                <span className="cal-suggest__name">{displayName(o)}</span>
+                <span className="cal-suggest__name" dir="auto">
+                  {displayName(o)}
+                </span>
                 {o.name && <span className="cal-suggest__address">{o.address}</span>}
               </span>
             </li>

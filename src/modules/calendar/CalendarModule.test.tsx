@@ -8,6 +8,7 @@ import { Toaster } from "../../components/Toaster";
 import { renderWithBackend } from "../../test/render";
 import { CalendarModule } from "./CalendarModule";
 import type { CalendarView } from "./layout";
+import { toAllDayIso } from "./dates";
 import { HIDDEN_KEY, VIEW_KEY } from "./prefs";
 import { currentTimeZone, setTimeZone } from "./testing";
 
@@ -376,10 +377,12 @@ describe("CalendarModule", () => {
 
   it("shows +k more in month view and opens the day", async () => {
     const { user } = await setup({ view: "month" });
+    // "+N more" sits beside the date, so the day keeps all three lines for events.
     const more = await screen.findByRole("button", {
-      name: "5 more events on Wednesday, October 14",
+      name: "4 more events on Wednesday, October 14",
     });
-    expect(more).toHaveTextContent("+5 more");
+    expect(more).toHaveTextContent("+4 more");
+    expect(more.previousElementSibling).toHaveAccessibleName(/^Wednesday, October 14, 2026/);
     // Bars span days: the launch week is drawn once for Monday to Friday.
     expect(screen.getAllByRole("button", { name: /^Atlas launch week,/ })).toHaveLength(1);
 
@@ -387,6 +390,66 @@ describe("CalendarModule", () => {
     expect(title()).toHaveTextContent("Wednesday, October 14, 2026");
     expect(screen.getByRole("button", { name: "Day" })).toHaveAttribute("aria-pressed", "true");
     expect(await eventButton("Customer escalation: Contoso")).toBeInTheDocument();
+  });
+
+  it("puts overlaps that don't fit behind +N, which opens the day", async () => {
+    // A 700px grid: a week column has room for one of two overlapping events.
+    class FixedSizeObserver {
+      constructor(private callback: ResizeObserverCallback) {}
+      observe() {
+        const entry = { contentRect: { width: 700, height: 600 } } as ResizeObserverEntry;
+        this.callback([entry], this as unknown as ResizeObserver);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", FixedSizeObserver);
+    try {
+      const { user } = await setup({ view: "week" });
+      await eventButton("Focus time");
+      expect(queryEvent("Security review")).not.toBeInTheDocument();
+      const chip = screen.getByRole("button", {
+        name: "1 more event at 11:00 AM on Wednesday, October 14",
+      });
+      expect(chip).toHaveTextContent("+1");
+
+      await user.click(chip);
+      expect(title()).toHaveTextContent("Wednesday, October 14, 2026");
+      // Day view has room for both.
+      expect(await eventButton("Security review")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /^1 more event at/ })).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("collapses a crowded all-day lane until it is opened", async () => {
+    const backend = new MockBackend();
+    const calendar = (await backend.listCalendars()).find((c) => c.canEdit)!;
+    for (const subject of ["Offsite", "Hackathon", "Board visit", "Fire drill"]) {
+      await backend.createEvent({
+        calendarId: calendar.id,
+        subject,
+        start: toAllDayIso(new Date(2026, 9, 14)),
+        end: toAllDayIso(new Date(2026, 9, 15)),
+        isAllDay: true,
+        attendees: [],
+        showAs: "free",
+        isOnlineMeeting: false,
+      });
+    }
+    const { user } = await setup({ backend });
+    // Wednesday has five all-day rows: three show, the rest wait behind "+2 more".
+    const more = await screen.findByRole("button", {
+      name: "2 more all-day events on Wednesday, October 14",
+    });
+    expect(queryEvent("Board visit")).not.toBeInTheDocument();
+
+    await user.click(more);
+    expect(await eventButton("Board visit")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /more all-day events/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show fewer all-day events" }));
+    expect(queryEvent("Board visit")).not.toBeInTheDocument();
   });
 
   it("lists what tomorrow holds in the sidebar", async () => {

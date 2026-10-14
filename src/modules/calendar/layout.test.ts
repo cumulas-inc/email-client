@@ -1,3 +1,4 @@
+import { addDays } from "date-fns";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CalendarEvent } from "../../api/types";
@@ -7,17 +8,18 @@ import { withTimeZone } from "./testing";
 import {
   type TimedSegment,
   cellLanes,
+  fitColumns,
   hiddenCount,
   laneTable,
   layoutDay,
   layoutLanes,
+  limitColumns,
   rangeTitle,
   rowItems,
   shiftAnchor,
   spanForDays,
   timedSegmentsForDay,
   viewRange,
-  visibleLanes,
   weekLabel,
 } from "./layout";
 
@@ -104,6 +106,99 @@ describe("overlap layout", () => {
     expect(placed.a!.columns).toBe(2);
     expect(byKey(layoutDay([seg("a", 600, 605), seg("b", 605, 610)])).a!.columns).toBe(1);
   });
+
+  it("numbers the clusters of a day", () => {
+    const placed = byKey(layoutDay([seg("a", 540, 600), seg("b", 570, 600), seg("c", 600, 630)]));
+    expect([placed.a!.cluster, placed.b!.cluster, placed.c!.cluster]).toEqual([0, 0, 1]);
+  });
+});
+
+describe("crowded clusters", () => {
+  // Seven meetings at 10:00 (the longest first), then one at 11:30 that
+  // takes the third column once it is free.
+  const crowd = [
+    seg("legal", 600, 720),
+    seg("interview", 600, 690),
+    seg("budget", 600, 660),
+    seg("steering", 600, 660),
+    seg("coffee", 600, 645),
+    seg("vendor", 600, 630),
+    seg("supplier", 600, 630),
+    seg("canceled", 690, 720),
+    seg("lunch", 750, 780),
+  ];
+
+  it("fits as many columns as have room, beside a chip for the rest", () => {
+    const fit = { minWidth: 48, shownWidth: 72, chipWidth: 30 };
+    // Two events in a 109px column get 54px each: no chip needed.
+    expect(fitColumns(109, 2, fit)).toBe(2);
+    // Seven don't fit in 204px (a work-week column at 1440px): two are shown,
+    // 87px each, beside the chip.
+    expect(fitColumns(204, 7, fit)).toBe(2);
+    expect(fitColumns(400, 9, fit)).toBe(5);
+    // A 75px column shows one event and a chip, however narrow.
+    expect(fitColumns(75, 2, fit)).toBe(1);
+    expect(fitColumns(20, 9, fit)).toBe(1);
+    expect(fitColumns(75, 1, fit)).toBe(1);
+  });
+
+  it("hides the columns that don't fit behind +N chips", () => {
+    const { placed, overflow } = limitColumns(layoutDay(crowd), () => 3);
+    const shown = byKey(placed);
+    expect(Object.keys(shown).sort()).toEqual([
+      "budget",
+      "canceled",
+      "interview",
+      "legal",
+      "lunch",
+    ]);
+    expect(shown.legal).toMatchObject({ column: 0, columns: 3, overflowed: true });
+    expect(shown.budget).toMatchObject({ column: 2, columns: 3, span: 1 });
+    // 11:30 takes the Interview's column once it ends, so it stays visible.
+    expect(shown.canceled).toMatchObject({ column: 1, columns: 3 });
+    // A later cluster that fits is left alone.
+    expect(shown.lunch).toMatchObject({ column: 0, columns: 1 });
+    expect(shown.lunch!.overflowed).toBeUndefined();
+    expect(overflow).toEqual([
+      {
+        key: "more-steering",
+        start: 600,
+        end: 660,
+        items: ["steering", "coffee", "supplier", "vendor"],
+      },
+    ]);
+  });
+
+  it("keeps hidden events that don't overlap in separate chips", () => {
+    // a runs all morning; b and c overlap it but not each other.
+    const day = layoutDay([seg("a", 540, 720), seg("b", 600, 630), seg("c", 660, 690)]);
+    const { placed, overflow } = limitColumns(day, (columns) => (columns > 1 ? 1 : columns));
+    expect(placed.map((p) => p.key)).toEqual(["a"]);
+    expect(overflow.map((g) => [g.start, g.end, g.items])).toEqual([
+      [600, 630, ["b"]],
+      [660, 690, ["c"]],
+    ]);
+  });
+
+  it("stops stretched events at the chip", () => {
+    // d could stretch over two columns, but only two of three are shown.
+    const day = layoutDay([
+      seg("a", 540, 720),
+      seg("b", 600, 630),
+      seg("c", 600, 630),
+      seg("d", 660, 700),
+    ]);
+    const { placed, overflow } = limitColumns(day, () => 2);
+    expect(byKey(placed).d).toMatchObject({ column: 1, columns: 2, span: 1 });
+    expect(overflow).toHaveLength(1);
+    expect(overflow[0]!.items).toEqual(["c"]);
+  });
+
+  it("draws short hidden events at their minimum height", () => {
+    const day = layoutDay([seg("a", 600, 660), seg("b", 600, 605)], 18);
+    const { overflow } = limitColumns(day, () => 1, 18);
+    expect(overflow[0]).toMatchObject({ start: 600, end: 618 });
+  });
 });
 
 describe("timed segments", () => {
@@ -188,6 +283,13 @@ describe("view ranges", () => {
     expect(rangeTitle("month", wednesday)).toBe("October 2026");
     expect(rangeTitle("week", new Date(2026, 9, 1))).toBe("September 27 – October 3, 2026");
     expect(rangeTitle("week", new Date(2026, 11, 31))).toBe("December 27, 2026 – January 2, 2027");
+  });
+
+  it("has short titles for narrow windows", () => {
+    expect(rangeTitle("day", wednesday, true)).toBe("Wed, Oct 14, 2026");
+    expect(rangeTitle("workweek", wednesday, true)).toBe("Oct 12 – 16, 2026");
+    expect(rangeTitle("week", new Date(2026, 9, 1), true)).toBe("Sep 27 – Oct 3, 2026");
+    expect(rangeTitle("month", wednesday, true)).toBe("October 2026");
   });
 
   it("titles ranges in the locale's own style", () => {
@@ -289,15 +391,36 @@ describe("lanes for multi-day bars", () => {
     expect(byKey(placed).t1!.lane).toBe(1);
 
     const table = laneTable(placed, 7);
-    // Wednesday has 4 items; with 3 lines only 2 show plus "+2 more".
-    const visible = (col: number) => visibleLanes(table[col]!.length, 3);
-    expect(visible(2)).toBe(2);
-    expect(hiddenCount(table, 2, visible(2))).toBe(2);
-    expect(hiddenCount(table, 1, visible(1))).toBe(0);
+    // Wednesday has 4 items; with 3 lines, 3 show and "+1 more" counts the last.
+    const visible = () => 3;
+    expect(cellLanes(table, 2, visible)).toHaveLength(3);
+    expect(hiddenCount(table, 2, 3)).toBe(1);
+    expect(hiddenCount(table, 1, 3)).toBe(0);
 
     // The bar is drawn once, from Tuesday, over three columns.
     const tuesday = cellLanes(table, 1, visible);
     expect(tuesday[0]!.piece).toMatchObject({ span: 3, joinsBefore: false, joinsAfter: false });
     expect(cellLanes(table, 2, visible)[0]!.piece).toBeNull();
+  });
+
+  it("draws a bar across every day when all days show the same lanes", () => {
+    // Friday is full, the weekend is not: a Fri–Sun bar in the second lane is
+    // drawn across all three days, or counted in "+N more" on each.
+    const events = [
+      ev("long", toAllDayIso(week[0]!), toAllDayIso(addDays(week[0]!, 7)), true),
+      ev("fri", toAllDayIso(week[4]!), toAllDayIso(week[5]!), true),
+      ev("summit", toAllDayIso(week[4]!), toAllDayIso(addDays(week[6]!, 1)), true),
+      ev("t1", new Date(2026, 9, 16, 9), new Date(2026, 9, 16, 10)),
+      ev("t2", new Date(2026, 9, 16, 11), new Date(2026, 9, 16, 12)),
+    ];
+    const placed = byKey(rowItems(events, week, { includeTimed: true }));
+    expect(placed.summit).toMatchObject({ lane: 1, startCol: 4, endCol: 6 });
+    const table = laneTable(Object.values(placed), 7);
+    expect(cellLanes(table, 4, () => 2)[1]!.piece).toMatchObject({ span: 3 });
+    expect(hiddenCount(table, 4, 2)).toBe(3);
+    expect(hiddenCount(table, 5, 2)).toBe(0);
+    // With one line, the summit is counted on all three days instead.
+    expect(cellLanes(table, 4, () => 1)).toHaveLength(1);
+    expect([4, 5, 6].map((col) => hiddenCount(table, col, 1))).toEqual([4, 1, 1]);
   });
 });

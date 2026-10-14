@@ -1,5 +1,6 @@
 import clsx from "clsx";
 import { addDays, format, isSameDay, isWeekend } from "date-fns";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -12,6 +13,7 @@ import {
 
 import type { Calendar, CalendarEvent } from "../../api/types";
 import { appLocale, formatDate, formatHour, formatTime, formatTimeSpan } from "../../lib/datetime";
+import { formatCount } from "../../lib/format";
 import { atMinutes, eventRange, minutesOfDay } from "./dates";
 import { EventBar } from "./EventBar";
 import { type EventSelectProps, eventClasses, eventStyle, selectHandlers } from "./eventProps";
@@ -23,11 +25,16 @@ import {
   eventTitle,
   formatClock,
 } from "./eventText";
+import { useElementWidth } from "./hooks";
 import {
+  type OverflowGroup,
   type PlacedSegment,
   cellLanes,
+  fitColumns,
+  hiddenCount,
   laneTable,
   layoutDay,
+  limitColumns,
   rowItems,
   timedSegmentsForDay,
 } from "./layout";
@@ -51,6 +58,20 @@ const INSET_RIGHT = 5;
 const EVENT_GAP = 2;
 /** Hour labels this close to the now pill make way for it. */
 const NOW_PILL_CLEARANCE = 18;
+/** Width of the hour gutter and the breathing room after the last day. */
+const GUTTER = 64;
+const GRID_END = 12;
+/** The "+N" chip beside a crowded cluster, and the gap before it. */
+const CHIP_WIDTH = 28;
+const CHIP_GAP = 2;
+/**
+ * Overlapping events narrower than `minWidth` would only show slivers of
+ * their titles: what doesn't fit goes behind the chip, which opens the day,
+ * and the events still shown get `shownWidth` for a word or two per line.
+ */
+const FIT = { minWidth: 48, shownWidth: 72, chipWidth: CHIP_WIDTH + CHIP_GAP };
+/** All-day rows shown before the rest go behind "+N more". */
+const ALL_DAY_LINES = 3;
 
 interface TimeGridProps {
   days: Date[];
@@ -91,9 +112,17 @@ function clockLabel(minutes: number): string {
   return `${String(h).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
-/** Horizontal placement inside a day column, leaving the column's insets free. */
-function columnPlacement(column: number, span: number, columns: number): CSSProperties {
-  const inner = `(100% - ${INSET_LEFT + INSET_RIGHT}px)`;
+/**
+ * Horizontal placement inside a day column, leaving the column's insets free
+ * and `reserve` pixels on the right for "+N" chips.
+ */
+function columnPlacement(
+  column: number,
+  span: number,
+  columns: number,
+  reserve = 0,
+): CSSProperties {
+  const inner = `(100% - ${INSET_LEFT + INSET_RIGHT + reserve}px)`;
   const last = column + span >= columns;
   return {
     left: `calc(${INSET_LEFT}px + ${inner} * ${column / columns})`,
@@ -114,6 +143,9 @@ export function TimeGrid({
 }: TimeGridProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const headRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const bodyWidth = useElementWidth(bodyRef);
+  const [allDayOpen, setAllDayOpen] = useState(false);
   const dragRef = useRef<DragState | null>(null);
   const stopDragRef = useRef<(() => void) | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -146,10 +178,30 @@ export function TimeGrid({
     return laneTable(placed, days.length);
   }, [events, days]);
 
+  // Room for events in one day column (each column has a 1px border). Before
+  // the grid is measured, and in day view, every event gets its column.
+  const eventsWidth =
+    bodyWidth > 0
+      ? (bodyWidth - GUTTER - GRID_END) / days.length - 1 - INSET_LEFT - INSET_RIGHT
+      : 0;
+  const limit = onOpenDay !== undefined && eventsWidth > 0;
   const columns = useMemo(
-    () => days.map((day) => layoutDay(timedSegmentsForDay(events, day), MIN_MINUTES)),
-    [events, days],
+    () =>
+      days.map((day) =>
+        limitColumns(
+          layoutDay(timedSegmentsForDay(events, day), MIN_MINUTES),
+          (n) => (limit ? fitColumns(eventsWidth, n, FIT) : n),
+          MIN_MINUTES,
+        ),
+      ),
+    [events, days, limit, eventsWidth],
   );
+
+  // A crowded all-day lane shows three rows, and "+N more" below them on the
+  // days with more, until it's opened.
+  const allDayLanes = Math.max(0, ...allDay.map((lanes) => lanes.length));
+  const allDayCollapsible = allDayLanes > ALL_DAY_LINES;
+  const allDayVisible = allDayCollapsible && !allDayOpen ? ALL_DAY_LINES : Infinity;
 
   const startDrag = (e: ReactPointerEvent<HTMLDivElement>, col: number) => {
     if (e.button !== 0) return;
@@ -213,7 +265,16 @@ export function TimeGrid({
   const nowTop = (minutesOfDay(now) / 60) * HOUR_HEIGHT;
 
   return (
-    <div className="cal-tg" style={{ "--cal-days": days.length } as CSSProperties}>
+    <div
+      className="cal-tg"
+      style={
+        {
+          "--cal-days": days.length,
+          "--tg-gutter": `${GUTTER}px`,
+          "--tg-end": `${GRID_END}px`,
+        } as CSSProperties
+      }
+    >
       <div className="cal-tg__head" ref={headRef}>
         <div className="cal-tg__row cal-tg__days">
           <div className="cal-tg__gutter cal-tg__tz" title="Time zone">
@@ -250,47 +311,81 @@ export function TimeGrid({
             );
           })}
         </div>
-        <div className="cal-tg__row cal-tg__allday">
-          <div className="cal-tg__gutter cal-tg__allday-label">All day</div>
-          {days.map((day, col) => (
-            <div
-              key={day.getTime()}
-              className={clsx(
-                "cal-tg__allday-cell",
-                isWeekend(day) && "cal-tg__allday-cell--off",
-                col === todayCol && "cal-tg__allday-cell--today",
-              )}
-              role="group"
-              aria-label={`All-day events, ${formatDate(day, "weekdayLong")}`}
-              onClick={() => onCreate(day, addDays(day, 1), true)}
-            >
-              {cellLanes(allDay, col, () => Infinity).map(({ lane, piece }) => {
-                if (!piece) {
-                  return <div key={`gap-${lane}`} className="cal-bar-gap" aria-hidden="true" />;
-                }
-                const calendar = calendars.get(piece.placed.item.calendarId);
-                return (
-                  <EventBar
-                    key={piece.placed.key}
-                    event={piece.placed.item}
-                    span={piece.span}
-                    joinsBefore={piece.joinsBefore}
-                    joinsAfter={piece.joinsAfter}
-                    // Long bars have room to say which calendar they're from.
-                    detail={piece.span > 1 ? calendar?.name : undefined}
-                    calendar={calendar}
-                    selected={selectedId === piece.placed.item.id}
-                    onSelect={onSelect}
-                  />
-                );
-              })}
-            </div>
-          ))}
+        <div className={clsx("cal-tg__row cal-tg__allday", allDayOpen && "cal-tg__allday--open")}>
+          <div className="cal-tg__gutter cal-tg__allday-label">
+            All day
+            {allDayCollapsible && (
+              <button
+                type="button"
+                className="icon-btn icon-btn--sm cal-tg__allday-toggle"
+                aria-expanded={allDayOpen}
+                aria-label={allDayOpen ? "Show fewer all-day events" : "Show all all-day events"}
+                title={allDayOpen ? "Show fewer" : "Show all"}
+                onClick={() => setAllDayOpen((open) => !open)}
+              >
+                {allDayOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              </button>
+            )}
+          </div>
+          {days.map((day, col) => {
+            const hidden = hiddenCount(allDay, col, allDayVisible);
+            return (
+              <div
+                key={day.getTime()}
+                className={clsx(
+                  "cal-tg__allday-cell",
+                  isWeekend(day) && "cal-tg__allday-cell--off",
+                  col === todayCol && "cal-tg__allday-cell--today",
+                )}
+                role="group"
+                aria-label={`All-day events, ${formatDate(day, "weekdayLong")}`}
+                onClick={() => onCreate(day, addDays(day, 1), true)}
+              >
+                {cellLanes(allDay, col, () => allDayVisible).map(({ lane, piece }) => {
+                  if (!piece) {
+                    return <div key={`gap-${lane}`} className="cal-bar-gap" aria-hidden="true" />;
+                  }
+                  const calendar = calendars.get(piece.placed.item.calendarId);
+                  return (
+                    <EventBar
+                      key={piece.placed.key}
+                      event={piece.placed.item}
+                      span={piece.span}
+                      joinsBefore={piece.joinsBefore}
+                      joinsAfter={piece.joinsAfter}
+                      // Long bars have room to say which calendar they're from.
+                      detail={piece.span > 1 ? calendar?.name : undefined}
+                      calendar={calendar}
+                      selected={selectedId === piece.placed.item.id}
+                      onSelect={onSelect}
+                    />
+                  );
+                })}
+                {hidden > 0 && (
+                  <button
+                    type="button"
+                    className="cal-more-link cal-tg__allday-more"
+                    aria-label={`${hidden} more all-day event${hidden === 1 ? "" : "s"} on ${formatDate(day, "weekdayLong")}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setAllDayOpen(true);
+                    }}
+                  >
+                    +{formatCount(hidden)} more
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 
       <div className="cal-tg__scroll" ref={scrollRef}>
-        <div className="cal-tg__row cal-tg__body" style={{ height: 24 * HOUR_HEIGHT }}>
+        <div
+          className="cal-tg__row cal-tg__body"
+          ref={bodyRef}
+          style={{ height: 24 * HOUR_HEIGHT }}
+        >
           <div className="cal-tg__gutter cal-tg__hours" aria-hidden="true">
             {Array.from({ length: 23 }, (_, i) => i + 1).map((hour) => {
               const top = hour * HOUR_HEIGHT;
@@ -340,7 +435,7 @@ export function TimeGrid({
                     />
                   );
                 })}
-                {columns[col]!.map((placed) => (
+                {columns[col]!.placed.map((placed) => (
                   <TimedEvent
                     key={placed.key}
                     placed={placed}
@@ -349,6 +444,10 @@ export function TimeGrid({
                     onSelect={onSelect}
                   />
                 ))}
+                {onOpenDay &&
+                  columns[col]!.overflow.map((group) => (
+                    <MoreChip key={group.key} group={group} day={day} onOpen={onOpenDay} />
+                  ))}
                 {drag && drag.col === col && <DragGhost drag={drag} />}
                 {col === todayCol && (
                   <div className="cal-now" style={{ top: nowTop }} aria-hidden="true" />
@@ -359,6 +458,43 @@ export function TimeGrid({
         </div>
       </div>
     </div>
+  );
+}
+
+/** "+3": the events of a crowded cluster that didn't fit; opens the day. */
+function MoreChip({
+  group,
+  day,
+  onOpen,
+}: {
+  group: OverflowGroup<CalendarEvent>;
+  day: Date;
+  onOpen: (day: Date) => void;
+}) {
+  const count = group.items.length;
+  const height = ((group.end - group.start) / 60) * HOUR_HEIGHT - EVENT_GAP;
+  return (
+    <button
+      type="button"
+      className="cal-ev-more tnum"
+      style={{
+        top: (group.start / 60) * HOUR_HEIGHT + EVENT_GAP / 2,
+        height: Math.max(height, 20),
+        right: INSET_RIGHT,
+        width: CHIP_WIDTH,
+      }}
+      aria-label={`${count} more event${count === 1 ? "" : "s"} at ${formatTime(
+        atMinutes(day, group.start),
+      )} on ${formatDate(day, "weekdayLong")}`}
+      title={group.items.map(eventTitle).join("\n")}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen(day);
+      }}
+    >
+      +{formatCount(count)}
+    </button>
   );
 }
 
@@ -423,7 +559,13 @@ function TimedEvent({ placed, calendar, selected, onSelect }: TimedEventProps) {
       style={eventStyle(calendar, {
         top: (placed.start / 60) * HOUR_HEIGHT + EVENT_GAP / 2,
         height,
-        ...columnPlacement(placed.column, placed.span, placed.columns),
+        "--ev-height": `${height}px`,
+        ...columnPlacement(
+          placed.column,
+          placed.span,
+          placed.columns,
+          placed.overflowed ? CHIP_WIDTH + CHIP_GAP : 0,
+        ),
         "--title-lines": titleLines,
       } as CSSProperties)}
       data-event-id={event.id}
@@ -432,7 +574,9 @@ function TimedEvent({ placed, calendar, selected, onSelect }: TimedEventProps) {
       aria-expanded={selected}
       {...selectHandlers(event, onSelect)}
     >
-      <span className="cal-ev__title">{eventTitle(event)}</span>
+      <span className="cal-ev__title" dir="auto">
+        {eventTitle(event)}
+      </span>
       {compact ? (
         !placed.continuesBefore && (
           <span className="cal-ev__meta tnum">
@@ -455,7 +599,11 @@ function TimedEvent({ placed, calendar, selected, onSelect }: TimedEventProps) {
             </span>
             {statusText && <span className="cal-ev__status">{statusText}</span>}
           </span>
-          {showLocation && <span className="cal-ev__meta">{event.location}</span>}
+          {showLocation && (
+            <span className="cal-ev__meta" dir="auto">
+              {event.location}
+            </span>
+          )}
         </>
       )}
     </button>

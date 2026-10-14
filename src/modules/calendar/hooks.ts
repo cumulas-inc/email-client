@@ -20,20 +20,30 @@ export function useNow(intervalMs = 60_000): Date {
   return now;
 }
 
-/** Height of an element, tracked with ResizeObserver (0 until measured). */
-export function useElementHeight(ref: RefObject<HTMLElement | null>): number {
-  const [height, setHeight] = useState(0);
+/** Content-box size of an element, tracked with ResizeObserver (0 until measured). */
+function useElementSize(ref: RefObject<HTMLElement | null>, dimension: "width" | "height"): number {
+  const [size, setSize] = useState(0);
   useEffect(() => {
     const el = ref.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
-      if (entry) setHeight(entry.contentRect.height);
+      if (entry) setSize(entry.contentRect[dimension]);
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [ref]);
-  return height;
+  }, [ref, dimension]);
+  return size;
+}
+
+/** Height of an element, tracked with ResizeObserver (0 until measured). */
+export function useElementHeight(ref: RefObject<HTMLElement | null>): number {
+  return useElementSize(ref, "height");
+}
+
+/** Width of an element, tracked with ResizeObserver (0 until measured). */
+export function useElementWidth(ref: RefObject<HTMLElement | null>): number {
+  return useElementSize(ref, "width");
 }
 
 /** `value`, but only after it has stopped changing for `delayMs`. */

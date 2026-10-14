@@ -48,8 +48,14 @@ export function EventBar({
       {timed && !joinsBefore && (
         <span className="cal-bar__time">{formatTime(eventRange(event).start)}</span>
       )}
-      <span className="cal-bar__title">{eventTitle(event)}</span>
-      {detail && <span className="cal-bar__detail">· {detail}</span>}
+      <span className="cal-bar__title" dir="auto">
+        {eventTitle(event)}
+      </span>
+      {detail && (
+        <span className="cal-bar__detail">
+          · <bdi>{detail}</bdi>
+        </span>
+      )}
     </button>
   );
 }

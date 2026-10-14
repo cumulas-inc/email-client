@@ -4,6 +4,7 @@ import { useId, useMemo } from "react";
 
 import type { Calendar } from "../../api/types";
 import { formatDate } from "../../lib/datetime";
+import { formatCount } from "../../lib/format";
 import { tintStyle } from "./colors";
 import { eventRange, isAllDayLike } from "./dates";
 import type { EventSelectProps } from "./eventProps";
@@ -74,7 +75,9 @@ export function Agenda({ today, hidden, calendars, selectedId, onSelect, onOpenD
                 aria-expanded={selectedId === event.id}
                 onClick={(e) => onSelect(event, e.currentTarget)}
               >
-                <span className="cal-agenda__title">{eventTitle(event)}</span>
+                <span className="cal-agenda__title" dir="auto">
+                  {eventTitle(event)}
+                </span>
                 <span className="cal-agenda__time tnum">{eventTimeRange(event)}</span>
               </button>
             </li>
@@ -88,7 +91,7 @@ export function Agenda({ today, hidden, calendars, selectedId, onSelect, onOpenD
           aria-label={`${more} more event${more === 1 ? "" : "s"} tomorrow`}
           onClick={() => onOpenDay(start)}
         >
-          +{more} more
+          +{formatCount(more)} more
         </button>
       )}
     </section>

@@ -7,6 +7,8 @@ import { type CalendarView, VIEWS, VIEW_LABELS, stepLabel } from "./layout";
 interface ToolbarProps {
   view: CalendarView;
   title: string;
+  /** The same range in fewer characters, for narrow windows. */
+  shortTitle: string;
   /** "Week 42" where the locale numbers its weeks, else null. */
   weekLabel: string | null;
   busy: boolean;
@@ -15,7 +17,16 @@ interface ToolbarProps {
   onView: (view: CalendarView) => void;
 }
 
-export function Toolbar({ view, title, weekLabel, busy, onToday, onStep, onView }: ToolbarProps) {
+export function Toolbar({
+  view,
+  title,
+  shortTitle,
+  weekLabel,
+  busy,
+  onToday,
+  onStep,
+  onView,
+}: ToolbarProps) {
   return (
     <div className="toolbar cal-toolbar">
       <button
@@ -47,7 +58,13 @@ export function Toolbar({ view, title, weekLabel, busy, onToday, onStep, onView 
         </button>
       </div>
       <h1 className="cal-toolbar__title" aria-live="polite">
-        {title}
+        {/* calendar.css shows one of the two by the width of the toolbar. */}
+        <span className="cal-toolbar__title-long">{title}</span>
+        {shortTitle !== title && (
+          <span className="cal-toolbar__title-short" aria-hidden="true">
+            {shortTitle}
+          </span>
+        )}
       </h1>
       {weekLabel && <span className="cal-toolbar__week tnum">{weekLabel}</span>}
       {busy && <Spinner size={16} label="Updating calendar" />}

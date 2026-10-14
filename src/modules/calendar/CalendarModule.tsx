@@ -29,6 +29,8 @@ import { Toolbar } from "./Toolbar";
 const NO_ACCOUNTS: Account[] = [];
 const NO_CALENDARS: Calendar[] = [];
 const NO_EVENTS: CalendarEvent[] = [];
+/** Range titles longer than this (in characters) get a short form for narrow windows. */
+const SHORT_TITLE_AFTER = 24;
 
 interface Selection {
   event: CalendarEvent;
@@ -186,6 +188,9 @@ export function CalendarModule() {
   const noCalendars = calendarsQuery.isSuccess && calendars.length === 0;
   const settled = eventsQuery.isSuccess && !eventsQuery.isPlaceholderData;
   const nothingScheduled = settled && !allHidden && events.length === 0;
+  const title = rangeTitle(view, anchor);
+  // Narrow windows shorten titles that wouldn't fit ("Wed, Oct 14, 2026").
+  const shortTitle = title.length > SHORT_TITLE_AFTER ? rangeTitle(view, anchor, true) : title;
   // In month view the mini month highlights the month itself, not the 6-week grid.
   const miniRange =
     view === "month"
@@ -250,7 +255,8 @@ export function CalendarModule() {
       <section className="cal-main card" aria-label="Calendar">
         <Toolbar
           view={view}
-          title={rangeTitle(view, anchor)}
+          title={title}
+          shortTitle={shortTitle}
           weekLabel={weekLabel(view, anchor)}
           busy={eventsQuery.isFetching && !eventsQuery.isLoading}
           onToday={goToday}

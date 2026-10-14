@@ -184,6 +184,9 @@ export function EventEditor({
       width={640}
       footer={
         <>
+          <button type="button" className="btn" onClick={onClose}>
+            Cancel
+          </button>
           <button
             type="submit"
             form={formId}
@@ -191,9 +194,6 @@ export function EventEditor({
             disabled={save.isPending}
           >
             {save.isPending ? "Saving…" : "Save"}
-          </button>
-          <button type="button" className="btn" onClick={onClose}>
-            Cancel
           </button>
         </>
       }
@@ -224,6 +224,7 @@ export function EventEditor({
                 el?.setAttribute("autofocus", "");
               }}
               className="input cal-form__title"
+              dir="auto"
               placeholder="Add a title"
               value={subject}
               maxLength={255}
@@ -371,6 +372,7 @@ export function EventEditor({
             <input
               id={ids.location}
               className="input"
+              dir="auto"
               placeholder="Add a location"
               value={location}
               onChange={(e) => setLocation(e.target.value)}
@@ -439,6 +441,7 @@ export function EventEditor({
           <textarea
             id={ids.description}
             className="textarea cal-form__description"
+            dir="auto"
             placeholder="Add a description"
             rows={4}
             value={description}

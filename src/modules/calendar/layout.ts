@@ -89,12 +89,16 @@ export function shiftAnchor(view: CalendarView, anchor: Date, direction: 1 | -1)
   }
 }
 
-/** "Wednesday, October 14, 2026", "October 12 – 16, 2026", "October 2026"… */
-export function rangeTitle(view: CalendarView, anchor: Date): string {
-  if (view === "day") return formatDate(anchor, "weekdayLongYear");
+/**
+ * "Wednesday, October 14, 2026", "October 12 – 16, 2026", "October 2026"…
+ * The short form ("Wed, Oct 14, 2026", "Sep 28 – Oct 4, 2026") is for
+ * narrow windows.
+ */
+export function rangeTitle(view: CalendarView, anchor: Date, short = false): string {
+  if (view === "day") return formatDate(anchor, short ? "weekdayShortYear" : "weekdayLongYear");
   if (view === "month") return formatDate(anchor, "monthYear");
   const { days } = viewRange(view, anchor);
-  return formatDateRange(days[0]!, days[days.length - 1]!, "longYear");
+  return formatDateRange(days[0]!, days[days.length - 1]!, short ? "shortYear" : "longYear");
 }
 
 /** Label of the previous/next buttons for a view. */
@@ -154,6 +158,19 @@ export interface PlacedSegment<T> extends TimedSegment<T> {
   columns: number;
   /** Number of columns the event may stretch over (≥ 1). */
   span: number;
+  /** Index of the overlap cluster within the day. */
+  cluster: number;
+  /** The cluster keeps room on its right for a "+N" chip (see limitColumns). */
+  overflowed?: boolean;
+}
+
+/** Events of a crowded cluster that didn't fit, drawn as one "+N" chip. */
+export interface OverflowGroup<T> {
+  key: string;
+  /** Drawn extent in minutes since the start of the day. */
+  start: number;
+  end: number;
+  items: T[];
 }
 
 /** The parts of timed events that fall on `day`, in wall-clock minutes. */
@@ -202,6 +219,7 @@ export function layoutDay<T>(segments: TimedSegment<T>[], minDuration = 0): Plac
   let cluster: Entry[] = [];
   let columnEnds: number[] = [];
   let clusterEnd = -Infinity;
+  let clusterIndex = 0;
 
   const flush = () => {
     const columns = columnEnds.length;
@@ -214,8 +232,9 @@ export function layoutDay<T>(segments: TimedSegment<T>[], minDuration = 0): Plac
         if (blocked) break;
         span += 1;
       }
-      out.push({ ...entry.seg, column: entry.column, columns, span });
+      out.push({ ...entry.seg, column: entry.column, columns, span, cluster: clusterIndex });
     }
+    if (cluster.length > 0) clusterIndex += 1;
     cluster = [];
     columnEnds = [];
     clusterEnd = -Infinity;
@@ -237,6 +256,64 @@ export function layoutDay<T>(segments: TimedSegment<T>[], minDuration = 0): Plac
   }
   flush();
   return out;
+}
+
+/**
+ * How many of a cluster's `columns` to draw side by side in a day column
+ * whose events share `width` pixels: all of them when each gets `minWidth`.
+ * Otherwise some go behind a "+N" chip `chipWidth` wide, and the ones shown
+ * get room to be read, `shownWidth` each (at least one is shown, and always
+ * one fewer than the cluster has).
+ */
+export function fitColumns(
+  width: number,
+  columns: number,
+  { minWidth, shownWidth, chipWidth }: { minWidth: number; shownWidth: number; chipWidth: number },
+): number {
+  if (columns <= 1 || width / columns >= minWidth) return columns;
+  return Math.max(1, Math.min(columns - 1, Math.floor((width - chipWidth) / shownWidth)));
+}
+
+/**
+ * Keeps each cluster to the columns `visibleColumns(columns)` allows. Events
+ * in the columns past that are hidden and gathered, by overlap, into groups
+ * that are drawn as "+N" chips covering the time they take; the visible
+ * events of such a cluster are marked `overflowed` so they leave room for
+ * the chips. `minDuration` is the shortest drawn height, as in layoutDay.
+ */
+export function limitColumns<T>(
+  placed: PlacedSegment<T>[],
+  visibleColumns: (columns: number) => number,
+  minDuration = 0,
+): { placed: PlacedSegment<T>[]; overflow: OverflowGroup<T>[] } {
+  const shown: PlacedSegment<T>[] = [];
+  const hidden: PlacedSegment<T>[] = [];
+  for (const p of placed) {
+    const visible = visibleColumns(p.columns);
+    if (visible >= p.columns) shown.push(p);
+    else if (p.column < visible) {
+      shown.push({
+        ...p,
+        columns: visible,
+        span: Math.min(p.span, visible - p.column),
+        overflowed: true,
+      });
+    } else hidden.push(p);
+  }
+  const bottom = (p: PlacedSegment<T>) => Math.max(p.end, p.start + minDuration);
+  hidden.sort((a, b) => a.start - b.start || a.column - b.column);
+  const overflow: OverflowGroup<T>[] = [];
+  let group: OverflowGroup<T> | null = null;
+  for (const p of hidden) {
+    if (group && p.start < group.end) {
+      group.items.push(p.item);
+      group.end = Math.max(group.end, bottom(p));
+    } else {
+      group = { key: `more-${p.key}`, start: p.start, end: bottom(p), items: [p.item] };
+      overflow.push(group);
+    }
+  }
+  return { placed: shown, overflow };
 }
 
 // --- Multi-day bars: lanes ---------------------------------------------------
@@ -390,14 +467,6 @@ export function hiddenCount<T>(
   let n = 0;
   for (let lane = visible; lane < lanes.length; lane++) if (lanes[lane]) n += 1;
   return n;
-}
-
-/**
- * How many lanes a month cell shows: all of them when they fit in
- * `maxLines`, otherwise one line fewer to make room for "+k more".
- */
-export function visibleLanes(laneCount: number, maxLines: number): number {
-  return laneCount <= maxLines ? maxLines : Math.max(0, maxLines - 1);
 }
 
 /** Bars (all-day and multi-day events) and single-day items for one row of days. */

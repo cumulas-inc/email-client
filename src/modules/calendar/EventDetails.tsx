@@ -40,9 +40,9 @@ import type {
   ResponseStatus,
 } from "../../api/types";
 import { Avatar } from "../../components/Avatar";
-import { Dialog } from "../../components/Dialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { toast } from "../../components/toast";
-import { displayName } from "../../lib/format";
+import { displayName, formatCount } from "../../lib/format";
 import { tintStyle } from "./colors";
 import { eventRange } from "./dates";
 import {
@@ -69,6 +69,10 @@ interface EventDetailsProps {
 
 const WIDTH = 380;
 const GAP = 8;
+/** People listed before "Show all"; the card scrolls once they're all shown. */
+const PEOPLE_SHOWN = 8;
+/** Titles longer than this take a smaller serif so the details stay in view. */
+const LONG_TITLE = 80;
 
 function reminderText(minutes: number | null): string {
   if (minutes === null) return "No reminder";
@@ -179,6 +183,7 @@ export function EventDetails({
   const [comment, setComment] = useState("");
   const [showComment, setShowComment] = useState(false);
   const [sendResponse, setSendResponse] = useState(true);
+  const [allPeople, setAllPeople] = useState(false);
   const remove = useDeleteEvent();
   const respond = useRespondToEvent();
 
@@ -223,6 +228,31 @@ export function EventDetails({
 
   useEffect(() => {
     ref.current?.focus();
+  }, []);
+
+  // Fade the edge of the details where there is more to scroll to.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const update = () => {
+      const top = el.scrollTop > 1;
+      const bottom = el.scrollTop + el.clientHeight < el.scrollHeight - 1;
+      el.dataset.fade = [top && "top", bottom && "bottom"].filter(Boolean).join(" ");
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    if (typeof ResizeObserver === "undefined") {
+      return () => el.removeEventListener("scroll", update);
+    }
+    // The content grows when "Show all" lists everyone.
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    for (const child of el.children) observer.observe(child);
+    return () => {
+      el.removeEventListener("scroll", update);
+      observer.disconnect();
+    };
   }, []);
 
   // Clicks outside close the card (but not clicks in a dialog it opened, or
@@ -306,6 +336,14 @@ export function EventDetails({
   const attendees = event.attendees.filter(
     (a) => !organizer || a.email.address.toLowerCase() !== organizer.address.toLowerCase(),
   );
+  const people = attendees.length + (organizer ? 1 : 0);
+  // Long lists show the first few; "Show all" lists everyone in the card.
+  const collapsePeople = people > PEOPLE_SHOWN + 2;
+  const shownAttendees =
+    collapsePeople && !allPeople
+      ? attendees.slice(0, PEOPLE_SHOWN - (organizer ? 1 : 0))
+      : attendees;
+  const title = eventTitle(event);
 
   return (
     <div
@@ -317,153 +355,179 @@ export function EventDetails({
       tabIndex={-1}
       onKeyDown={onKeyDown}
     >
-      <div className="cal-details__header">
-        <h2
-          id={titleId}
-          className={clsx("cal-details__title serif", isStruck(event) && "cal-ev--struck")}
-        >
-          {eventTitle(event)}
-        </h2>
-        <div className="cal-details__actions">
-          {canEdit && (
-            <button
-              type="button"
-              className="icon-btn"
-              aria-label="Edit event"
-              title="Edit"
-              onClick={() => onEdit(event)}
-            >
-              <Pencil size={16} />
-            </button>
-          )}
-          {canEdit && (
-            <button
-              type="button"
-              className="icon-btn"
-              aria-label="Delete event"
-              title="Delete"
-              onClick={() => setConfirmDelete(true)}
-            >
-              <Trash2 size={16} />
-            </button>
-          )}
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="Close"
-            title="Close"
-            onClick={() => onClose(true)}
-          >
-            <X size={16} />
-          </button>
-        </div>
-      </div>
-
-      <div className="cal-details__body selectable">
-        <Row icon={<Clock size={16} />} label="When">
-          <div>{eventDateLine(event)}</div>
-          <div className="cal-details__muted">
-            {allDayText(event) ?? eventTimeRange(event)}
-            {event.isRecurring && (
-              <span className="cal-details__recurring">
-                <Repeat size={12} aria-hidden="true" /> Recurring
-              </span>
+      <div className="cal-details__scroll selectable" ref={scrollRef}>
+        <div className="cal-details__header">
+          <h2
+            id={titleId}
+            className={clsx(
+              "cal-details__title serif",
+              title.length > LONG_TITLE && "cal-details__title--long",
+              isStruck(event) && "cal-ev--struck",
             )}
+            dir="auto"
+          >
+            {title}
+          </h2>
+          <div className="cal-details__actions">
+            {canEdit && (
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Edit event"
+                title="Edit"
+                onClick={() => onEdit(event)}
+              >
+                <Pencil size={16} />
+              </button>
+            )}
+            {canEdit && (
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Delete event"
+                title="Delete"
+                onClick={() => setConfirmDelete(true)}
+              >
+                <Trash2 size={16} />
+              </button>
+            )}
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="Close"
+              title="Close"
+              onClick={() => onClose(true)}
+            >
+              <X size={16} />
+            </button>
           </div>
-        </Row>
+        </div>
 
-        {event.location && (
-          <Row icon={<MapPin size={16} />} label="Location">
-            {event.location}
-          </Row>
-        )}
-
-        {event.isOnlineMeeting && (
-          <Row icon={<Video size={16} />} label="Online meeting">
-            <div className="cal-details__join">
-              <span>
-                {account?.kind === "microsoft" ? "Microsoft Teams meeting" : "Online meeting"}
-              </span>
-              {event.onlineMeetingUrl && (
-                <button
-                  type="button"
-                  className="btn btn--primary btn--sm"
-                  onClick={() => void backend.openLink(event.onlineMeetingUrl!)}
-                >
-                  <Video size={14} aria-hidden="true" />
-                  Join
-                </button>
+        <div className="cal-details__body">
+          <Row icon={<Clock size={16} />} label="When">
+            <div>{eventDateLine(event)}</div>
+            <div className="cal-details__muted">
+              {allDayText(event) ?? eventTimeRange(event)}
+              {event.isRecurring && (
+                <span className="cal-details__recurring">
+                  <Repeat size={12} aria-hidden="true" /> Recurring
+                </span>
               )}
             </div>
           </Row>
-        )}
 
-        {(attendees.length > 0 || (organizer && invitation)) && (
-          <Row
-            icon={<Users size={16} />}
-            label="Attendees"
-            showLabel
-            aside={attendees.length > 0 ? attendeeSummary(event.attendees) : undefined}
-          >
-            <ul className="cal-people" aria-label="Organizer and attendees">
-              {organizer && (
-                <li className="cal-people__item">
-                  <Avatar name={displayName(organizer)} colorKey={organizer.address} size={24} />
-                  <span className="cal-people__name" title={organizer.address}>
-                    {displayName(organizer)}
-                  </span>
-                  <span className="cal-people__role">Organizer</span>
-                </li>
-              )}
-              {attendees.map((a) => (
-                <li key={a.email.address} className="cal-people__item">
-                  <Avatar name={displayName(a.email)} colorKey={a.email.address} size={24} />
-                  <span className="cal-people__name" title={a.email.address}>
-                    {displayName(a.email)}
-                  </span>
-                  {a.kind === "optional" && <span className="cal-people__role">Optional</span>}
-                  <span
-                    className="cal-people__response"
-                    title={RESPONSE_LABELS[a.response]}
-                    aria-label={RESPONSE_LABELS[a.response]}
-                    role="img"
+          {event.location && (
+            <Row icon={<MapPin size={16} />} label="Location">
+              <div dir="auto">{event.location}</div>
+            </Row>
+          )}
+
+          {event.isOnlineMeeting && (
+            <Row icon={<Video size={16} />} label="Online meeting">
+              <div className="cal-details__join">
+                <span>
+                  {account?.kind === "microsoft" ? "Microsoft Teams meeting" : "Online meeting"}
+                </span>
+                {event.onlineMeetingUrl && (
+                  <button
+                    type="button"
+                    className="btn btn--primary btn--sm"
+                    onClick={() => void backend.openLink(event.onlineMeetingUrl!)}
                   >
-                    {RESPONSE_ICONS[a.response]}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </Row>
-        )}
+                    <Video size={14} aria-hidden="true" />
+                    Join
+                  </button>
+                )}
+              </div>
+            </Row>
+          )}
 
-        {(description || event.bodyPreview) && (
-          <Row icon={<AlignLeft size={16} />} label="Description">
-            {description ? (
-              <div
-                className="cal-details__description"
-                onClick={onDescriptionClick}
-                // Sanitized above with DOMPurify (no scripts, styles, forms or images).
-                dangerouslySetInnerHTML={{ __html: description }}
-              />
-            ) : (
-              <p className="cal-details__description">{event.bodyPreview}</p>
+          {(attendees.length > 0 || (organizer && invitation)) && (
+            <Row
+              icon={<Users size={16} />}
+              label="Attendees"
+              showLabel
+              aside={attendees.length > 0 ? attendeeSummary(event.attendees) : undefined}
+            >
+              <ul className="cal-people" aria-label="Organizer and attendees">
+                {organizer && (
+                  <li className="cal-people__item">
+                    <Avatar name={displayName(organizer)} colorKey={organizer.address} size={24} />
+                    <span className="cal-people__name" title={organizer.address} dir="auto">
+                      {displayName(organizer)}
+                    </span>
+                    <span className="cal-people__role">Organizer</span>
+                  </li>
+                )}
+                {shownAttendees.map((a) => (
+                  <li key={a.email.address} className="cal-people__item">
+                    <Avatar name={displayName(a.email)} colorKey={a.email.address} size={24} />
+                    <span className="cal-people__name" title={a.email.address} dir="auto">
+                      {displayName(a.email)}
+                    </span>
+                    {a.kind === "optional" && <span className="cal-people__role">Optional</span>}
+                    <span
+                      className="cal-people__response"
+                      title={RESPONSE_LABELS[a.response]}
+                      aria-label={RESPONSE_LABELS[a.response]}
+                      role="img"
+                    >
+                      {RESPONSE_ICONS[a.response]}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {collapsePeople && (
+                <button
+                  type="button"
+                  className="cal-link cal-people__toggle"
+                  aria-expanded={allPeople}
+                  onClick={() => setAllPeople((all) => !all)}
+                >
+                  {allPeople ? "Show fewer attendees" : `Show all ${formatCount(people)} attendees`}
+                </button>
+              )}
+            </Row>
+          )}
+
+          {(description || event.bodyPreview) && (
+            <Row icon={<AlignLeft size={16} />} label="Description">
+              {description ? (
+                <div
+                  className="cal-details__description"
+                  dir="auto"
+                  onClick={onDescriptionClick}
+                  // Sanitized above with DOMPurify (no scripts, styles, forms or images).
+                  dangerouslySetInnerHTML={{ __html: description }}
+                />
+              ) : (
+                <p className="cal-details__description" dir="auto">
+                  {event.bodyPreview}
+                </p>
+              )}
+            </Row>
+          )}
+
+          <Row icon={<Bell size={16} />} label="Reminder">
+            <span className="cal-details__muted">
+              {reminderText(event.reminderMinutes)} · Show as {SHOW_AS_LABELS[event.showAs]}
+            </span>
+          </Row>
+
+          {/* The calendar's name, then its account on a line of its own: long
+            names wrap between words instead of squeezing each other. */}
+          <Row icon={<CalendarDays size={16} />} label="Calendar">
+            <div className="cal-details__calendar">
+              <span className="cal-details__swatch" aria-hidden="true" />
+              <span dir="auto">{calendar?.name ?? "Calendar"}</span>
+            </div>
+            {account && (
+              <div className="cal-details__muted cal-details__account" dir="auto">
+                {account.displayName}
+              </div>
             )}
           </Row>
-        )}
-
-        <Row icon={<Bell size={16} />} label="Reminder">
-          <span className="cal-details__muted">
-            {reminderText(event.reminderMinutes)} · Show as {SHOW_AS_LABELS[event.showAs]}
-          </span>
-        </Row>
-
-        <Row icon={<CalendarDays size={16} />} label="Calendar">
-          <span className="cal-details__calendar">
-            <span className="cal-details__swatch" aria-hidden="true" />
-            {calendar?.name ?? "Calendar"}
-            {account && <span className="cal-details__muted"> · {account.displayName}</span>}
-          </span>
-        </Row>
+        </div>
       </div>
 
       {invitation && (
@@ -526,35 +590,22 @@ export function EventDetails({
         </div>
       )}
 
-      <Dialog
+      <ConfirmDialog
         open={confirmDelete}
-        onClose={() => setConfirmDelete(false)}
         title="Delete event?"
-        width={420}
-        footer={
+        message={
           <>
-            <button
-              type="button"
-              className="btn btn--destructive"
-              disabled={remove.isPending}
-              onClick={doDelete}
-            >
-              Delete
-            </button>
-            <button type="button" className="btn" onClick={() => setConfirmDelete(false)}>
-              Cancel
-            </button>
+            “<bdi>{title}</bdi>” will be deleted
+            {event.attendees.length > 0 && event.responseStatus === "organizer"
+              ? " and a cancellation sent to attendees"
+              : ""}
+            .
           </>
         }
-      >
-        <p>
-          “{eventTitle(event)}” will be deleted
-          {event.attendees.length > 0 && event.responseStatus === "organizer"
-            ? " and a cancellation sent to attendees"
-            : ""}
-          .
-        </p>
-      </Dialog>
+        busy={remove.isPending}
+        onConfirm={doDelete}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }

@@ -40,8 +40,14 @@ function AccountGroup({
           color={group.account?.color ?? group.calendars[0]?.color ?? "#0b7a75"}
         />
         <span className="cal-list__account-text">
-          <span className="cal-list__account-name">{name}</span>
-          {group.account && <span className="cal-list__account-email">{group.account.email}</span>}
+          <span className="cal-list__account-name" dir="auto" title={name}>
+            {name}
+          </span>
+          {group.account && (
+            <span className="cal-list__account-email" title={group.account.email}>
+              {group.account.email}
+            </span>
+          )}
         </span>
         <ChevronDown size={14} strokeWidth={2} className="cal-list__chevron" aria-hidden="true" />
       </button>
@@ -66,7 +72,9 @@ function AccountGroup({
                   <span className="cal-list__swatch" aria-hidden="true">
                     <Check size={12} strokeWidth={3} />
                   </span>
-                  <span className="cal-list__name">{calendar.name}</span>
+                  <span className="cal-list__name" dir="auto" title={calendar.name}>
+                    {calendar.name}
+                  </span>
                 </label>
               </li>
             );

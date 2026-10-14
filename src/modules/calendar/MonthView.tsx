@@ -4,17 +4,22 @@ import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react"
 
 import type { Calendar, CalendarEvent } from "../../api/types";
 import { formatDate, formatTime } from "../../lib/datetime";
+import { formatCount } from "../../lib/format";
 import { eventRange } from "./dates";
 import { EventBar } from "./EventBar";
 import { type EventSelectProps, eventClasses, eventStyle, selectHandlers } from "./eventProps";
 import { eventAriaLabel, eventTitle } from "./eventText";
 import { useElementHeight } from "./hooks";
-import { cellLanes, chunk, hiddenCount, isBar, laneTable, rowItems, visibleLanes } from "./layout";
+import { cellLanes, chunk, hiddenCount, isBar, laneTable, rowItems } from "./layout";
 
 /** Lines per day when the grid has not been measured (tests, first paint). */
 export const DEFAULT_MONTH_LINES = 3;
+/** An event line: 20px and the 2px gap under it (which also ends the cell). */
 const LINE_HEIGHT = 22;
-const DAY_HEADER_HEIGHT = 30;
+/** The day number and "+N more" share this row, so events get every line below. */
+const DAY_HEADER_HEIGHT = 28;
+/** Each week row ends in a 1px rule. */
+const WEEK_BORDER = 1;
 
 interface MonthViewProps {
   anchor: Date;
@@ -52,7 +57,10 @@ export function MonthView({
   const weeks = useMemo(() => chunk(days, 7), [days]);
   const maxLines =
     bodyHeight > 0
-      ? Math.max(1, Math.floor((bodyHeight / weeks.length - DAY_HEADER_HEIGHT - 4) / LINE_HEIGHT))
+      ? Math.max(
+          1,
+          Math.floor((bodyHeight / weeks.length - WEEK_BORDER - DAY_HEADER_HEIGHT) / LINE_HEIGHT),
+        )
       : DEFAULT_MONTH_LINES;
 
   const [focused, setFocused] = useState<Date>(anchor);
@@ -110,12 +118,14 @@ export function MonthView({
         onKeyDown={onKeyDown}
       >
         {rows.map(({ week, table }) => {
-          const visible = (col: number) => visibleLanes(table[col]?.length ?? 0, maxLines);
+          // Every day shows the same lanes, so a bar across several days is
+          // drawn across all of them or counted in "+N more" on each.
+          const visible = () => maxLines;
           return (
             <div key={week[0]!.getTime()} className="cal-month__week" role="row">
               {week.map((day, col) => {
                 const isToday = isSameDay(day, today);
-                const more = hiddenCount(table, col, visible(col));
+                const more = hiddenCount(table, col, maxLines);
                 const dayEvents = (table[col] ?? []).filter(Boolean).length;
                 return (
                   <div
@@ -146,6 +156,20 @@ export function MonthView({
                       >
                         {formatDate(day, day.getDate() === 1 ? "short" : "dayOfMonth")}
                       </button>
+                      {more > 0 && (
+                        <button
+                          type="button"
+                          className="cal-more-link cal-month__more"
+                          aria-label={`${more} more event${more === 1 ? "" : "s"} on ${formatDate(day, "weekdayLong")}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenDay(day);
+                          }}
+                        >
+                          +{formatCount(more)}
+                          <span className="cal-month__more-word"> more</span>
+                        </button>
+                      )}
                     </div>
                     <div className="cal-month__lanes">
                       {cellLanes(table, col, visible).map(({ lane, piece }) => {
@@ -173,19 +197,6 @@ export function MonthView({
                           <MonthEntry key={piece.placed.key} {...common} />
                         );
                       })}
-                      {more > 0 && (
-                        <button
-                          type="button"
-                          className="cal-more-link cal-month__more"
-                          aria-label={`${more} more event${more === 1 ? "" : "s"} on ${formatDate(day, "weekdayLong")}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onOpenDay(day);
-                          }}
-                        >
-                          +{more} more
-                        </button>
-                      )}
                     </div>
                   </div>
                 );
@@ -217,7 +228,9 @@ function MonthEntry({ event, calendar, selected, onSelect }: MonthEntryProps) {
     >
       <span className="cal-entry__dot" aria-hidden="true" />
       <span className="cal-entry__time tnum">{formatTime(eventRange(event).start)}</span>
-      <span className="cal-entry__title">{eventTitle(event)}</span>
+      <span className="cal-entry__title" dir="auto">
+        {eventTitle(event)}
+      </span>
     </button>
   );
 }
