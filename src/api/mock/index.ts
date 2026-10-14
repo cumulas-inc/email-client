@@ -17,6 +17,7 @@ import type {
   Task,
 } from "../types";
 import { type MockState, createDemoState, recount } from "./data";
+import { createWorstState } from "./worst";
 
 const DEFAULT_SETTINGS: Settings = {
   theme: "system",
@@ -70,6 +71,8 @@ export interface MockOptions {
   latency?: number;
   /** Start without any accounts (shows onboarding). */
   empty?: boolean;
+  /** Start with worst-case data (long, empty, huge and non-Latin values). */
+  worst?: boolean;
 }
 
 export class MockBackend implements Backend {
@@ -85,7 +88,11 @@ export class MockBackend implements Backend {
 
   constructor(options: MockOptions = {}) {
     this.latency = options.latency ?? 0;
-    this.state = options.empty ? emptyState() : createDemoState();
+    this.state = options.empty
+      ? emptyState()
+      : options.worst
+        ? createWorstState()
+        : createDemoState();
   }
 
   private async delay(): Promise<void> {

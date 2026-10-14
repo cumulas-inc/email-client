@@ -24,6 +24,11 @@ export interface MockState {
   contacts: Contact[];
   taskLists: TaskList[];
   tasks: Task[];
+  /**
+   * Messages a folder holds on the server beyond the ones synced locally, as
+   * large mailboxes report: added to the counts `recount` derives.
+   */
+  remoteCounts?: Record<string, { unread: number; total: number }>;
 }
 
 const WORK = "acct-work";
@@ -49,31 +54,31 @@ const people = {
   club: { name: "Riverside Climbing Club", address: "hello@riversideclimbing.example" },
 } satisfies Record<string, EmailAddress>;
 
-function at(daysFromToday: number, hours: number, minutes = 0): Date {
+export function at(daysFromToday: number, hours: number, minutes = 0): Date {
   const d = new Date();
   d.setDate(d.getDate() + daysFromToday);
   d.setHours(hours, minutes, 0, 0);
   return d;
 }
 
-function iso(d: Date): string {
+export function iso(d: Date): string {
   return d.toISOString();
 }
 
 /** Midnight UTC of a local calendar day, as all-day events are stored. */
-function allDay(daysFromToday: number): string {
+export function allDay(daysFromToday: number): string {
   const d = at(daysFromToday, 0);
   return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())).toISOString();
 }
 
-function dateOnly(daysFromToday: number): string {
+export function dateOnly(daysFromToday: number): string {
   const d = at(daysFromToday, 12);
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${d.getFullYear()}-${m}-${day}`;
 }
 
-function folder(
+export function folder(
   accountId: string,
   id: string,
   name: string,
@@ -1130,11 +1135,12 @@ function nextWeekday(weekday: number): number {
   return 7;
 }
 
-/** Recomputes folder counts from the messages. */
+/** Recomputes folder counts from the messages (plus any server-only ones). */
 export function recount(state: MockState): void {
   for (const f of state.folders) {
     const inFolder = state.messages.filter((m) => m.folderId === f.id);
-    f.totalCount = inFolder.length;
-    f.unreadCount = inFolder.filter((m) => !m.isRead).length;
+    const remote = state.remoteCounts?.[f.id];
+    f.totalCount = inFolder.length + (remote?.total ?? 0);
+    f.unreadCount = inFolder.filter((m) => !m.isRead).length + (remote?.unread ?? 0);
   }
 }
