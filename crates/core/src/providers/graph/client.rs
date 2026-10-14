@@ -158,6 +158,9 @@ pub(super) struct IdOnly {
     pub id: String,
 }
 
+/// Request body. All variants borrow buffers that are re-sent on every
+/// attempt, so any request can be retried; a one-shot streaming body would
+/// have to be excluded from the retries in [`GraphClient::execute`].
 enum Body<'a> {
     Empty,
     Json(&'a Value),
@@ -219,6 +222,7 @@ impl GraphClient {
 
     async fn execute(&self, request: Request<'_>) -> GraphResult<reqwest::Response> {
         let mut attempt = 0;
+        let mut token_refreshed = false;
         loop {
             let mut builder = self.http.request(request.method.clone(), request.url);
             if request.authenticated {
@@ -247,6 +251,15 @@ impl GraphClient {
             let status = response.status();
             if status.is_success() {
                 return Ok(response);
+            }
+            // A token the cache still considered valid can be rejected (revoked
+            // session, clock skew): refresh it and try once more before the
+            // user is asked to sign in again.
+            if status == StatusCode::UNAUTHORIZED && request.authenticated && !token_refreshed {
+                tracing::debug!("Graph rejected the access token; refreshing it");
+                token_refreshed = true;
+                self.tokens.invalidate().await;
+                continue;
             }
             if is_retryable(status) && attempt < MAX_RETRIES {
                 let retry_after = response

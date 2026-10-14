@@ -11,6 +11,10 @@ use crate::error::Result;
 #[async_trait]
 pub trait TokenSource: Send + Sync {
     async fn access_token(&self) -> Result<String>;
+
+    /// Forgets the cached access token after the server rejected it, so the
+    /// next [`access_token`](Self::access_token) call obtains a fresh one.
+    async fn invalidate(&self) {}
 }
 
 /// A fixed token, for tests.
