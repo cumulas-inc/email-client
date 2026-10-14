@@ -100,7 +100,7 @@ export function ContactList({ groups, selectedId, onSelect, onDelete, listRef }:
                   <Avatar
                     name={contact.displayName}
                     colorKey={contact.emails[0]?.address ?? contact.displayName}
-                    size={32}
+                    size={34}
                   />
                   <span className="people-row__text">
                     <span className="people-row__name">{contact.displayName}</span>

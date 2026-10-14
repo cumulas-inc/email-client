@@ -93,6 +93,8 @@
 
   /* Status */
   --danger: #c23a2c;
+  --danger-hover: #a8301f;
+  --on-danger: #ffffff;
   --danger-subtle: #fbe8e4;
   --warning: #a8560e;
   --warning-subtle: #fcf0e2;
@@ -172,6 +174,8 @@
     --focus-ring: #5cc6bb;
 
     --danger: #ec6e5f;
+    --danger-hover: #f2867a;
+    --on-danger: #1f0b08;
     --danger-subtle: #3d2320;
     --warning: #eba25c;
     --warning-subtle: #3a2a1a;
@@ -249,6 +253,8 @@
   --focus-ring: #5cc6bb;
 
   --danger: #ec6e5f;
+  --danger-hover: #f2867a;
+  --on-danger: #1f0b08;
   --danger-subtle: #3d2320;
   --warning: #eba25c;
   --warning-subtle: #3a2a1a;

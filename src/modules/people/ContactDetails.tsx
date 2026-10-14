@@ -27,7 +27,19 @@ function copyText(text: string, what: string) {
   );
 }
 
-function Field({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
+/** One label/value row. The icon names the kind of value at a glance. */
+function Field({
+  icon,
+  label,
+  children,
+  copy,
+}: {
+  icon: ReactNode;
+  label: string;
+  children: ReactNode;
+  /** A copy button at the end of the row. */
+  copy?: ReactNode;
+}) {
   return (
     <div className="people-field">
       <dt className="people-field__label">
@@ -36,10 +48,29 @@ function Field({ icon, label, children }: { icon: ReactNode; label: string; chil
         </span>
         {label}
       </dt>
-      <dd className="people-field__value">{children}</dd>
+      <dd className="people-field__value">
+        {children}
+        {copy}
+      </dd>
     </div>
   );
 }
+
+function CopyButton({ label, onCopy }: { label: string; onCopy: () => void }) {
+  return (
+    <button
+      type="button"
+      className="icon-btn icon-btn--sm people-field__copy"
+      aria-label={label}
+      title={label}
+      onClick={onCopy}
+    >
+      <Copy size={14} strokeWidth={2} />
+    </button>
+  );
+}
+
+const ICON = { size: 16, strokeWidth: 1.75 } as const;
 
 export function ContactDetails({
   contact,
@@ -55,72 +86,94 @@ export function ContactDetails({
 
   const compose = (to: EmailAddress) => requestCompose({ to: [to], accountId: contact.accountId });
 
-  const hasContactInfo =
-    contact.emails.length > 0 || contact.phones.length > 0 || Boolean(contact.address);
+  const hasInfo =
+    contact.emails.length > 0 ||
+    contact.phones.length > 0 ||
+    Boolean(contact.address) ||
+    Boolean(contact.birthday) ||
+    Boolean(contact.notes);
 
   return (
     <article className="people-details" aria-labelledby={headingId}>
-      <header className="people-card people-details__header">
+      <header className="people-details__header">
         <Avatar
           name={contact.displayName}
           colorKey={contact.emails[0]?.address ?? contact.displayName}
-          size={80}
+          size={72}
         />
         <div className="people-details__identity">
           <div className="selectable">
-            <h2 id={headingId} className="people-details__name">
+            <h2 id={headingId} className="people-details__name" title={contact.displayName}>
               {contact.displayName}
             </h2>
-            {subtitle && <p className="people-details__subtitle">{subtitle}</p>}
-            {account && (
-              <p className="people-details__account">
-                <span
-                  className="people-details__account-dot"
-                  style={{ background: account.color }}
-                  aria-hidden="true"
-                />
-                <span className="visually-hidden">Saved in </span>
-                {account.email}
+            {subtitle && (
+              <p className="people-details__subtitle" title={subtitle}>
+                {subtitle}
               </p>
             )}
           </div>
-          <div className="people-details__actions">
-            <button
-              type="button"
-              className="btn btn--primary"
-              disabled={!primary}
-              title={primary ? `Send email to ${primary.address}` : "This contact has no email"}
-              onClick={() => primary && compose(primary)}
-            >
-              <Mail size={16} aria-hidden="true" />
-              Send email
-            </button>
-            <button type="button" className="btn" ref={editRef} onClick={onEdit}>
-              <Pencil size={16} aria-hidden="true" />
-              Edit
-            </button>
-            <button type="button" className="btn" onClick={onDelete}>
-              <Trash2 size={16} aria-hidden="true" />
-              Delete
-            </button>
-          </div>
+          {account && (
+            <p className="people-details__account" title={account.displayName}>
+              <span
+                className="people-details__account-dot"
+                style={{ background: account.color }}
+                aria-hidden="true"
+              />
+              <span className="visually-hidden">Saved in </span>
+              <span className="people-details__account-email">{account.email}</span>
+            </p>
+          )}
         </div>
       </header>
 
-      <section className="people-card" aria-label="Contact information">
-        <h3 className="people-card__title">Contact information</h3>
-        {hasContactInfo ? (
+      <div className="people-actions" role="group" aria-label="Contact actions">
+        <button
+          type="button"
+          className="people-actions__btn people-actions__btn--primary"
+          disabled={!primary}
+          title={primary ? `Write to ${primary.address}` : "This contact has no email address"}
+          onClick={() => primary && compose(primary)}
+        >
+          <Mail {...ICON} aria-hidden="true" />
+          Email
+        </button>
+        <button type="button" className="people-actions__btn" ref={editRef} onClick={onEdit}>
+          <Pencil {...ICON} aria-hidden="true" />
+          Edit
+        </button>
+        <button
+          type="button"
+          className="people-actions__btn people-actions__btn--danger"
+          onClick={onDelete}
+        >
+          <Trash2 {...ICON} aria-hidden="true" />
+          Delete
+        </button>
+      </div>
+
+      <section className="people-info" aria-label="Contact information">
+        {hasInfo ? (
           <dl className="people-fields">
             {contact.emails.map((email, i) => (
               <Field
                 key={`e-${i}`}
-                icon={<Mail size={16} />}
+                icon={<Mail {...ICON} />}
                 label={contact.emails.length > 1 ? `Email ${i + 1}` : "Email"}
+                copy={
+                  <CopyButton
+                    label={
+                      contact.emails.length > 1
+                        ? `Copy email address ${i + 1}`
+                        : "Copy email address"
+                    }
+                    onCopy={() => copyText(email.address, "Email address")}
+                  />
+                }
               >
                 <button
                   type="button"
                   className="people-link"
-                  title={`Send email to ${email.address}`}
+                  title={`Write to ${email.address}`}
                   onClick={() =>
                     compose({
                       name: email.name?.trim() || contact.displayName,
@@ -133,54 +186,52 @@ export function ContactDetails({
               </Field>
             ))}
             {contact.phones.map((phone, i) => (
-              <Field key={`p-${i}`} icon={<Phone size={16} />} label={phoneKindLabel(phone.kind)}>
+              <Field
+                key={`p-${i}`}
+                icon={<Phone {...ICON} />}
+                label={phoneKindLabel(phone.kind)}
+                copy={
+                  <CopyButton
+                    label={`Copy ${phoneKindLabel(phone.kind).toLowerCase()} number`}
+                    onCopy={() => copyText(phone.number, "Phone number")}
+                  />
+                }
+              >
                 <span className="selectable people-field__text">{phone.number}</span>
-                <button
-                  type="button"
-                  className="icon-btn icon-btn--sm people-field__copy"
-                  aria-label={`Copy ${phoneKindLabel(phone.kind).toLowerCase()} number`}
-                  title="Copy number"
-                  onClick={() => copyText(phone.number, "Phone number")}
-                >
-                  <Copy size={14} />
-                </button>
               </Field>
             ))}
             {contact.address && (
-              <Field icon={<MapPin size={16} />} label="Address">
+              <Field icon={<MapPin {...ICON} />} label="Address">
                 <span className="selectable people-field__text people-field__multiline">
                   {contact.address}
                 </span>
               </Field>
             )}
+            {contact.birthday && (
+              <Field icon={<Cake {...ICON} />} label="Birthday">
+                <span className="selectable people-field__text">
+                  {formatBirthday(contact.birthday)}
+                </span>
+              </Field>
+            )}
+            {contact.notes && (
+              <Field icon={<StickyNote {...ICON} />} label="Notes">
+                <span className="selectable people-field__text people-field__multiline">
+                  {contact.notes}
+                </span>
+              </Field>
+            )}
           </dl>
         ) : (
-          <p className="people-card__empty">No email address, phone number or address yet.</p>
+          <div className="people-info__empty">
+            <p>No email address, phone number or address yet.</p>
+            <button type="button" className="btn btn--sm" onClick={onEdit}>
+              <Pencil size={14} strokeWidth={2} aria-hidden="true" />
+              Add details
+            </button>
+          </div>
         )}
       </section>
-
-      {contact.birthday && (
-        <section className="people-card" aria-label="Personal">
-          <h3 className="people-card__title">Personal</h3>
-          <dl className="people-fields">
-            <Field icon={<Cake size={16} />} label="Birthday">
-              <span className="selectable people-field__text">
-                {formatBirthday(contact.birthday)}
-              </span>
-            </Field>
-          </dl>
-        </section>
-      )}
-
-      {contact.notes && (
-        <section className="people-card" aria-label="Notes">
-          <h3 className="people-card__title">
-            <StickyNote size={16} aria-hidden="true" />
-            Notes
-          </h3>
-          <p className="selectable people-details__notes">{contact.notes}</p>
-        </section>
-      )}
     </article>
   );
 }

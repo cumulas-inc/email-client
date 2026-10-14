@@ -10,6 +10,8 @@ interface ConfirmDialogProps {
   confirmLabel?: string;
   /** Disables the buttons while the action runs. */
   busy?: boolean;
+  /** "danger" (the default) shows the confirming button in red, for actions that can't be undone. */
+  tone?: "danger" | "default";
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -29,6 +31,7 @@ export function ConfirmDialog({
   message,
   confirmLabel = "Delete",
   busy = false,
+  tone = "danger",
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -43,7 +46,12 @@ export function ConfirmDialog({
           <button type="button" className="btn" ref={autofocus} onClick={onCancel} disabled={busy}>
             Cancel
           </button>
-          <button type="button" className="btn btn--primary" onClick={onConfirm} disabled={busy}>
+          <button
+            type="button"
+            className={`btn ${tone === "danger" ? "btn--destructive" : "btn--primary"}`}
+            onClick={onConfirm}
+            disabled={busy}
+          >
             {confirmLabel}
           </button>
         </>

@@ -1,5 +1,5 @@
 import { ContactRound, SearchX, UserPlus, Users } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { errorMessage } from "../../api/errors";
 import { useAccounts } from "../../api/queries";
@@ -14,10 +14,11 @@ import { toast } from "../../components/toast";
 import { ContactDetails } from "./ContactDetails";
 import { ContactEditor } from "./ContactEditor";
 import { ContactList } from "./ContactList";
-import { groupContacts } from "./contactUtils";
+import { countByAccount, groupContacts } from "./contactUtils";
 import { useContacts, useDeleteContact } from "./queries";
 import { usePeopleStore } from "./store";
 import { useDebouncedValue } from "./useDebouncedValue";
+import { AddressBooks } from "./AddressBooks";
 import "./people.css";
 
 type EditorState = { mode: "create" } | { mode: "edit"; contact: Contact };
@@ -37,6 +38,13 @@ export function PeopleModule() {
   // Ignore a remembered filter for an account that has since been removed.
   const filterAccountId = accountId && accounts.some((a) => a.id === accountId) ? accountId : null;
   const query = useContacts(filterAccountId, debouncedSearch);
+  // Every contact, for the address book counts. Unfiltered and unsearched,
+  // this is the same query as the list's, so it costs nothing extra.
+  const everyone = useContacts(null, "");
+  const counts = useMemo(
+    () => (everyone.data ? countByAccount(everyone.data) : null),
+    [everyone.data],
+  );
   const groups = useMemo(() => groupContacts(query.data ?? []), [query.data]);
   const ordered = useMemo(() => groups.flatMap((g) => g.contacts), [groups]);
   const selected = ordered.find((c) => c.id === selectedId) ?? ordered[0] ?? null;
@@ -91,9 +99,25 @@ export function PeopleModule() {
     }
   };
 
-  const filterLabel = filterAccountId
-    ? (accounts.find((a) => a.id === filterAccountId)?.email ?? "this account")
-    : null;
+  // Ctrl+N starts a new contact, as it starts a message in Mail.
+  const canCreate = accounts.length > 0;
+  useEffect(() => {
+    if (!canCreate) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || document.querySelector("dialog[open]")) return;
+      if (e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        returnFocus.current = document.activeElement as HTMLElement | null;
+        setEditor({ mode: "create" });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canCreate]);
+
+  const filterAccount = filterAccountId
+    ? accounts.find((a) => a.id === filterAccountId)
+    : undefined;
 
   let list;
   if (query.isLoading) {
@@ -125,21 +149,28 @@ export function PeopleModule() {
     ) : (
       <EmptyState
         icon={<Users size={40} strokeWidth={1.5} />}
-        title={filterLabel ? "No contacts in this account" : "No contacts yet"}
+        title={filterAccount ? "No contacts in this account" : "No contacts yet"}
         description={
-          filterLabel
-            ? `${filterLabel} has no contacts. Add one, or show all accounts.`
-            : "People you add, or sync from your accounts, show up here."
+          filterAccount
+            ? `${filterAccount.email} has no contacts yet.`
+            : "Contacts you add, or sync from your accounts, show up here."
         }
         action={
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={() => openEditor({ mode: "create" })}
-          >
-            <UserPlus size={16} aria-hidden="true" />
-            New contact
-          </button>
+          <span className="people__empty-actions">
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => openEditor({ mode: "create" })}
+            >
+              <UserPlus size={16} aria-hidden="true" />
+              New contact
+            </button>
+            {filterAccount && (
+              <button type="button" className="btn" onClick={() => setAccountId(null)}>
+                Show all contacts
+              </button>
+            )}
+          </span>
         }
       />
     );
@@ -165,43 +196,49 @@ export function PeopleModule() {
             type="button"
             className="btn btn--primary"
             onClick={() => openEditor({ mode: "create" })}
-            disabled={accounts.length === 0}
+            disabled={!canCreate}
+            aria-keyshortcuts="Control+N"
           >
-            <UserPlus size={16} aria-hidden="true" />
+            <UserPlus size={18} strokeWidth={1.75} aria-hidden="true" />
             New contact
+            <span className="kbd" aria-hidden="true">
+              Ctrl N
+            </span>
           </button>
         }
       >
-        {null}
+        <AddressBooks
+          accounts={accounts}
+          counts={counts}
+          selectedId={filterAccountId}
+          onSelect={setAccountId}
+        />
       </ModuleSidebar>
       <section className="people__list-pane card" aria-label="Contact list">
-        <div className="people__search">
+        <div className="people__list-head">
           <SearchField placeholder="Search contacts" />
+          <div className="people__title-row">
+            <h1 className="pane-title people__title">
+              Contacts
+              {!query.isLoading && <span className="people__count">{ordered.length}</span>}
+            </h1>
+            {filterAccount && (
+              <span className="people__chip" title={filterAccount.email}>
+                <span
+                  className="people__chip-dot"
+                  style={{ background: filterAccount.color }}
+                  aria-hidden="true"
+                />
+                <span className="people__chip-name">{filterAccount.displayName}</span>
+              </span>
+            )}
+          </div>
+          {debouncedSearch && ordered.length > 0 && (
+            <p className="people__search-note" role="status">
+              Results for “{debouncedSearch}”
+            </p>
+          )}
         </div>
-        <div className="people__list-header">
-          <h1 className="people__title">
-            Contacts
-            {!query.isLoading && <span className="people__count">{ordered.length}</span>}
-          </h1>
-          <select
-            className="select people__account-filter"
-            aria-label="Show contacts from"
-            value={filterAccountId ?? ""}
-            onChange={(e) => setAccountId(e.target.value || null)}
-          >
-            <option value="">All accounts</option>
-            {accounts.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.email}
-              </option>
-            ))}
-          </select>
-        </div>
-        {debouncedSearch && ordered.length > 0 && (
-          <p className="people__search-note" role="status">
-            Results for “{debouncedSearch}”
-          </p>
-        )}
         <div className="people__list-body">{list}</div>
       </section>
 
@@ -242,6 +279,7 @@ export function PeopleModule() {
       <ConfirmDialog
         open={toDelete !== null}
         title="Delete contact?"
+        confirmLabel="Delete contact"
         message={
           toDelete ? (
             <>

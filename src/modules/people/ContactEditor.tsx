@@ -1,14 +1,16 @@
-import { CircleAlert, Plus, X } from "lucide-react";
+import { CircleAlert, Plus, UserRound, X } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 
 import { errorMessage } from "../../api/errors";
 import type { Account, Contact } from "../../api/types";
+import { Avatar } from "../../components/Avatar";
 import { Dialog } from "../../components/Dialog";
 import { toast } from "../../components/toast";
 import {
   type ContactForm,
   PHONE_KINDS,
   type PhoneRow,
+  accountMark,
   composeName,
   draftFromForm,
   emptyForm,
@@ -104,6 +106,7 @@ export function ContactEditor({
 
   const formId = fieldId("form");
   const account = accounts.find((a) => a.id === form.accountId);
+  const previewName = form.displayName.trim() || composeName(form.givenName, form.surname);
 
   return (
     <Dialog
@@ -117,7 +120,7 @@ export function ContactEditor({
             Cancel
           </button>
           <button type="submit" form={formId} className="btn btn--primary" disabled={saving}>
-            {saving ? "Saving…" : "Save"}
+            {saving ? "Saving…" : contact ? "Save changes" : "Add contact"}
           </button>
         </>
       }
@@ -131,88 +134,125 @@ export function ContactEditor({
         )}
 
         <div className="people-form__grid">
-          {contact ? (
-            account && (
-              <p className="people-form__account people-form__full">
-                Saved in <strong>{account.email}</strong>
-              </p>
-            )
-          ) : (
-            <div className="field people-form__full">
-              <label className="field__label" htmlFor={fieldId("account")}>
-                Save to account
-              </label>
-              <select
-                id={fieldId("account")}
-                className="select"
-                value={form.accountId}
-                onChange={(e) => set("accountId", e.target.value)}
-              >
-                {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.displayName} ({a.email})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+          {contact
+            ? account && (
+                <p className="people-form__account people-form__full">
+                  <span
+                    className="people-form__account-dot"
+                    style={{ background: account.color }}
+                    aria-hidden="true"
+                  />
+                  Saved in <strong>{account.email}</strong>
+                </p>
+              )
+            : accounts.length > 0 && (
+                <div className="field people-form__full">
+                  <span id={fieldId("account-label")} className="field__label">
+                    Save to account
+                  </span>
+                  <div
+                    className="people-form__accounts"
+                    role="radiogroup"
+                    aria-labelledby={fieldId("account-label")}
+                  >
+                    {accounts.map((a) => (
+                      <label key={a.id} className="people-form__account-tile">
+                        <input
+                          type="radio"
+                          className="people-form__account-input"
+                          name={fieldId("account")}
+                          value={a.id}
+                          checked={form.accountId === a.id}
+                          onChange={() => set("accountId", a.id)}
+                        />
+                        <span
+                          className="people-form__account-mark"
+                          style={{ background: a.color }}
+                          aria-hidden="true"
+                        >
+                          {accountMark(a.displayName)}
+                        </span>
+                        <span className="people-form__account-text">
+                          <span className="people-form__account-name">{a.displayName}</span>
+                          <span className="people-form__account-email">{a.email}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-          <div className="field">
-            <label className="field__label" htmlFor={fieldId("given")}>
-              First name
-            </label>
-            <input
-              id={fieldId("given")}
-              ref={autofocus}
-              className="input"
-              autoComplete="off"
-              value={form.givenName}
-              onChange={(e) => setName("givenName", e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label className="field__label" htmlFor={fieldId("surname")}>
-              Last name
-            </label>
-            <input
-              id={fieldId("surname")}
-              className="input"
-              autoComplete="off"
-              value={form.surname}
-              onChange={(e) => setName("surname", e.target.value)}
-            />
-          </div>
-
-          <div className="field people-form__full">
-            <label className="field__label" htmlFor={fieldId("display")}>
-              Display name
-            </label>
-            <input
-              id={fieldId("display")}
-              className="input"
-              autoComplete="off"
-              value={form.displayName}
-              aria-invalid={errors.displayName ? true : undefined}
-              aria-describedby={
-                errors.displayName ? fieldId("display-error") : fieldId("display-hint")
-              }
-              onChange={(e) =>
-                setForm((f) => ({
-                  ...f,
-                  displayName: e.target.value,
-                  displayNameEdited: e.target.value.trim() !== "",
-                }))
-              }
-            />
-            {errors.displayName ? (
-              <span id={fieldId("display-error")} className="field__error">
-                {errors.displayName}
-              </span>
+          <div className="people-form__identity people-form__full">
+            {previewName ? (
+              <Avatar
+                name={previewName}
+                colorKey={form.emails.find((e) => e.address.trim())?.address.trim() || previewName}
+                size={56}
+              />
             ) : (
-              <span id={fieldId("display-hint")} className="field__hint">
-                Filled in from the first and last name unless you change it.
+              <span className="people-form__avatar-empty" aria-hidden="true">
+                <UserRound size={24} strokeWidth={1.5} />
               </span>
             )}
+            <div className="people-form__names">
+              <div className="field">
+                <label className="field__label" htmlFor={fieldId("given")}>
+                  First name
+                </label>
+                <input
+                  id={fieldId("given")}
+                  ref={autofocus}
+                  className="input"
+                  autoComplete="off"
+                  value={form.givenName}
+                  onChange={(e) => setName("givenName", e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label className="field__label" htmlFor={fieldId("surname")}>
+                  Last name
+                </label>
+                <input
+                  id={fieldId("surname")}
+                  className="input"
+                  autoComplete="off"
+                  value={form.surname}
+                  onChange={(e) => setName("surname", e.target.value)}
+                />
+              </div>
+
+              <div className="field people-form__full">
+                <label className="field__label" htmlFor={fieldId("display")}>
+                  Display name
+                </label>
+                <input
+                  id={fieldId("display")}
+                  className="input"
+                  autoComplete="off"
+                  value={form.displayName}
+                  aria-invalid={errors.displayName ? true : undefined}
+                  aria-describedby={
+                    errors.displayName ? fieldId("display-error") : fieldId("display-hint")
+                  }
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      displayName: e.target.value,
+                      displayNameEdited: e.target.value.trim() !== "",
+                    }))
+                  }
+                />
+                {errors.displayName ? (
+                  <span id={fieldId("display-error")} className="field__error">
+                    {errors.displayName}
+                  </span>
+                ) : (
+                  <span id={fieldId("display-hint")} className="field__hint">
+                    Filled in from the first and last name unless you change it.
+                  </span>
+                )}
+              </div>
+            </div>
           </div>
 
           <fieldset className="people-form__group people-form__full">

@@ -36,7 +36,7 @@ beforeEach(() => {
   useToasts.setState({ toasts: [] });
 });
 
-describe("People list", () => {
+describe("Contact list", () => {
   it("groups contacts under letter headers, sorted by name, with # last", async () => {
     renderPeople();
     const list = await screen.findByRole("listbox", { name: "Contacts" });
@@ -64,6 +64,12 @@ describe("People list", () => {
     ).toBeVisible();
     expect(
       within(list).getByRole("option", { name: "Ben Morgan, ben.morgan@mailbox.example" }),
+    ).toBeVisible();
+    // A company that only repeats the name gives way to the address.
+    expect(
+      within(list).getByRole("option", {
+        name: "24/7 Emergency Plumbing, help@247plumbing.example",
+      }),
     ).toBeVisible();
   });
 
@@ -128,14 +134,22 @@ describe("People list", () => {
     expect(optionNames(list)).toHaveLength(16);
   });
 
-  it("filters by account", async () => {
+  it("filters by address book from the sidebar, with counts", async () => {
     const user = userEvent.setup();
     renderPeople();
     await screen.findByRole("listbox", { name: "Contacts" });
-    await user.selectOptions(
-      screen.getByRole("combobox", { name: "Show contacts from" }),
-      "alex@morgan-family.example",
-    );
+    const books = screen.getByRole("list", { name: "Address books" });
+    const all = await within(books).findByRole("button", { name: "All contacts, 16 contacts" });
+    const work = within(books).getByRole("button", {
+      name: "Alex Morgan (alex.morgan@acme.example), 11 contacts",
+    });
+    const home = within(books).getByRole("button", {
+      name: "Alex (Personal) (alex@morgan-family.example), 5 contacts",
+    });
+    expect(all).toHaveAttribute("aria-current", "true");
+    expect(work).not.toHaveAttribute("aria-current");
+
+    await user.click(home);
     await waitFor(() =>
       expect(optionNames(screen.getByRole("listbox", { name: "Contacts" }))).toEqual([
         "Ben Morgan",
@@ -146,6 +160,31 @@ describe("People list", () => {
       ]),
     );
     expect(usePeopleStore.getState().accountId).toBe("acct-home");
+    expect(home).toHaveAttribute("aria-current", "true");
+    expect(all).not.toHaveAttribute("aria-current");
+    // The list's title names the address book on show.
+    const listPane = screen.getByRole("region", { name: "Contact list" });
+    expect(within(listPane).getByText("Alex (Personal)")).toBeInTheDocument();
+
+    await user.click(all);
+    await waitFor(() =>
+      expect(optionNames(screen.getByRole("listbox", { name: "Contacts" }))).toHaveLength(16),
+    );
+    expect(usePeopleStore.getState().accountId).toBeNull();
+  });
+
+  it("offers every contact when an address book is empty", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    for (const c of await backend.listContacts("acct-home")) await backend.deleteContact(c.id);
+    renderPeople(backend);
+    await screen.findByRole("listbox", { name: "Contacts" });
+    await user.click(screen.getByRole("button", { name: /^Alex \(Personal\)/ }));
+    expect(await screen.findByText("No contacts in this account")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show all contacts" }));
+    await waitFor(() =>
+      expect(optionNames(screen.getByRole("listbox", { name: "Contacts" }))).toHaveLength(11),
+    );
   });
 
   it("shows an empty state when there are no contacts", async () => {
@@ -175,12 +214,12 @@ describe("Contact details", () => {
     expect(await screen.findByText("Phone number copied")).toBeInTheDocument();
   });
 
-  it("starts an email from Send email and from an address", async () => {
+  it("starts an email from the Email button and from an address", async () => {
     const user = userEvent.setup();
     renderPeople();
     await user.click(await screen.findByRole("option", { name: /^Aisha Khan/ }));
 
-    await user.click(screen.getByRole("button", { name: "Send email" }));
+    await user.click(screen.getByRole("button", { name: "Email" }));
     expect(useAppStore.getState().composeRequest).toEqual({
       to: [{ name: "Aisha Khan", address: "aisha.khan@contoso-partners.example" }],
       accountId: "acct-work",
@@ -195,7 +234,7 @@ describe("Contact details", () => {
     });
   });
 
-  it("disables Send email for a contact without an address", async () => {
+  it("disables Email for a contact without an address", async () => {
     const backend = new MockBackend();
     await backend.createContact({
       accountId: "acct-home",
@@ -206,7 +245,7 @@ describe("Contact details", () => {
     renderPeople(backend);
     await screen.findByRole("listbox", { name: "Contacts" });
     expect(detailsHeading()).toHaveTextContent("Aardvark Phone Only");
-    expect(screen.getByRole("button", { name: "Send email" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Email" })).toBeDisabled();
   });
 });
 
@@ -218,10 +257,11 @@ describe("Contact editor", () => {
 
     await user.click(screen.getByRole("button", { name: "New contact" }));
     const dialog = screen.getByRole("dialog", { name: "New contact" });
-    expect(within(dialog).getByLabelText("Save to account")).toHaveValue("acct-work");
+    const accountChoice = within(dialog).getByRole("radiogroup", { name: "Save to account" });
+    expect(within(accountChoice).getByRole("radio", { name: /^Alex Morgan/ })).toBeChecked();
 
     // Nothing entered: the name is required.
-    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add contact" }));
     expect(within(dialog).getByText("Enter a name for the contact.")).toBeInTheDocument();
     expect(within(dialog).getByLabelText("Display name")).toHaveAttribute("aria-invalid", "true");
 
@@ -232,7 +272,7 @@ describe("Contact editor", () => {
     expect(within(dialog).queryByText("Enter a name for the contact.")).not.toBeInTheDocument();
 
     await user.type(within(dialog).getByLabelText("Email address 1"), "grace@");
-    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add contact" }));
     expect(within(dialog).getByText(/Enter a valid email address/)).toBeInTheDocument();
     await user.type(within(dialog).getByLabelText("Email address 1"), "liu.example");
 
@@ -247,7 +287,7 @@ describe("Contact editor", () => {
     await user.type(within(dialog).getByLabelText("Birthday"), "1990-05-04");
     await user.type(within(dialog).getByLabelText("Address"), "1 Main Street");
     await user.type(within(dialog).getByLabelText("Notes"), "Met at the conference.");
-    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add contact" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(detailsHeading()).toHaveTextContent("Grace Liu");
@@ -286,13 +326,14 @@ describe("Contact editor", () => {
 
     await user.click(screen.getByRole("button", { name: "New contact" }));
     const dialog = screen.getByRole("dialog");
-    await user.selectOptions(within(dialog).getByLabelText("Save to account"), "acct-home");
+    await user.click(within(dialog).getByRole("radio", { name: /^Alex \(Personal\)/ }));
     await user.type(within(dialog).getByLabelText("Display name"), "Uncle Rob");
-    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add contact" }));
 
     await waitFor(() => expect(detailsHeading()).toHaveTextContent("Uncle Rob"));
     expect(useAppStore.getState().search).toBe("");
-    expect(screen.getByText("alex@morgan-family.example", { selector: "p" })).toBeInTheDocument();
+    const details = screen.getByRole("region", { name: "Contact details" });
+    expect(within(details).getByText("alex@morgan-family.example")).toBeInTheDocument();
   });
 
   it("edits a contact and keeps a custom display name", async () => {
@@ -311,7 +352,7 @@ describe("Contact editor", () => {
     expect(within(dialog).getByLabelText("Display name")).toHaveValue("Helen Morgan (Mom)");
     await user.type(within(dialog).getByLabelText("Job title"), "Retired teacher");
     await user.click(within(dialog).getByRole("button", { name: "Remove phone number 1" }));
-    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(screen.getByText("Retired teacher")).toBeInTheDocument();
@@ -335,7 +376,7 @@ describe("Contact editor", () => {
     renderPeople(backend);
     await user.click(await screen.findByRole("option", { name: /^Ben Morgan/ }));
     await user.click(screen.getByRole("button", { name: "Edit" }));
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
     expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent(
       "You're offline.",
     );
@@ -353,6 +394,20 @@ describe("Contact editor", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(spy).not.toHaveBeenCalled();
   });
+
+  it("opens with Ctrl+N, and the avatar follows the name", async () => {
+    const user = userEvent.setup();
+    renderPeople();
+    await screen.findByRole("listbox", { name: "Contacts" });
+    await user.keyboard("{Control>}n{/Control}");
+    const dialog = screen.getByRole("dialog", { name: "New contact" });
+    await user.type(within(dialog).getByLabelText("First name"), "Grace");
+    await user.type(within(dialog).getByLabelText("Last name"), "Liu");
+    expect(within(dialog).getByText("GL")).toBeInTheDocument();
+    // Ctrl+N inside the dialog doesn't open another one.
+    await user.keyboard("{Control>}n{/Control}");
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
 });
 
 describe("Deleting contacts", () => {
@@ -364,7 +419,7 @@ describe("Deleting contacts", () => {
 
     const dialog = screen.getByRole("dialog", { name: "Delete contact?" });
     expect(dialog).toHaveTextContent("Ben Morgan will be permanently deleted");
-    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await user.click(within(dialog).getByRole("button", { name: "Delete contact" }));
 
     await waitFor(() =>
       expect(screen.queryByRole("option", { name: /^Ben Morgan/ })).not.toBeInTheDocument(),

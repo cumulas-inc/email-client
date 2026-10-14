@@ -216,6 +216,23 @@ a {
   color: var(--danger);
 }
 
+/* The confirming button of an action that can't be undone. */
+.btn--destructive {
+  background: var(--danger);
+  box-shadow: 0 1px 2px rgba(80, 20, 10, 0.25);
+  color: var(--on-danger);
+}
+
+.btn--destructive:hover:not(:disabled) {
+  background: var(--danger-hover);
+}
+
+.btn--destructive:disabled {
+  background: var(--bg-pressed);
+  box-shadow: none;
+  color: var(--fg-disabled);
+}
+
 .btn--sm {
   height: 28px;
   padding: 0 var(--space-2);

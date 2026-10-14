@@ -9,7 +9,7 @@ interface PeopleState {
   setAccountId: (accountId: string | null) => void;
 }
 
-/** UI state of the People module, kept across module switches. */
+/** UI state of the Contacts module, kept across module switches. */
 export const usePeopleStore = create<PeopleState>((set) => ({
   selectedId: null,
   accountId: null,

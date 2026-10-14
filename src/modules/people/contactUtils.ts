@@ -43,12 +43,42 @@ export function contactSubtitle(c: Contact): string {
     .join(" · ");
 }
 
-/** Second line of a list row: the company, else the first email address. */
+/**
+ * Second line of a list row: the company, else the first email address.
+ * A company that only repeats the name ("24/7 Emergency Plumbing") gives way
+ * to the address too.
+ */
 export function contactSecondary(c: Contact): string {
-  return c.company?.trim() || c.emails[0]?.address || "";
+  const company = c.company?.trim() ?? "";
+  const repeatsName =
+    company.localeCompare(c.displayName.trim(), undefined, { sensitivity: "base" }) === 0;
+  return (repeatsName ? "" : company) || c.emails[0]?.address || company;
 }
 
-/** The address to use for "Send email", with the contact's name. */
+/** The letters on an account's badge: "AM" for Alex Morgan, "W" for Work. */
+export function accountMark(name: string): string {
+  const words = name
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  const first = words[0]?.[0] ?? "?";
+  const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? "") : "";
+  return (first + last).toUpperCase();
+}
+
+/** How many contacts each account holds. */
+export function countByAccount(contacts: Contact[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const c of contacts) counts.set(c.accountId, (counts.get(c.accountId) ?? 0) + 1);
+  return counts;
+}
+
+/** "1 contact", "16 contacts". */
+export function contactCount(n: number): string {
+  return n === 1 ? "1 contact" : `${n} contacts`;
+}
+
+/** The address the Email button writes to, with the contact's name. */
 export function primaryEmail(c: Contact): EmailAddress | null {
   const first = c.emails[0];
   if (!first) return null;
