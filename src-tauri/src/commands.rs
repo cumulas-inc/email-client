@@ -242,7 +242,11 @@ pub async fn delete_messages(state: State<'_, AppState>, message_ids: Vec<String
 
 #[tauri::command]
 pub async fn send_message(state: State<'_, AppState>, message: OutgoingMessage) -> Result<()> {
-    state.service.send_message(message).await
+    let account_id = message.account_id.clone();
+    state.service.send_message(message).await?;
+    // Bring the copy in Sent into view without waiting for the next sync.
+    spawn_sync(&state, &account_id);
+    Ok(())
 }
 
 #[tauri::command]
