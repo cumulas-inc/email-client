@@ -28,7 +28,7 @@ describe("message frame document", () => {
     );
     expect(doc).toContain("img { max-width: 100%; height: auto; }");
     expect(doc).toContain("overflow-wrap: break-word");
-    expect(doc).toContain("<body><p>Hello</p></body>");
+    expect(doc).toContain(`<body dir="auto"><p>Hello</p></body>`);
     // Dark mode inverts the page and turns images back.
     expect(buildSrcDoc("", { allowRemote: false, appearance: "dark" })).toContain(
       "filter: invert(1) hue-rotate(180deg)",

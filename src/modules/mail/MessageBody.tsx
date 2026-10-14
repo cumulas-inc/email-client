@@ -8,6 +8,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { anchorOf, type BodyAppearance, buildSrcDoc, linkify } from "./bodyHtml";
+import { plainTextBlocks } from "./text";
 
 interface MessageBodyProps {
   html: string;
@@ -29,6 +30,8 @@ export function MessageBody({
 }: MessageBodyProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(80);
+  // Mail wider than the pane scrolls sideways; faded edges say there's more.
+  const [hidden, setHidden] = useState({ left: false, right: false });
   const handlers = useRef({ onLink, onHoverLink });
   useEffect(() => {
     handlers.current = { onLink, onHoverLink };
@@ -52,6 +55,17 @@ export function MessageBody({
     observers.current.forEach((o) => o.disconnect());
     observers.current = [];
 
+    const edges = () => {
+      const scroller = doc.scrollingElement ?? doc.documentElement;
+      if (!scroller) return;
+      const max = scroller.scrollWidth - scroller.clientWidth;
+      // Right-to-left pages scroll from 0 down to -max.
+      const rtl = doc.defaultView?.getComputedStyle(scroller).direction === "rtl";
+      const min = rtl ? -max : 0;
+      const left = max > 1 && scroller.scrollLeft - min > 1;
+      const right = max > 1 && min + max - scroller.scrollLeft > 1;
+      setHidden((h) => (h.left === left && h.right === right ? h : { left, right }));
+    };
     const measure = () => {
       const root = doc.documentElement;
       if (!root) return;
@@ -59,8 +73,10 @@ export function MessageBody({
       // Room for a horizontal scrollbar on very wide newsletters.
       if (root.scrollWidth > root.clientWidth + 1) next += 16;
       setHeight(Math.max(next, 24));
+      edges();
     };
     measure();
+    doc.addEventListener("scroll", edges, { passive: true });
 
     // Images and fonts change the height after load.
     doc.addEventListener("load", measure, true);
@@ -117,19 +133,51 @@ export function MessageBody({
   }, []);
 
   return (
-    <iframe
-      ref={frameRef}
-      className={`mail-body-frame mail-body-frame--${appearance}`}
-      title={title}
-      sandbox="allow-same-origin"
-      referrerPolicy="no-referrer"
-      srcDoc={srcDoc}
-      onLoad={onLoad}
-      style={{ height }}
-    />
+    <div
+      className="mail-body-wide"
+      data-more-left={hidden.left || undefined}
+      data-more-right={hidden.right || undefined}
+    >
+      <iframe
+        ref={frameRef}
+        className={`mail-body-frame mail-body-frame--${appearance}`}
+        title={title}
+        sandbox="allow-same-origin"
+        referrerPolicy="no-referrer"
+        srcDoc={srcDoc}
+        onLoad={onLoad}
+        style={{ height }}
+      />
+    </div>
   );
 }
 
+function Linked({ text, onLink }: { text: string; onLink: (href: string) => void }) {
+  return linkify(text).map((part, i) =>
+    "href" in part ? (
+      <a
+        key={i}
+        href={part.href}
+        title={part.href}
+        onClick={(e) => {
+          e.preventDefault();
+          onLink(part.href);
+        }}
+        onAuxClick={(e) => e.preventDefault()}
+      >
+        {part.text}
+      </a>
+    ) : (
+      <span key={i}>{part.text}</span>
+    ),
+  );
+}
+
+/**
+ * Plain text, set like the letter: paragraphs in the serif, each in its own
+ * direction; quoted lines quieter; tables and aligned columns in monospace,
+ * unwrapped, scrolling sideways when they're wider than the pane.
+ */
 export function PlainTextBody({
   text,
   onLink,
@@ -137,27 +185,35 @@ export function PlainTextBody({
   text: string;
   onLink: (href: string) => void;
 }): ReactNode {
-  const parts = useMemo(() => linkify(text), [text]);
+  const blocks = useMemo(() => plainTextBlocks(text), [text]);
   return (
     <div className="mail-plaintext selectable">
-      {parts.map((part, i) =>
-        "href" in part ? (
-          <a
-            key={i}
-            href={part.href}
-            title={part.href}
-            onClick={(e) => {
-              e.preventDefault();
-              onLink(part.href);
-            }}
-            onAuxClick={(e) => e.preventDefault()}
-          >
-            {part.text}
-          </a>
-        ) : (
-          <span key={i}>{part.text}</span>
-        ),
-      )}
+      {blocks.map((block, i) => {
+        if (block.kind === "pre") {
+          return (
+            <pre key={i} className="mail-plaintext__pre" tabIndex={0}>
+              <Linked text={block.text} onLink={onLink} />
+            </pre>
+          );
+        }
+        if (block.kind === "signature") {
+          return (
+            <p key={i} className="mail-plaintext__p mail-plaintext__signature">
+              <Linked text={block.text} onLink={onLink} />
+            </p>
+          );
+        }
+        return (
+          <p key={i} className="mail-plaintext__p">
+            {block.lines.map((line, j) => (
+              <span key={j} className={line.quoted ? "mail-plaintext__quote" : undefined}>
+                <Linked text={line.text} onLink={onLink} />
+                {j < block.lines.length - 1 ? "\n" : ""}
+              </span>
+            ))}
+          </p>
+        );
+      })}
     </div>
   );
 }

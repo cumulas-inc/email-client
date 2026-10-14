@@ -15,8 +15,11 @@ import { useAccounts } from "../../api/queries";
 import type { Account, Folder } from "../../api/types";
 import { AccountBadge } from "../../components/AccountBadge";
 import type { MailActions } from "./actions";
+import { Count } from "./Count";
+import { exactCount } from "./counts";
 import { currentMailDrag, endMailDrag } from "./dnd";
 import { FolderIcon } from "./FolderIcon";
+import { folderPath, visibleDepth } from "./folders";
 import { ALL_INBOXES, useMailStore } from "./mailStore";
 import { useFolders } from "./queries";
 
@@ -33,8 +36,8 @@ function folderCount(folder: Folder): number {
 function countLabel(folder: Folder): string {
   const n = folderCount(folder);
   if (n === 0) return "";
-  if (folder.role === "drafts") return n === 1 ? ", 1 item" : `, ${n} items`;
-  return `, ${n} unread`;
+  if (folder.role === "drafts") return n === 1 ? ", 1 item" : `, ${exactCount(n)} items`;
+  return `, ${exactCount(n)} unread`;
 }
 
 interface ItemProps {
@@ -165,15 +168,23 @@ function TreeItem(props: ItemProps) {
         {...dropHandlers}
       >
         {icon && <span className="mail-tree__icon">{icon}</span>}
-        <span className="mail-tree__label">
-          {prefix && <span className="mail-tree__prefix">{prefix} · </span>}
-          {label}
-        </span>
+        {prefix ? (
+          <span className="mail-tree__label">
+            <bdi className="mail-tree__prefix">{prefix}</bdi>
+            <span className="mail-tree__prefix"> · </span>
+            <bdi>{label}</bdi>
+          </span>
+        ) : (
+          <span className="mail-tree__label" dir="auto">
+            {label}
+          </span>
+        )}
         {secondary && <span className="mail-tree__secondary">{secondary}</span>}
         {!!count && (
-          <span className={`mail-tree__count${countMuted ? " mail-tree__count--muted" : ""}`}>
-            {count}
-          </span>
+          <Count
+            n={count}
+            className={`mail-tree__count${countMuted ? " mail-tree__count--muted" : ""}`}
+          />
         )}
         {expandable && (
           <span
@@ -263,6 +274,7 @@ export function FolderPane({ actions }: FolderPaneProps) {
           level={level}
           label={f.name}
           ariaLabel={`${f.name}${countLabel(f)}`}
+          title={folderPath(folders, f)}
           icon={<FolderIcon role={f.role} size={17} open={kids.length > 0 && expanded} />}
           count={folderCount(f)}
           countMuted={f.role === "drafts"}
@@ -339,6 +351,8 @@ export function FolderPane({ actions }: FolderPaneProps) {
 
   const totalUnifiedUnread = inboxes.reduce((sum, f) => sum + f.unreadCount, 0);
   const favExpanded = !collapsed.favorites;
+  // Deep trees indent each level less, so the deepest names keep their room.
+  const depth = useMemo(() => visibleDepth(folders, collapsed), [folders, collapsed]);
 
   return (
     <div className="mail-folders">
@@ -347,6 +361,7 @@ export function FolderPane({ actions }: FolderPaneProps) {
         role="tree"
         aria-label="Folders"
         className="mail-tree"
+        style={{ "--mail-tree-depth": Math.max(depth, 1) } as CSSProperties}
         onKeyDown={onKeyDown}
       >
         <TreeItem
@@ -371,7 +386,9 @@ export function FolderPane({ actions }: FolderPaneProps) {
               parentKey="favorites"
               level={2}
               label="All inboxes"
-              ariaLabel={`All inboxes${totalUnifiedUnread ? `, ${totalUnifiedUnread} unread` : ""}`}
+              ariaLabel={`All inboxes${
+                totalUnifiedUnread ? `, ${exactCount(totalUnifiedUnread)} unread` : ""
+              }`}
               icon={<FolderIcon role="unified" size={17} />}
               count={totalUnifiedUnread}
               selected={selectedKey === `fav:${ALL_INBOXES}`}
@@ -392,6 +409,7 @@ export function FolderPane({ actions }: FolderPaneProps) {
                 label={f.name}
                 prefix={accounts.length > 1 ? name : undefined}
                 ariaLabel={`${f.name}${accounts.length > 1 ? ` (${name})` : ""}${countLabel(f)}`}
+                title={accounts.length > 1 ? `${name} · ${f.name}` : undefined}
                 icon={<FolderIcon role="inbox" size={17} />}
                 count={folderCount(f)}
                 selected={selectedKey === key}

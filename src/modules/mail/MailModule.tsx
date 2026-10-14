@@ -25,6 +25,7 @@ function DraftBar() {
   const closeCompose = useMailStore((s) => s.closeCompose);
   const [confirm, setConfirm] = useState(false);
   if (!compose) return null;
+  const noSubject = !compose.subject.trim();
   const subject = compose.subject.trim() || "(no subject)";
   return (
     <div className="mail-draftbar" role="region" aria-label="Unsent draft">
@@ -36,7 +37,12 @@ function DraftBar() {
       >
         <Pencil size={14} aria-hidden="true" />
         <span className="mail-draftbar__label">Draft</span>
-        <span className="mail-draftbar__subject">{subject}</span>
+        <span
+          className={`mail-draftbar__subject${noSubject ? " is-empty" : ""}`}
+          dir={noSubject ? undefined : "auto"}
+        >
+          {subject}
+        </span>
       </button>
       <button
         type="button"

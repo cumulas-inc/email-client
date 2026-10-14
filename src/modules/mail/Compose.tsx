@@ -15,7 +15,7 @@ import type { EmailAddress, Importance } from "../../api/types";
 import { Dialog } from "../../components/Dialog";
 import { toast } from "../../components/toast";
 import { formatBytes } from "../../lib/format";
-import { FileBadge } from "./Attachments";
+import { FileBadge, FileName } from "./Attachments";
 import { bodyAppearance } from "./bodyHtml";
 import { ATTACHMENT_WARN_BYTES, composeBodyHtml, readFileBase64 } from "./draft";
 import type { EditorHandle } from "./Editor";
@@ -334,6 +334,7 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
               <input
                 id="mail-compose-subject"
                 className="mail-compose__subject"
+                dir="auto"
                 aria-label="Subject"
                 placeholder="Add a subject"
                 value={draft.subject}
@@ -352,9 +353,7 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
                 {draft.attachments.map((a) => (
                   <li key={a.id} className="mail-file-chip">
                     <FileBadge name={a.name} contentType={a.contentType} />
-                    <span className="mail-file-chip__name" title={a.name}>
-                      {a.name}
-                    </span>
+                    <FileName name={a.name} className="mail-file-chip__name" />
                     <span className="mail-file-chip__size">{formatBytes(a.size)}</span>
                     <button
                       type="button"

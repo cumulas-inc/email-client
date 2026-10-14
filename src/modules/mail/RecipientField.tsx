@@ -166,7 +166,9 @@ export function RecipientField({
         <div className="mail-recipients__box">
           {value.map((a, i) => (
             <span key={`${a.address}-${i}`} className="mail-chip" title={a.address}>
-              <span className="mail-chip__text">{displayName(a)}</span>
+              <span className="mail-chip__text" dir="auto">
+                {displayName(a)}
+              </span>
               <button
                 type="button"
                 className="mail-chip__remove"
@@ -194,6 +196,7 @@ export function RecipientField({
             aria-describedby={error ? errorId : undefined}
             autoComplete="off"
             spellCheck={false}
+            dir="auto"
             autoFocus={autoFocus}
             value={text}
             onChange={(e) => {
@@ -229,7 +232,9 @@ export function RecipientField({
             >
               <Avatar name={displayName(s)} colorKey={s.address} size={28} />
               <span className="mail-suggest__text">
-                <span className="mail-suggest__name">{s.name ?? s.address}</span>
+                <span className="mail-suggest__name" dir="auto">
+                  {s.name ?? s.address}
+                </span>
                 {s.name && <span className="mail-suggest__address">{s.address}</span>}
               </span>
             </li>

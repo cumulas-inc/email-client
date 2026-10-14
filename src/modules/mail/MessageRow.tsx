@@ -12,7 +12,8 @@ import { type DragEvent, type MouseEvent, memo } from "react";
 
 import type { MessageSummary } from "../../api/types";
 import { Avatar } from "../../components/Avatar";
-import { displayName, formatListDate } from "../../lib/format";
+import { displayName } from "../../lib/format";
+import { FUTURE_NOTE, isFutureDated, listDate, messageDate } from "./dates";
 import { optionId } from "./dom";
 
 export interface RowHandlers {
@@ -40,12 +41,13 @@ interface RowProps {
   handlers: RowHandlers;
 }
 
-function who(message: MessageSummary, showRecipients: boolean): string {
+/** Who the row is about, and whether that's a stand-in ("(no sender)"). */
+function who(message: MessageSummary, showRecipients: boolean): [string, boolean] {
   if (showRecipients) {
     const names = message.to.map((a) => displayName(a));
-    return names.length > 0 ? names.join("; ") : "(no recipients)";
+    return names.length > 0 ? [names.join("; "), false] : ["(no recipients)", true];
   }
-  return displayName(message.from);
+  return [displayName(message.from), !message.from];
 }
 
 export const MessageRow = memo(function MessageRow({
@@ -58,15 +60,18 @@ export const MessageRow = memo(function MessageRow({
   contextColor,
   handlers,
 }: RowProps) {
-  const sender = who(m, showRecipients);
-  const date = formatListDate(m.receivedAt);
+  const [sender, noSender] = who(m, showRecipients);
+  const date = listDate(m.receivedAt);
+  const sent = messageDate(m.receivedAt);
+  const future = !!sent && isFutureDated(sent);
+  const noSubject = !m.subject.trim();
   const subject = m.subject.trim() || "(no subject)";
   const label = [
     m.isRead ? null : "Unread",
     m.isDraft ? "Draft" : null,
     sender,
     subject,
-    date,
+    date || "No date",
     m.isFlagged ? "Flagged" : null,
     m.hasAttachments ? "Has attachments" : null,
     m.importance === "high" ? "High importance" : null,
@@ -125,7 +130,11 @@ export const MessageRow = memo(function MessageRow({
       </div>
       <div className="mail-row__body">
         <div className="mail-row__line">
-          <span className="mail-row__sender" title={sender}>
+          <span
+            className={`mail-row__sender${noSender ? " is-empty" : ""}`}
+            dir="auto"
+            title={sender}
+          >
             {sender}
           </span>
           <span className="mail-row__status">
@@ -142,12 +151,20 @@ export const MessageRow = memo(function MessageRow({
             {m.hasAttachments && <Paperclip size={14} aria-label="Has attachments" />}
             {m.isFlagged && <Flag size={14} className="mail-row__flag" aria-label="Flagged" />}
           </span>
-          <span className="mail-row__date">{date}</span>
+          <span className="mail-row__date" title={future ? FUTURE_NOTE : undefined}>
+            {date}
+          </span>
         </div>
         <div className="mail-row__line">
-          <span className="mail-row__subject" title={subject}>
-            {m.isDraft && <span className="mail-row__draft">Draft · </span>}
-            {subject}
+          <span className="mail-row__subject-cell">
+            {m.isDraft && <span className="mail-row__draft">Draft ·</span>}
+            <span
+              className={`mail-row__subject${noSubject ? " is-empty" : ""}`}
+              dir={noSubject ? undefined : "auto"}
+              title={subject}
+            >
+              {subject}
+            </span>
           </span>
           <span className="mail-row__actions" onClick={stop} onDoubleClick={stop}>
             <button
@@ -185,14 +202,16 @@ export const MessageRow = memo(function MessageRow({
         </div>
         <div className="mail-row__preview">
           {context && (
-            <span className="mail-row__context">
+            <span className="mail-row__context" title={context}>
               {contextColor && (
                 <span className="mail-row__dot" style={{ background: contextColor }} />
               )}
-              {context}
+              <span className="mail-row__context-text">{context}</span>
             </span>
           )}
-          {m.preview || "This message has no content."}
+          <span className="mail-row__preview-text" dir={m.preview ? "auto" : undefined}>
+            {m.preview || "This message has no content."}
+          </span>
         </div>
       </div>
     </div>

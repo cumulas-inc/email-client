@@ -16,7 +16,9 @@ import { useBackend } from "../../api/context";
 import type { AttachmentMeta } from "../../api/types";
 import { toast } from "../../components/toast";
 import { formatBytes } from "../../lib/format";
+import { exactCount } from "./counts";
 import { fileKind, type FileKind } from "./files";
+import { splitFileName } from "./text";
 
 export function FileTypeIcon({ kind, size = 20 }: { kind: FileKind; size?: number }) {
   const props = { size, "aria-hidden": true as const };
@@ -57,6 +59,26 @@ export function FileBadge({ name, contentType }: { name: string; contentType: st
     <span className={`mail-file-badge mail-file-badge--${kind}`} aria-hidden="true">
       <FileTypeIcon kind={kind} size={ext ? 14 : 18} />
       {ext && <span className="mail-file-badge__ext">{ext}</span>}
+    </span>
+  );
+}
+
+/**
+ * A file name cut in the middle when it doesn't fit: the end of the name and
+ * its extension stay, so files that share a long prefix stay apart.
+ */
+export function FileName({ name, className }: { name: string; className?: string }) {
+  const { head, tail } = splitFileName(name);
+  return (
+    <span className={`mail-filename${className ? ` ${className}` : ""}`} dir="auto" title={name}>
+      {tail ? (
+        <>
+          <span className="mail-filename__head">{head}</span>
+          <span className="mail-filename__tail">{tail}</span>
+        </>
+      ) : (
+        <span className="mail-filename__head">{name}</span>
+      )}
     </span>
   );
 }
@@ -115,7 +137,7 @@ export function Attachments({
       {files.length > 1 && (
         <div className="mail-attachments__summary">
           <span>
-            {files.length} attachments · {formatBytes(total)}
+            {exactCount(files.length)} attachments · {formatBytes(total)}
           </span>
           <button type="button" className="btn btn--subtle btn--sm" onClick={() => void saveAll()}>
             <Download size={14} aria-hidden="true" />
@@ -123,7 +145,7 @@ export function Attachments({
           </button>
         </div>
       )}
-      <ul className="mail-attachments__list">
+      <ul className={`mail-attachments__list${files.length > 1 ? " is-grid" : ""}`}>
         {files.map((a) => (
           <li key={a.id} className="mail-attachment">
             <button
@@ -136,7 +158,7 @@ export function Attachments({
             >
               <FileBadge name={a.name} contentType={a.contentType} />
               <span className="mail-attachment__text">
-                <span className="mail-attachment__name">{a.name}</span>
+                <FileName name={a.name} className="mail-attachment__name" />
                 <span className="mail-attachment__size">{formatBytes(a.size)}</span>
               </span>
             </button>

@@ -31,16 +31,19 @@ import { EmptyState } from "../../components/EmptyState";
 import { Menu, type MenuItem } from "../../components/Menu";
 import { PaneSpinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
-import { displayName, formatFullDate, fullAddress } from "../../lib/format";
+import { displayName, formatCount, fullAddress } from "../../lib/format";
 import type { MailActions } from "./actions";
 import { Attachments } from "./Attachments";
+import { exactCount } from "./counts";
+import { FUTURE_NOTE, fullDate, isFutureDated, messageDate } from "./dates";
 import { FolderIcon } from "./FolderIcon";
-import { moveTargets } from "./folders";
+import { folderPath, moveTargets } from "./folders";
 import { useIsDark, usePersistentString } from "./hooks";
 import { useMailStore } from "./mailStore";
 import { bodyAppearance, classifyLink, paintsOwnBackground } from "./bodyHtml";
 import { MessageBody, PlainTextBody } from "./MessageBody";
 import { useFolders, useMessage } from "./queries";
+import { visualLength } from "./text";
 
 const ICON = { size: 17, strokeWidth: 1.75, "aria-hidden": true as const };
 
@@ -89,7 +92,7 @@ function AddressList({ list }: { list: EmailAddress[] }) {
     <>
       {list.map((a, i) => (
         <span key={`${a.address}-${i}`} className="mail-reader__recipient" title={a.address}>
-          {displayName(a)}
+          <bdi>{displayName(a)}</bdi>
           {i < list.length - 1 ? ", " : ""}
         </span>
       ))}
@@ -117,7 +120,7 @@ function Recipients({ message }: { message: Message }) {
               <span className="mail-reader__recipient-label">{label}:</span>{" "}
               {list.map((a, i) => (
                 <span key={`${a.address}-${i}`} className="mail-reader__recipient">
-                  {fullAddress(a)}
+                  <bdi>{fullAddress(a)}</bdi>
                   {i < list.length - 1 ? ", " : ""}
                 </span>
               ))}
@@ -228,9 +231,15 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
   const junk = own.find((f) => f.role === "junk");
   const inbox = own.find((f) => f.role === "inbox");
   const appearance = bodyAppearance(message.bodyHtml ?? "", isDark, darkBody);
+  const noSubject = !message.subject.trim();
   const subject = message.subject.trim() || "(no subject)";
+  // Long subjects step down a size, so the sender and the letter stay in view.
+  const longSubject = visualLength(subject) > 90;
   const sender = message.from;
   const senderName = displayName(sender);
+  const date = fullDate(message.receivedAt);
+  const sent = messageDate(message.receivedAt);
+  const future = !!sent && isFutureDated(sent);
 
   const more: MenuItem[] = [];
   if (folder?.role === "junk" && inbox) {
@@ -268,15 +277,21 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
     });
   }
 
-  const folderLabel = folder
-    ? accounts.length > 1 && account
-      ? `${account.displayName} · ${folder.name}`
-      : folder.name
+  // "Work · Inbox": where the message is. The account name gives way first.
+  const placeAccount = folder && account && accounts.length > 1 ? account : null;
+  const placeTitle = folder
+    ? placeAccount
+      ? `${placeAccount.displayName} · ${folderPath(folders, folder)}`
+      : folderPath(folders, folder)
     : null;
 
   return (
     <article className="mail-reader" aria-label={subject}>
-      <div className="mail-reader__toolbar" role="toolbar" aria-label="Message actions">
+      <div
+        className={`mail-reader__toolbar${onBack ? " mail-reader__toolbar--back" : ""}`}
+        role="toolbar"
+        aria-label="Message actions"
+      >
         {onBack && (
           <>
             <button
@@ -307,7 +322,7 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
           <Menu
             label="Move to"
             items={targets.map((t) => ({
-              label: t.path,
+              label: t.label,
               icon: <FolderIcon role={t.folder.role} />,
               onSelect: () => actions.move(ids, t.folder.id),
             }))}
@@ -346,8 +361,11 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
         />
         <span className="toolbar__spacer" />
         {position >= 0 && (
-          <span className="mail-reader__position tnum">
-            {position + 1} of {listTotal}
+          <span
+            className="mail-reader__position tnum"
+            title={`${exactCount(position + 1)} of ${exactCount(listTotal)}`}
+          >
+            {formatCount(position + 1)} of {formatCount(listTotal)}
           </span>
         )}
         <button
@@ -393,8 +411,19 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
       <div id="mail-reading-pane" className="mail-reader__scroll" tabIndex={-1}>
         <div className="mail-reader__page">
           <header className="mail-reader__head">
-            <h1 className="mail-reader__subject selectable">{subject}</h1>
-            {(message.importance !== "normal" || message.isFlagged || folderLabel) && (
+            <h1
+              className={[
+                "mail-reader__subject selectable",
+                noSubject && "is-empty",
+                longSubject && "mail-reader__subject--long",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              dir={noSubject ? undefined : "auto"}
+            >
+              {subject}
+            </h1>
+            {(message.importance !== "normal" || message.isFlagged || placeTitle) && (
               <div className="mail-reader__tags">
                 {message.importance === "high" && (
                   <span className="mail-tag mail-tag--danger">
@@ -414,16 +443,20 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                     Flagged
                   </span>
                 )}
-                {folderLabel && (
-                  <span className="mail-tag mail-tag--place">
-                    {account && accounts.length > 1 && (
-                      <span
-                        className="mail-tag__dot"
-                        style={{ background: account.color }}
-                        aria-hidden="true"
-                      />
+                {folder && placeTitle && (
+                  <span className="mail-tag mail-tag--place" title={placeTitle}>
+                    {placeAccount && (
+                      <>
+                        <span
+                          className="mail-tag__dot"
+                          style={{ background: placeAccount.color }}
+                          aria-hidden="true"
+                        />
+                        <bdi className="mail-tag__account">{placeAccount.displayName}</bdi>
+                        <span className="mail-tag__sep">·</span>
+                      </>
                     )}
-                    {folderLabel}
+                    <bdi className="mail-tag__folder">{folder.name}</bdi>
                   </span>
                 )}
               </div>
@@ -432,7 +465,12 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
               <Avatar name={senderName} colorKey={sender?.address} size={42} />
               <div className="mail-reader__people selectable">
                 <div className="mail-reader__from">
-                  <span className="mail-reader__from-name">{senderName}</span>
+                  <span
+                    className={`mail-reader__from-name${sender ? "" : " is-empty"}`}
+                    dir={sender ? "auto" : undefined}
+                  >
+                    {senderName}
+                  </span>
                   {sender?.name && (
                     <span className="mail-reader__from-address">&lt;{sender.address}&gt;</span>
                   )}
@@ -440,9 +478,15 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 <Recipients message={message} />
               </div>
               <div className="mail-reader__side">
-                <time className="mail-reader__date tnum selectable" dateTime={message.receivedAt}>
-                  {formatFullDate(message.receivedAt)}
-                </time>
+                {date && (
+                  <time
+                    className="mail-reader__date tnum selectable"
+                    dateTime={message.receivedAt}
+                    title={future ? FUTURE_NOTE : undefined}
+                  >
+                    {date}
+                  </time>
+                )}
                 <div className="mail-respond" role="group" aria-label="Respond">
                   <button
                     type="button"
@@ -526,7 +570,15 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
             onClick={() => void actions.reply(message.id, "reply")}
           >
             {account && <Avatar name={account.displayName} colorKey={account.email} size={26} />}
-            <span className="mail-quickreply__text">Reply to {senderName}…</span>
+            <span className="mail-quickreply__text">
+              {sender ? (
+                <>
+                  Reply to <bdi>{senderName}</bdi>…
+                </>
+              ) : (
+                "Reply…"
+              )}
+            </span>
             <span className="kbd" aria-hidden="true">
               Ctrl R
             </span>
@@ -547,7 +599,7 @@ function MultiSelection({ ids, actions }: { ids: string[]; actions: MailActions 
   return (
     <EmptyState
       icon={<Layers size={40} strokeWidth={1.5} />}
-      title={`${ids.length} items selected`}
+      title={`${formatCount(ids.length)} items selected`}
       description="Choose what to do with them."
       action={
         <div className="mail-bulk">

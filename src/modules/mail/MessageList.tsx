@@ -29,11 +29,13 @@ import { EmptyState } from "../../components/EmptyState";
 import { Menu } from "../../components/Menu";
 import { SearchField } from "../../components/SearchField";
 import { PaneSpinner, Spinner } from "../../components/Spinner";
-import { dateGroup } from "../../lib/format";
+import { formatCount } from "../../lib/format";
 import type { MailActions } from "./actions";
+import { exactCount } from "./counts";
+import { listGroup } from "./dates";
 import { endMailDrag, MAIL_DRAG_TYPE, startMailDrag } from "./dnd";
 import { FolderIcon } from "./FolderIcon";
-import { moveTargets } from "./folders";
+import { folderPath, moveTargets } from "./folders";
 import { useDebounced } from "./hooks";
 import { ALL_INBOXES, type MailFilter, useMailStore } from "./mailStore";
 import { optionId } from "./dom";
@@ -83,7 +85,14 @@ function SelectionBar({ ids, actions, folders, messages }: SelectionBarProps) {
       >
         <X size={15} />
       </button>
-      <span className="mail-selection__count">{ids.length} selected</span>
+      <span
+        className="mail-selection__count"
+        title={
+          formatCount(ids.length) === exactCount(ids.length) ? undefined : exactCount(ids.length)
+        }
+      >
+        {formatCount(ids.length)} selected
+      </span>
       <span className="toolbar__spacer" />
       <button
         type="button"
@@ -117,7 +126,7 @@ function SelectionBar({ ids, actions, folders, messages }: SelectionBarProps) {
           label="Move to"
           align="end"
           items={targets.map((t) => ({
-            label: t.path,
+            label: t.label,
             icon: <FolderIcon role={t.folder.role} />,
             onSelect: () => actions.move(ids, t.folder.id),
           }))}
@@ -165,7 +174,6 @@ interface MessageListProps {
 
 export function MessageList({ actions, readingPane, onEditDraft }: MessageListProps) {
   const search = useAppStore((s) => s.search);
-  const setSearch = useAppStore((s) => s.setSearch);
   const searchText = useDebounced(search.trim(), 250);
   const searching = search.trim().length > 0;
 
@@ -255,7 +263,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     const now = new Date();
     const out: { label: string; items: MessageSummary[] }[] = [];
     for (const m of items) {
-      const label = dateGroup(m.receivedAt, now);
+      const label = listGroup(m.receivedAt, now);
       const last = out[out.length - 1];
       if (last?.label === label) last.items.push(m);
       else out.push({ label, items: [m] });
@@ -301,7 +309,8 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
         // A compact drag image: "Move 3 items".
         const ghost = document.createElement("div");
         ghost.className = "mail-drag-ghost";
-        ghost.textContent = ids.length === 1 ? m.subject || "(no subject)" : `${ids.length} items`;
+        ghost.textContent =
+          ids.length === 1 ? m.subject || "(no subject)" : `${formatCount(ids.length)} items`;
         document.body.appendChild(ghost);
         e.dataTransfer.setDragImage?.(ghost, 12, 12);
         setTimeout(() => ghost.remove(), 0);
@@ -398,17 +407,26 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
 
   const accountName = (id: string) => accountById.get(id)?.displayName ?? "";
   let title = "Mail";
-  let subtitle: string | null = null;
+  let titleHint = title;
   let titleAccount: Account | null = null;
   if (searching) {
     title = "Search results";
-    subtitle = results.data ? `${items.length} for “${search.trim()}”` : null;
+    titleHint = title;
   } else if (folderId === ALL_INBOXES) {
     title = "All inboxes";
+    titleHint = title;
   } else if (folder) {
     title = folder.name;
+    titleHint = folderPath(folders, folder);
     titleAccount = accounts.length > 1 ? (accountById.get(folder.accountId) ?? null) : null;
   }
+  const subtitle =
+    searching && results.data && items.length > 0 ? (
+      <span className="mail-list__subtitle" title={`${exactCount(items.length)} results`}>
+        {formatCount(items.length)} {items.length === 1 ? "result" : "results"} for “
+        <bdi>{search.trim()}</bdi>”
+      </span>
+    ) : null;
 
   const contextFor = (m: MessageSummary): string | null => {
     if (searching) {
@@ -559,54 +577,52 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     <section className="mail-list" aria-label="Message list">
       <header className="mail-list__header">
         <SearchField placeholder="Search mail" />
-        <div className="mail-list__title-row">
-          <div className="mail-list__titles">
-            <h2 className="pane-title mail-list__title" title={title}>
-              {title}
-            </h2>
+        {/* The selection's actions take the title row's place, so the list
+            doesn't jump under the pointer while messages are picked. */}
+        <div className={`mail-list__bar${checkMode ? " is-selecting" : ""}`}>
+          <div className="mail-list__title-row">
+            <div className="mail-list__titles">
+              <h2 className="pane-title mail-list__title" dir="auto" title={titleHint}>
+                {title}
+              </h2>
+              {subtitle}
+            </div>
             {titleAccount && (
-              <span className="mail-chip-account" title={titleAccount.email}>
+              <span
+                className="mail-chip-account"
+                title={`${titleAccount.displayName} (${titleAccount.email})`}
+              >
                 <span
                   className="mail-chip-account__dot"
                   style={{ background: titleAccount.color }}
                   aria-hidden="true"
                 />
-                <span className="mail-chip-account__name">{titleAccount.displayName}</span>
+                <span className="mail-chip-account__name" dir="auto">
+                  {titleAccount.displayName}
+                </span>
               </span>
             )}
-            {subtitle && <span className="mail-list__subtitle">{subtitle}</span>}
+            <div className="segmented mail-filter" role="group" aria-label="Filter messages">
+              {FILTERS.map((f) => (
+                <button
+                  key={f.value}
+                  type="button"
+                  className={`segmented__option mail-filter__option${
+                    filter === f.value ? " segmented__option--selected" : ""
+                  }`}
+                  aria-pressed={filter === f.value}
+                  onClick={() => setFilter(f.value)}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="segmented mail-filter" role="group" aria-label="Filter messages">
-            {FILTERS.map((f) => (
-              <button
-                key={f.value}
-                type="button"
-                className={`segmented__option mail-filter__option${
-                  filter === f.value ? " segmented__option--selected" : ""
-                }`}
-                aria-pressed={filter === f.value}
-                onClick={() => setFilter(f.value)}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
-          {searching && (
-            <button
-              type="button"
-              className="icon-btn icon-btn--sm"
-              aria-label="Exit search"
-              title="Exit search (Esc)"
-              onClick={() => setSearch("")}
-            >
-              <X size={16} />
-            </button>
+          {checkMode && (
+            <SelectionBar ids={selectedIds} actions={actions} folders={folders} messages={items} />
           )}
         </div>
       </header>
-      {checkMode && (
-        <SelectionBar ids={selectedIds} actions={actions} folders={folders} messages={items} />
-      )}
       <div ref={scrollRef} className="mail-list__scroll">
         {body}
       </div>

@@ -3,6 +3,7 @@
 
 import type { Account, EmailAddress, Message, ReplyKind } from "../../api/types";
 import { formatDate, formatTime } from "../../lib/datetime";
+import { messageDate } from "./dates";
 import type { ComposeDraft } from "./mailStore";
 
 export type DraftInput = Omit<ComposeDraft, "id" | "dirty">;
@@ -116,9 +117,11 @@ function sentLine(date: Date): string {
 
 /** The usual From/Sent/To/Subject block, followed by the original body. */
 export function quoteOriginal(original: Message): string {
+  const sent = messageDate(original.receivedAt);
   const rows: [string, string][] = [
     ["From", original.from ? formatAddressHtml(original.from) : ""],
-    ["Sent", escapeHtml(sentLine(new Date(original.receivedAt)))],
+    // A message without a date (sent as 1 Jan 1970) gets no "Sent" line.
+    ...(sent ? [["Sent", escapeHtml(sentLine(sent))] as [string, string]] : []),
     ["To", original.to.map(formatAddressHtml).join("; ")],
   ];
   if (original.cc.length > 0) rows.push(["Cc", original.cc.map(formatAddressHtml).join("; ")]);

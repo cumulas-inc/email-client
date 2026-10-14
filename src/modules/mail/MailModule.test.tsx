@@ -431,12 +431,14 @@ describe("Search", () => {
     const hit = within(results).getByRole("option", { name: /Your trip to Lisbon/ });
     expect(hit.getAttribute("aria-label")).toMatch(/Inbox · Alex Morgan$/);
     expect(within(results).getAllByRole("option")).toHaveLength(1);
-    expect(screen.getByText("1 for “lisbon”")).toBeInTheDocument();
+    const list = screen.getByRole("region", { name: "Message list" });
+    expect(within(list).getByText(/^1 result for/)).toHaveTextContent("1 result for “lisbon”");
 
     await setSearch("zzzz-nothing");
     expect(await screen.findByText("No results")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Exit search" }));
+    // The search field's own Clear button leaves search.
+    await user.click(screen.getByRole("button", { name: "Clear" }));
     expect(useAppStore.getState().search).toBe("");
     expect(await screen.findByRole("listbox", { name: "Messages in Inbox" })).toBeInTheDocument();
   });

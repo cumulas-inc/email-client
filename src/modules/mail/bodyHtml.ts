@@ -134,6 +134,7 @@ function baseCss(appearance: BodyAppearance, fontFamily: string, measure: boolea
     ${SERIF_FACES}
     :root { color-scheme: light; }
     html { background: ${background}; overflow-y: hidden; }
+    html:has(> body:dir(rtl)) { direction: rtl; }
     body {
       margin: 0;
       padding: ${padding};
@@ -149,7 +150,7 @@ function baseCss(appearance: BodyAppearance, fontFamily: string, measure: boolea
       -webkit-font-smoothing: antialiased;
     }
     p { margin: 0 0 0.75em; }
-    ul, ol { margin: 0 0 0.75em; padding-left: 1.5em; }
+    ul, ol { margin: 0 0 0.75em; padding-inline-start: 1.5em; }
     li + li { margin-top: 0.2em; }
     li::marker { color: ${colors.muted}; }
     ul > li::marker { color: ${colors.link}; }
@@ -159,8 +160,8 @@ function baseCss(appearance: BodyAppearance, fontFamily: string, measure: boolea
     a { color: ${colors.link}; cursor: pointer; text-decoration-thickness: 1px; text-underline-offset: 2px; }
     blockquote {
       margin: 12px 0;
-      padding-left: 14px;
-      border-left: 2px solid ${colors.rule};
+      padding-inline-start: 14px;
+      border-inline-start: 2px solid ${colors.rule};
       color: ${colors.muted};
     }
     hr { border: none; border-top: 1px solid ${colors.rule}; margin: 16px 0; }
@@ -185,7 +186,8 @@ export function buildSrcDoc(html: string, options: SrcDocOptions): string {
     '<meta name="color-scheme" content="light">' +
     '<meta name="referrer" content="no-referrer">' +
     `<style>${css}</style>` +
-    `</head><body>${html}</body></html>`
+    // dir="auto": a letter in Arabic or Hebrew sets itself right to left.
+    `</head><body dir="auto">${html}</body></html>`
   );
 }
 
