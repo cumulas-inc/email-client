@@ -6,6 +6,7 @@ import {
   formatBytes,
   formatListDate,
   formatTimeRange,
+  formatCount,
   initials,
 } from "./format";
 
@@ -16,6 +17,14 @@ describe("format helpers", () => {
     expect(initials("servicedesk@acme.example")).toBe("SE");
     expect(initials("john.smith@acme.example")).toBe("JS");
     expect(initials("")).toBe("?");
+    expect(initials("(no sender)")).toBe("?");
+    expect(initials("+1 (206) 555-0145")).toBe("?");
+    expect(initials("🦄✨🌈")).toBe("?");
+    expect(initials("Maximilian Montgomery III")).toBe("MM");
+    expect(initials("@home Wi-Fi support")).toBe("HS");
+    expect(initials("נועה כהן (Noa Cohen)")).toBe("נכ");
+    expect(initials("Jane Doe <jane@acme.example>")).toBe("JD");
+    expect(initials("山田 太郎")).toBe("山太");
   });
 
   it("falls back to the address for display", () => {
@@ -50,5 +59,14 @@ describe("format helpers", () => {
     expect(formatBytes(512)).toBe("512 B");
     expect(formatBytes(184_320)).toBe("180 KB");
     expect(formatBytes(8_412_220)).toBe("8.0 MB");
+  });
+});
+
+describe("formatCount", () => {
+  it("groups thousands and turns large counts compact", () => {
+    expect(formatCount(7)).toBe("7");
+    expect(formatCount(1204)).toBe("1,204");
+    expect(formatCount(12_345)).toBe("12K");
+    expect(formatCount(251_877)).toBe("252K");
   });
 });

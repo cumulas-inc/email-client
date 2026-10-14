@@ -2,6 +2,7 @@ import { differenceInCalendarDays, isSameDay, isSameYear } from "date-fns";
 
 import type { EmailAddress } from "../api/types";
 import {
+  appLocale,
   formatDate,
   formatDateRange,
   formatDateTime,
@@ -20,16 +21,28 @@ export function fullAddress(addr: EmailAddress): string {
   return addr.name ? `${addr.name} <${addr.address}>` : addr.address;
 }
 
+// Name suffixes that don't make initials: "Maximilian Montgomery III" is "MM".
+const NAME_SUFFIX = /^(?:jr|sr|ii|iii|iv|phd|md|esq)$/i;
+
+/**
+ * Up to two letters for an avatar: "PR" for Priya Raman, "SE" for
+ * servicedesk@…, "נכ" for נועה כהן. "?" when there are no letters to use (a
+ * phone number, emoji, "(no sender)"), so callers can show a generic person.
+ */
 export function initials(nameOrAddress: string): string {
-  const cleaned = nameOrAddress
-    .replace(/<.*>/, "")
-    .replace(/[^\p{L}\p{N}\s@.]/gu, "")
+  const text = nameOrAddress
+    .replace(/<[^>]*>/g, "")
+    .replace(/\([^)]*\)/g, " ")
     .trim();
-  const base = cleaned.includes("@") && !cleaned.includes(" ") ? cleaned.split("@")[0]! : cleaned;
-  const parts = base.split(/[\s._-]+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
+  const base = text.includes("@") && !/\s/.test(text) ? text.split("@")[0]! : text;
+  const words = base
+    .split(/[\s._-]+/)
+    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter((w) => /\p{L}/u.test(w) && !NAME_SUFFIX.test(w));
+  if (words.length === 0) return "?";
+  const first = Array.from(words[0]!);
+  if (words.length === 1) return first.slice(0, 2).join("").toLocaleUpperCase();
+  return (first[0]! + Array.from(words[words.length - 1]!)[0]!).toLocaleUpperCase();
 }
 
 /** The letters on an account's badge: "AM" for Alex Morgan, "W" for Work. */
@@ -61,6 +74,19 @@ export function hueFor(key: string): AvatarHue {
   let hash = 0;
   for (const ch of key.toLowerCase()) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
   return AVATAR_HUES[Math.abs(hash) % AVATAR_HUES.length]!;
+}
+
+/**
+ * A count for badges and headers: "1,204" with the locale's grouping, and
+ * compact from ten thousand on ("12K") so badges stay small. Callers put the
+ * exact number in a tooltip when it's shortened.
+ */
+export function formatCount(n: number): string {
+  if (n < 10_000) return new Intl.NumberFormat(appLocale()).format(n);
+  return new Intl.NumberFormat(appLocale(), {
+    notation: "compact",
+    maximumFractionDigits: 0,
+  }).format(n);
 }
 
 /** Compact timestamp for lists: "3:05 PM", "Mon 3:05 PM", "Oct 9", "Oct 9, 2025". */

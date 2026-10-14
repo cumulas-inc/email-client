@@ -1,3 +1,5 @@
+import { UserRound } from "lucide-react";
+
 import { hueFor, initials } from "../lib/format";
 
 interface AvatarProps {
@@ -8,13 +10,18 @@ interface AvatarProps {
 }
 
 export function Avatar({ name, colorKey, size = 32 }: AvatarProps) {
+  const letters = initials(name);
   return (
     <span
       className={`avatar avatar--${hueFor(colorKey ?? name)}`}
       aria-hidden="true"
       style={{ width: size, height: size, fontSize: Math.round(size * 0.37) }}
     >
-      {initials(name)}
+      {letters === "?" ? (
+        <UserRound size={Math.round(size * 0.5)} strokeWidth={2} aria-hidden="true" />
+      ) : (
+        letters
+      )}
     </span>
   );
 }
