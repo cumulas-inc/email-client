@@ -4,7 +4,7 @@ import type { EmailAddress } from "../api/types";
 
 export type Module = "mail" | "calendar" | "people" | "tasks";
 
-export type SettingsSection = "accounts" | "general" | "mail" | "about";
+export type SettingsSection = "accounts" | "general" | "mail" | "microsoft" | "about";
 
 /** A request to open the mail composer, possibly from another module. */
 export interface ComposeRequest {

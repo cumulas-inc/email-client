@@ -1,0 +1,253 @@
+/* Form controls: Switch, SegmentedControl, ColorPicker. */
+
+/* --- Switch ---------------------------------------------------------------- */
+
+.switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.switch__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.switch__label {
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.switch__description {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.switch__control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.switch__state {
+  min-width: 22px;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  text-align: right;
+}
+
+.switch__box {
+  position: relative;
+  display: inline-flex;
+  width: 40px;
+  height: 20px;
+}
+
+.switch__input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switch__input:disabled {
+  cursor: default;
+}
+
+.switch__track {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0 3px;
+  border: 1px solid var(--fg-secondary);
+  border-radius: var(--radius-round);
+  background: var(--bg-input);
+  transition:
+    background var(--duration-normal) var(--ease),
+    border-color var(--duration-normal) var(--ease);
+}
+
+.switch__thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-round);
+  background: var(--fg-secondary);
+  transition: transform var(--duration-normal) var(--ease);
+}
+
+.switch__input:hover + .switch__track {
+  border-color: var(--fg-primary);
+}
+
+.switch__input:hover + .switch__track .switch__thumb {
+  background: var(--fg-primary);
+}
+
+.switch__input:checked + .switch__track {
+  border-color: transparent;
+  background: var(--brand);
+}
+
+.switch__input:checked:hover + .switch__track {
+  background: var(--brand-hover);
+}
+
+.switch__input:checked + .switch__track .switch__thumb {
+  background: var(--on-brand);
+  transform: translateX(20px);
+}
+
+.switch__input:focus-visible + .switch__track {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.switch__input:disabled + .switch__track {
+  opacity: 0.5;
+}
+
+/* --- Segmented control ----------------------------------------------------- */
+
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.segmented__option {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--fg-primary);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    border-color var(--duration-fast) var(--ease);
+}
+
+.segmented__option:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.segmented__option--selected,
+.segmented__option--selected:hover {
+  border-color: var(--brand);
+  background: var(--brand-subtle);
+  color: var(--fg-primary);
+  box-shadow: inset 0 0 0 1px var(--brand);
+}
+
+.segmented__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.segmented__option:has(.segmented__input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.segmented__icon {
+  display: inline-flex;
+  color: var(--fg-secondary);
+}
+
+.segmented__option--selected .segmented__icon {
+  color: var(--brand);
+}
+
+.segmented__label {
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.segmented--tiles .segmented__option {
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 92px;
+  min-height: 68px;
+  padding: var(--space-2);
+}
+
+.segmented--tiles .segmented__label {
+  font-size: var(--text-sm);
+}
+
+/* --- Colour picker --------------------------------------------------------- */
+
+.color-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.color-picker__swatch {
+  position: relative;
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-round);
+  cursor: pointer;
+}
+
+.color-picker__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.color-picker__dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-round);
+  background: var(--swatch);
+  /* The check mark sits on the account colour, which is always dark enough. */
+  color: #fff;
+  transition: box-shadow var(--duration-fast) var(--ease);
+}
+
+.color-picker__swatch:hover .color-picker__dot {
+  box-shadow:
+    0 0 0 2px var(--bg-surface-raised),
+    0 0 0 4px var(--border-strong);
+}
+
+.color-picker__input:checked + .color-picker__dot {
+  box-shadow:
+    0 0 0 2px var(--bg-surface-raised),
+    0 0 0 4px var(--fg-primary);
+}
+
+.color-picker__input:focus-visible + .color-picker__dot {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 5px;
+}
