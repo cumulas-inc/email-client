@@ -10,22 +10,27 @@ export function LogoMark({ size = 28 }: { size?: number }) {
       focusable="false"
     >
       <defs>
-        <linearGradient id="logo-mark-front" x1="0" y1="0" x2="0" y2="1">
+        <linearGradient
+          id="logo-mark-front"
+          gradientUnits="userSpaceOnUse"
+          x1="0"
+          y1="6.6"
+          x2="0"
+          y2="22.2"
+        >
           <stop offset="0" style={{ stopColor: "var(--logo-front-top)" }} />
           <stop offset="1" style={{ stopColor: "var(--logo-front-bottom)" }} />
         </linearGradient>
       </defs>
-      <g style={{ fill: "var(--logo-back)" }}>
-        <circle cx="17.6" cy="8.6" r="4.4" />
-        <circle cx="22.2" cy="11.6" r="3.3" />
-        <rect x="13.2" y="9.5" width="12.3" height="5.6" rx="2.8" />
-      </g>
-      <g fill="url(#logo-mark-front)">
-        <circle cx="8.4" cy="15.6" r="4.4" />
-        <circle cx="13.8" cy="12.6" r="6" />
-        <circle cx="19.6" cy="16.4" r="3.9" />
-        <rect x="4" y="15" width="19.5" height="7.2" rx="3.6" />
-      </g>
+      {/* Each cloud is one outline, so large sizes show no seams between its parts. */}
+      <path
+        style={{ fill: "var(--logo-back)" }}
+        d="M16 15.1A2.8 2.8 0 0 1 13.72 10.675A4.4 4.4 0 1 1 21.99 8.307A3.3 3.3 0 0 1 25.5 11.6L25.5 12.3A2.8 2.8 0 0 1 22.7 15.1Z"
+      />
+      <path
+        fill="url(#logo-mark-front)"
+        d="M4 18.6L4 15.6A4.4 4.4 0 0 1 7.96 11.222A6 6 0 0 1 19.799 12.505A3.9 3.9 0 0 1 23.5 16.4L23.5 18.6A3.6 3.6 0 0 1 19.9 22.2L7.6 22.2A3.6 3.6 0 0 1 4 18.6Z"
+      />
     </svg>
   );
 }

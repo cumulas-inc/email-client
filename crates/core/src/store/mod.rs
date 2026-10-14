@@ -103,7 +103,7 @@ pub(crate) mod test_support {
             kind: AccountKind::Imap,
             display_name: "Test".into(),
             email: format!("{id}@example.com"),
-            color: "#0f6cbd".into(),
+            color: "#0b7a75".into(),
             settings: AccountSettings::Imap(ImapSettings {
                 imap_host: "imap.example.com".into(),
                 imap_port: 993,

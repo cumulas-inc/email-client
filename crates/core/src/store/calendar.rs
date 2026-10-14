@@ -227,7 +227,7 @@ mod tests {
             account_id: "a".into(),
             remote_id: "c".into(),
             name: "Calendar".into(),
-            color: "#0f6cbd".into(),
+            color: "#0b7a75".into(),
             can_edit: true,
             is_default: true,
         };

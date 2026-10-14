@@ -26,8 +26,8 @@ const EVENT_FIELDS: &str = "id,subject,location,body,bodyPreview,start,end,isAll
      reminderMinutesBeforeStart,type,isCancelled";
 /// Immutable ids, times in UTC and HTML bodies for every calendar request.
 const PREFER: &[&str] = &[PREFER_IMMUTABLE_ID, PREFER_UTC, PREFER_HTML_BODY];
-/// Outlook's default calendar blue.
-const DEFAULT_COLOR: &str = "#0078d4";
+/// Cumulas teal, for calendars that use the automatic color.
+const DEFAULT_COLOR: &str = "#0b7a75";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,18 +58,19 @@ fn normalize_hex(hex: &str) -> Option<String> {
         .then(|| format!("#{}", digits.to_ascii_lowercase()))
 }
 
-/// Approximations of Outlook's swatches for the `calendarColor` presets.
+/// The nearest Cumulas palette hue for each `calendarColor` preset, so
+/// calendars keep their hue but sit with the rest of the app's colors.
 fn preset_color(color: &str) -> &'static str {
     match color {
-        "lightBlue" => "#3a96dd",
-        "lightGreen" => "#4da64d",
-        "lightOrange" => "#f7894a",
-        "lightGray" => "#8a8886",
-        "lightYellow" => "#d9b300",
-        "lightTeal" => "#00a5af",
-        "lightPink" => "#e3008c",
-        "lightBrown" => "#a86c4b",
-        "lightRed" => "#e74856",
+        "lightBlue" => "#2b7aa8",
+        "lightGreen" => "#4d7a2e",
+        "lightOrange" => "#b35f26",
+        "lightGray" => "#5e6b7a",
+        "lightYellow" => "#8c6a10",
+        "lightTeal" => "#0b7a75",
+        "lightPink" => "#8a4f7d",
+        "lightBrown" => "#9a5b3c",
+        "lightRed" => "#b8434f",
         _ => DEFAULT_COLOR,
     }
 }

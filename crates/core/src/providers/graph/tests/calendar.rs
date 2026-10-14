@@ -20,7 +20,7 @@ fn calendar() -> Calendar {
         account_id: ACCOUNT.into(),
         remote_id: "AAMkCal".into(),
         name: "Calendar".into(),
-        color: "#0078d4".into(),
+        color: "#0b7a75".into(),
         can_edit: true,
         is_default: true,
     }
@@ -44,7 +44,7 @@ async fn calendars_map_colours_and_permissions() {
     let calendars = provider.list_calendars().await.unwrap();
     assert_eq!(calendars.len(), 3);
     assert_eq!(calendars[0], calendar());
-    assert_eq!(calendars[1].color, "#4da64d");
+    assert_eq!(calendars[1].color, "#4d7a2e");
     assert!(!calendars[1].can_edit);
     assert!(!calendars[1].is_default);
     assert_eq!(calendars[2].color, "#e3008c");

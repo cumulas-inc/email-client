@@ -40,8 +40,8 @@
   <url type="vcs-browser">https://github.com/cumulas-inc/email-client</url>
 
   <branding>
-    <color type="primary" scheme_preference="light">#cfe4fa</color>
-    <color type="primary" scheme_preference="dark">#0e2f4f</color>
+    <color type="primary" scheme_preference="light">#efede8</color>
+    <color type="primary" scheme_preference="dark">#2e2b27</color>
   </branding>
 
   <!-- Screenshot URLs must be publicly reachable when submitting to Flathub. -->

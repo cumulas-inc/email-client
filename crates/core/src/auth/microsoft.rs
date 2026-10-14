@@ -645,18 +645,47 @@ async fn respond(stream: &mut TcpStream, status: &str, body: &str) -> std::io::R
     stream.shutdown().await
 }
 
+/// Styles for the result page: the app's warm stone canvas, a white card and
+/// the teal mark, with the app's dark palette when the browser is dark.
+const RESULT_PAGE_STYLE: &str = r#"<style>
+:root{color-scheme:light dark;--canvas:#efede8;--card:#fff;--ink:#1d1c1a;--muted:#57534c;
+--front-top:#149189;--front-bottom:#0a6c67;--back:#93d9cf;--selection:#c9e5e0;
+--shadow:0 0 0 1px rgba(60,50,35,.07),0 1px 2px rgba(60,50,35,.05),0 8px 24px -12px rgba(60,50,35,.14)}
+@media (prefers-color-scheme:dark){:root{--canvas:#181715;--card:#22211e;--ink:#edebe6;--muted:#bbb6ac;
+--front-top:#33b3a8;--front-bottom:#178a82;--back:#2f5f5a;--selection:#23524c;
+--shadow:0 0 0 1px rgba(255,255,255,.055),0 1px 2px rgba(0,0,0,.3),0 10px 28px -12px rgba(0,0,0,.55)}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px 16px;
+background:var(--canvas);color:var(--ink);-webkit-font-smoothing:antialiased;
+font:15px/1.5 system-ui,-apple-system,"Noto Sans",Cantarell,Ubuntu,sans-serif}
+main{width:100%;max-width:28rem;padding:32px 32px 30px;border-radius:12px;background:var(--card);
+box-shadow:var(--shadow);text-align:center;animation:enter .2s cubic-bezier(.23,1,.32,1)}
+svg{display:block;width:44px;height:auto;margin:0 auto 18px}
+.back{fill:var(--back)}.front-top{stop-color:var(--front-top)}.front-bottom{stop-color:var(--front-bottom)}
+h1{margin:0 0 6px;font-size:20px;line-height:1.3;font-weight:600;letter-spacing:-.01em;text-wrap:balance}
+p{margin:0;color:var(--muted);overflow-wrap:anywhere;text-wrap:balance}
+::selection{background:var(--selection)}
+@keyframes enter{from{opacity:0;transform:scale(.97)}}
+@media (prefers-reduced-motion:reduce){main{animation:none}}
+</style>"#;
+
+/// The Cumulas mark (src/app/LogoMark.tsx), colored by the page style.
+const RESULT_PAGE_MARK: &str = r#"<svg viewBox="3.3 3.4 22.8 19.4" aria-hidden="true">
+<defs><linearGradient id="front" gradientUnits="userSpaceOnUse" x1="0" y1="6.6" x2="0" y2="22.2">
+<stop offset="0" class="front-top"/><stop offset="1" class="front-bottom"/></linearGradient></defs>
+<g class="back"><circle cx="17.6" cy="8.6" r="4.4"/><circle cx="22.2" cy="11.6" r="3.3"/>
+<rect x="13.2" y="9.5" width="12.3" height="5.6" rx="2.8"/></g>
+<g fill="url(#front)"><circle cx="8.4" cy="15.6" r="4.4"/><circle cx="13.8" cy="12.6" r="6"/>
+<circle cx="19.6" cy="16.4" r="3.9"/><rect x="4" y="15" width="19.5" height="7.2" rx="3.6"/></g>
+</svg>"#;
+
 /// Small self-contained page shown in the browser after the redirect.
 fn result_page(title: &str, message: &str) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>{title} · Cumulas Mail</title><style>\
-         body{{margin:0;min-height:100vh;display:grid;place-items:center;\
-         font-family:system-ui,sans-serif;background:#f5f5f5;color:#1f1f1f}}\
-         main{{max-width:30rem;padding:2rem;text-align:center}}\
-         h1{{font-size:1.4rem;font-weight:600}}p{{line-height:1.5}}\
-         @media (prefers-color-scheme:dark){{body{{background:#1f1f1f;color:#f0f0f0}}}}\
-         </style></head><body><main><h1>{title}</h1><p>{message}</p></main></body></html>",
+         <title>{title} · Cumulas Mail</title>{RESULT_PAGE_STYLE}</head>\
+         <body><main>{RESULT_PAGE_MARK}<h1>{title}</h1><p>{message}</p></main></body></html>",
         title = escape_html(title),
         message = escape_html(message),
     )

@@ -48,9 +48,11 @@ impl EventSink for NullSink {
     fn new_mail(&self, _: &Account, _: &[MessageSummary]) {}
 }
 
-/// Accent colors assigned to new accounts in turn.
+/// Accent colors assigned to new accounts in turn: teal, sky, apricot, plum,
+/// moss, gold, rose and slate. Each reads as a dot or stripe and carries white
+/// bold text as a fill.
 const ACCOUNT_COLORS: &[&str] = &[
-    "#0f6cbd", "#c239b3", "#038387", "#ca5010", "#4f6bed", "#498205", "#8764b8", "#d13438",
+    "#0b7a75", "#2b7aa8", "#b35f26", "#8a4f7d", "#4d7a2e", "#8c6a10", "#b8434f", "#5e6b7a",
 ];
 
 /// Remote ids of the calendar and task list created for IMAP accounts.
