@@ -67,6 +67,13 @@
   transition: background var(--duration-fast) var(--ease);
 }
 
+.app-header__me-name {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .app-header__me:hover {
   background: var(--bg-hover);
   color: var(--fg-primary);

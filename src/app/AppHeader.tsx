@@ -35,11 +35,13 @@ export function AppHeader() {
           <button
             type="button"
             className="app-header__me"
-            title="Manage accounts"
+            title={`Manage accounts (${me.displayName || me.email})`}
             onClick={() => openSettings("accounts")}
           >
             <Avatar name={me.displayName || me.email} colorKey={me.email} size={26} />
-            <span>{me.displayName || me.email}</span>
+            <span className="app-header__me-name" dir="auto">
+              {me.displayName || me.email}
+            </span>
           </button>
         </>
       )}

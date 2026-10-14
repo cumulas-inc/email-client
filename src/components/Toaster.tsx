@@ -1,11 +1,28 @@
 import { CircleAlert, CircleCheck, Info, X } from "lucide-react";
+import { useLayoutEffect, useRef } from "react";
 
 import { useToasts } from "./toast";
 
 export function Toaster() {
   const { toasts, dismiss } = useToasts();
+  const ref = useRef<HTMLDivElement>(null);
+  // The toaster is a manual popover: showing it again whenever a toast
+  // arrives puts it at the top of the top layer, above any open dialog.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || typeof el.showPopover !== "function") return;
+    if (el.matches(":popover-open")) el.hidePopover();
+    if (toasts.length > 0) el.showPopover();
+  }, [toasts.length]);
   return (
-    <div className="toaster" role="region" aria-label="Notifications" aria-live="polite">
+    <div
+      ref={ref}
+      popover="manual"
+      className="toaster"
+      role="region"
+      aria-label="Notifications"
+      aria-live="polite"
+    >
       {toasts.map((t) => (
         <div
           key={t.id}

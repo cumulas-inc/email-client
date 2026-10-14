@@ -233,6 +233,26 @@ a {
   color: var(--fg-disabled);
 }
 
+/* A button whose action is running: still disabled, but it keeps its fill so
+   it reads as progress rather than unavailable. */
+.btn--primary.btn--busy:disabled {
+  background: var(--brand);
+  box-shadow: var(--shadow-button);
+  color: var(--on-brand);
+  cursor: progress;
+}
+
+.btn--destructive.btn--busy:disabled {
+  background: var(--danger);
+  color: var(--on-danger);
+  cursor: progress;
+}
+
+/* A spinner in a button turns with the label's color, not teal on teal. */
+.btn .spinner {
+  color: inherit;
+}
+
 .btn--sm {
   height: 28px;
   padding: 0 var(--space-2);

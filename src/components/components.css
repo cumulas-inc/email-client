@@ -225,9 +225,14 @@
 /* --- Toasts ---------------------------------------------------------------- */
 
 .toaster {
+  /* A popover in the top layer, so toasts show above open dialogs too. */
   position: fixed;
-  bottom: var(--space-4);
-  left: 50%;
+  inset: auto auto var(--space-4) 50%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  overflow: visible;
   z-index: 1000;
   display: flex;
   flex-direction: column;
@@ -237,6 +242,7 @@
 }
 
 .toast {
+  overflow-wrap: anywhere;
   display: flex;
   align-items: center;
   gap: var(--space-2);

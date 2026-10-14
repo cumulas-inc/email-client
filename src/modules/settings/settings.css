@@ -680,26 +680,6 @@
   position: absolute;
 }
 
-/* "Checking your settings…" is progress, not a disabled button: it keeps
-   its fill so the label stays readable. */
-.btn--primary.btn--busy:disabled {
-  background: var(--brand);
-  box-shadow: var(--shadow-button);
-  color: var(--on-brand);
-  cursor: progress;
-}
-
-.btn--destructive.btn--busy:disabled {
-  background: var(--danger);
-  color: var(--on-danger);
-  cursor: progress;
-}
-
-/* The spinner turns with the label's color, not teal on teal. */
-.btn--busy .spinner {
-  color: inherit;
-}
-
 .advanced {
   border-top: 1px solid var(--border-subtle);
 }
