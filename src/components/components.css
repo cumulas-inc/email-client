@@ -12,6 +12,13 @@
   letter-spacing: 0.01em;
 }
 
+/* The signed-in person: tinted with the account's color, which also reads
+   well in dark mode because the ink mixes toward the text color. */
+.avatar--account {
+  --avatar-bg: color-mix(in srgb, var(--account-color) 20%, var(--bg-surface));
+  --avatar-fg: color-mix(in srgb, var(--account-color) 70%, var(--fg-primary));
+}
+
 .avatar--teal {
   --avatar-bg: var(--avatar-teal-bg);
   --avatar-fg: var(--avatar-teal-fg);

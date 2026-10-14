@@ -38,7 +38,7 @@ export function AppHeader() {
             title={`Manage accounts (${me.displayName || me.email})`}
             onClick={() => openSettings("accounts")}
           >
-            <Avatar name={me.displayName || me.email} colorKey={me.email} size={26} />
+            <Avatar name={me.displayName || me.email} color={me.color} size={26} />
             <span className="app-header__me-name" dir="auto">
               {me.displayName || me.email}
             </span>

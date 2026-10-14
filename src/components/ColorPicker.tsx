@@ -4,9 +4,9 @@ import { useId, type CSSProperties } from "react";
 import "./controls.css";
 
 export interface ColorOption {
-  /** CSS color, e.g. "#0f6cbd". */
+  /** CSS color, e.g. "#0b7a75". */
   value: string;
-  /** Accessible name, e.g. "Blue". */
+  /** Accessible name, e.g. "Teal". */
   name: string;
 }
 

@@ -97,7 +97,7 @@ a {
 .pane-title {
   font-family: var(--font-serif);
   font-feature-settings: normal;
-  font-size: var(--text-2xl);
+  font-size: 22px;
   font-weight: 700;
   line-height: 1.15;
   letter-spacing: -0.005em;
