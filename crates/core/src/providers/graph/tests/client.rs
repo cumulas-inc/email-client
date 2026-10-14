@@ -4,14 +4,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, ResponseTemplate};
+use wiremock::matchers::{body_string_contains, header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{authorized, batch_responder, batched_requests, graph_error, ok_json, setup};
 use crate::auth::StaticToken;
+use crate::auth::microsoft::{MicrosoftAuthConfig, MicrosoftTokenSource};
 use crate::error::ErrorCode;
 use crate::providers::graph::GraphProvider;
 use crate::providers::{MailProvider, MessageLocator, TasksProvider};
+use crate::secrets::{MemorySecretStore, SecretStore, keys};
 
 fn lists_body() -> serde_json::Value {
     json!({ "value": [{ "id": "list-1", "displayName": "Tasks", "wellknownListName": "defaultList" }] })
@@ -30,15 +32,73 @@ async fn sends_the_bearer_token() {
     assert_eq!(provider.list_task_lists().await.unwrap().len(), 1);
 }
 
+/// A Graph provider whose real Microsoft token source refreshes against the
+/// mock server, with a cached token that Graph will reject.
+async fn provider_with_revoked_token(server: &MockServer) -> GraphProvider {
+    Mock::given(method("POST"))
+        .and(path("/common/oauth2/v2.0/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .respond_with(ok_json(json!({
+            "token_type": "Bearer",
+            "expires_in": 3599,
+            "access_token": "fresh-token",
+            "refresh_token": "refresh-0",
+        })))
+        .expect(1)
+        .named("token refresh")
+        .mount(server)
+        .await;
+    let secrets = Arc::new(MemorySecretStore::default());
+    secrets
+        .set(&keys::refresh_token("acct"), "refresh-0")
+        .await
+        .unwrap();
+    let config = MicrosoftAuthConfig {
+        client_id: "test-client-id".into(),
+        tenant: "common".into(),
+        authority_host: server.uri(),
+    };
+    let tokens = Arc::new(MicrosoftTokenSource::new(config, "acct", secrets));
+    tokens
+        .prime("revoked-token", Duration::from_secs(3600))
+        .await;
+    GraphProvider::with_base_url("acct", tokens, server.uri())
+}
+
+fn token_rejected() -> ResponseTemplate {
+    graph_error(
+        401,
+        "InvalidAuthenticationToken",
+        "Access token has expired or is not yet valid.",
+    )
+}
+
 #[tokio::test]
-async fn unauthorized_requires_sign_in() {
-    let (server, provider) = setup().await;
+async fn rejected_tokens_are_refreshed_once_and_the_request_retried() {
+    let server = MockServer::start().await;
+    let provider = provider_with_revoked_token(&server).await;
     Mock::given(path("/me/todo/lists"))
-        .respond_with(graph_error(
-            401,
-            "InvalidAuthenticationToken",
-            "Access token has expired or is not yet valid.",
-        ))
+        .and(header("authorization", "Bearer revoked-token"))
+        .respond_with(token_rejected())
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/me/todo/lists"))
+        .and(header("authorization", "Bearer fresh-token"))
+        .respond_with(ok_json(lists_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(provider.list_task_lists().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_second_rejection_requires_sign_in() {
+    let server = MockServer::start().await;
+    let provider = provider_with_revoked_token(&server).await;
+    Mock::given(path("/me/todo/lists"))
+        .respond_with(token_rejected())
+        .expect(2)
         .mount(&server)
         .await;
     let error = provider.list_task_lists().await.unwrap_err();

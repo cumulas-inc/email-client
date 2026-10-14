@@ -73,6 +73,10 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// <https://learn.microsoft.com/entra/identity/enterprise-apps/application-sign-in-unexpected-user-consent-error>.
 const ADMIN_CONSENT_CODES: &[u32] = &[65001, 90093, 90094, 90095, 900941, 900981];
 
+/// AADSTS90095 AdminConsentRequiredRequestAccess: the tenant has the admin
+/// consent workflow enabled, so the user can request approval.
+const ADMIN_CONSENT_WORKFLOW_CODE: u32 = 90095;
+
 /// AADSTS65004 UserDeclinedConsent. Also sent when the user picks "Back to
 /// app" after submitting an approval request in the admin consent workflow.
 const USER_DECLINED_CODE: u32 = 65004;
@@ -387,6 +391,10 @@ impl TokenSource for MicrosoftTokenSource {
         let access_token = token.access_token.clone();
         *cache = Some(token);
         Ok(access_token)
+    }
+
+    async fn invalidate(&self) {
+        *self.cache.lock().await = None;
     }
 }
 
@@ -766,14 +774,21 @@ fn sign_in_error(
     {
         let hint = login_hint.and_then(|h| h.rsplit_once('@')).map(|(_, d)| d);
         let tenant = admin_consent_tenant(config, hint);
-        return Error::new(
-            ErrorCode::AdminConsentRequired,
+        // With the admin consent workflow enabled, Microsoft's page lets the
+        // user send an approval request themselves.
+        let can_request_approval = error.has_code(ADMIN_CONSENT_WORKFLOW_CODE);
+        let message = if can_request_approval {
             "Your organisation requires an administrator to approve Cumulas Mail before \
-             you can sign in. Send the approval link to your IT department.",
-        )
-        .with_details(json!({
+             you can sign in. You can request approval on Microsoft's sign-in page, or send \
+             the approval link to your IT department."
+        } else {
+            "Your organisation requires an administrator to approve Cumulas Mail before \
+             you can sign in. Send the approval link to your IT department."
+        };
+        return Error::new(ErrorCode::AdminConsentRequired, message).with_details(json!({
             "adminConsentUrl": admin_consent_url(config, Some(&tenant)),
             "tenant": tenant,
+            "canRequestApproval": can_request_approval,
         }));
     }
     if error.has_code(USER_DECLINED_CODE) {
@@ -1239,6 +1254,11 @@ mod tests {
             if let Some(tenant) = tenant {
                 let details = error.details.expect("admin consent details");
                 assert_eq!(details["tenant"], *tenant);
+                assert_eq!(
+                    details["canRequestApproval"],
+                    query.contains("AADSTS90095"),
+                    "{query}"
+                );
                 let url = details["adminConsentUrl"].as_str().unwrap();
                 assert!(
                     url.starts_with(&format!("{}/{tenant}/v2.0/adminconsent?", server.uri())),
@@ -1265,7 +1285,26 @@ mod tests {
         )]);
         let error = run_sign_in(&server, &browser, None).await.unwrap_err();
         assert_eq!(error.code, ErrorCode::AdminConsentRequired);
-        assert_eq!(error.details.unwrap()["tenant"], "organizations");
+        let details = error.details.unwrap();
+        assert_eq!(details["tenant"], "organizations");
+        assert_eq!(details["canRequestApproval"], false);
+    }
+
+    #[tokio::test]
+    async fn admin_consent_workflow_lets_users_request_approval() {
+        let server = MockServer::start().await;
+        let browser = fake_browser(vec![redirect_with(
+            "error=access_denied&error_description=AADSTS90095%3a+Admin+consent+is+required+for+the+permissions+requested+by+this+application.+An+admin+consent+request+may+be+sent+to+the+admin.",
+        )]);
+        let error = run_sign_in(&server, &browser, Some("adele@contoso.com"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::AdminConsentRequired);
+        assert!(error.message.contains("request approval"));
+        let details = error.details.unwrap();
+        assert_eq!(details["canRequestApproval"], true);
+        assert_eq!(details["tenant"], "contoso.com");
+        assert!(details["adminConsentUrl"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -1325,6 +1364,23 @@ mod tests {
         source.prime("primed", Duration::from_secs(3600)).await;
         assert_eq!(source.access_token().await.unwrap(), "primed");
         assert_eq!(source.access_token().await.unwrap(), "primed");
+    }
+
+    #[tokio::test]
+    async fn invalidated_tokens_are_refreshed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .respond_with(token_success())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let source = token_source(&server, Some("refresh-0")).await;
+        source.prime("rejected", Duration::from_secs(3600)).await;
+        source.invalidate().await;
+        assert_eq!(source.access_token().await.unwrap(), "access-1");
+        // The refreshed token is cached again.
+        assert_eq!(source.access_token().await.unwrap(), "access-1");
     }
 
     #[tokio::test]
