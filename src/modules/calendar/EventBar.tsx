@@ -13,6 +13,8 @@ interface EventBarProps extends EventSelectProps {
   span: number;
   joinsBefore: boolean;
   joinsAfter: boolean;
+  /** Quiet text after the title, e.g. the calendar's name. */
+  detail?: string;
 }
 
 /** An all-day or multi-day event drawn as a bar across day cells. */
@@ -21,6 +23,7 @@ export function EventBar({
   span,
   joinsBefore,
   joinsAfter,
+  detail,
   calendar,
   selected,
   onSelect,
@@ -46,6 +49,7 @@ export function EventBar({
         <span className="cal-bar__time">{formatTime(eventRange(event).start)}</span>
       )}
       <span className="cal-bar__title">{eventTitle(event)}</span>
+      {detail && <span className="cal-bar__detail">· {detail}</span>}
     </button>
   );
 }

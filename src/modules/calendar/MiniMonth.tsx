@@ -1,6 +1,14 @@
 import clsx from "clsx";
-import { addDays, addMonths, isSameDay, isSameMonth, startOfDay, startOfMonth } from "date-fns";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import {
+  addDays,
+  addMonths,
+  isSameDay,
+  isSameMonth,
+  isWeekend,
+  startOfDay,
+  startOfMonth,
+} from "date-fns";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import { formatDate } from "../../lib/datetime";
@@ -45,7 +53,8 @@ export function MiniMonth({ anchor, rangeStart, rangeEnd, today, onSelect }: Min
   }, [focused, month]);
 
   const { days } = viewRange("month", month);
-  const weeks = chunk(days, 7);
+  // Only the weeks that hold days of the month (four to six rows).
+  const weeks = chunk(days, 7).filter((week) => week.some((d) => isSameMonth(d, month)));
   const tabbable = isSameMonth(focused, month) ? focused : month;
 
   const onKeyDown = (e: KeyboardEvent<HTMLTableElement>) => {
@@ -75,7 +84,7 @@ export function MiniMonth({ anchor, rangeStart, rangeEnd, today, onSelect }: Min
           title="Previous month"
           onClick={() => setMonth((m) => addMonths(m, -1))}
         >
-          <ChevronUp size={16} />
+          <ChevronLeft size={16} />
         </button>
         <button
           type="button"
@@ -84,7 +93,7 @@ export function MiniMonth({ anchor, rangeStart, rangeEnd, today, onSelect }: Min
           title="Next month"
           onClick={() => setMonth((m) => addMonths(m, 1))}
         >
-          <ChevronDown size={16} />
+          <ChevronRight size={16} />
         </button>
       </div>
       <table
@@ -117,11 +126,11 @@ export function MiniMonth({ anchor, rangeStart, rangeEnd, today, onSelect }: Min
                       tabIndex={tabIndex}
                       className={clsx("cal-mini__day", {
                         "cal-mini__day--outside": !isSameMonth(day, month),
+                        "cal-mini__day--weekend": isWeekend(day),
                         "cal-mini__day--in-range": inRange,
                         "cal-mini__day--range-start": inRange && isSameDay(day, rangeStart),
                         "cal-mini__day--range-end": inRange && isSameDay(addDays(day, 1), rangeEnd),
                         "cal-mini__day--today": isToday,
-                        "cal-mini__day--anchor": isSameDay(day, anchor),
                       })}
                       aria-label={formatDate(day, "weekdayLongYear")}
                       aria-current={isToday ? "date" : undefined}

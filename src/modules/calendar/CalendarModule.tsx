@@ -11,12 +11,13 @@ import { ModuleSidebar } from "../../app/ModuleSidebar";
 import { useAppStore } from "../../app/store";
 import { EmptyState } from "../../components/EmptyState";
 import { Spinner } from "../../components/Spinner";
+import { Agenda } from "./Agenda";
 import { CalendarList } from "./CalendarList";
 import { defaultNewEventTimes, eventRange, timesFromRange } from "./dates";
 import { EventDetails } from "./EventDetails";
 import { type EditorRequest, EventEditor } from "./EventEditor";
 import { isTypingTarget, useNow } from "./hooks";
-import { type CalendarView, VIEWS, rangeTitle, shiftAnchor, viewRange } from "./layout";
+import { type CalendarView, VIEWS, rangeTitle, shiftAnchor, viewRange, weekLabel } from "./layout";
 import { MiniMonth } from "./MiniMonth";
 import { defaultCalendar } from "./model";
 import { MonthView } from "./MonthView";
@@ -137,7 +138,8 @@ export function CalendarModule() {
     if (start < range.start || start >= range.end) setAnchor(startOfDay(start));
   };
 
-  // Keyboard shortcuts (Outlook style).
+  // Keyboard shortcuts: Ctrl+Alt+1–4 views, Alt+arrows and Page Up/Down move,
+  // T goes to today, Ctrl+N creates.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || document.querySelector("dialog[open]")) return;
@@ -200,11 +202,14 @@ export function CalendarModule() {
             type="button"
             className="btn btn--primary cal-sidebar__new"
             onClick={newEvent}
-            title="New event (Ctrl+N)"
+            aria-keyshortcuts="Control+N"
             disabled={noCalendars}
           >
-            <CalendarPlus size={16} aria-hidden="true" />
+            <CalendarPlus size={18} strokeWidth={1.75} aria-hidden="true" />
             New event
+            <span className="kbd" aria-hidden="true">
+              Ctrl N
+            </span>
           </button>
         }
       >
@@ -230,12 +235,23 @@ export function CalendarModule() {
             onToggle={toggleCalendar}
           />
         )}
+        {calendars.length > 0 && (
+          <Agenda
+            today={today}
+            hidden={hidden}
+            calendars={calendarsById}
+            selectedId={selectedEvent?.id ?? null}
+            onSelect={selectEvent}
+            onOpenDay={openDay}
+          />
+        )}
       </ModuleSidebar>
 
       <section className="cal-main card" aria-label="Calendar">
         <Toolbar
           view={view}
           title={rangeTitle(view, anchor)}
+          weekLabel={weekLabel(view, anchor)}
           busy={eventsQuery.isFetching && !eventsQuery.isLoading}
           onToday={goToday}
           onStep={step}

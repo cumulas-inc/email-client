@@ -3,7 +3,7 @@
 import { format } from "date-fns";
 
 import type { CalendarEvent, ResponseStatus, ShowAs } from "../../api/types";
-import { formatDate, formatDateRange } from "../../lib/datetime";
+import { appLocale, formatDate, formatDateRange } from "../../lib/datetime";
 import { formatTimeRange } from "../../lib/format";
 import { eventRange } from "./dates";
 
@@ -24,7 +24,7 @@ export const RESPONSE_LABELS: Record<ResponseStatus, string> = {
   notResponded: "Not responded",
 };
 
-/** Title as shown on the grid ("Canceled: …" like Outlook). */
+/** Title as shown on the grid, with a "Canceled: " prefix for canceled events. */
 export function eventTitle(event: CalendarEvent): string {
   const subject = event.subject.trim() || "(No title)";
   return event.isCancelled && !/^cancel+ed:/i.test(subject) ? `Canceled: ${subject}` : subject;
@@ -40,7 +40,7 @@ export function isInvitation(event: CalendarEvent): boolean {
   return event.responseStatus !== "organizer" && !event.isCancelled;
 }
 
-/** "Pending" invitations are drawn like tentative events (as Outlook does). */
+/** Invitations still waiting for an answer are drawn like tentative events. */
 export function displayShowAs(event: CalendarEvent): ShowAs {
   if (event.responseStatus === "notResponded" && event.showAs === "busy") return "tentative";
   return event.showAs;
@@ -49,6 +49,29 @@ export function displayShowAs(event: CalendarEvent): ShowAs {
 /** Time range for display, all-day events read as local days. */
 export function eventTimeRange(event: CalendarEvent): string {
   return formatTimeRange(event.start, event.end, event.isAllDay);
+}
+
+const clockFormats = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * "10:30" without AM/PM ("15:30" where the locale uses a 24-hour clock), for
+ * narrow events: the hour labels beside the grid already say whether it is
+ * morning or afternoon.
+ */
+export function formatClock(date: Date): string {
+  const locale = appLocale();
+  let f = clockFormats.get(locale);
+  if (!f) {
+    f = new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" });
+    clockFormats.set(locale, f);
+  }
+  return f
+    .formatToParts(date)
+    .filter((p) => p.type !== "dayPeriod")
+    .map((p) => p.value)
+    .join("")
+    .replace(/[\s\u202f\u2009\u00a0]+/g, " ")
+    .trim();
 }
 
 /** "Wednesday, October 14, 2026", or "Wed, Oct 14 – Fri, Oct 16, 2026" for long events. */

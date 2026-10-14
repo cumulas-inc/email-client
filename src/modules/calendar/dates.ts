@@ -196,7 +196,7 @@ export function setAllDay(t: EventTimes, allDay: boolean): EventTimes {
   return { ...t, allDay: false, startTime, endTime };
 }
 
-/** Moves the start, keeping the duration (like Outlook). */
+/** Moves the start, keeping the duration. */
 export function moveStart(t: EventTimes, startDate: string, startTime: string): EventTimes {
   const next = { ...t, startDate, startTime };
   const old = localBounds(t);

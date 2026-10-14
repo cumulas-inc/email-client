@@ -1,10 +1,18 @@
 // Pure layout math for the calendar views: visible ranges, titles, the
 // side-by-side layout of overlapping events and lanes for multi-day bars.
 
-import { addDays, addMonths, addWeeks, startOfDay, startOfMonth, startOfWeek } from "date-fns";
+import {
+  addDays,
+  addMonths,
+  addWeeks,
+  getISOWeek,
+  startOfDay,
+  startOfMonth,
+  startOfWeek,
+} from "date-fns";
 
 import type { CalendarEvent } from "../../api/types";
-import { formatDate, formatDateRange, weekStartsOn } from "../../lib/datetime";
+import { appLocale, formatDate, formatDateRange, weekStartsOn } from "../../lib/datetime";
 import { type LocalRange, eventRange, isAllDayLike, minutesOfDay } from "./dates";
 
 export type CalendarView = "day" | "workweek" | "week" | "month";
@@ -93,6 +101,30 @@ export function rangeTitle(view: CalendarView, anchor: Date): string {
 export function stepLabel(view: CalendarView, direction: 1 | -1): string {
   const unit = view === "day" ? "day" : view === "month" ? "month" : "week";
   return `${direction < 0 ? "Previous" : "Next"} ${unit}`;
+}
+
+/**
+ * Whether people in the app's locale refer to weeks by number. Locales that
+ * follow ISO 8601 weeks (Monday first, the first week has four or more days),
+ * as most of Europe does, use them; the US and most others don't.
+ */
+export function usesWeekNumbers(): boolean {
+  try {
+    const locale = new Intl.Locale(appLocale()) as Intl.Locale & {
+      getWeekInfo?: () => { firstDay: number; minimalDays: number };
+      weekInfo?: { firstDay: number; minimalDays: number };
+    };
+    const info = locale.getWeekInfo?.() ?? locale.weekInfo;
+    return !!info && info.firstDay === 1 && info.minimalDays === 4;
+  } catch {
+    return false;
+  }
+}
+
+/** "Week 42" for day and week views where the locale numbers weeks, else null. */
+export function weekLabel(view: CalendarView, anchor: Date): string | null {
+  if (view === "month" || !usesWeekNumbers()) return null;
+  return `Week ${getISOWeek(viewRange(view, anchor).start)}`;
 }
 
 export function chunk<T>(items: T[], size: number): T[][] {

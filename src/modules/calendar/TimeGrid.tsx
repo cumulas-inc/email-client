@@ -11,11 +11,18 @@ import {
 } from "react";
 
 import type { Calendar, CalendarEvent } from "../../api/types";
-import { formatDate, formatHour, formatTimeSpan } from "../../lib/datetime";
-import { atMinutes, minutesOfDay } from "./dates";
+import { appLocale, formatDate, formatHour, formatTime, formatTimeSpan } from "../../lib/datetime";
+import { atMinutes, eventRange, minutesOfDay } from "./dates";
 import { EventBar } from "./EventBar";
 import { type EventSelectProps, eventClasses, eventStyle, selectHandlers } from "./eventProps";
-import { eventAriaLabel, eventTimeRange, eventTitle } from "./eventText";
+import {
+  SHOW_AS_LABELS,
+  displayShowAs,
+  eventAriaLabel,
+  eventTimeRange,
+  eventTitle,
+  formatClock,
+} from "./eventText";
 import {
   type PlacedSegment,
   cellLanes,
@@ -26,16 +33,24 @@ import {
 } from "./layout";
 
 /** Height of one hour in pixels (two 30-minute slots). */
-export const HOUR_HEIGHT = 48;
+export const HOUR_HEIGHT = 56;
 const SLOT_MINUTES = 30;
 const SLOTS = (24 * 60) / SLOT_MINUTES;
 const SLOT_HEIGHT = (HOUR_HEIGHT * SLOT_MINUTES) / 60;
-/** Shortest drawn event, in minutes, so a title always fits. */
-const MIN_MINUTES = 22;
+/** Shortest drawn event, in minutes, so a one-line title always fits. */
+const MIN_MINUTES = 18;
 const WORK_START = 8 * 60;
 const WORK_END = 17 * 60;
 const SCROLL_TO_MINUTES = 8 * 60;
+/** Height of a line of event text. */
 const LINE_HEIGHT = 16;
+/** Events keep this much of the column free on the left and right. */
+const INSET_LEFT = 4;
+const INSET_RIGHT = 5;
+/** Vertical gap between back-to-back events. */
+const EVENT_GAP = 2;
+/** Hour labels this close to the now pill make way for it. */
+const NOW_PILL_CLEARANCE = 18;
 
 interface TimeGridProps {
   days: Date[];
@@ -55,9 +70,10 @@ interface DragState {
   to: number;
 }
 
+/** "EDT", or "GMT+2" where the zone has no common abbreviation. */
 function timeZoneLabel(now: Date): string {
   try {
-    const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: "shortOffset" }).formatToParts(
+    const parts = new Intl.DateTimeFormat(appLocale(), { timeZoneName: "short" }).formatToParts(
       now,
     );
     return parts.find((p) => p.type === "timeZoneName")?.value ?? "";
@@ -73,6 +89,16 @@ const DAY_ZERO = new Date(2000, 0, 1);
 function clockLabel(minutes: number): string {
   const h = Math.floor(minutes / 60) % 24;
   return `${String(h).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+/** Horizontal placement inside a day column, leaving the column's insets free. */
+function columnPlacement(column: number, span: number, columns: number): CSSProperties {
+  const inner = `(100% - ${INSET_LEFT + INSET_RIGHT}px)`;
+  const last = column + span >= columns;
+  return {
+    left: `calc(${INSET_LEFT}px + ${inner} * ${column / columns})`,
+    width: `calc(${inner} * ${span / columns} - ${last ? 0 : 2}px)`,
+  };
 }
 
 /** Day, work week and week views: a 24-hour grid with an all-day lane. */
@@ -97,7 +123,7 @@ export function TimeGrid({
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = (SCROLL_TO_MINUTES / 60) * HOUR_HEIGHT - 8;
+    if (el) el.scrollTop = (SCROLL_TO_MINUTES / 60) * HOUR_HEIGHT - 10;
   }, []);
 
   // Keep the header columns aligned with the body when it shows a scrollbar.
@@ -183,8 +209,8 @@ export function TimeGrid({
     window.addEventListener("pointercancel", onCancel);
   };
 
-  const wide = days.length <= 5;
-  const nowMinutes = minutesOfDay(now);
+  const todayCol = days.findIndex((day) => isSameDay(day, now));
+  const nowTop = (minutesOfDay(now) / 60) * HOUR_HEIGHT;
 
   return (
     <div className="cal-tg" style={{ "--cal-days": days.length } as CSSProperties}>
@@ -193,14 +219,12 @@ export function TimeGrid({
           <div className="cal-tg__gutter cal-tg__tz" title="Time zone">
             {timeZoneLabel(now)}
           </div>
-          {days.map((day) => {
-            const today = isSameDay(day, now);
+          {days.map((day, col) => {
+            const today = col === todayCol;
             const label = (
               <>
-                <span className="cal-tg__daynum">{formatDate(day, "dayOfMonth")}</span>
-                <span className="cal-tg__dayname">
-                  {formatDate(day, wide ? "weekdayName" : "weekday")}
-                </span>
+                <span className="cal-tg__daynum tnum">{formatDate(day, "dayOfMonth")}</span>
+                <span className="cal-tg__dayname">{formatDate(day, "weekday")}</span>
               </>
             );
             return (
@@ -231,27 +255,35 @@ export function TimeGrid({
           {days.map((day, col) => (
             <div
               key={day.getTime()}
-              className={clsx("cal-tg__allday-cell", isWeekend(day) && "cal-tg__allday-cell--off")}
+              className={clsx(
+                "cal-tg__allday-cell",
+                isWeekend(day) && "cal-tg__allday-cell--off",
+                col === todayCol && "cal-tg__allday-cell--today",
+              )}
               role="group"
               aria-label={`All-day events, ${formatDate(day, "weekdayLong")}`}
               onClick={() => onCreate(day, addDays(day, 1), true)}
             >
-              {cellLanes(allDay, col, () => Infinity).map(({ lane, piece }) =>
-                piece ? (
+              {cellLanes(allDay, col, () => Infinity).map(({ lane, piece }) => {
+                if (!piece) {
+                  return <div key={`gap-${lane}`} className="cal-bar-gap" aria-hidden="true" />;
+                }
+                const calendar = calendars.get(piece.placed.item.calendarId);
+                return (
                   <EventBar
                     key={piece.placed.key}
                     event={piece.placed.item}
                     span={piece.span}
                     joinsBefore={piece.joinsBefore}
                     joinsAfter={piece.joinsAfter}
-                    calendar={calendars.get(piece.placed.item.calendarId)}
+                    // Long bars have room to say which calendar they're from.
+                    detail={piece.span > 1 ? calendar?.name : undefined}
+                    calendar={calendar}
                     selected={selectedId === piece.placed.item.id}
                     onSelect={onSelect}
                   />
-                ) : (
-                  <div key={`gap-${lane}`} className="cal-bar-gap" aria-hidden="true" />
-                ),
-              )}
+                );
+              })}
             </div>
           ))}
         </div>
@@ -260,19 +292,34 @@ export function TimeGrid({
       <div className="cal-tg__scroll" ref={scrollRef}>
         <div className="cal-tg__row cal-tg__body" style={{ height: 24 * HOUR_HEIGHT }}>
           <div className="cal-tg__gutter cal-tg__hours" aria-hidden="true">
-            {Array.from({ length: 23 }, (_, i) => i + 1).map((hour) => (
-              <span key={hour} className="cal-tg__hour" style={{ top: hour * HOUR_HEIGHT }}>
-                {formatHour(new Date(2000, 0, 1, hour))}
+            {Array.from({ length: 23 }, (_, i) => i + 1).map((hour) => {
+              const top = hour * HOUR_HEIGHT;
+              const clear = todayCol >= 0 && Math.abs(top - nowTop) < NOW_PILL_CLEARANCE;
+              return (
+                <span
+                  key={hour}
+                  className={clsx("cal-tg__hour", clear && "cal-tg__hour--clear")}
+                  style={{ top }}
+                >
+                  {formatHour(new Date(2000, 0, 1, hour))}
+                </span>
+              );
+            })}
+            {todayCol >= 0 && (
+              <span className="cal-now-pill tnum" style={{ top: nowTop }}>
+                {formatTime(now)}
               </span>
-            ))}
+            )}
           </div>
+          {todayCol >= 0 && days.length > 1 && (
+            <div className="cal-now-rule" style={{ top: nowTop }} aria-hidden="true" />
+          )}
           {days.map((day, col) => {
-            const today = isSameDay(day, now);
             const off = isWeekend(day);
             return (
               <div
                 key={day.getTime()}
-                className="cal-tg__col"
+                className={clsx("cal-tg__col", col === todayCol && "cal-tg__col--today")}
                 role="group"
                 aria-label={formatDate(day, "weekdayLong")}
                 onPointerDown={(e) => startDrag(e, col)}
@@ -303,12 +350,8 @@ export function TimeGrid({
                   />
                 ))}
                 {drag && drag.col === col && <DragGhost drag={drag} />}
-                {today && (
-                  <div
-                    className="cal-now"
-                    style={{ top: (nowMinutes / 60) * HOUR_HEIGHT }}
-                    aria-hidden="true"
-                  />
+                {col === todayCol && (
+                  <div className="cal-now" style={{ top: nowTop }} aria-hidden="true" />
                 )}
               </div>
             );
@@ -325,7 +368,11 @@ function DragGhost({ drag }: { drag: DragState }) {
   return (
     <div
       className="cal-ghost"
-      style={{ top: first * SLOT_HEIGHT, height: (last - first + 1) * SLOT_HEIGHT }}
+      style={{
+        top: first * SLOT_HEIGHT + 1,
+        height: (last - first + 1) * SLOT_HEIGHT - EVENT_GAP,
+        ...columnPlacement(0, 1, 1),
+      }}
       aria-hidden="true"
     >
       {formatTimeSpan(
@@ -343,14 +390,25 @@ interface TimedEventProps extends EventSelectProps {
 function TimedEvent({ placed, calendar, selected, onSelect }: TimedEventProps) {
   const event = placed.item;
   const minutes = Math.max(placed.end - placed.start, MIN_MINUTES);
-  const height = (minutes / 60) * HOUR_HEIGHT;
-  // Text lines that fit: title first, then the time, then the location.
-  const lines = Math.max(1, Math.floor((height - 5) / LINE_HEIGHT));
+  const height = (minutes / 60) * HOUR_HEIGHT - EVENT_GAP;
+  // Lines of text that fit: the title, then the time, then the place. Short
+  // events put the title and the start time on one line.
+  const lines = Math.max(1, Math.floor((height - 4) / LINE_HEIGHT));
   const compact = lines < 2;
-  const showLocation = !!event.location && lines >= 3;
-  const titleLines = Math.max(1, Math.min(3, lines - 1 - (showLocation ? 1 : 0)));
-  const left = (placed.column / placed.columns) * 100;
-  const width = (placed.span / placed.columns) * 100;
+  const tiny = height < 20;
+  // In a narrow column the title wraps before the place gets a line.
+  let spare = lines - 2;
+  let titleLines = 1;
+  if (placed.span < placed.columns && spare > 0) {
+    titleLines += 1;
+    spare -= 1;
+  }
+  const showLocation = !!event.location && spare > 0;
+  if (showLocation) spare -= 1;
+  titleLines = Math.min(3, titleLines + Math.max(0, spare));
+  const range = eventRange(event);
+  const status = displayShowAs(event);
+  const statusText = status === "busy" ? "" : ` · ${SHOW_AS_LABELS[status]}`;
   return (
     <button
       type="button"
@@ -358,14 +416,14 @@ function TimedEvent({ placed, calendar, selected, onSelect }: TimedEventProps) {
         "cal-ev",
         eventClasses(event, selected),
         compact && "cal-ev--compact",
+        tiny && "cal-ev--tiny",
         placed.continuesBefore && "cal-ev--joins-before",
         placed.continuesAfter && "cal-ev--joins-after",
       )}
       style={eventStyle(calendar, {
-        top: (placed.start / 60) * HOUR_HEIGHT,
-        height: height - 1,
-        left: `${left}%`,
-        width: `calc(${width}% - ${placed.column + placed.span < placed.columns ? 2 : 8}px)`,
+        top: (placed.start / 60) * HOUR_HEIGHT + EVENT_GAP / 2,
+        height,
+        ...columnPlacement(placed.column, placed.span, placed.columns),
         "--title-lines": titleLines,
       } as CSSProperties)}
       data-event-id={event.id}
@@ -376,10 +434,27 @@ function TimedEvent({ placed, calendar, selected, onSelect }: TimedEventProps) {
     >
       <span className="cal-ev__title">{eventTitle(event)}</span>
       {compact ? (
-        event.location && <span className="cal-ev__meta"> {event.location}</span>
+        !placed.continuesBefore && (
+          <span className="cal-ev__meta tnum">
+            <span className="cal-ev__time-full">{formatTime(range.start)}</span>
+            <span className="cal-ev__time-short">{formatClock(range.start)}</span>
+          </span>
+        )
       ) : (
         <>
-          <span className="cal-ev__meta">{eventTimeRange(event)}</span>
+          <span className="cal-ev__meta tnum">
+            {/* calendar.css shows one of the two by the width of the event. */}
+            <span className="cal-ev__time-full">{eventTimeRange(event)}</span>
+            <span className="cal-ev__time-short">
+              {formatClock(range.start)}
+              {/* Thin spaces keep the short form short. */}
+              <span className="cal-ev__time-end">
+                {"\u2009–\u2009"}
+                {formatClock(range.end)}
+              </span>
+            </span>
+            {statusText && <span className="cal-ev__status">{statusText}</span>}
+          </span>
           {showLocation && <span className="cal-ev__meta">{event.location}</span>}
         </>
       )}

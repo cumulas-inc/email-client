@@ -132,7 +132,7 @@ export function MonthView({
                     <div className="cal-month__dayhead">
                       <button
                         type="button"
-                        className="cal-month__daynum"
+                        className="cal-month__daynum tnum"
                         tabIndex={tabbable && isSameDay(day, tabbable) ? 0 : -1}
                         aria-label={`${formatDate(day, "weekdayLongYear")}, ${
                           dayEvents === 1 ? "1 event" : `${dayEvents} events`
@@ -176,7 +176,7 @@ export function MonthView({
                       {more > 0 && (
                         <button
                           type="button"
-                          className="cal-month__more"
+                          className="cal-more-link cal-month__more"
                           aria-label={`${more} more event${more === 1 ? "" : "s"} on ${formatDate(day, "weekdayLong")}`}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -216,7 +216,7 @@ function MonthEntry({ event, calendar, selected, onSelect }: MonthEntryProps) {
       {...selectHandlers(event, onSelect)}
     >
       <span className="cal-entry__dot" aria-hidden="true" />
-      <span className="cal-entry__time">{formatTime(eventRange(event).start)}</span>
+      <span className="cal-entry__time tnum">{formatTime(eventRange(event).start)}</span>
       <span className="cal-entry__title">{eventTitle(event)}</span>
     </button>
   );

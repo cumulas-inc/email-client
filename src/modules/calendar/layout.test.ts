@@ -18,6 +18,7 @@ import {
   timedSegmentsForDay,
   viewRange,
   visibleLanes,
+  weekLabel,
 } from "./layout";
 
 function seg(key: string, start: number, end: number): TimedSegment<string> {
@@ -194,6 +195,16 @@ describe("view ranges", () => {
     expect(rangeTitle("day", wednesday)).toBe("Wednesday, 14 October 2026");
     // Newer ICU data puts spaces around the dash; either is the British style.
     expect(rangeTitle("workweek", wednesday)).toMatch(/^12 ?– ?16 October 2026$/);
+  });
+
+  it("numbers weeks only where the locale does", () => {
+    // American calendars don't number weeks.
+    expect(weekLabel("workweek", wednesday)).toBeNull();
+    setLocaleForTesting("de-DE");
+    expect(weekLabel("workweek", wednesday)).toBe("Week 42");
+    expect(weekLabel("day", new Date(2026, 0, 1))).toBe("Week 1");
+    // A month spans several weeks.
+    expect(weekLabel("month", wednesday)).toBeNull();
   });
 
   it("keeps whole days across daylight-saving changes", () => {

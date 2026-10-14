@@ -389,6 +389,24 @@ describe("CalendarModule", () => {
     expect(await eventButton("Customer escalation: Contoso")).toBeInTheDocument();
   });
 
+  it("lists what tomorrow holds in the sidebar", async () => {
+    const { user } = await setup();
+    const agenda = await screen.findByRole("region", { name: "Tomorrow · Thu, Oct 15" });
+    // The declined meeting and the launch week (already under way) stay out.
+    const items = within(agenda).getAllByRole("listitem");
+    expect(items.map((item) => item.textContent)).toEqual([
+      expect.stringMatching(/^Atlas stand-up/),
+      expect.stringMatching(/^1:1 Dana \/ Alex/),
+      expect.stringMatching(/^School pickup/),
+    ]);
+
+    await user.click(within(agenda).getByRole("button", { name: /^School pickup/ }));
+    expect(await screen.findByRole("dialog", { name: "School pickup" })).toBeInTheDocument();
+
+    await user.click(within(agenda).getByRole("button", { name: "1 more event tomorrow" }));
+    expect(title()).toHaveTextContent("Thursday, October 15, 2026");
+  });
+
   it("jumps to a date from the mini month", async () => {
     const { user } = await setup();
     await eventButton("Atlas launch review");

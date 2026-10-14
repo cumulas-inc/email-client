@@ -1,7 +1,8 @@
-import { Check, ChevronDown, ChevronRight } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
 import { useId, useState } from "react";
 
 import type { Account, Calendar } from "../../api/types";
+import { initials } from "../../lib/format";
 import { tintStyle } from "./colors";
 import { type CalendarGroup, groupCalendars } from "./model";
 
@@ -31,11 +32,21 @@ function AccountGroup({
         className="cal-list__account"
         aria-expanded={open}
         aria-controls={listId}
-        title={group.account?.email}
+        title={open ? "Hide this account's calendars" : "Show this account's calendars"}
         onClick={() => setOpen((o) => !o)}
       >
-        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <span className="cal-list__account-name">{name}</span>
+        <span
+          className="cal-list__badge cal-tint"
+          style={tintStyle(group.account?.color ?? group.calendars[0]?.color)}
+          aria-hidden="true"
+        >
+          {initials(name)}
+        </span>
+        <span className="cal-list__account-text">
+          <span className="cal-list__account-name">{name}</span>
+          {group.account && <span className="cal-list__account-email">{group.account.email}</span>}
+        </span>
+        <ChevronDown size={14} strokeWidth={2} className="cal-list__chevron" aria-hidden="true" />
       </button>
       {open && (
         <ul id={listId} className="cal-list__items" aria-label={`${name} calendars`}>
@@ -56,7 +67,7 @@ function AccountGroup({
                     onChange={(e) => onToggle(calendar.id, e.target.checked)}
                   />
                   <span className="cal-list__swatch" aria-hidden="true">
-                    {visible && <Check size={12} strokeWidth={3} />}
+                    <Check size={12} strokeWidth={3} />
                   </span>
                   <span className="cal-list__name">{calendar.name}</span>
                 </label>
@@ -71,8 +82,12 @@ function AccountGroup({
 
 export function CalendarList({ accounts, calendars, hidden, onToggle }: CalendarListProps) {
   const groups = groupCalendars(accounts, calendars);
+  const headingId = useId();
   return (
-    <nav className="cal-list" aria-label="Calendars">
+    <nav className="cal-list" aria-labelledby={headingId}>
+      <h2 id={headingId} className="cal-section-label">
+        Calendars
+      </h2>
       {groups.map((group) => (
         <AccountGroup key={group.accountId} group={group} hidden={hidden} onToggle={onToggle} />
       ))}

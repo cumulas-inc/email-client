@@ -129,14 +129,36 @@ function allDayText(event: CalendarEvent): string | null {
   return days > 1 ? `All day · ${days} days` : "All day";
 }
 
-function Row({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
+function Row({
+  icon,
+  label,
+  showLabel = false,
+  aside,
+  children,
+}: {
+  icon: ReactNode;
+  label: string;
+  /** Print the label above the value instead of only naming the icon. */
+  showLabel?: boolean;
+  /** Quiet text next to a printed label. */
+  aside?: string;
+  children: ReactNode;
+}) {
   return (
     <div className="cal-details__row">
-      <span className="cal-details__icon" title={label}>
+      <span className="cal-details__icon" title={showLabel ? undefined : label}>
         {icon}
-        <span className="visually-hidden">{label}</span>
+        {!showLabel && <span className="visually-hidden">{label}</span>}
       </span>
-      <div className="cal-details__value">{children}</div>
+      <div className="cal-details__value">
+        {showLabel && (
+          <div className="cal-details__label">
+            {label}
+            {aside && <span className="cal-details__aside">{aside}</span>}
+          </div>
+        )}
+        {children}
+      </div>
     </div>
   );
 }
@@ -175,17 +197,28 @@ export function EventDetails({
     const height = card.offsetHeight;
     let left: number;
     let top: number;
+    // The card grows out of the event it belongs to.
+    let originX = WIDTH / 2;
+    let originY = height / 2;
     if (!rect) {
       left = (vw - WIDTH) / 2;
       top = Math.max(GAP, (vh - height) / 2);
     } else {
-      if (rect.right + GAP + WIDTH <= vw - GAP) left = rect.right + GAP;
-      else if (rect.left - GAP - WIDTH >= GAP) left = rect.left - GAP - WIDTH;
-      else left = Math.min(Math.max(GAP, rect.left), vw - WIDTH - GAP);
+      if (rect.right + GAP + WIDTH <= vw - GAP) {
+        left = rect.right + GAP;
+        originX = 0;
+      } else if (rect.left - GAP - WIDTH >= GAP) {
+        left = rect.left - GAP - WIDTH;
+        originX = WIDTH;
+      } else {
+        left = Math.min(Math.max(GAP, rect.left), vw - WIDTH - GAP);
+      }
       top = Math.min(Math.max(GAP, rect.top), Math.max(GAP, vh - height - GAP));
+      originY = Math.min(Math.max(0, rect.top + Math.min(rect.height, 40) / 2 - top), height);
     }
     card.style.left = `${Math.round(left)}px`;
     card.style.top = `${Math.round(top)}px`;
+    card.style.transformOrigin = `${Math.round(originX)}px ${Math.round(originY)}px`;
   });
 
   useEffect(() => {
@@ -202,7 +235,7 @@ export function EventDetails({
       if (target instanceof Element && target.closest("dialog")) return;
       onClose(false);
     };
-    // Like Outlook's peek card, it closes when the calendar scrolls or resizes.
+    // The card belongs to a spot in the grid, so it closes when that moves.
     const onScroll = (e: Event) => {
       if (e.target instanceof Node && ref.current?.contains(e.target)) return;
       if (e.target instanceof Element && e.target.closest("dialog")) return;
@@ -287,7 +320,7 @@ export function EventDetails({
       <div className="cal-details__header">
         <h2
           id={titleId}
-          className={clsx("cal-details__title", isStruck(event) && "cal-ev--struck")}
+          className={clsx("cal-details__title serif", isStruck(event) && "cal-ev--struck")}
         >
           {eventTitle(event)}
         </h2>
@@ -366,12 +399,12 @@ export function EventDetails({
         )}
 
         {(attendees.length > 0 || (organizer && invitation)) && (
-          <Row icon={<Users size={16} />} label="Attendees">
-            {attendees.length > 0 && (
-              <div className="cal-details__muted cal-details__summary">
-                {attendeeSummary(event.attendees)}
-              </div>
-            )}
+          <Row
+            icon={<Users size={16} />}
+            label="Attendees"
+            showLabel
+            aside={attendees.length > 0 ? attendeeSummary(event.attendees) : undefined}
+          >
             <ul className="cal-people" aria-label="Organizer and attendees">
               {organizer && (
                 <li className="cal-people__item">
@@ -502,7 +535,7 @@ export function EventDetails({
           <>
             <button
               type="button"
-              className="btn btn--primary cal-danger"
+              className="btn btn--destructive"
               disabled={remove.isPending}
               onClick={doDelete}
             >
