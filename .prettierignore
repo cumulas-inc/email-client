@@ -3,3 +3,4 @@ target
 src-tauri/gen
 package-lock.json
 packaging/flatpak/*-sources.json
+.claude
