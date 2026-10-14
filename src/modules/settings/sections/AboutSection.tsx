@@ -1,10 +1,14 @@
-import { KeyRound, ShieldCheck } from "lucide-react";
+import { KeyRound, Scale, ShieldCheck } from "lucide-react";
 
+import { useBackend } from "../../../api/context";
 import { useAppInfo } from "../../../api/queries";
 import { PaneSpinner } from "../../../components/Spinner";
 import { Callout } from "../Fields";
 
+const LICENSE_URL = "https://www.gnu.org/licenses/gpl-3.0.html";
+
 export function AboutSection() {
+  const backend = useBackend();
   const { data: info } = useAppInfo();
   if (!info) return <PaneSpinner />;
   return (
@@ -51,6 +55,23 @@ export function AboutSection() {
             </div>
           </div>
         )}
+        <div className="about-card">
+          <Scale size={20} aria-hidden="true" className="about-card__icon" />
+          <div>
+            <p className="about-card__title">Free software</p>
+            <p>
+              You can use, study, share and change Cumulas Mail under the terms of the GNU General
+              Public License, version 3 or later. It comes with no warranty.
+            </p>
+            <button
+              type="button"
+              className="btn btn--subtle btn--sm about-card__link"
+              onClick={() => void backend.openLink(LICENSE_URL)}
+            >
+              Read the licence
+            </button>
+          </div>
+        </div>
       </div>
     </>
   );

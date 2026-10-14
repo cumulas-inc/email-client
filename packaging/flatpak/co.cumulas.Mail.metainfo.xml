@@ -2,8 +2,7 @@
 <component type="desktop-application">
   <id>co.cumulas.Mail</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <!-- TODO: Flathub requires the project licence (SPDX), e.g. GPL-3.0-or-later or LicenseRef-proprietary. -->
-  <project_license>LicenseRef-TODO</project_license>
+  <project_license>GPL-3.0-or-later</project_license>
 
   <name>Cumulas Mail</name>
   <summary>Email, calendar, contacts and tasks</summary>

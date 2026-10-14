@@ -208,6 +208,15 @@ describe("Microsoft app registration", () => {
     expect(tenant).not.toHaveAttribute("aria-invalid");
   });
 
+  it("states the licence and links to it from About", async () => {
+    const backend = new MockBackend();
+    const openLink = vi.spyOn(backend, "openLink").mockResolvedValue();
+    openAt("about", backend);
+    expect(await screen.findByText("Free software")).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Read the licence" }));
+    expect(openLink).toHaveBeenCalledWith("https://www.gnu.org/licenses/gpl-3.0.html");
+  });
+
   it("asks for an ID when the build has none", async () => {
     const backend = new MockBackend();
     vi.spyOn(backend, "getAppInfo").mockResolvedValue({

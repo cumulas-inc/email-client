@@ -1293,6 +1293,12 @@
   color: var(--fg-secondary);
 }
 
+.about-card__link {
+  margin-top: var(--space-2);
+  margin-left: calc(-1 * var(--space-2));
+  color: var(--fg-link);
+}
+
 /* --- Remove account -------------------------------------------------------- */
 
 .remove-account {

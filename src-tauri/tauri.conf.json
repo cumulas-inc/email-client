@@ -40,6 +40,8 @@
     "active": true,
     "targets": ["deb", "rpm", "appimage"],
     "category": "Office",
+    "license": "GPL-3.0-or-later",
+    "licenseFile": "../LICENSE",
     "shortDescription": "Mail, calendar, contacts and tasks",
     "longDescription": "A fast desktop mail client for Linux with Microsoft 365, Outlook.com and IMAP accounts, plus calendar, contacts and tasks.",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"],

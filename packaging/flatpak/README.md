@@ -29,15 +29,14 @@ the OpenURI portal.
 
 ## Submitting to Flathub
 
-1. Choose a licence and set `project_license` in `co.cumulas.Mail.metainfo.xml`.
-2. Make the screenshot URLs in the metainfo publicly reachable.
-3. Register the Microsoft Entra app (see `docs/microsoft-365.md`), get publisher
+1. Make the screenshot URLs in the metainfo publicly reachable.
+2. Register the Microsoft Entra app (see `docs/microsoft-365.md`), get publisher
    verification, and set `CUMULAS_MS_CLIENT_ID` in the manifest.
-4. Tag a release, then open a pull request against
+3. Tag a release, then open a pull request against
    [flathub/flathub](https://github.com/flathub/flathub) (branch `new-pr`) with
    this manifest using a `git` source pinned to the tag and commit, plus the
    generated `cargo-sources.json` and `node-sources.json`.
-5. To get the "verified" badge, publish the token Flathub gives you at
+4. To get the "verified" badge, publish the token Flathub gives you at
    `https://cumulas.co/.well-known/org.flathub.VerifiedApps.txt`.
 
 Validate before submitting:
