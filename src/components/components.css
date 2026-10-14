@@ -143,6 +143,7 @@
   position: absolute;
   top: calc(100% + 4px);
   z-index: 100;
+  max-width: min(420px, calc(100vw - 32px));
   min-width: 200px;
   padding: var(--space-1);
   border: none;
@@ -209,6 +210,10 @@
 
 .menu__label {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .menu__shortcut {
@@ -311,6 +316,8 @@
 
 .empty-state__description {
   max-width: 360px;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 .empty-state__action {

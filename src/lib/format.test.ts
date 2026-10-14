@@ -24,7 +24,9 @@ describe("format helpers", () => {
     expect(initials("@home Wi-Fi support")).toBe("HS");
     expect(initials("נועה כהן (Noa Cohen)")).toBe("נכ");
     expect(initials("Jane Doe <jane@acme.example>")).toBe("JD");
-    expect(initials("山田 太郎")).toBe("山太");
+    expect(initials("山田 太郎")).toBe("山");
+    expect(initials("ｶﾌｪ ﾀﾛｳ")).toBe("カ");
+    expect(initials("สมชาย ใจดี")).toBe("สจ");
   });
 
   it("falls back to the address for display", () => {

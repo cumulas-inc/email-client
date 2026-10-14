@@ -16,6 +16,7 @@ export function SearchField({ placeholder }: { placeholder: string }) {
         ref={inputRef}
         id="global-search"
         type="search"
+        dir="auto"
         placeholder={placeholder}
         aria-label={placeholder}
         value={search}

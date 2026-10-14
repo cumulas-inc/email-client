@@ -31,6 +31,7 @@ const NAME_SUFFIX = /^(?:jr|sr|ii|iii|iv|phd|md|esq)$/i;
  */
 export function initials(nameOrAddress: string): string {
   const text = nameOrAddress
+    .normalize("NFKC")
     .replace(/<[^>]*>/g, "")
     .replace(/\([^)]*\)/g, " ")
     .trim();
@@ -40,9 +41,19 @@ export function initials(nameOrAddress: string): string {
     .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ""))
     .filter((w) => /\p{L}/u.test(w) && !NAME_SUFFIX.test(w));
   if (words.length === 0) return "?";
-  const first = Array.from(words[0]!);
+  // Chinese and Japanese names: the first character, as their apps show it.
+  if (CJK.test(words[0]![0]!)) return Array.from(words[0]!)[0]!;
+  const first = letters(words[0]!);
   if (words.length === 1) return first.slice(0, 2).join("").toLocaleUpperCase();
-  return (first[0]! + Array.from(words[words.length - 1]!)[0]!).toLocaleUpperCase();
+  return (first[0]! + letters(words[words.length - 1]!)[0]!).toLocaleUpperCase();
+}
+
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+// Thai and Lao vowels written before their consonant: "ใจดี" starts with จ.
+const LEADING_VOWEL = /^[\u0E40-\u0E44\u0EC0-\u0EC4]/;
+
+function letters(word: string): string[] {
+  return Array.from(word.replace(LEADING_VOWEL, "") || word);
 }
 
 /** The letters on an account's badge: "AM" for Alex Morgan, "W" for Work. */
@@ -81,12 +92,23 @@ export function hueFor(key: string): AvatarHue {
  * compact from ten thousand on ("12K") so badges stay small. Callers put the
  * exact number in a tooltip when it's shortened.
  */
+const countFormats = new Map<string, Intl.NumberFormat>();
+
+function countFormat(compact: boolean): Intl.NumberFormat {
+  const key = `${appLocale()}|${compact}`;
+  let f = countFormats.get(key);
+  if (!f) {
+    f = new Intl.NumberFormat(
+      appLocale(),
+      compact ? { notation: "compact", maximumFractionDigits: 0 } : undefined,
+    );
+    countFormats.set(key, f);
+  }
+  return f;
+}
+
 export function formatCount(n: number): string {
-  if (n < 10_000) return new Intl.NumberFormat(appLocale()).format(n);
-  return new Intl.NumberFormat(appLocale(), {
-    notation: "compact",
-    maximumFractionDigits: 0,
-  }).format(n);
+  return countFormat(n >= 10_000).format(n);
 }
 
 /** Compact timestamp for lists: "3:05 PM", "Mon 3:05 PM", "Oct 9", "Oct 9, 2025". */
