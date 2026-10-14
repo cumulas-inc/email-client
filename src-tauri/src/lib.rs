@@ -2,6 +2,7 @@
 //! events, and runs periodic background sync.
 
 mod commands;
+mod fonts;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -130,6 +131,16 @@ pub fn run() {
                 app: app.handle().clone(),
             });
             let service = Arc::new(CoreService::new(store, secrets, connector, sink));
+            // The UI sets the zoom when the text size changes; setting the
+            // saved one now means the first frame is already the right size.
+            if let (Ok(settings), Some(window)) =
+                (service.get_settings(), app.get_webview_window("main"))
+            {
+                let zoom = settings.text_size.zoom();
+                if let Err(e) = window.set_zoom(zoom) {
+                    tracing::warn!("could not set the zoom to {zoom}: {e}");
+                }
+            }
             spawn_background_sync(Arc::clone(&service));
             app.manage(AppState {
                 service,
@@ -150,6 +161,7 @@ pub fn run() {
             commands::remove_account,
             commands::get_settings,
             commands::update_settings,
+            commands::list_fonts,
             commands::sync_account,
             commands::sync_all,
             commands::get_sync_statuses,

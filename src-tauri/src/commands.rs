@@ -134,6 +134,12 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
     state.service.get_settings()
 }
 
+/// Installed font families for the font settings (scanned once, then cached).
+#[tauri::command]
+pub async fn list_fonts() -> Vec<String> {
+    crate::fonts::installed_families().await
+}
+
 #[tauri::command]
 pub async fn update_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
     state.service.update_settings(settings).await
