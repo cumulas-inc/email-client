@@ -2,6 +2,7 @@ import clsx from "clsx";
 import { formatDistanceToNowStrict } from "date-fns";
 import {
   ChevronDown,
+  KeyRound,
   LoaderCircle,
   LogIn,
   Plus,
@@ -22,6 +23,7 @@ import { openAddAccount } from "../addAccountStore";
 import { ACCOUNT_COLORS, ADD_ACCOUNT_BUTTON_ID } from "../constants";
 import { Callout, TextField } from "../Fields";
 import { focusLater } from "../focus";
+import { ImapAccountEditor } from "../ImapAccountEditor";
 import { TLS_LABELS } from "../presets";
 import { useSyncAccount, useUpdateAccount } from "../queries";
 import { trackSave } from "../saveStatus";
@@ -123,9 +125,10 @@ function AccountItem({
 }: AccountItemProps) {
   const id = useId();
   const bodyId = `${id}-body`;
-  const problemId = `${id}-problem`;
+  const editButtonId = `${id}-edit-servers`;
   const sync = useSyncAccount();
   const update = useUpdateAccount();
+  const [editing, setEditing] = useState(false);
 
   const state = status?.state ?? (account.syncError ? "error" : "idle");
   const lastSyncedAt = status?.lastSyncedAt ?? account.lastSyncedAt;
@@ -141,10 +144,61 @@ function AccountItem({
   const signInAgain = () =>
     openAddAccount({ step: "microsoft", email: account.email, autoStart: true });
 
+  // Opening the editor focuses its password field.
   const fix = () => {
     onExpand();
-    focusLater(problemId);
+    setEditing(true);
   };
+
+  const stopEditing = () => {
+    setEditing(false);
+    focusLater(editButtonId);
+  };
+
+  const imap = account.settings.kind === "imap" ? account.settings : null;
+  let servers = null;
+  if (imap && editing) {
+    servers = (
+      <div className="account-field">
+        <span className="field__label">Password and servers</span>
+        <ImapAccountEditor
+          account={account}
+          settings={imap}
+          onDone={stopEditing}
+          onCancel={stopEditing}
+        />
+      </div>
+    );
+  } else if (imap) {
+    servers = (
+      <div className="account-field">
+        <div className="account-field__head">
+          <span className="field__label">Password and servers</span>
+          <button
+            id={editButtonId}
+            type="button"
+            className="btn btn--sm"
+            onClick={() => setEditing(true)}
+          >
+            <KeyRound size={14} aria-hidden="true" />
+            Change password or servers
+          </button>
+        </div>
+        <dl className="server-summary selectable">
+          <dt>Incoming</dt>
+          <dd>
+            {imap.imapHost}:{imap.imapPort} · {TLS_LABELS[imap.imapTls]}
+          </dd>
+          <dt>Outgoing</dt>
+          <dd>
+            {imap.smtpHost}:{imap.smtpPort} · {TLS_LABELS[imap.smtpTls]}
+          </dd>
+          <dt>User name</dt>
+          <dd>{imap.username}</dd>
+        </dl>
+      </div>
+    );
+  }
 
   let statusNode;
   if (syncing) {
@@ -216,7 +270,8 @@ function AccountItem({
         </div>
       </div>
 
-      {syncError && (
+      {/* When an IMAP account is open, its callout below shows the error instead. */}
+      {syncError && (microsoft || !expanded) && (
         <p className="account-item__error selectable">
           <span className="visually-hidden">Sync problem: </span>
           {syncError}
@@ -226,25 +281,26 @@ function AccountItem({
       {expanded && (
         <div id={bodyId} className="account-item__body">
           {syncError && !microsoft && (
-            <div id={problemId} tabIndex={-1} className="account-item__problem">
-              <Callout
-                tone="danger"
-                title="This account can't sync right now"
-                action={
-                  <button type="button" className="btn btn--sm" onClick={syncNow}>
-                    <RefreshCw size={14} aria-hidden="true" />
-                    Try again
-                  </button>
-                }
-              >
-                <p>
-                  Check that you&apos;re online and that the server settings below are still right.
-                  If your password changed, remove this account and add it again with the new one;
-                  the mail on the server isn&apos;t affected.
-                </p>
-              </Callout>
-            </div>
+            <Callout
+              tone="danger"
+              title="This account can't sync right now"
+              action={
+                <button type="button" className="btn btn--sm" onClick={syncNow}>
+                  <RefreshCw size={14} aria-hidden="true" />
+                  Try again
+                </button>
+              }
+            >
+              <p className="selectable">{syncError}</p>
+              <p>
+                Check that you&apos;re online. If your password or server settings changed, update
+                them below.
+              </p>
+            </Callout>
           )}
+
+          {/* With a sync error, the way to fix it comes first. */}
+          {syncError && servers}
 
           <AccountNameField account={account} />
 
@@ -279,25 +335,7 @@ function AccountItem({
             </button>
           </div>
 
-          {account.settings.kind === "imap" && (
-            <div className="account-field">
-              <span className="field__label">Servers</span>
-              <dl className="server-summary selectable">
-                <dt>Incoming</dt>
-                <dd>
-                  {account.settings.imapHost}:{account.settings.imapPort} ·{" "}
-                  {TLS_LABELS[account.settings.imapTls]}
-                </dd>
-                <dt>Outgoing</dt>
-                <dd>
-                  {account.settings.smtpHost}:{account.settings.smtpPort} ·{" "}
-                  {TLS_LABELS[account.settings.smtpTls]}
-                </dd>
-                <dt>User name</dt>
-                <dd>{account.settings.username}</dd>
-              </dl>
-            </div>
-          )}
+          {!syncError && servers}
 
           <div className="account-field account-field--row account-field--danger">
             <div>

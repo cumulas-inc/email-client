@@ -350,6 +350,8 @@ export interface BackendError {
   details?: {
     adminConsentUrl?: string;
     tenant?: string;
+    /** The tenant has Microsoft's admin consent workflow ("Request approval") enabled. */
+    canRequestApproval?: boolean;
     [key: string]: unknown;
   };
 }

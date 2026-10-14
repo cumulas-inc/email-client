@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 
+import { useBackend } from "../../api/context";
 import { errorMessage, isBackendError } from "../../api/errors";
 import type { Account } from "../../api/types";
 import { Spinner } from "../../components/Spinner";
@@ -49,20 +50,12 @@ export function MicrosoftSignIn({
   const emailId = useId();
   const [email, setEmail] = useState(initialEmail);
   const [emailError, setEmailError] = useState<string | null>(null);
-  const [phase, setPhaseState] = useState<Phase>(
-    autoStart ? { kind: "waiting" } : { kind: "form" },
-  );
+  const [phase, setPhase] = useState<Phase>(autoStart ? { kind: "waiting" } : { kind: "form" });
+  const backend = useBackend();
   const { mutateAsync } = useAddMicrosoftAccount();
+  /** Bumped for each sign-in, and on cancel, so stale results are ignored. */
   const attempt = useRef(0);
   const mounted = useRef(true);
-
-  const setPhase = useCallback(
-    (next: Phase) => {
-      setPhaseState(next);
-      onPhaseChange?.(next.kind);
-    },
-    [onPhaseChange],
-  );
 
   useEffect(() => {
     mounted.current = true;
@@ -71,25 +64,31 @@ export function MicrosoftSignIn({
     };
   }, []);
 
+  useEffect(() => onPhaseChange?.(phase.kind), [phase.kind, onPhaseChange]);
+
   /** Runs the browser sign-in; the caller has already shown the waiting state. */
   const signIn = useCallback(
     async (hint: string) => {
       const id = ++attempt.current;
       try {
         const account = await mutateAsync(hint || undefined);
-        if (!mounted.current || id !== attempt.current) {
-          // The dialog was closed while the browser was open; still say so.
-          toast.success(`Signed in as ${account.email}.`);
-          return;
-        }
-        onDone(account);
+        // Even a sign-in the user gave up on may have finished: say so.
+        if (mounted.current) onDone(account);
+        else toast.success(`Signed in as ${account.email}.`);
       } catch (error) {
         if (!mounted.current || id !== attempt.current) return;
         setPhase({ kind: "failed", error });
       }
     },
-    [mutateAsync, onDone, setPhase],
+    [mutateAsync, onDone],
   );
+
+  /** Stops waiting for the browser and returns to the form. */
+  const cancel = () => {
+    attempt.current += 1;
+    setPhase({ kind: "form" });
+    backend.cancelMicrosoftSignIn().catch((e: unknown) => toast.error(e));
+  };
 
   const start = () => {
     const hint = email.trim();
@@ -126,7 +125,7 @@ export function MicrosoftSignIn({
     return (
       <StepLayout
         footer={
-          <button type="button" className="btn" onClick={onClose}>
+          <button type="button" className="btn" onClick={cancel}>
             Cancel
           </button>
         }
@@ -182,6 +181,7 @@ export function MicrosoftSignIn({
             adminConsentUrl={error.details.adminConsentUrl}
             tenant={error.details.tenant}
             email={email.trim() || undefined}
+            canRequestApproval={error.details.canRequestApproval === true}
           />
         </StepLayout>
       );

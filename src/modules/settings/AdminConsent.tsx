@@ -1,4 +1,4 @@
-import { Check, Copy, Mail, ShieldCheck } from "lucide-react";
+import { Check, Copy, Info, Mail, ShieldCheck } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { useBackend } from "../../api/context";
@@ -12,13 +12,20 @@ interface AdminConsentProps {
   tenant?: string;
   /** The address the user tried to sign in with. */
   email?: string;
+  /** Microsoft's own "Request approval" button is available to the user. */
+  canRequestApproval?: boolean;
 }
 
 /**
  * Shown when the organisation only allows apps an administrator approved.
  * Explains that nothing is wrong and makes forwarding the approval link easy.
  */
-export function AdminConsent({ adminConsentUrl, tenant, email }: AdminConsentProps) {
+export function AdminConsent({
+  adminConsentUrl,
+  tenant,
+  email,
+  canRequestApproval,
+}: AdminConsentProps) {
   const backend = useBackend();
   const linkId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -77,6 +84,15 @@ export function AdminConsent({ adminConsentUrl, tenant, email }: AdminConsentPro
           </span>
         </li>
       </ol>
+      {canRequestApproval && (
+        <p className="consent-alt">
+          <Info size={16} aria-hidden="true" />
+          <span>
+            You can also select <strong>Request approval</strong> on Microsoft&apos;s sign-in page,
+            then wait for IT to approve.
+          </span>
+        </p>
+      )}
 
       <div className="consent-link">
         <label htmlFor={linkId} className="field__label">

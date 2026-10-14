@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -73,21 +73,89 @@ describe("Microsoft sign-in", () => {
     );
   });
 
-  it("can be cancelled while waiting and still reports a late success", async () => {
+  it("cancels a pending sign-in and goes back to the form", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend();
-    const { release } = holdCalls(backend, "addMicrosoftAccount");
+    const signIn = vi.spyOn(backend, "addMicrosoftAccount");
+    const cancel = vi.spyOn(backend, "cancelMicrosoftSignIn");
     openFlow({ step: "microsoft" }, backend);
 
+    // "slow@…" waits in the demo backend until the sign-in is cancelled.
+    await user.type(screen.getByLabelText("Email address (optional)"), "slow@contoso.example");
     await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
-    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(
+      await screen.findByRole("heading", { name: "Finish signing in in your browser…" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(cancel).toHaveBeenCalledTimes(1);
+    // The backend reports the cancellation; that isn't shown as a problem.
+    await expect(signIn.mock.results[0]!.value).rejects.toMatchObject({
+      code: "signInCancelled",
+    });
+
+    expect(useAppStore.getState().addAccountOpen).toBe(true);
+    expect(
+      screen.queryByRole("heading", { name: "Sign-in was cancelled" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in with Microsoft" })).toBeInTheDocument();
+    const email = screen.getByLabelText("Email address (optional)");
+    expect(email).toHaveValue("slow@contoso.example");
+    await waitFor(() => expect(email).toHaveFocus());
+  });
+
+  it("cancels the sign-in when the dialog is closed while waiting", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const signIn = vi.spyOn(backend, "addMicrosoftAccount");
+    const cancel = vi.spyOn(backend, "cancelMicrosoftSignIn");
+    openFlow({ step: "microsoft" }, backend);
+
+    await user.type(screen.getByLabelText("Email address (optional)"), "slow@contoso.example");
+    await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add a Microsoft account" });
+    await screen.findByRole("heading", { name: "Finish signing in in your browser…" });
+
+    // Escape on a <dialog> fires "cancel".
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
+    expect(cancel).toHaveBeenCalledTimes(1);
     expect(useAppStore.getState().addAccountOpen).toBe(false);
+    await expect(signIn.mock.results[0]!.value).rejects.toMatchObject({
+      code: "signInCancelled",
+    });
+    expect(toastMessages()).toEqual([]);
+  });
+
+  it("cancels the sign-in from the close button too, but not after it ended", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const cancel = vi.spyOn(backend, "cancelMicrosoftSignIn");
+    openFlow({ step: "microsoft" }, backend);
+
+    await user.type(screen.getByLabelText("Email address (optional)"), "slow@contoso.example");
+    await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
+    await screen.findByRole("heading", { name: "Finish signing in in your browser…" });
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(cancel).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    release();
-    await waitFor(() =>
-      expect(toastMessages()).toContainEqual("Signed in as new.user@contoso.example."),
-    );
+    // Closing from the form doesn't cancel anything.
+    act(() => openAddAccount({ step: "microsoft" }));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a cancelled 'Sign in again' start over", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const signIn = vi.spyOn(backend, "addMicrosoftAccount");
+    openFlow({ step: "microsoft", email: "slow@acme.example", autoStart: true }, backend);
+
+    expect(screen.getByRole("dialog", { name: "Sign in again" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("button", { name: "Sign in with Microsoft" })).toBeVisible();
+    expect(screen.getByLabelText("Email address (optional)")).toHaveValue("slow@acme.example");
+    expect(signIn).toHaveBeenCalledTimes(1);
   });
 
   it("checks the optional email before opening the browser", async () => {
@@ -152,6 +220,31 @@ describe("Microsoft sign-in", () => {
         name: "Your organisation needs to approve Cumulas Mail",
       }),
     ).toBeInTheDocument();
+  });
+
+  it("mentions Microsoft's Request approval button when the organisation offers it", async () => {
+    const user = userEvent.setup();
+    const { backend } = openFlow({ step: "microsoft" });
+    const details = { adminConsentUrl: ADMIN_URL, tenant: "contoso.example" };
+    const needsApproval = (canRequestApproval: boolean): BackendError => ({
+      code: "adminConsentRequired",
+      message: "An administrator needs to approve Cumulas Mail.",
+      details: { ...details, canRequestApproval },
+    });
+    vi.spyOn(backend, "addMicrosoftAccount")
+      .mockRejectedValueOnce(needsApproval(true))
+      .mockRejectedValueOnce(needsApproval(false));
+    const heading = { name: "Your organisation needs to approve Cumulas Mail" };
+
+    await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
+    await screen.findByRole("heading", heading);
+    expect(screen.getByText(/You can also select/)).toHaveTextContent(
+      "You can also select Request approval on Microsoft's sign-in page, then wait for IT to approve.",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByRole("heading", heading);
+    expect(screen.queryByText(/Request approval/)).not.toBeInTheDocument();
   });
 
   it("handles a cancelled browser sign-in quietly", async () => {
