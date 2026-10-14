@@ -35,12 +35,11 @@ fn decode_strict(name: &str) -> Option<String> {
             out.push('&');
         } else {
             let bytes = MUTF7.decode(encoded).ok()?;
-            if bytes.len() % 2 != 0 {
+            let (pairs, remainder) = bytes.as_chunks::<2>();
+            if !remainder.is_empty() {
                 return None;
             }
-            let units = bytes
-                .chunks_exact(2)
-                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+            let units = pairs.iter().map(|pair| u16::from_be_bytes(*pair));
             for c in char::decode_utf16(units) {
                 out.push(c.ok()?);
             }
