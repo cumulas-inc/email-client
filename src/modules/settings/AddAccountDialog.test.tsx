@@ -95,9 +95,7 @@ describe("Microsoft sign-in", () => {
     });
 
     expect(useAppStore.getState().addAccountOpen).toBe(true);
-    expect(
-      screen.queryByRole("heading", { name: "Sign-in was canceled" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Sign-in was canceled" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in with Microsoft" })).toBeInTheDocument();
     const email = screen.getByLabelText("Email address (optional)");
     expect(email).toHaveValue("slow@contoso.example");

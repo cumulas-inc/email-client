@@ -12,7 +12,7 @@ interface ControlProps {
   tabbable?: boolean;
 }
 
-/** Round completion checkbox; the tick draws in when the task is completed. */
+/** Round completion checkbox; the check mark draws in when the task is completed. */
 export function TaskCheckbox({ task, onToggle, size = "md", tabbable = true }: ControlProps) {
   const checked = task.status === "completed";
   // Only animate after a click, not when a completed task first renders.

@@ -1,6 +1,13 @@
-import { differenceInCalendarDays, format, isSameDay, isSameYear } from "date-fns";
+import { differenceInCalendarDays, isSameDay, isSameYear } from "date-fns";
 
 import type { EmailAddress } from "../api/types";
+import {
+  formatDate,
+  formatDateRange,
+  formatDateTime,
+  formatTime,
+  formatTimeSpan,
+} from "./datetime";
 
 /** Name to show for an address: the display name, else the address. */
 export function displayName(addr: EmailAddress | null | undefined): string {
@@ -49,19 +56,19 @@ export function colorFor(key: string): string {
   return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length]!;
 }
 
-/** Compact timestamp for lists: "14:05", "Mon 14:05", "12/09", "12/09/2025". */
+/** Compact timestamp for lists: "3:05 PM", "Mon 3:05 PM", "Oct 9", "Oct 9, 2025". */
 export function formatListDate(isoDate: string, now = new Date()): string {
   const d = new Date(isoDate);
   const days = differenceInCalendarDays(now, d);
-  if (days === 0) return format(d, "HH:mm");
-  if (days > 0 && days < 7) return format(d, "EEE HH:mm");
-  if (isSameYear(d, now)) return format(d, "d MMM");
-  return format(d, "d MMM yyyy");
+  if (days === 0) return formatTime(d);
+  if (days > 0 && days < 7) return `${formatDate(d, "weekday")} ${formatTime(d)}`;
+  if (isSameYear(d, now)) return formatDate(d, "short");
+  return formatDate(d, "shortYear");
 }
 
-/** Full timestamp for message headers: "Tue 14/10/2026 14:05". */
+/** Full timestamp for message headers: "Wed, Oct 14, 2026, 3:05 PM". */
 export function formatFullDate(isoDate: string): string {
-  return format(new Date(isoDate), "EEE d MMM yyyy HH:mm");
+  return formatDateTime(new Date(isoDate));
 }
 
 /** Group label for message lists. */
@@ -73,8 +80,8 @@ export function dateGroup(isoDate: string, now = new Date()): string {
   if (days < 7) return "This week";
   if (days < 14) return "Last week";
   if (isSameYear(d, now) && d.getMonth() === now.getMonth()) return "Earlier this month";
-  if (isSameYear(d, now)) return format(d, "MMMM");
-  return format(d, "MMMM yyyy");
+  if (isSameYear(d, now)) return formatDate(d, "month");
+  return formatDate(d, "monthYear");
 }
 
 /** The local calendar day an all-day boundary (stored as midnight UTC) means. */
@@ -84,7 +91,7 @@ function allDayToLocal(iso: string): Date {
 }
 
 /**
- * "09:30 – 10:00", "All day", "8 Oct – 11 Oct". Timed events are shown in
+ * "9:30 – 10:00 AM", "All day", "Oct 8 – 11". Timed events are shown in
  * local time; all-day events use the stored dates (midnight UTC of the first
  * day to midnight UTC of the day after the last), whatever the time zone.
  */
@@ -93,14 +100,9 @@ export function formatTimeRange(startIso: string, endIso: string, allDay: boolea
     const start = allDayToLocal(startIso);
     const end = allDayToLocal(endIso);
     const lastDay = end > start ? new Date(end.getTime() - 1) : start;
-    return isSameDay(start, lastDay)
-      ? "All day"
-      : `${format(start, "d MMM")} – ${format(lastDay, "d MMM")}`;
+    return isSameDay(start, lastDay) ? "All day" : formatDateRange(start, lastDay, "short");
   }
-  const start = new Date(startIso);
-  const end = new Date(endIso);
-  if (isSameDay(start, end)) return `${format(start, "HH:mm")} – ${format(end, "HH:mm")}`;
-  return `${format(start, "d MMM HH:mm")} – ${format(end, "d MMM HH:mm")}`;
+  return formatTimeSpan(new Date(startIso), new Date(endIso));
 }
 
 export function formatBytes(bytes: number): string {

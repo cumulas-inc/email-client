@@ -10,6 +10,7 @@ import {
 } from "date-fns";
 
 import type { Account, Task, TaskList, TaskPatch } from "../../api/types";
+import { formatDate, weekStartsOn } from "../../lib/datetime";
 
 // --- Views -------------------------------------------------------------------
 
@@ -107,7 +108,7 @@ export function dueGroup(dueDate: string, now = new Date()): DueGroup {
   if (days < 0) return "overdue";
   if (days === 0) return "today";
   if (days === 1) return "tomorrow";
-  if (due <= endOfWeek(now, { weekStartsOn: 1 })) return "thisWeek";
+  if (due <= endOfWeek(now, { weekStartsOn: weekStartsOn() })) return "thisWeek";
   return "later";
 }
 
@@ -117,7 +118,7 @@ export interface DueLabel {
   today: boolean;
 }
 
-/** Short due label: "Today", "Tomorrow", "Yesterday", "Friday" or "Wed 28 Oct". */
+/** Short due label: "Today", "Tomorrow", "Yesterday", "Friday" or "Wed, Oct 28". */
 export function dueLabel(dueDate: string, now = new Date()): DueLabel {
   const due = parseDue(dueDate);
   const days = differenceInCalendarDays(due, now);
@@ -125,20 +126,20 @@ export function dueLabel(dueDate: string, now = new Date()): DueLabel {
   if (days === 0) text = "Today";
   else if (days === 1) text = "Tomorrow";
   else if (days === -1) text = "Yesterday";
-  else if (days > 1 && days < 7) text = format(due, "EEEE");
-  else text = format(due, isSameYear(due, now) ? "EEE d MMM" : "EEE d MMM yyyy");
+  else if (days > 1 && days < 7) text = formatDate(due, "weekdayName");
+  else text = formatDate(due, isSameYear(due, now) ? "weekdayShort" : "weekdayShortYear");
   return { text, overdue: days < 0, today: days === 0 };
 }
 
-/** Long form for the details pane: "Wednesday 14 October" (+ year if needed). */
+/** Long form for the details pane: "Wednesday, October 14" (+ year if needed). */
 export function longDate(date: Date, now = new Date()): string {
-  return format(date, isSameYear(date, now) ? "EEEE d MMMM" : "EEEE d MMMM yyyy");
+  return formatDate(date, isSameYear(date, now) ? "weekdayLong" : "weekdayLongYear");
 }
 
-/** "Wed 14 Oct" (+ year if needed) for created / completed stamps. */
+/** "Wed, Oct 14" (+ year if needed) for created / completed stamps. */
 export function shortDate(iso: string, now = new Date()): string {
   const d = new Date(iso);
-  return format(d, isSameYear(d, now) ? "EEE d MMM" : "EEE d MMM yyyy");
+  return formatDate(d, isSameYear(d, now) ? "weekdayShort" : "weekdayShortYear");
 }
 
 export interface QuickDue {

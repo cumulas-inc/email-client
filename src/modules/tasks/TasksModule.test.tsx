@@ -12,7 +12,7 @@ import { renderWithBackend } from "../../test/render";
 import { useTasksStore } from "./store";
 import { TasksModule } from "./TasksModule";
 
-// Wednesday 14 October 2026, 10:00 local time. Only Date is faked so that
+// Wednesday, October 14, 2026, 10 AM local time. Only Date is faked so that
 // React Query, user-event and the debounce timers keep running normally.
 const NOW = new Date(2026, 9, 14, 10, 0);
 
@@ -138,8 +138,8 @@ describe("To Do lists", () => {
     ).toEqual(["Overdue", "Today", "Tomorrow", "This week", "Later"]);
     expect(group("Overdue")).toEqual(["Send Q3 metrics to Dana", "Update status page copy"]);
     expect(group("Today")).toEqual(["Review rollback plan"]);
-    expect(group("Tomorrow")).toEqual(["Confirm launch-week on-call rota"]);
-    // Friday 16 and Saturday 17 October are still this week.
+    expect(group("Tomorrow")).toEqual(["Confirm launch-week on-call rotation"]);
+    // Friday, October 16 and Saturday, October 17 are still this week.
     expect(group("This week")).toEqual([
       "Approve customer announcement",
       "Add top three bets to planning doc",
@@ -154,7 +154,7 @@ describe("To Do lists", () => {
 
     // Due chips: red when overdue, relative names close by, dates further out.
     const overdue = within(list).getByRole("option", { name: /^Send Q3 metrics/ });
-    expect(within(overdue).getByText("Mon 12 Oct")).toHaveClass("tasks-due--overdue");
+    expect(within(overdue).getByText("Mon, Oct 12")).toHaveClass("tasks-due--overdue");
     const yesterday = within(list).getByRole("option", { name: /^Update status page copy/ });
     expect(yesterday).toHaveAccessibleName(/due Yesterday, overdue/);
     expect(
@@ -164,7 +164,7 @@ describe("To Do lists", () => {
       "Friday",
     );
     expect(within(list).getByRole("option", { name: /^Book car service/ })).toHaveTextContent(
-      "Fri 23 Oct",
+      "Fri, Oct 23",
     );
   });
 
@@ -268,12 +268,12 @@ describe("Completing and starring", () => {
       name: "Completed: Read load test report",
     });
     await user.click(checkbox);
-    // Ticked straight away, before the backend answers.
+    // Checked right away, before the backend answers.
     expect(checkbox).toHaveAttribute("aria-checked", "true");
     expect((await findTask(backend, "Read load test report"))?.status).toBe("notStarted");
     release();
 
-    // After the tick animation it leaves the open tasks.
+    // After the check mark animation it leaves the open tasks.
     await waitFor(() => expect(taskTitles(list)).not.toContain("Read load test report"));
     const toggle = screen.getByRole("button", { name: /^Completed \d/ });
     expect(toggle).toHaveTextContent("Completed 2");
@@ -388,7 +388,7 @@ describe("Task details", () => {
     const list = await screen.findByRole("listbox", { name: "Tasks" });
     await user.click(within(list).getByRole("option", { name: /^Read load test report/ }));
     const pane = details();
-    expect(within(pane).getByText("Created Wed 14 Oct")).toBeInTheDocument();
+    expect(within(pane).getByText("Created Wed, Oct 14")).toBeInTheDocument();
     expect(within(pane).getByRole("heading", { name: "Add due date" })).toBeInTheDocument();
 
     // Title: saved on blur.
@@ -410,7 +410,7 @@ describe("Task details", () => {
       "aria-pressed",
       "true",
     );
-    expect(within(pane).getByRole("heading", { name: "Due Thursday 15 October" })).toBeVisible();
+    expect(within(pane).getByRole("heading", { name: "Due Thursday, October 15" })).toBeVisible();
     await user.click(within(pane).getByRole("button", { name: "Next week" }));
     await waitFor(async () =>
       expect((await findTask(backend, "Read the load test report"))?.dueDate).toBe("2026-10-19"),
@@ -470,7 +470,7 @@ describe("Task details", () => {
     await user.click(
       within(pane).getByRole("checkbox", { name: "Completed: Expense Lisbon trip" }),
     );
-    expect(await within(pane).findByText("Completed Wed 14 Oct")).toBeInTheDocument();
+    expect(await within(pane).findByText("Completed Wed, Oct 14")).toBeInTheDocument();
     await waitFor(async () =>
       expect(await findTask(backend, "Expense Lisbon trip")).toMatchObject({
         status: "completed",

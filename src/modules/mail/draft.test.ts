@@ -140,7 +140,7 @@ describe("reply helpers", () => {
     expect(html).toContain("<b>To:</b> Alex Morgan &lt;alex.morgan@acme.example&gt;; Mei Tanaka");
     expect(html).toContain("<b>Cc:</b> Jonas Becker");
     expect(html).toContain("<b>Subject:</b> Plans &lt;for&gt; Q3 &amp; beyond");
-    expect(html).toMatch(/<b>Sent:<\/b> Wednesday, 14 October 2026 \d\d:\d\d/);
+    expect(html).toMatch(/<b>Sent:<\/b> Wednesday, October 14, 2026 \d{1,2}:\d\d [AP]M/);
     expect(html).toContain("<p>Original</p>");
     // Plain-text originals are escaped.
     expect(quoteOriginal(message({ bodyHtml: null, bodyText: "a < b\nc" }))).toContain(

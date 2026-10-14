@@ -53,7 +53,7 @@ describe("all-day representation", () => {
 
   it("keeps whole days across a daylight-saving change", () => {
     withTimeZone("Europe/London", () => {
-      // Clocks go back on 25 October 2026: the local day is 25 hours long.
+      // Clocks go back on October 25, 2026: the local day is 25 hours long.
       const times = timesFromRange(new Date(2026, 9, 25), new Date(2026, 9, 26), true);
       expect(times).toMatchObject({ startDate: "2026-10-25", endDate: "2026-10-25" });
       expect(timesToIso(times)).toEqual({
@@ -155,7 +155,7 @@ describe("form times", () => {
 
   it("builds instants from wall-clock times across DST gaps", () => {
     withTimeZone("Europe/London", () => {
-      // 01:30 does not exist on 29 March 2026; JavaScript moves it forward.
+      // 1:30 AM does not exist on March 29, 2026; JavaScript moves it forward.
       const d = combineDateTime("2026-03-29", "01:30")!;
       expect(d.getHours()).toBe(2);
       expect(combineDateTime("2026-03-29", "25:00")).toBeNull();

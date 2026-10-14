@@ -30,7 +30,7 @@ import {
 } from "./taskUtils";
 import "./tasks.css";
 
-/** How long a just-completed task stays in place so its tick can animate. */
+/** How long a just-completed task stays in place so its check mark can animate. */
 const SETTLE_MS = 450;
 
 const EMPTY_TEXT = {
@@ -175,7 +175,7 @@ export function TasksModule() {
   const toggleComplete = (task: Task) => {
     const completing = !isCompleted(task);
     if (completing) {
-      // Let the tick animate in place before the task moves to Completed.
+      // Let the check mark animate in place before the task moves to Completed.
       setSettling((s) => new Set(s).add(task.id));
       setTimeout(() => {
         setSettling((s) => {

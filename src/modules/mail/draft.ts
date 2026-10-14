@@ -1,9 +1,8 @@
 // Pure helpers for composing: address parsing, reply/forward prefill and
 // quoting the original message.
 
-import { format } from "date-fns";
-
 import type { Account, EmailAddress, Message, ReplyKind } from "../../api/types";
+import { formatDate, formatTime } from "../../lib/datetime";
 import type { ComposeDraft } from "./mailStore";
 
 export type DraftInput = Omit<ComposeDraft, "id" | "dirty">;
@@ -110,11 +109,16 @@ function formatAddressHtml(a: EmailAddress): string {
   return a.name ? `${escapeHtml(a.name)} &lt;${escapeHtml(a.address)}&gt;` : escapeHtml(a.address);
 }
 
+/** Outlook's quote header date: "Wednesday, October 14, 2026 3:05 PM". */
+function sentLine(date: Date): string {
+  return `${formatDate(date, "weekdayLongYear")} ${formatTime(date)}`;
+}
+
 /** Outlook-style header block followed by the original body. */
 export function quoteOriginal(original: Message): string {
   const rows: [string, string][] = [
     ["From", original.from ? formatAddressHtml(original.from) : ""],
-    ["Sent", escapeHtml(format(new Date(original.receivedAt), "EEEE, d MMMM yyyy HH:mm"))],
+    ["Sent", escapeHtml(sentLine(new Date(original.receivedAt)))],
     ["To", original.to.map(formatAddressHtml).join("; ")],
   ];
   if (original.cc.length > 0) rows.push(["Cc", original.cc.map(formatAddressHtml).join("; ")]);

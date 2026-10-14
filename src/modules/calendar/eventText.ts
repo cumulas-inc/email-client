@@ -3,6 +3,7 @@
 import { format } from "date-fns";
 
 import type { CalendarEvent, ResponseStatus, ShowAs } from "../../api/types";
+import { formatDate, formatDateRange } from "../../lib/datetime";
 import { formatTimeRange } from "../../lib/format";
 import { eventRange } from "./dates";
 
@@ -50,14 +51,14 @@ export function eventTimeRange(event: CalendarEvent): string {
   return formatTimeRange(event.start, event.end, event.isAllDay);
 }
 
-/** "Wednesday, 14 October 2026" or "Wed 14 Oct – Fri 16 Oct" for long events. */
+/** "Wednesday, October 14, 2026", or "Wed, Oct 14 – Fri, Oct 16, 2026" for long events. */
 export function eventDateLine(event: CalendarEvent): string {
   const { start, end } = eventRange(event);
   const last = new Date(end.getTime() - 1);
   if (format(start, "yyyy-MM-dd") === format(last, "yyyy-MM-dd") || !event.isAllDay) {
-    return format(start, "EEEE, d MMMM yyyy");
+    return formatDate(start, "weekdayLongYear");
   }
-  return `${format(start, "EEE d MMM")} – ${format(last, "EEE d MMM yyyy")}`;
+  return formatDateRange(start, last, "weekdayShortYear");
 }
 
 /** Spoken summary of an event for its button. */
@@ -69,11 +70,11 @@ export function eventAriaLabel(event: CalendarEvent, calendarName?: string): str
     const sameDay = format(start, "yyyy-MM-dd") === format(last, "yyyy-MM-dd");
     parts.push(
       sameDay
-        ? `${format(start, "EEEE d MMMM")}, all day`
-        : `${format(start, "EEEE d MMMM")} to ${format(last, "EEEE d MMMM")}, all day`,
+        ? `${formatDate(start, "weekdayLong")}, all day`
+        : `${formatDate(start, "weekdayLong")} to ${formatDate(last, "weekdayLong")}, all day`,
     );
   } else {
-    parts.push(`${format(start, "EEEE d MMMM")}, ${eventTimeRange(event)}`);
+    parts.push(`${formatDate(start, "weekdayLong")}, ${eventTimeRange(event)}`);
   }
   if (event.location) parts.push(event.location);
   if (calendarName) parts.push(`${calendarName} calendar`);

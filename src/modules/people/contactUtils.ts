@@ -1,6 +1,7 @@
-import { format, isValid, parseISO } from "date-fns";
+import { isValid, parseISO } from "date-fns";
 
 import type { Contact, ContactDraft, EmailAddress, Phone } from "../../api/types";
+import { formatDate } from "../../lib/datetime";
 
 // --- List grouping -----------------------------------------------------------
 
@@ -65,10 +66,10 @@ export function phoneKindLabel(kind: string): string {
   return PHONE_KINDS.find((k) => k.value === kind)?.label ?? "Phone";
 }
 
-/** "6 November 1988" from "1988-11-06"; the raw text if it is not a date. */
+/** "November 6, 1988" from "1988-11-06"; the raw text if it is not a date. */
 export function formatBirthday(birthday: string): string {
   const date = parseISO(birthday);
-  return isValid(date) ? format(date, "d MMMM yyyy") : birthday;
+  return isValid(date) ? formatDate(date, "longYear") : birthday;
 }
 
 // --- Editor form ------------------------------------------------------------------

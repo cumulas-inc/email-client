@@ -52,7 +52,7 @@ export function contrast(a: string | Rgb, b: string | Rgb): number {
 }
 
 /**
- * Moves `color` towards `target` until it contrasts enough with every
+ * Moves `color` toward `target` until it contrasts enough with every
  * background (or returns `target`).
  */
 function readable(color: Rgb, target: Rgb, backgrounds: Rgb[], minimum: number, start = 0): Rgb {

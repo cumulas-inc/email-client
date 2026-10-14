@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import type { Calendar, CalendarEvent } from "../../api/types";
+import { formatDate, formatHour, formatTimeSpan } from "../../lib/datetime";
 import { atMinutes, minutesOfDay } from "./dates";
 import { EventBar } from "./EventBar";
 import { type EventSelectProps, eventClasses, eventStyle, selectHandlers } from "./eventProps";
@@ -65,7 +66,10 @@ function timeZoneLabel(now: Date): string {
   }
 }
 
-/** "HH:mm" for minutes since midnight. */
+/** Reference day for formatting times of day. */
+const DAY_ZERO = new Date(2000, 0, 1);
+
+/** "HH:mm" for minutes since midnight (machine-readable, for data attributes). */
 function clockLabel(minutes: number): string {
   const h = Math.floor(minutes / 60) % 24;
   return `${String(h).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
@@ -193,8 +197,10 @@ export function TimeGrid({
             const today = isSameDay(day, now);
             const label = (
               <>
-                <span className="cal-tg__daynum">{format(day, "d")}</span>
-                <span className="cal-tg__dayname">{format(day, wide ? "EEEE" : "EEE")}</span>
+                <span className="cal-tg__daynum">{formatDate(day, "dayOfMonth")}</span>
+                <span className="cal-tg__dayname">
+                  {formatDate(day, wide ? "weekdayName" : "weekday")}
+                </span>
               </>
             );
             return (
@@ -207,7 +213,7 @@ export function TimeGrid({
                   <button
                     type="button"
                     className="cal-tg__daybtn"
-                    aria-label={format(day, "EEEE, d MMMM yyyy")}
+                    aria-label={formatDate(day, "weekdayLongYear")}
                     title="Open this day"
                     onClick={() => onOpenDay(day)}
                   >
@@ -227,7 +233,7 @@ export function TimeGrid({
               key={day.getTime()}
               className={clsx("cal-tg__allday-cell", isWeekend(day) && "cal-tg__allday-cell--off")}
               role="group"
-              aria-label={`All-day events, ${format(day, "EEEE d MMMM")}`}
+              aria-label={`All-day events, ${formatDate(day, "weekdayLong")}`}
               onClick={() => onCreate(day, addDays(day, 1), true)}
             >
               {cellLanes(allDay, col, () => Infinity).map(({ lane, piece }) =>
@@ -256,7 +262,7 @@ export function TimeGrid({
           <div className="cal-tg__gutter cal-tg__hours" aria-hidden="true">
             {Array.from({ length: 23 }, (_, i) => i + 1).map((hour) => (
               <span key={hour} className="cal-tg__hour" style={{ top: hour * HOUR_HEIGHT }}>
-                {clockLabel(hour * 60)}
+                {formatHour(new Date(2000, 0, 1, hour))}
               </span>
             ))}
           </div>
@@ -268,7 +274,7 @@ export function TimeGrid({
                 key={day.getTime()}
                 className="cal-tg__col"
                 role="group"
-                aria-label={format(day, "EEEE d MMMM")}
+                aria-label={formatDate(day, "weekdayLong")}
                 onPointerDown={(e) => startDrag(e, col)}
               >
                 {Array.from({ length: SLOTS }, (_, i) => {
@@ -322,7 +328,10 @@ function DragGhost({ drag }: { drag: DragState }) {
       style={{ top: first * SLOT_HEIGHT, height: (last - first + 1) * SLOT_HEIGHT }}
       aria-hidden="true"
     >
-      {clockLabel(first * SLOT_MINUTES)} – {clockLabel((last + 1) * SLOT_MINUTES)}
+      {formatTimeSpan(
+        atMinutes(DAY_ZERO, first * SLOT_MINUTES),
+        atMinutes(DAY_ZERO, (last + 1) * SLOT_MINUTES),
+      )}
     </div>
   );
 }

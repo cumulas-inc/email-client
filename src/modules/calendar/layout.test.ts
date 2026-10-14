@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { CalendarEvent } from "../../api/types";
+import { setLocaleForTesting } from "../../lib/datetime";
 import { toAllDayIso } from "./dates";
 import { withTimeZone } from "./testing";
 import {
@@ -134,6 +135,8 @@ describe("timed segments", () => {
 describe("view ranges", () => {
   const wednesday = new Date(2026, 9, 14);
 
+  afterEach(() => setLocaleForTesting("en-US"));
+
   it("computes the visible days of each view", () => {
     expect(viewRange("day", new Date(2026, 9, 14, 15, 30)).days).toEqual([wednesday]);
 
@@ -141,20 +144,33 @@ describe("view ranges", () => {
     expect(work.days.map((d) => d.getDate())).toEqual([12, 13, 14, 15, 16]);
     expect(work.end).toEqual(new Date(2026, 9, 17));
 
+    // American weeks run Sunday to Saturday.
     const week = viewRange("week", wednesday);
-    expect(week.days.map((d) => d.getDate())).toEqual([12, 13, 14, 15, 16, 17, 18]);
+    expect(week.days.map((d) => d.getDate())).toEqual([11, 12, 13, 14, 15, 16, 17]);
 
     const month = viewRange("month", wednesday);
     expect(month.days).toHaveLength(42);
-    expect(month.start).toEqual(new Date(2026, 8, 28)); // Monday before 1 October
-    expect(month.end).toEqual(new Date(2026, 10, 9));
+    expect(month.start).toEqual(new Date(2026, 8, 27)); // Sunday before October 1
+    expect(month.end).toEqual(new Date(2026, 10, 8));
   });
 
-  it("shows Monday to Friday of the same week on weekends", () => {
-    const sunday = new Date(2026, 9, 18);
-    expect(viewRange("workweek", sunday).days.map((d) => d.getDate())).toEqual([
-      12, 13, 14, 15, 16,
+  it("starts weeks on Monday where the locale does", () => {
+    setLocaleForTesting("en-GB");
+    expect(viewRange("week", wednesday).days.map((d) => d.getDate())).toEqual([
+      12, 13, 14, 15, 16, 17, 18,
     ]);
+    expect(viewRange("month", wednesday).start).toEqual(new Date(2026, 8, 28));
+  });
+
+  it("shows the work week a weekend day belongs to", () => {
+    const saturday = new Date(2026, 9, 17);
+    const sunday = new Date(2026, 9, 18);
+    const workDays = (d: Date) => viewRange("workweek", d).days.map((day) => day.getDate());
+    expect(workDays(saturday)).toEqual([12, 13, 14, 15, 16]);
+    // Where weeks start on Sunday, Sunday already looks ahead to Monday.
+    expect(workDays(sunday)).toEqual([19, 20, 21, 22, 23]);
+    setLocaleForTesting("en-GB");
+    expect(workDays(sunday)).toEqual([12, 13, 14, 15, 16]);
   });
 
   it("moves by a day, a week or a month", () => {
@@ -165,20 +181,26 @@ describe("view ranges", () => {
   });
 
   it("titles ranges like Outlook", () => {
+    expect(rangeTitle("day", wednesday)).toBe("Wednesday, October 14, 2026");
+    expect(rangeTitle("workweek", wednesday)).toBe("October 12 – 16, 2026");
+    expect(rangeTitle("week", wednesday)).toBe("October 11 – 17, 2026");
+    expect(rangeTitle("month", wednesday)).toBe("October 2026");
+    expect(rangeTitle("week", new Date(2026, 9, 1))).toBe("September 27 – October 3, 2026");
+    expect(rangeTitle("week", new Date(2026, 11, 31))).toBe("December 27, 2026 – January 2, 2027");
+  });
+
+  it("titles ranges in the locale's own style", () => {
+    setLocaleForTesting("en-GB");
     expect(rangeTitle("day", wednesday)).toBe("Wednesday, 14 October 2026");
     expect(rangeTitle("workweek", wednesday)).toBe("12–16 October 2026");
-    expect(rangeTitle("week", wednesday)).toBe("12–18 October 2026");
-    expect(rangeTitle("month", wednesday)).toBe("October 2026");
-    expect(rangeTitle("week", new Date(2026, 9, 1))).toBe("28 September – 4 October 2026");
-    expect(rangeTitle("week", new Date(2026, 11, 31))).toBe("28 December 2026 – 3 January 2027");
   });
 
   it("keeps whole days across daylight-saving changes", () => {
     withTimeZone("Europe/Berlin", () => {
-      // Clocks go back on Sunday 25 October 2026 in Europe.
-      const days = viewRange("week", new Date(2026, 9, 22)).days;
+      // Clocks go back on Sunday, October 25, 2026 in Europe.
+      const days = viewRange("week", new Date(2026, 9, 28)).days;
       expect(days.map((d) => [d.getDate(), d.getHours()])).toEqual(
-        [19, 20, 21, 22, 23, 24, 25].map((d) => [d, 0]),
+        [25, 26, 27, 28, 29, 30, 31].map((d) => [d, 0]),
       );
     });
   });

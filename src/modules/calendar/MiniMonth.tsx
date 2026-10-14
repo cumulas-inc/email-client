@@ -1,16 +1,9 @@
 import clsx from "clsx";
-import {
-  addDays,
-  addMonths,
-  format,
-  isSameDay,
-  isSameMonth,
-  startOfDay,
-  startOfMonth,
-} from "date-fns";
+import { addDays, addMonths, isSameDay, isSameMonth, startOfDay, startOfMonth } from "date-fns";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 
+import { formatDate } from "../../lib/datetime";
 import { chunk, viewRange } from "./layout";
 
 interface MiniMonthProps {
@@ -73,7 +66,7 @@ export function MiniMonth({ anchor, rangeStart, rangeEnd, today, onSelect }: Min
     <div className="cal-mini">
       <div className="cal-mini__header">
         <span className="cal-mini__title" aria-live="polite">
-          {format(month, "MMMM yyyy")}
+          {formatDate(month, "monthYear")}
         </span>
         <button
           type="button"
@@ -98,14 +91,14 @@ export function MiniMonth({ anchor, rangeStart, rangeEnd, today, onSelect }: Min
         ref={gridRef}
         role="grid"
         className="cal-mini__grid"
-        aria-label={`Date navigator, ${format(month, "MMMM yyyy")}`}
+        aria-label={`Date navigator, ${formatDate(month, "monthYear")}`}
         onKeyDown={onKeyDown}
       >
         <thead>
           <tr>
             {weeks[0]!.map((d) => (
               <th key={d.getTime()} scope="col" className="cal-mini__weekday">
-                <abbr title={format(d, "EEEE")}>{format(d, "EEEEE")}</abbr>
+                <abbr title={formatDate(d, "weekdayName")}>{formatDate(d, "weekdayNarrow")}</abbr>
               </th>
             ))}
           </tr>
@@ -130,14 +123,14 @@ export function MiniMonth({ anchor, rangeStart, rangeEnd, today, onSelect }: Min
                         "cal-mini__day--today": isToday,
                         "cal-mini__day--anchor": isSameDay(day, anchor),
                       })}
-                      aria-label={format(day, "EEEE, d MMMM yyyy")}
+                      aria-label={formatDate(day, "weekdayLongYear")}
                       aria-current={isToday ? "date" : undefined}
                       onClick={() => {
                         setFocused(day);
                         onSelect(day);
                       }}
                     >
-                      <span>{format(day, "d")}</span>
+                      <span>{formatDate(day, "dayOfMonth")}</span>
                     </button>
                   </td>
                 );

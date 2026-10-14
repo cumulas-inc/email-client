@@ -1,19 +1,10 @@
-// Pure layout maths for the calendar views: visible ranges, titles, the
+// Pure layout math for the calendar views: visible ranges, titles, the
 // side-by-side layout of overlapping events and lanes for multi-day bars.
 
-import {
-  addDays,
-  addMonths,
-  addWeeks,
-  format,
-  isSameMonth,
-  isSameYear,
-  startOfDay,
-  startOfMonth,
-  startOfWeek,
-} from "date-fns";
+import { addDays, addMonths, addWeeks, startOfDay, startOfMonth, startOfWeek } from "date-fns";
 
 import type { CalendarEvent } from "../../api/types";
+import { formatDate, formatDateRange, weekStartsOn } from "../../lib/datetime";
 import { type LocalRange, eventRange, isAllDayLike, minutesOfDay } from "./dates";
 
 export type CalendarView = "day" | "workweek" | "week" | "month";
@@ -26,9 +17,6 @@ export const VIEW_LABELS: Record<CalendarView, string> = {
   week: "Week",
   month: "Month",
 };
-
-/** Weeks start on Monday, like Outlook in most of Europe. */
-export const WEEK_STARTS_ON = 1;
 
 export const MINUTES_PER_DAY = 24 * 60;
 
@@ -55,20 +43,29 @@ export function viewRange(view: CalendarView, anchor: Date): ViewRange {
       count = 1;
       break;
     case "workweek":
-      start = startOfWeek(anchor, { weekStartsOn: WEEK_STARTS_ON });
+      start = startOfWorkWeek(anchor);
       count = 5;
       break;
     case "week":
-      start = startOfWeek(anchor, { weekStartsOn: WEEK_STARTS_ON });
+      start = startOfWeek(anchor, { weekStartsOn: weekStartsOn() });
       count = 7;
       break;
     case "month":
-      start = startOfWeek(startOfMonth(anchor), { weekStartsOn: WEEK_STARTS_ON });
+      start = startOfWeek(startOfMonth(anchor), { weekStartsOn: weekStartsOn() });
       count = 42;
       break;
   }
   const days = daysFrom(start, count);
   return { start, end: addDays(start, count), days };
+}
+
+/**
+ * Monday of the work week to show. Where weeks start on Sunday, a Sunday
+ * belongs to the coming work week rather than the one just ended.
+ */
+function startOfWorkWeek(anchor: Date): Date {
+  const day = weekStartsOn() === 0 && anchor.getDay() === 0 ? addDays(anchor, 1) : anchor;
+  return startOfWeek(day, { weekStartsOn: 1 });
 }
 
 /** The anchor date one step back (-1) or forward (+1). */
@@ -84,18 +81,12 @@ export function shiftAnchor(view: CalendarView, anchor: Date, direction: 1 | -1)
   }
 }
 
-/** "Wednesday, 14 October 2026", "12–16 October 2026", "October 2026"… */
+/** "Wednesday, October 14, 2026", "October 12 – 16, 2026", "October 2026"… */
 export function rangeTitle(view: CalendarView, anchor: Date): string {
-  if (view === "day") return format(anchor, "EEEE, d MMMM yyyy");
-  if (view === "month") return format(anchor, "MMMM yyyy");
+  if (view === "day") return formatDate(anchor, "weekdayLongYear");
+  if (view === "month") return formatDate(anchor, "monthYear");
   const { days } = viewRange(view, anchor);
-  const first = days[0]!;
-  const last = days[days.length - 1]!;
-  if (isSameMonth(first, last)) return `${format(first, "d")}–${format(last, "d MMMM yyyy")}`;
-  if (isSameYear(first, last)) {
-    return `${format(first, "d MMMM")} – ${format(last, "d MMMM yyyy")}`;
-  }
-  return `${format(first, "d MMMM yyyy")} – ${format(last, "d MMMM yyyy")}`;
+  return formatDateRange(days[0]!, days[days.length - 1]!, "longYear");
 }
 
 /** Label of the previous/next buttons for a view. */

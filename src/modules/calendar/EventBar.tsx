@@ -1,8 +1,8 @@
 import clsx from "clsx";
-import { format } from "date-fns";
 import type { CSSProperties } from "react";
 
 import type { CalendarEvent } from "../../api/types";
+import { formatTime } from "../../lib/datetime";
 import { eventRange, isAllDayLike } from "./dates";
 import { type EventSelectProps, eventClasses, eventStyle, selectHandlers } from "./eventProps";
 import { eventAriaLabel, eventTitle } from "./eventText";
@@ -43,7 +43,7 @@ export function EventBar({
       {...selectHandlers(event, onSelect)}
     >
       {timed && !joinsBefore && (
-        <span className="cal-bar__time">{format(eventRange(event).start, "HH:mm")}</span>
+        <span className="cal-bar__time">{formatTime(eventRange(event).start)}</span>
       )}
       <span className="cal-bar__title">{eventTitle(event)}</span>
     </button>

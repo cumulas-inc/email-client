@@ -18,7 +18,7 @@ afterAll(() => setTimeZone(previousTz));
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(new Date(2026, 9, 14, 12, 0)); // Wednesday 14 October 2026, 12:00
+  vi.setSystemTime(new Date(2026, 9, 14, 12, 0)); // Wednesday, October 14, 2026, at noon
   localStorage.clear();
   useToasts.setState({ toasts: [] });
 });
@@ -50,12 +50,12 @@ describe("CalendarModule", () => {
   it("navigates between ranges and views with buttons and shortcuts", async () => {
     const { user } = await setup();
     await eventButton("Atlas launch review");
-    expect(title()).toHaveTextContent("12–16 October 2026");
+    expect(title()).toHaveTextContent("October 12 – 16, 2026");
 
     await user.click(screen.getByRole("button", { name: "Next week" }));
-    expect(title()).toHaveTextContent("19–23 October 2026");
+    expect(title()).toHaveTextContent("October 19 – 23, 2026");
     await user.click(screen.getByRole("button", { name: "Today" }));
-    expect(title()).toHaveTextContent("12–16 October 2026");
+    expect(title()).toHaveTextContent("October 12 – 16, 2026");
 
     await user.click(screen.getByRole("button", { name: "Month" }));
     expect(title()).toHaveTextContent("October 2026");
@@ -64,22 +64,22 @@ describe("CalendarModule", () => {
     expect(title()).toHaveTextContent("November 2026");
 
     await user.click(screen.getByRole("button", { name: "Day" }));
-    expect(title()).toHaveTextContent("Saturday, 14 November 2026");
+    expect(title()).toHaveTextContent("Saturday, November 14, 2026");
 
     await user.keyboard("{Control>}{Alt>}2{/Alt}{/Control}");
-    expect(title()).toHaveTextContent("9–13 November 2026");
+    expect(title()).toHaveTextContent("November 9 – 13, 2026");
     expect(screen.getByRole("button", { name: "Work week" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
     await user.keyboard("{Alt>}{ArrowLeft}{/Alt}");
-    expect(title()).toHaveTextContent("2–6 November 2026");
+    expect(title()).toHaveTextContent("November 2 – 6, 2026");
     await user.keyboard("{Alt>}{ArrowLeft}{/Alt}");
-    expect(title()).toHaveTextContent("26–30 October 2026");
+    expect(title()).toHaveTextContent("October 26 – 30, 2026");
     await user.keyboard("t");
-    expect(title()).toHaveTextContent("12–16 October 2026");
+    expect(title()).toHaveTextContent("October 12 – 16, 2026");
     await user.keyboard("{Control>}{Alt>}3{/Alt}{/Control}");
-    expect(title()).toHaveTextContent("12–18 October 2026");
+    expect(title()).toHaveTextContent("October 11 – 17, 2026");
   });
 
   it("restores the last view", async () => {
@@ -94,7 +94,7 @@ describe("CalendarModule", () => {
     const refresh = vi.spyOn(backend, "refreshEvents");
     const { user } = await setup({ backend });
     await eventButton("Atlas launch review");
-    // Local midnights in Los Angeles (UTC-7) of Monday 12 and Saturday 17 October.
+    // Local midnights in Los Angeles (UTC-7) of Monday, October 12 and Saturday, October 17.
     expect(list).toHaveBeenCalledWith("2026-10-12T07:00:00.000Z", "2026-10-17T07:00:00.000Z");
     expect(refresh).toHaveBeenCalledWith("2026-10-12T07:00:00.000Z", "2026-10-17T07:00:00.000Z");
 
@@ -105,23 +105,25 @@ describe("CalendarModule", () => {
   it("shows events in local time, including ones that cross midnight", async () => {
     const { user } = await setup({ view: "week" });
     const review = await eventButton("Atlas launch review");
-    expect(review).toHaveAccessibleName(/Wednesday 14 October, 14:00 – 15:00/);
-    expect(review).toHaveTextContent("14:00 – 15:00");
+    expect(review).toHaveAccessibleName(/Wednesday, October 14, 2:00 – 3:00 PM/);
+    expect(review).toHaveTextContent("2:00 – 3:00 PM");
 
-    // Friday 22:00 to Saturday 01:00 is drawn on both days.
+    // Friday 10 PM to Saturday 1 AM is drawn on both days.
     const release = screen.getAllByRole("button", { name: /^Release window,/ });
     expect(release).toHaveLength(2);
-    expect(release[0]!.closest('[role="group"]')).toHaveAccessibleName("Friday 16 October");
-    expect(release[1]!.closest('[role="group"]')).toHaveAccessibleName("Saturday 17 October");
+    expect(release[0]!.closest('[role="group"]')).toHaveAccessibleName("Friday, October 16");
+    expect(release[1]!.closest('[role="group"]')).toHaveAccessibleName("Saturday, October 17");
 
     // All-day events are in the all-day lane on the right local days.
     const wfh = screen.getByRole("button", { name: /^Working from home,/ });
-    expect(wfh).toHaveAccessibleName(/Friday 16 October, all day/);
-    expect(wfh.closest('[role="group"]')).toHaveAccessibleName("All-day events, Friday 16 October");
+    expect(wfh).toHaveAccessibleName(/Friday, October 16, all day/);
+    expect(wfh.closest('[role="group"]')).toHaveAccessibleName(
+      "All-day events, Friday, October 16",
+    );
 
     await user.click(screen.getByRole("button", { name: "Next week" }));
     const trip = await eventButton("Lisbon trip");
-    expect(trip).toHaveAccessibleName(/Thursday 22 October to Sunday 25 October, all day/);
+    expect(trip).toHaveAccessibleName(/Thursday, October 22 to Sunday, October 25, all day/);
   });
 
   it("creates an event by clicking a time slot", async () => {
@@ -157,7 +159,7 @@ describe("CalendarModule", () => {
     });
     expect(await screen.findByText("Event created")).toBeInTheDocument();
     expect(await eventButton("Roadmap review")).toHaveAccessibleName(
-      /Thursday 15 October, 10:00 – 10:30/,
+      /Thursday, October 15, 10:00 – 10:30 AM/,
     );
     expect(screen.queryByRole("dialog", { name: "New event" })).not.toBeInTheDocument();
   });
@@ -184,7 +186,7 @@ describe("CalendarModule", () => {
       isAllDay: true,
     });
     expect(await eventButton("Offsite")).toHaveAccessibleName(
-      /Thursday 15 October to Friday 16 October, all day/,
+      /Thursday, October 15 to Friday, October 16, all day/,
     );
   });
 
@@ -219,7 +221,7 @@ describe("CalendarModule", () => {
     const dialog = await screen.findByRole("dialog", { name: "New event" });
     const calendar = within(dialog).getByLabelText("Calendar");
     // Read-only calendars are not offered.
-    expect(within(calendar).queryByRole("option", { name: "Public holidays" })).toBeNull();
+    expect(within(calendar).queryByRole("option", { name: "US holidays" })).toBeNull();
     expect(within(dialog).getByRole("switch", { name: /Teams meeting/ })).toBeInTheDocument();
     await user.selectOptions(calendar, "cal-home");
     expect(within(dialog).queryByRole("switch", { name: /Teams meeting/ })).toBeNull();
@@ -231,7 +233,7 @@ describe("CalendarModule", () => {
     await user.click(await eventButton("Atlas launch review"));
 
     const details = screen.getByRole("dialog", { name: "Atlas launch review" });
-    expect(within(details).getByText("14:00 – 15:00")).toBeInTheDocument();
+    expect(within(details).getByText("2:00 – 3:00 PM")).toBeInTheDocument();
     expect(within(details).getByText("Room 4.12 / Online")).toBeInTheDocument();
     await user.click(within(details).getByRole("button", { name: "Edit event" }));
 
@@ -375,14 +377,14 @@ describe("CalendarModule", () => {
   it("shows +k more in month view and opens the day", async () => {
     const { user } = await setup({ view: "month" });
     const more = await screen.findByRole("button", {
-      name: "5 more events on Wednesday 14 October",
+      name: "5 more events on Wednesday, October 14",
     });
     expect(more).toHaveTextContent("+5 more");
     // Bars span days: the launch week is drawn once for Monday to Friday.
     expect(screen.getAllByRole("button", { name: /^Atlas launch week,/ })).toHaveLength(1);
 
     await user.click(more);
-    expect(title()).toHaveTextContent("Wednesday, 14 October 2026");
+    expect(title()).toHaveTextContent("Wednesday, October 14, 2026");
     expect(screen.getByRole("button", { name: "Day" })).toHaveAttribute("aria-pressed", "true");
     expect(await eventButton("Customer escalation: Contoso")).toBeInTheDocument();
   });
@@ -391,7 +393,7 @@ describe("CalendarModule", () => {
     const { user } = await setup();
     await eventButton("Atlas launch review");
     await user.click(screen.getByRole("button", { name: "Go to next month" }));
-    await user.click(screen.getByRole("button", { name: "Wednesday, 18 November 2026" }));
-    expect(title()).toHaveTextContent("16–20 November 2026");
+    await user.click(screen.getByRole("button", { name: "Wednesday, November 18, 2026" }));
+    expect(title()).toHaveTextContent("November 16 – 20, 2026");
   });
 });

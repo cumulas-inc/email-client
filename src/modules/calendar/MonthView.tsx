@@ -1,8 +1,9 @@
 import clsx from "clsx";
-import { addDays, format, isSameDay, isSameMonth, isWeekend } from "date-fns";
+import { addDays, isSameDay, isSameMonth, isWeekend } from "date-fns";
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Calendar, CalendarEvent } from "../../api/types";
+import { formatDate, formatTime } from "../../lib/datetime";
 import { eventRange } from "./dates";
 import { EventBar } from "./EventBar";
 import { type EventSelectProps, eventClasses, eventStyle, selectHandlers } from "./eventProps";
@@ -91,12 +92,12 @@ export function MonthView({
   };
 
   return (
-    <div className="cal-month" role="grid" aria-label={format(anchor, "MMMM yyyy")}>
+    <div className="cal-month" role="grid" aria-label={formatDate(anchor, "monthYear")}>
       <div className="cal-month__head" role="rowgroup">
         <div className="cal-month__headrow" role="row">
           {weeks[0]!.map((d) => (
             <div key={d.getTime()} className="cal-month__weekday" role="columnheader">
-              <abbr title={format(d, "EEEE")}>{format(d, "EEE")}</abbr>
+              <abbr title={formatDate(d, "weekdayName")}>{formatDate(d, "weekday")}</abbr>
             </div>
           ))}
         </div>
@@ -133,7 +134,7 @@ export function MonthView({
                         type="button"
                         className="cal-month__daynum"
                         tabIndex={tabbable && isSameDay(day, tabbable) ? 0 : -1}
-                        aria-label={`${format(day, "EEEE, d MMMM yyyy")}, ${
+                        aria-label={`${formatDate(day, "weekdayLongYear")}, ${
                           dayEvents === 1 ? "1 event" : `${dayEvents} events`
                         }`}
                         title="Open this day"
@@ -143,7 +144,7 @@ export function MonthView({
                         }}
                         onFocus={() => setFocused(day)}
                       >
-                        {format(day, day.getDate() === 1 ? "d MMM" : "d")}
+                        {formatDate(day, day.getDate() === 1 ? "short" : "dayOfMonth")}
                       </button>
                     </div>
                     <div className="cal-month__lanes">
@@ -176,7 +177,7 @@ export function MonthView({
                         <button
                           type="button"
                           className="cal-month__more"
-                          aria-label={`${more} more event${more === 1 ? "" : "s"} on ${format(day, "EEEE d MMMM")}`}
+                          aria-label={`${more} more event${more === 1 ? "" : "s"} on ${formatDate(day, "weekdayLong")}`}
                           onClick={(e) => {
                             e.stopPropagation();
                             onOpenDay(day);
@@ -215,7 +216,7 @@ function MonthEntry({ event, calendar, selected, onSelect }: MonthEntryProps) {
       {...selectHandlers(event, onSelect)}
     >
       <span className="cal-entry__dot" aria-hidden="true" />
-      <span className="cal-entry__time">{format(eventRange(event).start, "HH:mm")}</span>
+      <span className="cal-entry__time">{formatTime(eventRange(event).start)}</span>
       <span className="cal-entry__title">{eventTitle(event)}</span>
     </button>
   );

@@ -43,7 +43,7 @@ const people = {
   dana: { name: "Dana Whitfield", address: "dana.whitfield@acme.example" },
   travel: { name: "Skyway Travel", address: "bookings@skyway-travel.example" },
   news: { name: "The Linux Weekly Digest", address: "digest@linuxweekly.example" },
-  mum: { name: "Mum", address: "helen.morgan@mailbox.example" },
+  mom: { name: "Mom", address: "helen.morgan@mailbox.example" },
   ben: { name: "Ben Morgan", address: "ben.morgan@mailbox.example" },
   bank: { name: "Harbor Bank", address: "no-reply@harborbank.example" },
   club: { name: "Riverside Climbing Club", address: "hello@riversideclimbing.example" },
@@ -178,7 +178,7 @@ function workMessages(): Message[] {
           "Hi Alex,",
           "I've folded everyone's comments into the launch checklist. Could you take a last look at the <b>rollback plan</b> section before our 2pm review? The open items are:",
         ) +
-        "<ul><li>Confirm on-call rota for launch week</li><li>Sign-off from Security on the data retention change</li><li>Customer comms draft (Mei has it)</li></ul>" +
+        "<ul><li>Confirm the on-call rotation for launch week</li><li>Sign-off from Security on the data retention change</li><li>Customer comms draft (Mei has it)</li></ul>" +
         para("Thanks!") +
         signature("Priya", "Program Manager, Atlas"),
       received: at(0, 9, 42),
@@ -391,11 +391,11 @@ function homeMessages(): Message[] {
   return [
     m({
       folderId: "h-inbox",
-      from: people.mum,
+      from: people.mom,
       subject: "Sunday lunch",
       html: para(
-        "Hello love, are you and Ben still coming on Sunday? I'm making the lemon tart. Let me know about 1pm.",
-        "Mum x",
+        "Hi sweetie, are you and Ben still coming on Sunday? I'm making lemon pie. Let me know by 1 pm.",
+        "Love, Mom",
       ),
       received: at(0, 8, 2),
       read: false,
@@ -684,7 +684,7 @@ export function createDemoState(): MockState {
       id: "cal-holidays",
       accountId: WORK,
       remoteId: "cal-holidays",
-      name: "Public holidays",
+      name: "US holidays",
       color: "#8764b8",
       canEdit: false,
       isDefault: false,
@@ -781,8 +781,8 @@ export function createDemoState(): MockState {
       showAs: "free",
       reminderMinutes: null,
     }),
-    event(nextId(), "cal-home", HOME, "Sunday lunch at Mum's", at(nextWeekday(0), 13), 180, {
-      location: "Mum's",
+    event(nextId(), "cal-home", HOME, "Sunday lunch at Mom's", at(nextWeekday(0), 13), 180, {
+      location: "Mom's",
       organizer: null,
       showAs: "busy",
     }),
@@ -900,10 +900,10 @@ export function createDemoState(): MockState {
       jobTitle: "Program Manager",
       department: "Atlas",
       phones: [
-        { kind: "mobile", number: "+44 7700 900123" },
-        { kind: "business", number: "+44 20 7946 0110" },
+        { kind: "mobile", number: "+1 (206) 555-0123" },
+        { kind: "business", number: "+1 (206) 555-0110" },
       ],
-      address: "Acme Ltd\n1 Canal Street\nLondon EC1V 4AB",
+      address: "Acme Inc.\n1 Canal Street\nSeattle, WA 98101",
       birthday: "1989-11-06",
       notes:
         "Runs the Atlas launch. Prefers a quick chat over long email threads.\nOut of office on Fridays in December.",
@@ -919,7 +919,7 @@ export function createDemoState(): MockState {
     contact(WORK, "c-sam", people.sam, {
       company: "Acme",
       jobTitle: "Support Engineer",
-      phones: [{ kind: "business", number: "+44 20 7946 0321" }],
+      phones: [{ kind: "business", number: "+1 (206) 555-0132" }],
     }),
     contact(WORK, "c-dana", people.dana, {
       company: "Acme",
@@ -944,10 +944,10 @@ export function createDemoState(): MockState {
         company: "Contoso Partners",
         jobTitle: "Account Director",
         phones: [
-          { kind: "mobile", number: "+44 7700 900789" },
-          { kind: "business", number: "+44 161 496 0222" },
+          { kind: "mobile", number: "+1 (312) 555-0178" },
+          { kind: "business", number: "+1 (312) 555-0122" },
         ],
-        address: "Contoso Partners\n22 King Street\nManchester M2 6AG",
+        address: "Contoso Partners\n22 King Street\nChicago, IL 60601",
         notes: "Main contact for the Contoso reseller agreement. Renewal talks start in January.",
       },
     ),
@@ -975,25 +975,27 @@ export function createDemoState(): MockState {
       {
         company: "Woodgrove Legal",
         jobTitle: "Senior Counsel",
-        phones: [{ kind: "business", number: "+44 20 7946 0987" }],
+        phones: [{ kind: "business", number: "+1 (206) 555-0187" }],
       },
     ),
-    contact(HOME, "c-mum", people.mum, {
+    contact(HOME, "c-mom", people.mom, {
       givenName: "Helen",
       surname: "Morgan",
-      displayName: "Helen Morgan (Mum)",
-      phones: [{ kind: "home", number: "+44 1632 960555" }],
-      address: "14 Orchard Lane\nYork YO1 7HH",
+      displayName: "Helen Morgan (Mom)",
+      phones: [{ kind: "home", number: "+1 (503) 555-0155" }],
+      address: "14 Orchard Lane\nPortland, OR 97201",
       birthday: dateOnly(23).replace(/^\d{4}/, "1961"),
     }),
-    contact(HOME, "c-ben", people.ben, { phones: [{ kind: "mobile", number: "+44 7700 900456" }] }),
+    contact(HOME, "c-ben", people.ben, {
+      phones: [{ kind: "mobile", number: "+1 (503) 555-0146" }],
+    }),
     contact(HOME, "c-club", people.club, { notes: "Membership renews in March." }),
     contact(
       HOME,
       "c-zoe",
       { name: "Zoë Adeyemi", address: "zoe.adeyemi@mailbox.example" },
       {
-        phones: [{ kind: "mobile", number: "+44 7700 900321" }],
+        phones: [{ kind: "mobile", number: "+1 (503) 555-0121" }],
         birthday: "1991-04-27",
         notes: "Climbing partner. Allergic to peanuts.",
       },
@@ -1006,7 +1008,7 @@ export function createDemoState(): MockState {
         givenName: null,
         surname: null,
         company: "24/7 Emergency Plumbing",
-        phones: [{ kind: "business", number: "+44 800 046 0247" }],
+        phones: [{ kind: "business", number: "+1 (800) 555-0147" }],
       },
     ),
   ];
@@ -1055,7 +1057,7 @@ export function createDemoState(): MockState {
   const created = (daysAgo: number) => ({ createdAt: iso(at(-daysAgo, 9)) });
   const tasks: Task[] = [
     task("tl-atlas", WORK, "Review rollback plan", { dueDate: dateOnly(0), importance: "high" }),
-    task("tl-atlas", WORK, "Confirm launch-week on-call rota", { dueDate: dateOnly(1) }),
+    task("tl-atlas", WORK, "Confirm launch-week on-call rotation", { dueDate: dateOnly(1) }),
     task("tl-atlas", WORK, "Approve customer announcement", {
       dueDate: dateOnly(2),
       notes: "Check the pricing paragraph with Finance.",

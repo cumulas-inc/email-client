@@ -139,7 +139,7 @@ describe("People list", () => {
     await waitFor(() =>
       expect(optionNames(screen.getByRole("listbox", { name: "Contacts" }))).toEqual([
         "Ben Morgan",
-        "Helen Morgan (Mum)",
+        "Helen Morgan (Mom)",
         "Riverside Climbing Club",
         "Zoë Adeyemi",
         "24/7 Emergency Plumbing",
@@ -164,14 +164,14 @@ describe("Contact details", () => {
     expect(within(details).getByText("Program Manager · Atlas · Acme")).toBeInTheDocument();
     expect(within(details).getByText("alex.morgan@acme.example")).toBeInTheDocument();
     expect(within(details).getByText("Mobile")).toBeInTheDocument();
-    expect(within(details).getByText("+44 7700 900123")).toBeInTheDocument();
+    expect(within(details).getByText("+1 (206) 555-0123")).toBeInTheDocument();
     expect(within(details).getByText("Work")).toBeInTheDocument();
-    expect(within(details).getByText("6 November 1989")).toBeInTheDocument();
+    expect(within(details).getByText("November 6, 1989")).toBeInTheDocument();
     expect(within(details).getByText(/Runs the Atlas launch/)).toHaveClass("selectable");
     expect(within(details).getByText(/1 Canal Street/)).toBeInTheDocument();
 
     await user.click(within(details).getByRole("button", { name: "Copy mobile number" }));
-    expect(await navigator.clipboard.readText()).toBe("+44 7700 900123");
+    expect(await navigator.clipboard.readText()).toBe("+1 (206) 555-0123");
     expect(await screen.findByText("Phone number copied")).toBeInTheDocument();
   });
 
@@ -240,7 +240,7 @@ describe("Contact editor", () => {
     await user.type(within(dialog).getByLabelText("Email address 2"), "grace@home.example");
     await user.click(within(dialog).getByRole("button", { name: "Add phone number" }));
     await user.selectOptions(within(dialog).getByLabelText("Phone 1 type"), "Work");
-    await user.type(within(dialog).getByLabelText("Phone number 1"), "+44 20 1234 5678");
+    await user.type(within(dialog).getByLabelText("Phone number 1"), "+1 (206) 555-0199");
     await user.type(within(dialog).getByLabelText("Company"), "Tailspin Toys");
     await user.type(within(dialog).getByLabelText("Job title"), "Producer");
     await user.type(within(dialog).getByLabelText("Department"), "Games");
@@ -267,7 +267,7 @@ describe("Contact editor", () => {
         { name: null, address: "grace@liu.example" },
         { name: null, address: "grace@home.example" },
       ],
-      phones: [{ kind: "business", number: "+44 20 1234 5678" }],
+      phones: [{ kind: "business", number: "+1 (206) 555-0199" }],
       company: "Tailspin Toys",
       jobTitle: "Producer",
       department: "Games",
@@ -307,8 +307,8 @@ describe("Contact editor", () => {
     const first = within(dialog).getByLabelText("First name");
     await user.clear(first);
     await user.type(first, "Helena");
-    // "Helen Morgan (Mum)" was chosen by hand, so it is not overwritten.
-    expect(within(dialog).getByLabelText("Display name")).toHaveValue("Helen Morgan (Mum)");
+    // "Helen Morgan (Mom)" was chosen by hand, so it is not overwritten.
+    expect(within(dialog).getByLabelText("Display name")).toHaveValue("Helen Morgan (Mom)");
     await user.type(within(dialog).getByLabelText("Job title"), "Retired teacher");
     await user.click(within(dialog).getByRole("button", { name: "Remove phone number 1" }));
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
@@ -319,7 +319,7 @@ describe("Contact editor", () => {
     const [helen] = await backend.listContacts(undefined, "helen");
     expect(helen).toMatchObject({
       givenName: "Helena",
-      displayName: "Helen Morgan (Mum)",
+      displayName: "Helen Morgan (Mom)",
       jobTitle: "Retired teacher",
       phones: [],
     });

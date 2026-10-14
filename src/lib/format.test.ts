@@ -30,10 +30,10 @@ describe("format helpers", () => {
 
   it("formats list dates relative to now", () => {
     const now = new Date(2026, 9, 14, 15, 0);
-    expect(formatListDate(new Date(2026, 9, 14, 9, 5).toISOString(), now)).toMatch(/^\d\d:\d\d$/);
-    expect(formatListDate(new Date(2026, 9, 12, 9, 5).toISOString(), now)).toBe("Mon 09:05");
-    expect(formatListDate(new Date(2026, 6, 1, 9, 5).toISOString(), now)).toBe("1 Jul");
-    expect(formatListDate(new Date(2024, 6, 1, 9, 5).toISOString(), now)).toBe("1 Jul 2024");
+    expect(formatListDate(new Date(2026, 9, 14, 9, 5).toISOString(), now)).toBe("9:05 AM");
+    expect(formatListDate(new Date(2026, 9, 12, 9, 5).toISOString(), now)).toBe("Mon 9:05 AM");
+    expect(formatListDate(new Date(2026, 6, 1, 9, 5).toISOString(), now)).toBe("Jul 1");
+    expect(formatListDate(new Date(2024, 6, 1, 9, 5).toISOString(), now)).toBe("Jul 1, 2024");
   });
 
   it("reads all-day ranges from their stored UTC dates", () => {
@@ -42,7 +42,7 @@ describe("format helpers", () => {
       "All day",
     );
     expect(formatTimeRange("2026-10-20T00:00:00.000Z", "2026-10-24T00:00:00.000Z", true)).toBe(
-      "20 Oct – 23 Oct",
+      "Oct 20 – 23",
     );
   });
 
