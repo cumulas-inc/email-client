@@ -286,7 +286,7 @@ function PresetNote({
         }
       >
         <p>
-          Your calendar, contacts and To Do sync too, and {preset.name} usually doesn&apos;t accept
+          Your calendar, contacts and tasks sync too, and {preset.name} usually doesn&apos;t accept
           passwords from other apps.
         </p>
       </Callout>

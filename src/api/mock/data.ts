@@ -1076,7 +1076,7 @@ export function createDemoState(): MockState {
     task("tl-home", HOME, "Buy flowers for Sunday", { dueDate: dateOnly(nextWeekday(0) - 1) }),
     task("tl-home", HOME, "Renew climbing membership", { dueDate: dateOnly(20) }),
     task("tl-home", HOME, "Back up photos"),
-    // More variety for the To Do views: overdue, notes, completed, another list.
+    // More variety for the Tasks views: overdue, notes, completed, another list.
     task("tl-work", WORK, "Send Q3 metrics to Dana", {
       dueDate: dateOnly(-2),
       importance: "high",

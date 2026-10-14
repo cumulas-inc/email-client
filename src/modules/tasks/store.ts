@@ -14,7 +14,7 @@ interface TasksState {
   setShowCompleted: (show: boolean) => void;
 }
 
-/** UI state of the To Do module, kept across module switches. */
+/** UI state of the Tasks module, kept across module switches. */
 export const useTasksStore = create<TasksState>((set) => ({
   view: null,
   selectedTaskId: null,

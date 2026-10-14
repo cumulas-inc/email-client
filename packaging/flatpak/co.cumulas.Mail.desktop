@@ -7,5 +7,5 @@ Icon=co.cumulas.Mail
 Exec=cumulas-mail
 Terminal=false
 Categories=Office;Email;Calendar;ContactManagement;
-Keywords=email;mail;microsoft 365;office 365;exchange;outlook;imap;calendar;contacts;tasks;to do;
+Keywords=email;mail;microsoft 365;exchange;imap;calendar;contacts;tasks;
 StartupNotify=true

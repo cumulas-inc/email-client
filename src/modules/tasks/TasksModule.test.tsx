@@ -58,7 +58,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("To Do lists", () => {
+describe("Task lists", () => {
   it("shows smart lists and each account's lists with open-task counts", async () => {
     renderTasks();
     const nav = await screen.findByRole("listbox", { name: "Lists" });

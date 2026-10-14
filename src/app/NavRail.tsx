@@ -6,8 +6,8 @@ import { type Module, useAppStore } from "./store";
 const ITEMS: { module: Module; label: string; icon: ReactNode; shortcut: string }[] = [
   { module: "mail", label: "Mail", icon: <Mail size={20} />, shortcut: "Ctrl+1" },
   { module: "calendar", label: "Calendar", icon: <CalendarDays size={20} />, shortcut: "Ctrl+2" },
-  { module: "people", label: "People", icon: <Users size={20} />, shortcut: "Ctrl+3" },
-  { module: "tasks", label: "To Do", icon: <CircleCheckBig size={20} />, shortcut: "Ctrl+4" },
+  { module: "people", label: "Contacts", icon: <Users size={20} />, shortcut: "Ctrl+3" },
+  { module: "tasks", label: "Tasks", icon: <CircleCheckBig size={20} />, shortcut: "Ctrl+4" },
 ];
 
 export function NavRail() {

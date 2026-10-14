@@ -19,7 +19,7 @@ const OPTIONS: Option[] = [
     kind: "microsoft",
     title: "Microsoft 365 or Outlook.com",
     description:
-      "Work, school or personal Microsoft account. Mail, calendar, contacts and To Do all stay in sync.",
+      "Work, school or personal Microsoft account. Mail, calendar, contacts and tasks all stay in sync.",
     icon: <BriefcaseBusiness size={22} />,
     examples: ["Microsoft 365", "Outlook.com", "Hotmail", "Live"],
   },

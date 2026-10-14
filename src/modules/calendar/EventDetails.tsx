@@ -366,7 +366,7 @@ export function EventDetails({
         )}
 
         {(attendees.length > 0 || (organizer && invitation)) && (
-          <Row icon={<Users size={16} />} label="People">
+          <Row icon={<Users size={16} />} label="Attendees">
             {attendees.length > 0 && (
               <div className="cal-details__muted cal-details__summary">
                 {attendeeSummary(event.attendees)}

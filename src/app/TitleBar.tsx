@@ -38,7 +38,7 @@ export function TitleBar() {
   const { data: accounts = [] } = useAccounts();
   const inputRef = useRef<HTMLInputElement>(null);
   const placeholder =
-    module === "people" ? "Search people" : module === "tasks" ? "Search tasks" : "Search mail";
+    module === "people" ? "Search contacts" : module === "tasks" ? "Search tasks" : "Search mail";
 
   return (
     <header className="titlebar">

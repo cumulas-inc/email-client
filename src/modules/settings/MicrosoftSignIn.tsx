@@ -317,7 +317,7 @@ export function MicrosoftSignIn({
     >
       <StepIntro icon={<BriefcaseBusiness size={20} />}>
         Use your work, school or personal Microsoft account, including Outlook.com and Hotmail.
-        Mail, calendar, contacts and To Do all stay in sync.
+        Mail, calendar, contacts and tasks all stay in sync.
       </StepIntro>
       <TextField
         id={emailId}

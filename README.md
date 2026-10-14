@@ -1,8 +1,8 @@
 # Cumulas Mail
 
-A fast, familiar Outlook alternative for Linux: mail, calendar, contacts and
-tasks for **Microsoft 365 / Outlook.com** (via Microsoft Graph) and any
-**IMAP/SMTP** account. Built with [Tauri 2](https://tauri.app) (Rust) and
+A fast, focused mail, calendar, contacts and tasks app for Linux. It works
+with **Microsoft 365 and Outlook.com** accounts (through Microsoft Graph) and
+any **IMAP/SMTP** account. Built with [Tauri 2](https://tauri.app) (Rust) and
 React, packaged for Flathub as `co.cumulas.Mail`.
 
 > Status: early development. Everything below works against test servers;
@@ -20,7 +20,8 @@ React, packaged for Flathub as `co.cumulas.Mail`.
 - **Mail**: folders and favorites, unified inbox, reading pane (right,
   bottom or off), rich-text compose with attachments,
   reply/reply all/forward, flag, archive, move (drag and drop), undo, instant
-  offline search, Outlook keyboard shortcuts.
+  offline search, and the keyboard shortcuts people switching from other mail
+  clients expect (Ctrl+R, Ctrl+Shift+R, Ctrl+F, Ctrl+Q…).
 - **Calendar**: day, work week, week and month views, all-day and multi-day
   events, meeting invitations (accept / tentative / decline), Teams meetings
   for Microsoft accounts.
@@ -93,3 +94,9 @@ the terms of the GNU General Public License as published by the Free Software
 Foundation, either version 3 of the License, or (at your option) any later
 version. It is distributed in the hope that it will be useful, but without any
 warranty. See [LICENSE](LICENSE) for details.
+
+## Trademarks
+
+Microsoft 365, Outlook.com and Exchange are trademarks of Microsoft
+Corporation. Cumulas Mail is an independent project and is not affiliated
+with, sponsored by or endorsed by Microsoft.

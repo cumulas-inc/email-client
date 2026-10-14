@@ -1293,6 +1293,12 @@
   color: var(--fg-secondary);
 }
 
+.about-trademarks {
+  margin-top: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
 .about-card__link {
   margin-top: var(--space-2);
   margin-left: calc(-1 * var(--space-2));

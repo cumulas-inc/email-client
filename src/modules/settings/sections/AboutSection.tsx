@@ -73,6 +73,11 @@ export function AboutSection() {
           </div>
         </div>
       </div>
+
+      <p className="about-trademarks">
+        Microsoft 365 and Outlook.com are trademarks of Microsoft Corporation. Cumulas Mail is an
+        independent project, not affiliated with or endorsed by Microsoft.
+      </p>
     </>
   );
 }

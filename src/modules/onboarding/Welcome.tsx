@@ -8,8 +8,8 @@ import "./onboarding.css";
 const FEATURES = [
   { label: "Mail", icon: <Mail size={16} /> },
   { label: "Calendar", icon: <CalendarDays size={16} /> },
-  { label: "People", icon: <Users size={16} /> },
-  { label: "To Do", icon: <CircleCheckBig size={16} /> },
+  { label: "Contacts", icon: <Users size={16} /> },
+  { label: "Tasks", icon: <CircleCheckBig size={16} /> },
 ];
 
 /** First-run screen, shown while there are no accounts. */

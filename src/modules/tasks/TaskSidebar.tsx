@@ -70,8 +70,8 @@ export function TaskSidebar({ accounts, lists, view, onSelect, counts }: TaskSid
   };
 
   return (
-    <nav className="tasks-sidebar" aria-label="To Do lists">
-      <h1 className="tasks-sidebar__title">To Do</h1>
+    <nav className="tasks-sidebar" aria-label="Task lists">
+      <h1 className="tasks-sidebar__title">Tasks</h1>
       <div
         role="listbox"
         aria-label="Lists"

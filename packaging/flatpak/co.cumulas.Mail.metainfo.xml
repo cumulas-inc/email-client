@@ -24,6 +24,10 @@
       <li>Remote images blocked by default to stop email tracking</li>
       <li>Passwords and sign-ins kept in your system keyring</li>
     </ul>
+    <p>
+      Cumulas Mail is an independent project and is not affiliated with or endorsed by
+      Microsoft.
+    </p>
   </description>
 
   <launchable type="desktop-id">co.cumulas.Mail.desktop</launchable>

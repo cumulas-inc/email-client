@@ -5,7 +5,7 @@
   color-scheme: light;
 
   /* Typography */
-  --font-sans: "Inter", "Cantarell", "Segoe UI", "Noto Sans", system-ui, -apple-system, sans-serif;
+  --font-sans: "Inter", "Cantarell", "Noto Sans", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", "Source Code Pro", ui-monospace, monospace;
   --text-xs: 11px;
   --text-sm: 12px;
