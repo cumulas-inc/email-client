@@ -136,7 +136,10 @@ export function ContactEditor({
         <div className="people-form__grid">
           {contact
             ? account && (
-                <p className="people-form__account people-form__full">
+                <p
+                  className="people-form__account people-form__full"
+                  title={`${account.displayName} (${account.email})`}
+                >
                   <span
                     className="people-form__account-dot"
                     style={{ background: account.color }}
@@ -156,7 +159,11 @@ export function ContactEditor({
                     aria-labelledby={fieldId("account-label")}
                   >
                     {accounts.map((a) => (
-                      <label key={a.id} className="people-form__account-tile">
+                      <label
+                        key={a.id}
+                        className="people-form__account-tile"
+                        title={`${a.displayName} (${a.email})`}
+                      >
                         <input
                           type="radio"
                           className="people-form__account-input"
@@ -172,7 +179,9 @@ export function ContactEditor({
                           color={a.color}
                         />
                         <span className="people-form__account-text">
-                          <span className="people-form__account-name">{a.displayName}</span>
+                          <span className="people-form__account-name" dir="auto">
+                            {a.displayName}
+                          </span>
                           <span className="people-form__account-email">{a.email}</span>
                         </span>
                       </label>
@@ -202,6 +211,7 @@ export function ContactEditor({
                   id={fieldId("given")}
                   ref={autofocus}
                   className="input"
+                  dir="auto"
                   autoComplete="off"
                   value={form.givenName}
                   onChange={(e) => setName("givenName", e.target.value)}
@@ -214,6 +224,7 @@ export function ContactEditor({
                 <input
                   id={fieldId("surname")}
                   className="input"
+                  dir="auto"
                   autoComplete="off"
                   value={form.surname}
                   onChange={(e) => setName("surname", e.target.value)}
@@ -227,6 +238,7 @@ export function ContactEditor({
                 <input
                   id={fieldId("display")}
                   className="input"
+                  dir="auto"
                   autoComplete="off"
                   value={form.displayName}
                   aria-invalid={errors.displayName ? true : undefined}
@@ -372,6 +384,7 @@ export function ContactEditor({
             <input
               id={fieldId("company")}
               className="input"
+              dir="auto"
               autoComplete="off"
               value={form.company}
               onChange={(e) => set("company", e.target.value)}
@@ -384,6 +397,7 @@ export function ContactEditor({
             <input
               id={fieldId("job")}
               className="input"
+              dir="auto"
               autoComplete="off"
               value={form.jobTitle}
               onChange={(e) => set("jobTitle", e.target.value)}
@@ -396,6 +410,7 @@ export function ContactEditor({
             <input
               id={fieldId("department")}
               className="input"
+              dir="auto"
               autoComplete="off"
               value={form.department}
               onChange={(e) => set("department", e.target.value)}
@@ -421,6 +436,7 @@ export function ContactEditor({
             <textarea
               id={fieldId("address")}
               className="textarea people-form__address"
+              dir="auto"
               rows={3}
               value={form.address}
               onChange={(e) => set("address", e.target.value)}
@@ -433,6 +449,7 @@ export function ContactEditor({
             <textarea
               id={fieldId("notes")}
               className="textarea"
+              dir="auto"
               rows={3}
               value={form.notes}
               onChange={(e) => set("notes", e.target.value)}

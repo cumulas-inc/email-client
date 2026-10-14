@@ -81,6 +81,9 @@
 .people-book__name {
   grid-column: 2;
   overflow: hidden;
+  /* Chromium and WebKit only know the prefixed keyword. */
+  text-align: -webkit-match-parent;
+  text-align: match-parent;
   font-size: 12.5px;
   font-weight: var(--weight-bold);
   line-height: 1.25;
@@ -235,8 +238,10 @@
   min-height: 0;
 }
 
-/* Empty-state copy breaks into even lines, without a lone last word. */
+/* Empty-state copy breaks into even lines, without a lone last word, and a
+   searched-for address wraps instead of running off the card. */
 .people .empty-state__description {
+  overflow-wrap: anywhere;
   text-wrap: balance;
 }
 
@@ -316,24 +321,30 @@
 .people-row__text {
   display: flex;
   flex-direction: column;
-  gap: 1px;
   min-width: 0;
 }
 
+/* Fixed line boxes: 19 + 17 + 16 padding = the 52px a one-line row has, so
+   every row is the same height. Right-to-left names keep the row's
+   alignment; their own direction comes from dir="auto". */
 .people-row__name,
 .people-row__secondary {
   overflow: hidden;
+  text-align: -webkit-match-parent;
+  text-align: match-parent;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .people-row__name {
   font-weight: var(--weight-medium);
+  line-height: 19px;
 }
 
 .people-row__secondary {
   color: var(--fg-tertiary);
   font-size: 12.5px;
+  line-height: 17px;
 }
 
 .people-row[aria-selected="true"] .people-row__secondary {
@@ -354,9 +365,11 @@
   padding: 36px 40px 40px;
 }
 
+/* Top-aligned: a name can run to several lines, and the avatar stays by its
+   first one instead of drifting to the middle. */
 .people-details__header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 20px;
 }
 
@@ -373,7 +386,9 @@
   max-width: 100%;
 }
 
-/* The name reads like a heading on a calling card. */
+/* The name reads like a heading on a calling card. It is never cut short:
+   this is the one place the whole name and title can be read, so long ones
+   wrap, and a long name sets a size smaller. */
 .people-details__name {
   font-family: var(--font-serif);
   font-feature-settings: normal;
@@ -381,22 +396,24 @@
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: -0.005em;
+  text-wrap: balance;
+}
+
+.people-details__name--long {
+  font-size: 21px;
+  line-height: 1.25;
 }
 
 .people-details__subtitle {
-  margin-top: 3px;
+  margin-top: 4px;
   color: var(--fg-secondary);
   font-size: 14px;
+  line-height: 1.45;
+  text-wrap: pretty;
 }
 
-/* Long names and titles stop after two lines; the tooltip has the rest. */
 .people-details__name,
 .people-details__subtitle {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
   overflow-wrap: anywhere;
 }
 
@@ -432,10 +449,13 @@
 
 /* Email, Edit and Delete share one outlined group, like Reply / Reply all /
    Forward next to a sender. */
+/* The 1px padding keeps hover and press fills inside the outline instead of
+   painting over it. */
 .people-actions {
   display: inline-flex;
   max-width: 100%;
   margin-top: 22px;
+  padding: 1px;
   border-radius: 9px;
   background: var(--bg-surface);
   box-shadow: inset 0 0 0 1px var(--border-control);
@@ -444,9 +464,8 @@
 .people-actions__btn {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  height: 32px;
-  padding: 0 14px 0 12px;
+  height: 30px;
+  padding: 0 13px 0 11px;
   border: none;
   background: transparent;
   color: var(--fg-primary);
@@ -456,16 +475,24 @@
   cursor: pointer;
   transition:
     background var(--duration-fast) var(--ease),
-    color var(--duration-fast) var(--ease),
-    transform var(--duration-press) var(--ease-out);
+    color var(--duration-fast) var(--ease);
+}
+
+/* Pressing shrinks the label and icon, not the segment, so the group's
+   outline and dividers stay put. */
+.people-actions__face {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: transform var(--duration-press) var(--ease-out);
 }
 
 .people-actions__btn:first-child {
-  border-radius: 9px 0 0 9px;
+  border-radius: 8px 0 0 8px;
 }
 
 .people-actions__btn:last-child {
-  border-radius: 0 9px 9px 0;
+  border-radius: 0 8px 8px 0;
 }
 
 .people-actions__btn + .people-actions__btn {
@@ -483,7 +510,16 @@
 
 .people-actions__btn:active:not(:disabled) {
   background: var(--bg-pressed);
-  transform: scale(0.97);
+}
+
+.people-actions__btn:active:not(:disabled) .people-actions__face {
+  transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .people-actions__btn:active:not(:disabled) .people-actions__face {
+    transform: none;
+  }
 }
 
 .people-actions__btn:focus-visible {
@@ -620,9 +656,41 @@
   .people-field {
     grid-template-columns: 112px minmax(0, 1fr);
   }
+
+  /* Notes and addresses get the card's full width under their label rather
+     than a narrow column beside it. */
+  .people-field--block {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .people-field--block .people-field__label {
+    min-height: 0;
+    padding-top: 12px;
+  }
+
+  .people-field--block .people-field__multiline {
+    padding-top: 6px;
+  }
+}
+
+/* --- Delete confirmation ----------------------------------------------------- */
+
+/* The account address moves to the next line whole when it fits there, and
+   only wraps inside (after its "@") when it is longer than a line. */
+.people-confirm__account {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 /* --- Editor dialog --------------------------------------------------------- */
+
+/* The form is taller than most windows and scrolls under the buttons; a
+   hairline shows where it goes under. (The subtle border is tuned for
+   cards and disappears on a raised dialog in dark mode.) */
+.people .dialog:has(.people-form) .dialog__footer {
+  border-top: 1px solid var(--border-default);
+}
 
 .people-form__grid {
   display: grid;
@@ -705,6 +773,8 @@
 .people-form__account-name,
 .people-form__account-email {
   overflow: hidden;
+  text-align: -webkit-match-parent;
+  text-align: match-parent;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

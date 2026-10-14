@@ -1,5 +1,5 @@
 import { ContactRound, SearchX, UserPlus, Users } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { errorMessage } from "../../api/errors";
 import { useAccounts } from "../../api/queries";
@@ -11,10 +11,11 @@ import { EmptyState } from "../../components/EmptyState";
 import { SearchField } from "../../components/SearchField";
 import { PaneSpinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
-import { ContactDetails } from "./ContactDetails";
+import { formatCount } from "../../lib/format";
+import { AddressText, ContactDetails } from "./ContactDetails";
 import { ContactEditor } from "./ContactEditor";
 import { ContactList } from "./ContactList";
-import { countByAccount, groupContacts } from "./contactUtils";
+import { contactCount, contactName, countByAccount, groupContacts } from "./contactUtils";
 import { useContacts, useDeleteContact } from "./queries";
 import { usePeopleStore } from "./store";
 import { useDebouncedValue } from "./useDebouncedValue";
@@ -53,6 +54,7 @@ export function PeopleModule() {
   const [toDelete, setToDelete] = useState<Contact | null>(null);
   const remove = useDeleteContact();
   const listRef = useRef<HTMLDivElement>(null);
+  const detailsRef = useRef<HTMLElement>(null);
   const editRef = useRef<HTMLButtonElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
 
@@ -89,7 +91,7 @@ export function PeopleModule() {
     try {
       await remove.mutateAsync(contact.id);
       select(next?.id ?? null);
-      toast.success(`${contact.displayName} was deleted`);
+      toast.success(`${contactName(contact)} was deleted`);
       refocus(listRef.current);
     } catch (e) {
       toast.error(e);
@@ -98,6 +100,13 @@ export function PeopleModule() {
       setToDelete(null);
     }
   };
+
+  // Each contact opens at the top of the details card, not wherever the
+  // previous one was scrolled to.
+  const selectedKey = selected?.id ?? null;
+  useLayoutEffect(() => {
+    if (detailsRef.current) detailsRef.current.scrollTop = 0;
+  }, [selectedKey]);
 
   // Ctrl+N starts a new contact, as it starts a message in Mail.
   const canCreate = accounts.length > 0;
@@ -220,10 +229,20 @@ export function PeopleModule() {
           <div className="people__title-row">
             <h1 className="pane-title people__title">
               Contacts
-              {!query.isLoading && <span className="people__count">{ordered.length}</span>}
+              {!query.isLoading && (
+                <span
+                  className="people__count"
+                  title={ordered.length >= 10_000 ? contactCount(ordered.length) : undefined}
+                >
+                  {formatCount(ordered.length)}
+                </span>
+              )}
             </h1>
             {filterAccount && (
-              <span className="people__chip" title={filterAccount.email}>
+              <span
+                className="people__chip"
+                title={`${filterAccount.displayName} (${filterAccount.email})`}
+              >
                 <span
                   className="people__chip-dot"
                   style={{ background: filterAccount.color }}
@@ -242,7 +261,7 @@ export function PeopleModule() {
         <div className="people__list-body">{list}</div>
       </section>
 
-      <section className="people__details-pane card" aria-label="Contact details">
+      <section ref={detailsRef} className="people__details-pane card" aria-label="Contact details">
         {selected ? (
           <ContactDetails
             key={selected.id}
@@ -254,10 +273,11 @@ export function PeopleModule() {
           />
         ) : (
           !query.isLoading && (
+            // Only shown while the list is empty, so it doesn't send anyone
+            // to pick from it: the list's own empty state says what to do.
             <EmptyState
               icon={<ContactRound size={48} strokeWidth={1.25} />}
               title="No contact selected"
-              description="Pick someone from the list to see their details."
             />
           )
         )}
@@ -283,8 +303,15 @@ export function PeopleModule() {
         message={
           toDelete ? (
             <>
-              <strong>{toDelete.displayName}</strong> will be permanently deleted from{" "}
-              {accounts.find((a) => a.id === toDelete.accountId)?.email ?? "this account"}.
+              <strong dir="auto">{contactName(toDelete)}</strong> will be permanently deleted from{" "}
+              <span className="people-confirm__account">
+                <AddressText
+                  address={
+                    accounts.find((a) => a.id === toDelete.accountId)?.email ?? "this account"
+                  }
+                />
+                .
+              </span>
             </>
           ) : null
         }

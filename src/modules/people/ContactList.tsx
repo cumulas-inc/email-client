@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, type KeyboardEvent, type Ref } from "react";
 import type { Contact } from "../../api/types";
 import { Avatar } from "../../components/Avatar";
 import { listboxTarget, scrollIdIntoView } from "../../components/listboxKeys";
-import { type ContactGroup, contactSecondary } from "./contactUtils";
+import { type ContactGroup, contactName, contactSecondary, nameStartsWith } from "./contactUtils";
 
 interface ContactListProps {
   groups: ContactGroup[];
@@ -44,15 +44,16 @@ export function ContactList({ groups, selectedId, onSelect, onDelete, listRef }:
       return;
     }
     if (e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      // Type-ahead: jump to the next contact whose name starts with the typed text.
+      // Type-ahead: jump to the next contact whose name starts with the typed
+      // text, matched the way the letter headers file names ("l" finds Łukasz).
       const now = Date.now();
       const state = typeahead.current;
-      state.text = now - state.at < 700 ? state.text + e.key.toLowerCase() : e.key.toLowerCase();
+      state.text = now - state.at < 700 ? state.text + e.key : e.key;
       state.at = now;
       const start = state.text.length === 1 ? index + 1 : Math.max(index, 0);
       for (let i = 0; i < ordered.length; i++) {
         const contact = ordered[(start + i) % ordered.length]!;
-        if (contact.displayName.toLowerCase().startsWith(state.text)) {
+        if (nameStartsWith(contactName(contact), state.text)) {
           e.preventDefault();
           onSelect(contact.id);
           break;
@@ -84,6 +85,7 @@ export function ContactList({ groups, selectedId, onSelect, onDelete, listRef }:
               {group.letter}
             </div>
             {group.contacts.map((contact) => {
+              const name = contactName(contact);
               const secondary = contactSecondary(contact);
               return (
                 <div
@@ -91,20 +93,20 @@ export function ContactList({ groups, selectedId, onSelect, onDelete, listRef }:
                   id={optionId(contact.id)}
                   role="option"
                   aria-selected={contact.id === selectedId}
-                  aria-label={
-                    secondary ? `${contact.displayName}, ${secondary}` : contact.displayName
-                  }
+                  aria-label={secondary ? `${name}, ${secondary}` : name}
                   className="people-row"
                   onClick={() => onSelect(contact.id)}
                 >
-                  <Avatar
-                    name={contact.displayName}
-                    colorKey={contact.emails[0]?.address ?? contact.displayName}
-                    size={34}
-                  />
+                  <Avatar name={name} colorKey={contact.emails[0]?.address ?? name} size={34} />
                   <span className="people-row__text">
-                    <span className="people-row__name">{contact.displayName}</span>
-                    {secondary && <span className="people-row__secondary">{secondary}</span>}
+                    <span className="people-row__name" dir="auto">
+                      {name}
+                    </span>
+                    {secondary && (
+                      <span className="people-row__secondary" dir="auto">
+                        {secondary}
+                      </span>
+                    )}
                   </span>
                 </div>
               );

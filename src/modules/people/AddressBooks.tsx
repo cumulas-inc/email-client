@@ -3,6 +3,7 @@ import { useId } from "react";
 
 import type { Account } from "../../api/types";
 import { AccountBadge } from "../../components/AccountBadge";
+import { formatCount } from "../../lib/format";
 import { contactCount } from "./contactUtils";
 
 interface AddressBooksProps {
@@ -12,6 +13,15 @@ interface AddressBooksProps {
   /** The account being shown, or null for every account. */
   selectedId: string | null;
   onSelect: (accountId: string | null) => void;
+}
+
+/** A book's count, compact from ten thousand on, with the exact number on hover. */
+function BookCount({ n }: { n: number }) {
+  return (
+    <span className="people-book__count" title={n >= 10_000 ? contactCount(n) : undefined}>
+      {formatCount(n)}
+    </span>
+  );
 }
 
 /**
@@ -43,7 +53,7 @@ export function AddressBooks({ accounts, counts, selectedId, onSelect }: Address
               <Users size={14} strokeWidth={2} />
             </span>
             <span className="people-book__name">All contacts</span>
-            {total !== null && <span className="people-book__count">{total}</span>}
+            {total !== null && <BookCount n={total} />}
           </button>
         </li>
         {accounts.map((account) => {
@@ -63,9 +73,11 @@ export function AddressBooks({ accounts, counts, selectedId, onSelect }: Address
                   name={account.displayName}
                   color={account.color}
                 />
-                <span className="people-book__name">{account.displayName}</span>
+                <span className="people-book__name" dir="auto">
+                  {account.displayName}
+                </span>
                 <span className="people-book__email">{account.email}</span>
-                {n !== null && <span className="people-book__count">{n}</span>}
+                {n !== null && <BookCount n={n} />}
               </button>
             </li>
           );

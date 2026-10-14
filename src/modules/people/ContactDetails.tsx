@@ -5,7 +5,13 @@ import type { Account, Contact, EmailAddress } from "../../api/types";
 import { useAppStore } from "../../app/store";
 import { Avatar } from "../../components/Avatar";
 import { toast } from "../../components/toast";
-import { contactSubtitle, formatBirthday, phoneKindLabel, primaryEmail } from "./contactUtils";
+import {
+  contactName,
+  contactSubtitle,
+  formatBirthday,
+  phoneKindLabel,
+  primaryEmail,
+} from "./contactUtils";
 
 interface ContactDetailsProps {
   contact: Contact;
@@ -27,21 +33,40 @@ function copyText(text: string, what: string) {
   );
 }
 
+/**
+ * An email address that wraps after its "@" when it has to, rather than in
+ * the middle of the domain.
+ */
+export function AddressText({ address }: { address: string }) {
+  const at = address.lastIndexOf("@");
+  if (at <= 0) return <>{address}</>;
+  return (
+    <>
+      {address.slice(0, at + 1)}
+      <wbr />
+      {address.slice(at + 1)}
+    </>
+  );
+}
+
 /** One label/value row. The icon names the kind of value at a glance. */
 function Field({
   icon,
   label,
   children,
   copy,
+  block = false,
 }: {
   icon: ReactNode;
   label: string;
   children: ReactNode;
   /** A copy button at the end of the row. */
   copy?: ReactNode;
+  /** Multi-line text, which goes under its label when the card is narrow. */
+  block?: boolean;
 }) {
   return (
-    <div className="people-field">
+    <div className={block ? "people-field people-field--block" : "people-field"}>
       <dt className="people-field__label">
         <span className="people-field__icon" aria-hidden="true">
           {icon}
@@ -81,6 +106,7 @@ export function ContactDetails({
 }: ContactDetailsProps) {
   const requestCompose = useAppStore((s) => s.requestCompose);
   const headingId = useId();
+  const name = contactName(contact);
   const subtitle = contactSubtitle(contact);
   const primary = primaryEmail(contact);
 
@@ -96,24 +122,32 @@ export function ContactDetails({
   return (
     <article className="people-details" aria-labelledby={headingId}>
       <header className="people-details__header">
-        <Avatar
-          name={contact.displayName}
-          colorKey={contact.emails[0]?.address ?? contact.displayName}
-          size={72}
-        />
+        <Avatar name={name} colorKey={contact.emails[0]?.address ?? name} size={72} />
         <div className="people-details__identity">
           <div className="selectable">
-            <h2 id={headingId} className="people-details__name" title={contact.displayName}>
-              {contact.displayName}
+            {/* The whole name and title always show; long names set smaller. */}
+            <h2
+              id={headingId}
+              className={
+                name.length > 40
+                  ? "people-details__name people-details__name--long"
+                  : "people-details__name"
+              }
+              dir="auto"
+            >
+              {name}
             </h2>
             {subtitle && (
-              <p className="people-details__subtitle" title={subtitle}>
+              <p className="people-details__subtitle" dir="auto">
                 {subtitle}
               </p>
             )}
           </div>
           {account && (
-            <p className="people-details__account" title={account.displayName}>
+            <p
+              className="people-details__account"
+              title={`Saved in ${account.displayName} (${account.email})`}
+            >
               <span
                 className="people-details__account-dot"
                 style={{ background: account.color }}
@@ -134,20 +168,26 @@ export function ContactDetails({
           title={primary ? `Write to ${primary.address}` : "This contact has no email address"}
           onClick={() => primary && compose(primary)}
         >
-          <Mail {...ICON} aria-hidden="true" />
-          Email
+          <span className="people-actions__face">
+            <Mail {...ICON} aria-hidden="true" />
+            Email
+          </span>
         </button>
         <button type="button" className="people-actions__btn" ref={editRef} onClick={onEdit}>
-          <Pencil {...ICON} aria-hidden="true" />
-          Edit
+          <span className="people-actions__face">
+            <Pencil {...ICON} aria-hidden="true" />
+            Edit
+          </span>
         </button>
         <button
           type="button"
           className="people-actions__btn people-actions__btn--danger"
           onClick={onDelete}
         >
-          <Trash2 {...ICON} aria-hidden="true" />
-          Delete
+          <span className="people-actions__face">
+            <Trash2 {...ICON} aria-hidden="true" />
+            Delete
+          </span>
         </button>
       </div>
 
@@ -176,12 +216,12 @@ export function ContactDetails({
                   title={`Write to ${email.address}`}
                   onClick={() =>
                     compose({
-                      name: email.name?.trim() || contact.displayName,
+                      name: email.name?.trim() || name,
                       address: email.address,
                     })
                   }
                 >
-                  {email.address}
+                  <AddressText address={email.address} />
                 </button>
               </Field>
             ))}
@@ -201,8 +241,8 @@ export function ContactDetails({
               </Field>
             ))}
             {contact.address && (
-              <Field icon={<MapPin {...ICON} />} label="Address">
-                <span className="selectable people-field__text people-field__multiline">
+              <Field icon={<MapPin {...ICON} />} label="Address" block>
+                <span className="selectable people-field__text people-field__multiline" dir="auto">
                   {contact.address}
                 </span>
               </Field>
@@ -215,8 +255,8 @@ export function ContactDetails({
               </Field>
             )}
             {contact.notes && (
-              <Field icon={<StickyNote {...ICON} />} label="Notes">
-                <span className="selectable people-field__text people-field__multiline">
+              <Field icon={<StickyNote {...ICON} />} label="Notes" block>
+                <span className="selectable people-field__text people-field__multiline" dir="auto">
                   {contact.notes}
                 </span>
               </Field>

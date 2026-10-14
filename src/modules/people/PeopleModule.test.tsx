@@ -173,6 +173,31 @@ describe("Contact list", () => {
     expect(usePeopleStore.getState().accountId).toBeNull();
   });
 
+  it("files names from other alphabets under their own letters, laid out in their direction", async () => {
+    const backend = new MockBackend();
+    for (const name of ["ليلى حسن", "Łukasz Nowak", "Дмитрий Иванов"]) {
+      await backend.createContact({
+        accountId: "acct-home",
+        displayName: name,
+        emails: [],
+        phones: [],
+      });
+    }
+    renderPeople(backend);
+    const list = await screen.findByRole("listbox", { name: "Contacts" });
+    expect(optionNames(within(list).getByRole("group", { name: "L" }))).toEqual([
+      "Lucía Fernández",
+      "Łukasz Nowak",
+    ]);
+    expect(optionNames(within(list).getByRole("group", { name: "Д" }))).toEqual(["Дмитрий Иванов"]);
+    expect(optionNames(within(list).getByRole("group", { name: "ل" }))).toEqual(["ليلى حسن"]);
+
+    const user = userEvent.setup();
+    await user.click(within(list).getByRole("option", { name: "ليلى حسن" }));
+    expect(within(list).getByText("ليلى حسن")).toHaveAttribute("dir", "auto");
+    expect(detailsHeading()).toHaveAttribute("dir", "auto");
+  });
+
   it("offers every contact when an address book is empty", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend();
