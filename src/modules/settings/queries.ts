@@ -5,7 +5,13 @@ import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-q
 
 import { useBackend } from "../../api/context";
 import { qk } from "../../api/queries";
-import type { Account, DataKind, NewImapAccount } from "../../api/types";
+import type {
+  Account,
+  DataKind,
+  ImapAccountUpdate,
+  NewImapAccount,
+  SyncStatus,
+} from "../../api/types";
 
 const ALL_KINDS: DataKind[] = ["accounts", "mail", "calendar", "contacts", "tasks"];
 
@@ -80,6 +86,27 @@ export function useUpdateAccount() {
       if (context?.previous) client.setQueryData(qk.accounts(), context.previous);
     },
     onSuccess: (account) => upsertAccount(client, account),
+  });
+}
+
+export function useUpdateImapAccount() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ accountId, update }: { accountId: string; update: ImapAccountUpdate }) =>
+      backend.updateImapAccount(accountId, update),
+    onSuccess: (account) => {
+      upsertAccount(client, account);
+      // The check succeeded, so the account's sync error is gone.
+      client.setQueryData<SyncStatus[]>(qk.syncStatuses(), (old) =>
+        old?.map((s) =>
+          s.accountId === account.id && s.state === "error"
+            ? { ...s, state: "idle", message: null }
+            : s,
+        ),
+      );
+      void client.invalidateQueries({ queryKey: qk.syncStatuses() });
+    },
   });
 }
 

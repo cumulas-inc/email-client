@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { useBackend } from "../../api/context";
 import { useAppStore } from "../../app/store";
 import { Dialog } from "../../components/Dialog";
 import { toast } from "../../components/toast";
@@ -34,6 +35,7 @@ const TITLES: Record<AddAccountStep, string> = {
 };
 
 function AddAccountFlow() {
+  const backend = useBackend();
   const [request] = useState(() => useAddAccountRequest.getState().request);
   const [step, setStep] = useState<AddAccountStep>(request.step);
   const [email, setEmail] = useState(request.email ?? "");
@@ -51,6 +53,14 @@ function AddAccountFlow() {
     setStep(next);
   };
   const back = reauth ? undefined : () => goTo("choose");
+
+  /** Closing while the browser sign-in is open abandons it. */
+  const close = () => {
+    if (step === "microsoft" && phase === "waiting") {
+      backend.cancelMicrosoftSignIn().catch(() => undefined);
+    }
+    closeAddAccount();
+  };
 
   const done = (account: Account, kind: "microsoft" | "imap") => {
     closeAddAccount();
@@ -71,12 +81,12 @@ function AddAccountFlow() {
   const title = reauth && step === "microsoft" ? "Sign in again" : TITLES[step];
 
   return (
-    <Dialog open onClose={closeAddAccount} title={title} width={560}>
+    <Dialog open onClose={close} title={title} width={560}>
       <div className="add-account" ref={bodyRef}>
         {step === "choose" && (
           <StepLayout
             footer={
-              <button type="button" className="btn" onClick={closeAddAccount}>
+              <button type="button" className="btn" onClick={close}>
                 Cancel
               </button>
             }
@@ -90,7 +100,7 @@ function AddAccountFlow() {
             initialEmail={email}
             autoStart={reauth}
             onBack={back}
-            onClose={closeAddAccount}
+            onClose={close}
             onDone={(account) => done(account, "microsoft")}
             onOpenSettings={openMicrosoftSettings}
             onPhaseChange={setPhase}
@@ -100,7 +110,7 @@ function AddAccountFlow() {
           <ImapForm
             initialEmail={email}
             onBack={back}
-            onClose={closeAddAccount}
+            onClose={close}
             onDone={(account) => done(account, "imap")}
             onUseMicrosoft={(address) => goTo("microsoft", address.trim())}
           />

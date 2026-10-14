@@ -1,6 +1,13 @@
 import clsx from "clsx";
-import { CircleAlert, Info, TriangleAlert } from "lucide-react";
-import type { InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from "react";
+import { CircleAlert, Eye, EyeOff, Info, TriangleAlert } from "lucide-react";
+import {
+  useState,
+  type InputHTMLAttributes,
+  type ReactNode,
+  type SelectHTMLAttributes,
+} from "react";
+
+import type { FormProblem } from "./serverDraft";
 
 import "./settings.css";
 
@@ -61,6 +68,69 @@ export function TextField({
           {hint}
         </p>
       )}
+    </div>
+  );
+}
+
+interface PasswordFieldProps {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+  label?: string;
+  hint?: ReactNode;
+  error?: string | null;
+  placeholder?: string;
+  autoComplete?: string;
+}
+
+/** Password input with a show/hide button. */
+export function PasswordField({
+  id,
+  value,
+  onChange,
+  label = "Password",
+  hint,
+  error,
+  placeholder,
+  autoComplete = "current-password",
+}: PasswordFieldProps) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <TextField
+      id={id}
+      label={label}
+      type={visible ? "text" : "password"}
+      autoComplete={autoComplete}
+      spellCheck={false}
+      placeholder={placeholder}
+      value={value}
+      error={error}
+      hint={hint}
+      onChange={(e) => onChange(e.target.value)}
+      trailing={
+        <button
+          type="button"
+          className="icon-btn icon-btn--sm input-wrap__button"
+          aria-label={visible ? "Hide password" : "Show password"}
+          aria-pressed={visible}
+          aria-controls={id}
+          onClick={() => setVisible((v) => !v)}
+        >
+          {visible ? <EyeOff size={16} /> : <Eye size={16} />}
+        </button>
+      }
+    />
+  );
+}
+
+/** A failed check that isn't about one field; focusable so it can be announced. */
+export function ProblemCallout({ id, problem }: { id: string; problem: FormProblem }) {
+  return (
+    <div id={id} tabIndex={-1} className="imap-form__problem">
+      <Callout tone="danger" role="alert" title={problem.title}>
+        {problem.detail && <p>{problem.detail}</p>}
+        {problem.technical && <p className="callout__technical selectable">{problem.technical}</p>}
+      </Callout>
     </div>
   );
 }
