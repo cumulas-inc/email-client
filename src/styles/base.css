@@ -19,8 +19,14 @@ body {
   font-size: var(--text-md);
   line-height: 1.4;
   color: var(--fg-primary);
-  background: var(--bg-app);
+  background:
+    radial-gradient(1200px 500px at 15% -10%, var(--bg-app-glow), transparent 70%), var(--bg-app);
   -webkit-font-smoothing: antialiased;
+  font-optical-sizing: auto;
+  /* Inter: open digits, single-storey a off, rounded quotes. */
+  font-feature-settings:
+    "cv11" 1,
+    "ss03" 1;
   overflow: hidden;
   user-select: none;
   cursor: default;
@@ -61,7 +67,6 @@ a {
   cursor: auto;
 }
 
-/* Thin scrollbars, like modern Outlook. */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border-default) transparent;
@@ -79,6 +84,57 @@ a {
   border: 0;
 }
 
+/* --- Typography roles ------------------------------------------------------ */
+
+/* The serif is for reading: subjects, headings and message text. Controls,
+   labels, names and times stay in the sans. */
+.serif {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+}
+
+/* Big pane titles: "Inbox", "Contacts", a task list's name. */
+.pane-title {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.005em;
+  color: var(--fg-primary);
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Keyboard hint inside buttons and fields: "Ctrl K". */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+/* --- Cards ----------------------------------------------------------------- */
+
+/* Panes are cards floating on the canvas. */
+.card {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
 /* --- Buttons --------------------------------------------------------------- */
 
 .btn {
@@ -88,21 +144,32 @@ a {
   gap: var(--space-2);
   height: 32px;
   padding: 0 var(--space-3);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
+  border: none;
+  border-radius: var(--radius-md);
   background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-control);
   color: var(--fg-primary);
   font-weight: var(--weight-semibold);
   white-space: nowrap;
   cursor: pointer;
   transition:
     background var(--duration-fast) var(--ease),
-    border-color var(--duration-fast) var(--ease);
+    box-shadow var(--duration-fast) var(--ease),
+    transform var(--duration-press) var(--ease-out);
+}
+
+/* Pressing answers at once. */
+.btn:active:not(:disabled),
+.icon-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn svg {
+  flex-shrink: 0;
 }
 
 .btn:hover:not(:disabled) {
   background: var(--bg-hover);
-  border-color: var(--border-strong);
 }
 
 .btn:active:not(:disabled) {
@@ -116,13 +183,12 @@ a {
 
 .btn--primary {
   background: var(--brand);
-  border-color: transparent;
+  box-shadow: var(--shadow-button);
   color: var(--on-brand);
 }
 
 .btn--primary:hover:not(:disabled) {
   background: var(--brand-hover);
-  border-color: transparent;
 }
 
 .btn--primary:active:not(:disabled) {
@@ -131,18 +197,19 @@ a {
 
 .btn--primary:disabled {
   background: var(--bg-pressed);
+  box-shadow: none;
   color: var(--fg-disabled);
 }
 
 .btn--subtle {
   background: transparent;
-  border-color: transparent;
-  font-weight: var(--weight-regular);
+  box-shadow: none;
+  color: var(--fg-secondary);
 }
 
 .btn--subtle:hover:not(:disabled) {
   background: var(--bg-hover);
-  border-color: transparent;
+  color: var(--fg-primary);
 }
 
 .btn--danger {
@@ -163,11 +230,15 @@ a {
   height: 32px;
   padding: 0;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--fg-secondary);
   cursor: pointer;
   flex-shrink: 0;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease),
+    transform var(--duration-press) var(--ease-out);
 }
 
 .icon-btn:hover:not(:disabled) {
@@ -187,10 +258,11 @@ a {
 .icon-btn--sm {
   width: 24px;
   height: 24px;
+  border-radius: var(--radius-sm);
 }
 
 .icon-btn[aria-pressed="true"] {
-  color: var(--brand);
+  color: var(--brand-text);
 }
 
 /* --- Form fields ----------------------------------------------------------- */
@@ -204,12 +276,12 @@ a {
 .field__label {
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
-  color: var(--fg-primary);
+  color: var(--fg-secondary);
 }
 
 .field__hint {
   font-size: var(--text-sm);
-  color: var(--fg-secondary);
+  color: var(--fg-tertiary);
 }
 
 .field__error {
@@ -221,14 +293,16 @@ a {
 .select,
 .textarea {
   width: 100%;
-  min-height: 32px;
-  padding: 5px var(--space-2);
-  border: 1px solid var(--border-default);
-  border-bottom-color: var(--border-strong);
-  border-radius: var(--radius-sm);
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-md);
   background: var(--bg-input);
   user-select: text;
   cursor: text;
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
 }
 
 .select {
@@ -250,12 +324,16 @@ a {
 .select:focus,
 .textarea:focus {
   outline: none;
-  border-bottom: 2px solid var(--brand);
-  padding-bottom: 4px;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-subtle);
 }
 
 .input[aria-invalid="true"] {
-  border-bottom-color: var(--danger);
+  border-color: var(--danger);
+}
+
+.input[aria-invalid="true"]:focus {
+  box-shadow: 0 0 0 3px var(--danger-subtle);
 }
 
 .checkbox {
@@ -283,9 +361,10 @@ a {
   height: 18px;
   padding: 0 5px;
   border-radius: var(--radius-round);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  color: var(--brand);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+  color: var(--brand-text);
 }
 
 .badge--filled {
@@ -341,11 +420,18 @@ a {
   }
 }
 
+/* Reduced motion keeps fades and color changes, which help comprehension,
+   but nothing moves, grows or spins. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .btn:active:not(:disabled),
+  .icon-btn:active:not(:disabled) {
+    transform: none;
   }
 }

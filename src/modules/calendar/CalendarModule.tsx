@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAccounts } from "../../api/queries";
 import type { Account, Calendar, CalendarEvent } from "../../api/types";
 import { errorMessage } from "../../api/errors";
+import { ModuleSidebar } from "../../app/ModuleSidebar";
 import { useAppStore } from "../../app/store";
 import { EmptyState } from "../../components/EmptyState";
 import { Spinner } from "../../components/Spinner";
@@ -190,18 +191,23 @@ export function CalendarModule() {
       : range;
 
   return (
-    <div className="calendar">
-      <aside className="cal-sidebar" aria-label="Calendar navigation">
-        <button
-          type="button"
-          className="btn btn--primary cal-sidebar__new"
-          onClick={newEvent}
-          title="New event (Ctrl+N)"
-          disabled={noCalendars}
-        >
-          <CalendarPlus size={16} aria-hidden="true" />
-          New event
-        </button>
+    <div className="calendar module-layout">
+      <ModuleSidebar
+        label="Calendar navigation"
+        className="cal-sidebar"
+        action={
+          <button
+            type="button"
+            className="btn btn--primary cal-sidebar__new"
+            onClick={newEvent}
+            title="New event (Ctrl+N)"
+            disabled={noCalendars}
+          >
+            <CalendarPlus size={16} aria-hidden="true" />
+            New event
+          </button>
+        }
+      >
         <MiniMonth
           anchor={anchor}
           rangeStart={miniRange.start}
@@ -224,9 +230,9 @@ export function CalendarModule() {
             onToggle={toggleCalendar}
           />
         )}
-      </aside>
+      </ModuleSidebar>
 
-      <section className="cal-main" aria-label="Calendar">
+      <section className="cal-main card" aria-label="Calendar">
         <Toolbar
           view={view}
           title={rangeTitle(view, anchor)}

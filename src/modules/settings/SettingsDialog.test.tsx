@@ -284,11 +284,11 @@ describe("Accounts", () => {
     await user.click(await screen.findByRole("button", { name: "Manage Alex (Personal)" }));
     const colors = screen.getByRole("radiogroup", { name: "Color" });
     expect(within(colors).getAllByRole("radio")).toHaveLength(8);
-    expect(within(colors).getByRole("radio", { name: "Berry" })).toBeChecked();
+    expect(within(colors).getByRole("radio", { name: "Apricot" })).toBeChecked();
 
-    await user.click(within(colors).getByRole("radio", { name: "Green" }));
-    expect(update).toHaveBeenCalledWith("acct-home", undefined, "#107c10");
-    expect(within(colors).getByRole("radio", { name: "Green" })).toBeChecked();
+    await user.click(within(colors).getByRole("radio", { name: "Moss" }));
+    expect(update).toHaveBeenCalledWith("acct-home", undefined, "#4d7a2e");
+    expect(within(colors).getByRole("radio", { name: "Moss" })).toBeChecked();
   });
 
   it("removes an account after confirmation", async () => {

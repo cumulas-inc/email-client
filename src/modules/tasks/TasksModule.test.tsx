@@ -310,7 +310,7 @@ describe("Completing and starring", () => {
       expect((await findTask(backend, "Benefits enrollment"))?.importance).toBe("high"),
     );
     // Starring does not open the details pane.
-    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Task details" })).not.toBeInTheDocument();
 
     await pickList(user, /^Important/);
     expect(taskTitles(openList("Important"))).toContain("Benefits enrollment");
@@ -486,7 +486,7 @@ describe("Task details", () => {
     await user.click(within(list).getByRole("option", { name: /^Benefits enrollment/ }));
     await user.click(within(details()).getByRole("textbox", { name: "Notes" }));
     await user.keyboard("{Escape}");
-    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Task details" })).not.toBeInTheDocument();
 
     await user.click(within(list).getByRole("option", { name: /^Benefits enrollment/ }));
     await user.click(within(details()).getByRole("button", { name: "Delete task" }));
@@ -494,7 +494,7 @@ describe("Task details", () => {
     expect(dialog).toHaveTextContent("“Benefits enrollment” will be permanently deleted.");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
-    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Task details" })).not.toBeInTheDocument();
     expect(taskTitles(openList("Tasks"))).not.toContain("Benefits enrollment");
     await waitFor(async () =>
       expect(await findTask(backend, "Benefits enrollment")).toBeUndefined(),
@@ -524,7 +524,7 @@ describe("Completed section and search", () => {
     expect(screen.queryByRole("listbox", { name: "Completed tasks" })).not.toBeInTheDocument();
   });
 
-  it("filters the current list by the title-bar search", async () => {
+  it("filters the current list by the search box", async () => {
     const user = userEvent.setup();
     renderTasks();
     await screen.findByRole("listbox", { name: "Lists" });

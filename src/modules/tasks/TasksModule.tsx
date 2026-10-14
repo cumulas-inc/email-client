@@ -4,9 +4,11 @@ import { useMemo, useRef, useState } from "react";
 import { errorMessage } from "../../api/errors";
 import { useAccounts } from "../../api/queries";
 import type { Task, TaskList, TaskPatch } from "../../api/types";
+import { ModuleSidebar } from "../../app/ModuleSidebar";
 import { useAppStore } from "../../app/store";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { EmptyState } from "../../components/EmptyState";
+import { SearchField } from "../../components/SearchField";
 import { PaneSpinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
 import { useCreateTask, useDeleteTask, useTaskLists, useTasks, useUpdateTask } from "./queries";
@@ -250,16 +252,21 @@ export function TasksModule() {
     view.kind === "smart" ? EMPTY_TEXT[view.id] : lists.length === 0 ? null : EMPTY_TEXT.list;
 
   return (
-    <div className="tasks">
-      <TaskSidebar
-        accounts={accounts}
-        lists={lists}
-        view={view}
-        counts={counts}
-        onSelect={(v) => setView(v)}
-      />
+    <div className="tasks module-layout">
+      <ModuleSidebar label="Tasks" className="tasks__sidebar">
+        <TaskSidebar
+          accounts={accounts}
+          lists={lists}
+          view={view}
+          counts={counts}
+          onSelect={(v) => setView(v)}
+        />
+      </ModuleSidebar>
 
-      <section className="tasks__main" aria-label={title}>
+      <section className="tasks__main card" aria-label={title}>
+        <div className="tasks__search">
+          <SearchField placeholder="Search tasks" />
+        </div>
         <TaskListView
           title={title}
           subtitle={subtitle}

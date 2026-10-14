@@ -98,7 +98,7 @@ describe("People list", () => {
     );
   });
 
-  it("filters live by the title-bar search, debounced, through listContacts", async () => {
+  it("filters live by the search box, debounced, through listContacts", async () => {
     const backend = new MockBackend();
     const spy = vi.spyOn(backend, "listContacts");
     renderPeople(backend);

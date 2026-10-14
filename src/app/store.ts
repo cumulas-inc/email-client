@@ -20,7 +20,7 @@ interface AppState {
   module: Module;
   setModule: (module: Module) => void;
 
-  /** Global search text from the title bar (mail search). */
+  /** Text in the current module's search box; cleared when switching modules. */
   search: string;
   setSearch: (search: string) => void;
 
@@ -39,7 +39,7 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set) => ({
   module: "mail",
-  setModule: (module) => set({ module }),
+  setModule: (module) => set((state) => (state.module === module ? state : { module, search: "" })),
 
   search: "",
   setSearch: (search) => set({ search }),

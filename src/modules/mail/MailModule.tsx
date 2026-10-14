@@ -3,6 +3,7 @@ import "./mail.css";
 import { Pencil, X } from "lucide-react";
 import { type CSSProperties, useCallback, useEffect, useState } from "react";
 
+import { ModuleSidebar } from "../../app/ModuleSidebar";
 import { useAppStore } from "../../app/store";
 import { useAccounts, useSettings } from "../../api/queries";
 import { useMailActions } from "./actions";
@@ -147,9 +148,9 @@ export function MailModule() {
 
   return (
     <div className={`mail mail--${readingPane}`} style={style}>
-      <aside className="mail__folders" aria-label="Mail folders">
+      <ModuleSidebar label="Mail folders" className="mail__folders">
         <FolderPane actions={actions} />
-      </aside>
+      </ModuleSidebar>
       <Splitter
         orientation="vertical"
         value={foldersWidth}

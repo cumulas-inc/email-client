@@ -6,9 +6,50 @@
   justify-content: center;
   flex-shrink: 0;
   border-radius: var(--radius-round);
-  color: #fff;
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.02em;
+  background: var(--avatar-bg);
+  color: var(--avatar-fg);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.01em;
+}
+
+.avatar--teal {
+  --avatar-bg: var(--avatar-teal-bg);
+  --avatar-fg: var(--avatar-teal-fg);
+}
+
+.avatar--rose {
+  --avatar-bg: var(--avatar-rose-bg);
+  --avatar-fg: var(--avatar-rose-fg);
+}
+
+.avatar--sky {
+  --avatar-bg: var(--avatar-sky-bg);
+  --avatar-fg: var(--avatar-sky-fg);
+}
+
+.avatar--amber {
+  --avatar-bg: var(--avatar-amber-bg);
+  --avatar-fg: var(--avatar-amber-fg);
+}
+
+.avatar--violet {
+  --avatar-bg: var(--avatar-violet-bg);
+  --avatar-fg: var(--avatar-violet-fg);
+}
+
+.avatar--green {
+  --avatar-bg: var(--avatar-green-bg);
+  --avatar-fg: var(--avatar-green-fg);
+}
+
+.avatar--orange {
+  --avatar-bg: var(--avatar-orange-bg);
+  --avatar-fg: var(--avatar-orange-fg);
+}
+
+.avatar--slate {
+  --avatar-bg: var(--avatar-slate-bg);
+  --avatar-fg: var(--avatar-slate-fg);
 }
 
 /* --- Dialog ---------------------------------------------------------------- */
@@ -18,7 +59,7 @@
   max-height: calc(100vh - 48px);
   padding: 0;
   border: none;
-  border-radius: var(--radius-lg);
+  border-radius: 14px;
   background: var(--bg-surface-raised);
   color: var(--fg-primary);
   box-shadow: var(--shadow-lg);
@@ -28,10 +69,27 @@
 .dialog[open] {
   display: flex;
   flex-direction: column;
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 200ms var(--ease-out);
+}
+
+@starting-style {
+  .dialog[open] {
+    opacity: 0;
+    transform: scale(0.97);
+  }
 }
 
 .dialog::backdrop {
   background: var(--bg-overlay);
+  transition: opacity 200ms var(--ease-out);
+}
+
+@starting-style {
+  .dialog[open]::backdrop {
+    opacity: 0;
+  }
 }
 
 .dialog__header {
@@ -43,8 +101,10 @@
 }
 
 .dialog__title {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
   font-size: var(--text-xl);
-  font-weight: var(--weight-semibold);
+  font-weight: 700;
 }
 
 .dialog__body {
@@ -72,10 +132,22 @@
   z-index: 100;
   min-width: 200px;
   padding: var(--space-1);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  border: none;
+  border-radius: var(--radius-lg);
   background: var(--bg-surface-raised);
   box-shadow: var(--shadow-md);
+  transform-origin: top left;
+  transition:
+    opacity 150ms var(--ease-out),
+    transform 150ms var(--ease-out);
+}
+
+/* Menus grow out of the button that opened them. */
+@starting-style {
+  .menu {
+    opacity: 0;
+    transform: scale(0.97);
+  }
 }
 
 .menu--start {
@@ -84,6 +156,7 @@
 
 .menu--end {
   right: 0;
+  transform-origin: top right;
 }
 
 .menu__item {
@@ -157,11 +230,21 @@
   min-width: 320px;
   max-width: 560px;
   padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--bg-surface-raised);
   box-shadow: var(--shadow-lg);
   pointer-events: auto;
-  animation: toast-in var(--duration-normal) var(--ease);
+  transition:
+    opacity 300ms var(--ease-out),
+    transform 300ms var(--ease-out);
+}
+
+/* Toasts rise from the edge they live on. */
+@starting-style {
+  .toast {
+    opacity: 0;
+    transform: translateY(8px);
+  }
 }
 
 .toast--success > svg:first-child {
@@ -173,18 +256,11 @@
 }
 
 .toast--info > svg:first-child {
-  color: var(--brand);
+  color: var(--brand-text);
 }
 
 .toast__message {
   flex: 1;
-}
-
-@keyframes toast-in {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
 }
 
 /* --- Empty state & spinner ------------------------------------------------- */
@@ -207,8 +283,10 @@
 }
 
 .empty-state__title {
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: var(--text-xl);
+  font-weight: 700;
   color: var(--fg-primary);
 }
 
@@ -222,7 +300,7 @@
 
 .spinner {
   display: inline-flex;
-  color: var(--brand);
+  color: var(--brand-text);
 }
 
 .pane-spinner {

@@ -10,9 +10,8 @@ import { MailModule } from "../modules/mail/MailModule";
 import { Welcome } from "../modules/onboarding/Welcome";
 import { AddAccountDialog } from "../modules/settings/AddAccountDialog";
 import { SettingsDialog } from "../modules/settings/SettingsDialog";
-import { NavRail } from "./NavRail";
+import { AppHeader } from "./AppHeader";
 import { type Module, useAppStore } from "./store";
-import { TitleBar } from "./TitleBar";
 import { useBackendEvents } from "./useBackendEvents";
 import { useTheme } from "./useTheme";
 
@@ -43,12 +42,15 @@ function useGlobalShortcuts() {
       if (module) {
         e.preventDefault();
         setModule(module);
-      } else if (e.key === "e" || (e.shiftKey && e.key.toLowerCase() === "f")) {
-        // Ctrl+E (Outlook) focuses search.
+      } else if (e.key === "k" || e.key === "e" || (e.shiftKey && e.key.toLowerCase() === "f")) {
+        // Ctrl+K (or Ctrl+E) jumps to the list's search box. Calendar has
+        // none, so it searches mail.
+        e.preventDefault();
         const search = document.getElementById("global-search");
-        if (search) {
-          e.preventDefault();
-          search.focus();
+        if (search) search.focus();
+        else {
+          setModule("mail");
+          requestAnimationFrame(() => document.getElementById("global-search")?.focus());
         }
       }
     };
@@ -79,11 +81,8 @@ function Shell() {
 
   return (
     <div className="app">
-      <TitleBar />
-      <div className="app__body">
-        {accounts && accounts.length > 0 && <NavRail />}
-        <main className="app__main">{content}</main>
-      </div>
+      <AppHeader />
+      <main className="app__main">{content}</main>
       <SettingsDialog />
       <AddAccountDialog />
       <Toaster />

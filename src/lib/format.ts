@@ -32,28 +32,24 @@ export function initials(nameOrAddress: string): string {
   return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
 }
 
-const AVATAR_COLORS = [
-  "#0f6cbd",
-  "#c239b3",
-  "#038387",
-  "#ca5010",
-  "#4f6bed",
-  "#498205",
-  "#8764b8",
-  "#d13438",
-  "#986f0b",
-  "#00727c",
-  "#5c2e91",
-  "#b146c2",
-  "#13a10e",
-  "#a4262c",
-];
+export const AVATAR_HUES = [
+  "teal",
+  "rose",
+  "sky",
+  "amber",
+  "violet",
+  "green",
+  "orange",
+  "slate",
+] as const;
 
-/** Stable color for a person, derived from their address. */
-export function colorFor(key: string): string {
+export type AvatarHue = (typeof AVATAR_HUES)[number];
+
+/** Stable avatar hue for a person, derived from their address. */
+export function hueFor(key: string): AvatarHue {
   let hash = 0;
   for (const ch of key.toLowerCase()) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
-  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length]!;
+  return AVATAR_HUES[Math.abs(hash) % AVATAR_HUES.length]!;
 }
 
 /** Compact timestamp for lists: "3:05 PM", "Mon 3:05 PM", "Oct 9", "Oct 9, 2025". */

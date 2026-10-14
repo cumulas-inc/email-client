@@ -27,6 +27,7 @@ import { qk, useAccounts } from "../../api/queries";
 import type { Account, Folder, Message, MessageSummary, ReadingPane } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { Menu } from "../../components/Menu";
+import { SearchField } from "../../components/SearchField";
 import { PaneSpinner, Spinner } from "../../components/Spinner";
 import { dateGroup } from "../../lib/format";
 import type { MailActions } from "./actions";
@@ -545,6 +546,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   return (
     <section className="mail-list" aria-label="Message list">
       <header className="mail-list__header">
+        <SearchField placeholder="Search mail" />
         <div className="mail-list__title-row">
           <div className="mail-list__titles">
             <h2 className="mail-list__title" title={title}>

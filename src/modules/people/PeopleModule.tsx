@@ -4,9 +4,11 @@ import { useMemo, useRef, useState } from "react";
 import { errorMessage } from "../../api/errors";
 import { useAccounts } from "../../api/queries";
 import type { Contact } from "../../api/types";
+import { ModuleSidebar } from "../../app/ModuleSidebar";
 import { useAppStore } from "../../app/store";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { EmptyState } from "../../components/EmptyState";
+import { SearchField } from "../../components/SearchField";
 import { PaneSpinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
 import { ContactDetails } from "./ContactDetails";
@@ -154,9 +156,11 @@ export function PeopleModule() {
   }
 
   return (
-    <div className="people">
-      <section className="people__list-pane" aria-label="Contact list">
-        <div className="people__toolbar">
+    <div className="people module-layout">
+      <ModuleSidebar
+        label="Address books"
+        className="people__sidebar"
+        action={
           <button
             type="button"
             className="btn btn--primary"
@@ -166,6 +170,13 @@ export function PeopleModule() {
             <UserPlus size={16} aria-hidden="true" />
             New contact
           </button>
+        }
+      >
+        {null}
+      </ModuleSidebar>
+      <section className="people__list-pane card" aria-label="Contact list">
+        <div className="people__search">
+          <SearchField placeholder="Search contacts" />
         </div>
         <div className="people__list-header">
           <h1 className="people__title">
@@ -194,7 +205,7 @@ export function PeopleModule() {
         <div className="people__list-body">{list}</div>
       </section>
 
-      <section className="people__details-pane" aria-label="Contact details">
+      <section className="people__details-pane card" aria-label="Contact details">
         {selected ? (
           <ContactDetails
             key={selected.id}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  colorFor,
+  hueFor,
   displayName,
   formatBytes,
   formatListDate,
@@ -25,7 +25,7 @@ describe("format helpers", () => {
   });
 
   it("gives stable colors", () => {
-    expect(colorFor("A@b.example")).toBe(colorFor("a@B.example"));
+    expect(hueFor("A@b.example")).toBe(hueFor("a@B.example"));
   });
 
   it("formats list dates relative to now", () => {

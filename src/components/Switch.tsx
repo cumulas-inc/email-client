@@ -27,9 +27,6 @@ export function Switch({ checked, onChange, label, description, disabled }: Swit
         )}
       </div>
       <span className="switch__control">
-        <span className="switch__state" aria-hidden="true">
-          {checked ? "On" : "Off"}
-        </span>
         <span className="switch__box">
           <input
             id={id}
