@@ -112,20 +112,41 @@ jobs:
     name: Flatpak build
     needs: flatpak-sources
     runs-on: ubuntu-24.04
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
-      options: --privileged
     steps:
+      # The GNOME SDK, the Rust and Node extensions and a release build of the
+      # app need more disk than the runner has free by default.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force >/dev/null || true
+          df -h /
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: flatpak-sources
           path: packaging/flatpak
-      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          # Ubuntu 24.04 restricts the unprivileged user namespaces bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Build
+        run: |
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse --force-clean \
+            --repo=repo build-dir packaging/flatpak/co.cumulas.Mail.yml 2>&1 | tee flatpak-build.log
+          flatpak build-bundle repo cumulas-mail.flatpak co.cumulas.Mail
+          df -h /
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          bundle: cumulas-mail.flatpak
-          manifest-path: packaging/flatpak/co.cumulas.Mail.yml
-          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'package-lock.json') }}
+          name: flatpak
+          path: |
+            cumulas-mail.flatpak
+            flatpak-build.log
+          if-no-files-found: ignore
 
   desktop-e2e:
     name: Desktop end-to-end (tauri-driver + GreenMail)
