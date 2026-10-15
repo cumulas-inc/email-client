@@ -17,6 +17,11 @@ use crate::error::{Error, Result};
 /// The largest signature taken, the person's own or an organization's.
 pub const MAX_SIGNATURE_BYTES: usize = 512 * 1024;
 
+/// The version of [`sanitize_signature_html`]. Raise it when what the
+/// sanitizer keeps changes: organization signatures kept by an earlier one
+/// are then fetched again in full, rather than kept on "not modified".
+pub const SIGNATURE_SANITIZER_VERSION: u32 = 1;
+
 /// Result of [`sanitize_email_html`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SanitizedHtml {
@@ -146,6 +151,19 @@ pub fn sanitize_signature_html(html: &str, base: Option<&Url>) -> Result<String>
             "That signature is too large. Signatures can be 512 KB at most.",
         ));
     }
+    Ok(clean_signature(html, base))
+}
+
+/// A kept signature, sanitized again as it's read, so that a stricter
+/// sanitizer reaches signatures kept by an earlier one: as
+/// [`sanitize_signature_html`] without a base (relative URLs were resolved
+/// or dropped the first time) and without its size limit (it was within it
+/// then).
+pub fn sanitize_stored_signature_html(html: &str) -> String {
+    clean_signature(html, None)
+}
+
+fn clean_signature(html: &str, base: Option<&Url>) -> String {
     let base = base.cloned();
     let cleaned = ammonia::Builder::default()
         .add_tags(["style", "center", "font"])
@@ -164,7 +182,7 @@ pub fn sanitize_signature_html(html: &str, base: Option<&Url>) -> Result<String>
         })
         .clean(html)
         .to_string();
-    Ok(drop_unsafe_style_blocks(&cleaned))
+    drop_unsafe_style_blocks(&cleaned)
 }
 
 fn signature_attribute<'a>(
@@ -845,6 +863,23 @@ mod tests {
             "<!--[if mso]><style>p { font-family: Arial }</style><![endif]--><p>Ada<!-- note --></p>",
         );
         assert_eq!(out, "<p>Ada</p>");
+    }
+
+    #[test]
+    fn sanitizing_a_kept_signature_again_changes_nothing() {
+        let kept = organization_signature(
+            r#"<style>.sig td { color: #333 }</style><table class="sig"><tr>
+               <td style="font-family: Georgia, serif; background: url(https://cdn.example/bg.png)">
+               <a href="/people/ada">Ada</a><img src="logo.png" alt="Logo"></td></tr></table>"#,
+        );
+        assert_eq!(sanitize_stored_signature_html(&kept), kept);
+        // What an earlier sanitizer let through goes now.
+        assert_eq!(
+            sanitize_stored_signature_html(
+                r#"<p style="background: image-set('http://t.example/p.png' 1x); color: red">Ada</p>"#
+            ),
+            r#"<p style="color: red">Ada</p>"#
+        );
     }
 
     #[test]

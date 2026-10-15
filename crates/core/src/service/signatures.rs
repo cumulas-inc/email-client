@@ -29,7 +29,10 @@ use tokio_util::sync::CancellationToken;
 use super::reminders::Clock;
 use super::{CoreService, EventSink};
 use crate::error::Result;
-use crate::html::{html_to_text, sanitize_signature_html};
+use crate::html::{
+    SIGNATURE_SANITIZER_VERSION, html_to_text, sanitize_signature_html,
+    sanitize_stored_signature_html,
+};
 use crate::model::{
     Account, AccountSettings, AccountSignature, ComposeSignature, ComposeSignatureKind, DataKind,
     OrganizationSignature, OrganizationSignatureState, ReplyKind,
@@ -189,11 +192,7 @@ impl CheckContext {
                 return;
             }
         };
-        let etag = before
-            .etag
-            .as_deref()
-            .filter(|_| before.state != OrganizationSignatureState::Unchecked);
-        let outcome = organization.check(etag).await;
+        let outcome = organization.check(etag_to_send(&before)).await;
         let after = apply(&before, outcome, self.hub.now(), &scope, account_id);
         if let Err(e) = self.store.save_organization_signature(account_id, &after) {
             // The account was removed meanwhile, most likely.
@@ -217,6 +216,24 @@ fn effective(stored: StoredOrganizationSignature, scope: &str) -> StoredOrganiza
     }
 }
 
+/// What prefixes a kept ETag: the version of the sanitizer its answer went
+/// through.
+fn etag_prefix() -> String {
+    format!("s{SIGNATURE_SANITIZER_VERSION}:")
+}
+
+/// The ETag a check sends: the last answer's, when this sanitizer kept it.
+/// One kept by another (or by a version before the prefix) isn't sent, so
+/// the service answers in full and the signature is sanitized again; until
+/// then the one kept stays in use.
+fn etag_to_send(before: &StoredOrganizationSignature) -> Option<&str> {
+    let etag = before
+        .etag
+        .as_deref()
+        .filter(|_| before.state != OrganizationSignatureState::Unchecked)?;
+    etag.strip_prefix(etag_prefix().as_str())
+}
+
 /// What's known once a check ended with `outcome`.
 fn apply(
     before: &StoredOrganizationSignature,
@@ -225,14 +242,14 @@ fn apply(
     scope: &str,
     account_id: &str,
 ) -> StoredOrganizationSignature {
-    let answered = |state, html: Option<String>, on_replies, etag| {
+    let answered = |state, html: Option<String>, on_replies, etag: Option<String>| {
         tracing::debug!("organization signature for account {account_id}: {state:?}");
         StoredOrganizationSignature {
             scope: Some(scope.to_owned()),
             state,
             html,
             on_replies,
-            etag,
+            etag: etag.map(|etag| format!("{}{etag}", etag_prefix())),
             checked_at: Some(now),
             attempted_at: Some(now),
             stale: false,
@@ -281,16 +298,14 @@ fn apply(
         CheckOutcome::NotAllowed => {
             answered(OrganizationSignatureState::NotAllowed, None, false, None)
         }
-        CheckOutcome::Unchanged if before.state != OrganizationSignatureState::Unchecked => {
-            StoredOrganizationSignature {
-                checked_at: Some(now),
-                attempted_at: Some(now),
-                stale: false,
-                retry_at: None,
-                ..before.clone()
-            }
-        }
-        // Nothing was asked about: a service that says so is wrong.
+        CheckOutcome::Unchanged if etag_to_send(before).is_some() => StoredOrganizationSignature {
+            checked_at: Some(now),
+            attempted_at: Some(now),
+            stale: false,
+            retry_at: None,
+            ..before.clone()
+        },
+        // No ETag was sent: a service that says so is wrong.
         CheckOutcome::Unchanged => failed(None, "unexpected \"not modified\""),
         CheckOutcome::Failed {
             retry_after,
@@ -312,11 +327,18 @@ fn visible(
     )
 }
 
+/// What the UI and the composer get of it: its signature sanitized again
+/// by this version of the app.
 fn public(o: StoredOrganizationSignature) -> OrganizationSignature {
     let ready = o.state == OrganizationSignatureState::Ready;
     OrganizationSignature {
         state: o.state,
-        html: ready.then(|| o.html.unwrap_or_default()),
+        html: ready.then(|| {
+            o.html
+                .as_deref()
+                .map(sanitize_stored_signature_html)
+                .unwrap_or_default()
+        }),
         // Whoever adds it, the app or the organization's mail server.
         on_replies: o.on_replies && o.state.is_managed(),
         checked_at: o.checked_at,
@@ -506,6 +528,8 @@ impl CoreService {
         }
     }
 
+    /// The account's signatures as kept, each sanitized again: a sanitizer
+    /// stricter than the one that kept them applies at once.
     fn account_signature(&self, account: &Account) -> Result<AccountSignature> {
         let stored = self.store.account_signatures(&account.id)?;
         let organization = match self.organization_service(account) {
@@ -514,7 +538,7 @@ impl CoreService {
         };
         Ok(AccountSignature {
             account_id: account.id.clone(),
-            own_html: stored.own_html,
+            own_html: sanitize_stored_signature_html(&stored.own_html),
             own_on_replies: stored.own_on_replies,
             organization,
         })

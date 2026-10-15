@@ -228,7 +228,7 @@ impl Setup {
             state,
             html: (state == OrganizationSignatureState::Ready).then(|| "<p>Org</p>".into()),
             on_replies,
-            etag: None,
+            etag: Some(format!("{}\"k\"", etag_prefix())),
             checked_at: Some(now),
             attempted_at: Some(now),
             stale: false,
@@ -724,6 +724,93 @@ async fn an_hour_old_answer_is_checked_again_in_the_background() {
     s.compose(&account, None).await;
     settle().await;
     assert_eq!(s.organization.calls(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn kept_signatures_follow_the_current_sanitizer() {
+    let s = setup();
+    let account = work_account(&s);
+    // Kept by an earlier version, whose sanitizer let image-set through
+    // and whose ETags had no prefix.
+    let earlier =
+        r#"<p style="background: image-set('http://t.example/p.png' 1x); color: red">Org</p>"#;
+    let cleaned = r#"<p style="color: red">Org</p>"#;
+    let stored = StoredOrganizationSignature {
+        scope: Some(SCOPE.into()),
+        state: OrganizationSignatureState::Ready,
+        html: Some(earlier.into()),
+        on_replies: true,
+        etag: Some("\"v1\"".into()),
+        checked_at: Some(epoch()),
+        attempted_at: Some(epoch()),
+        stale: false,
+        retry_at: None,
+    };
+    let store = s.service.store();
+    store
+        .save_organization_signature(&account.id, &stored)
+        .unwrap();
+    store
+        .save_own_signature(&account.id, earlier, true)
+        .unwrap();
+
+    // Read, both go through today's sanitizer.
+    let read = s.service.get_account_signature(&account.id).unwrap();
+    assert_eq!(read.organization.html.as_deref(), Some(cleaned));
+    assert_eq!(read.own_html, cleaned);
+    assert_eq!(
+        s.compose(&account, Some(ReplyKind::Reply)).await,
+        ComposeSignature {
+            kind: ComposeSignatureKind::Organization,
+            html: Some(cleaned.into()),
+        }
+    );
+    let imap = imap_account(&s);
+    store.save_own_signature(&imap.id, earlier, true).unwrap();
+    assert_eq!(s.compose(&imap, None).await.html.as_deref(), Some(cleaned));
+
+    // An ETag from another sanitizer isn't sent, so the answer comes in
+    // full; a "not modified" without one is a failure, which keeps the
+    // signature.
+    s.organization.answer(CheckOutcome::Unchanged);
+    let failed = s
+        .service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap()
+        .organization;
+    assert!(failed.stale);
+    assert_eq!(failed.html.as_deref(), Some(cleaned));
+    sleep(61).await;
+    s.organization
+        .answer(signature("<p>Org</p>", true, "\"v2\""));
+    s.service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .account_signatures(&account.id)
+            .unwrap()
+            .organization
+            .etag,
+        Some(format!("s{SIGNATURE_SANITIZER_VERSION}:\"v2\""))
+    );
+    // Kept by this one, it's sent back as the service gave it.
+    sleep(61).await;
+    s.organization.answer(CheckOutcome::Unchanged);
+    let unchanged = s
+        .service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap()
+        .organization;
+    assert!(!unchanged.stale);
+    assert_eq!(unchanged.html.as_deref(), Some("<p>Org</p>"));
+    assert_eq!(
+        *s.organization.etags.lock().unwrap(),
+        [None, None, Some("\"v2\"".into())]
+    );
 }
 
 #[tokio::test(start_paused = true)]

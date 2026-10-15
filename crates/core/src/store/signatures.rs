@@ -17,10 +17,11 @@ pub struct StoredOrganizationSignature {
     pub scope: Option<String>,
     /// Never `Unsupported`: that depends on the account and the build.
     pub state: OrganizationSignatureState,
-    /// Sanitized; only while `Ready`.
+    /// Sanitized (and sanitized again when read); only while `Ready`.
     pub html: Option<String>,
     pub on_replies: bool,
-    /// The service's ETag for its last answer.
+    /// The service's ETag for its last answer, after the version of the
+    /// sanitizer the answer went through (`s1:"…"`).
     pub etag: Option<String>,
     /// The last answer.
     pub checked_at: Option<DateTime<Utc>>,
@@ -51,7 +52,7 @@ impl Default for StoredOrganizationSignature {
 /// An account's signatures, as kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSignatures {
-    /// Sanitized; empty for none.
+    /// Sanitized (and sanitized again when read); empty for none.
     pub own_html: String,
     pub own_on_replies: bool,
     pub organization: StoredOrganizationSignature,
