@@ -27,6 +27,7 @@ url.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
 tauri-plugin-notification = "2"
+notify-rust = "4.17"
 tauri-plugin-opener = "2"
 # Installed fonts for the font settings: fontdb finds and names them,
 # ttf-parser checks that they draw letters.

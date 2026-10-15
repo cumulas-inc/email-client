@@ -902,6 +902,7 @@ dependencies = [
  "chrono",
  "cumulas-core",
  "fontdb",
+ "notify-rust",
  "serde",
  "serde_json",
  "tauri",

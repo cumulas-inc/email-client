@@ -15,7 +15,6 @@ use cumulas_core::service::{EventSink, LiveConnector, MailAlert};
 use cumulas_core::store::Store;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
-use tauri_plugin_notification::NotificationExt;
 
 /// The most the app waits on exit for push connections to close.
 const SHUTDOWN_LIMIT: Duration = Duration::from_secs(2);
@@ -71,17 +70,24 @@ impl EventSink for TauriSink {
                 format!("in {}", account.email),
             )],
         };
+        // Straight to the notification server, not through the notification
+        // plugin: its desktop show() runs notify-rust's blocking call on a
+        // Tokio worker, which panics (zbus starts a runtime of its own), so
+        // nothing was ever shown.
         for (title, body) in toasts {
-            if let Err(e) = self
-                .app
-                .notification()
-                .builder()
-                .title(title)
-                .body(body)
-                .show()
-            {
-                tracing::warn!("could not show notification: {e}");
-            }
+            tauri::async_runtime::spawn(async move {
+                let shown = notify_rust::Notification::new()
+                    .appname("Cumulas Mail")
+                    .icon("co.cumulas.Mail")
+                    .hint(notify_rust::Hint::DesktopEntry("co.cumulas.Mail".into()))
+                    .summary(&title)
+                    .body(&body)
+                    .show_async()
+                    .await;
+                if let Err(e) = shown {
+                    tracing::warn!("could not show notification: {e}");
+                }
+            });
         }
     }
 
