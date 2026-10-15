@@ -337,10 +337,12 @@ export type SnoozeFor = { minutes: number } | { until: string };
 /**
  * What the account's organization last said about its signature:
  * - unsupported: an IMAP or personal Microsoft account, or company signatures are off.
- * - unchecked: not asked yet.
- * - notUsed: the organization doesn't use Cumulas Signatures, or has no signature for this person.
+ * - unchecked: not answered yet; with `stale`, the first check failed.
+ * - notUsed: Microsoft refused the token (the organization hasn't added Cumulas Signatures'
+ *   app), or the service has no signature for this person.
  * - ready: the organization's signature, which the app adds (`html`).
- * - addedOnSend: the organization's mail server adds it on send; the app adds none.
+ * - addedOnSend: the organization's mail server adds it on send (to replies and forwards only
+ *   with `onReplies`); the app adds none.
  * - notAllowed: Microsoft or the service didn't let Cumulas Mail get the signature, which may
  *   be how the service is set up rather than the organization's choice.
  */
