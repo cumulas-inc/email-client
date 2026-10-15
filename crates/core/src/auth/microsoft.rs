@@ -24,7 +24,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 use url::Url;
 
-use super::{SyncTokenError, SyncTokens, TokenSource};
+use super::{ApiTokenError, ApiTokens, SyncTokenError, SyncTokens, TokenSource};
 use crate::error::{Error, ErrorCode, Result};
 use crate::html::escape_html;
 use crate::secrets::{SecretStore, keys};
@@ -95,6 +95,14 @@ const SCOPE_NOT_OFFERED_CODES: &[u32] = &[70011, 500011, 650053, 650057];
 /// AADSTS65004 UserDeclinedConsent. Also sent when the user picks "Back to
 /// app" after submitting an approval request in the admin consent workflow.
 const USER_DECLINED_CODE: u32 = 65004;
+
+/// AADSTS codes meaning an organization's API (or the app registration it
+/// belongs to) isn't in the account's tenant: 500011
+/// InvalidResourceServicePrincipalNotFound, 650052 (the organization lacks a
+/// service principal for it), 650057 InvalidResource and 700016
+/// UnauthorizedClient_DoesNotMatchRequest (the application wasn't found in
+/// the directory).
+const API_NOT_IN_TENANT_CODES: &[u32] = &[500011, 650052, 650057, 700016];
 
 /// Upper bound for the browser's request head on the loopback listener.
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
@@ -576,6 +584,45 @@ impl SyncTokens for SyncTokenSource {
             .map_err(|e| match e {
                 TokenFailure::OAuth(e) => sync_token_error(&e),
                 TokenFailure::Other(e) => SyncTokenError::Failed(e),
+            })
+    }
+}
+
+/// Tokens for an API in the account's own organization (Cumulas
+/// Signatures'), from the account's refresh token (shared with Graph, and
+/// saved when Microsoft rotates it) with a cache of their own. `config`'s
+/// tenant should be the account's own, where the API is looked for. No
+/// refusal ever becomes an account error, or asks the person to sign in
+/// again: the API simply isn't used meanwhile.
+pub struct ApiTokenSource(MicrosoftTokenSource);
+
+impl ApiTokenSource {
+    /// `scope` is the API's delegated scope, such as
+    /// `api://signature.cumulas.co/<client id>/access_as_user`.
+    pub fn new(
+        config: MicrosoftAuthConfig,
+        account_id: impl Into<String>,
+        secrets: Arc<dyn SecretStore>,
+        scope: &str,
+    ) -> Self {
+        Self(MicrosoftTokenSource::with_scope(
+            config,
+            account_id,
+            secrets,
+            format!("{scope} offline_access"),
+        ))
+    }
+}
+
+#[async_trait]
+impl ApiTokens for ApiTokenSource {
+    async fn api_token(&self, fresh: bool) -> std::result::Result<String, ApiTokenError> {
+        self.0
+            .token(REFRESH_MARGIN, fresh)
+            .await
+            .map_err(|e| match e {
+                TokenFailure::OAuth(e) => api_token_error(&e),
+                TokenFailure::Other(e) => ApiTokenError::Failed(e),
             })
     }
 }
@@ -1175,6 +1222,40 @@ fn sync_token_error(error: &OAuthError) -> SyncTokenError {
     }
     SyncTokenError::Failed(
         Error::provider(error.summary()).with_details(json!({ "error": error.error })),
+    )
+}
+
+/// Maps a refused token for an organization's API. Unlike a refused Graph
+/// token, nothing here means "sign in again": `invalid_grant` with
+/// AADSTS65001 is consent the organization hasn't given, and an expired
+/// sign-in or new MFA requirement is the Graph sync's to report. Everything
+/// but the API missing from the tenant, or consent missing, is tried again
+/// later.
+fn api_token_error(error: &OAuthError) -> ApiTokenError {
+    if API_NOT_IN_TENANT_CODES.iter().any(|c| error.has_code(*c)) {
+        return ApiTokenError::NotInTenant;
+    }
+    // 65001 and the other codes asking for an administrator's consent, and
+    // 65004 (declined).
+    if ADMIN_CONSENT_CODES.iter().any(|c| error.has_code(*c))
+        || error.has_code(USER_DECLINED_CODE)
+        || error.error == "consent_required"
+    {
+        return ApiTokenError::NotAllowed;
+    }
+    // The error and its codes only: Microsoft's description can name the
+    // person, and this goes to the log.
+    let mut codes = error.error_codes.clone();
+    codes.extend(aadsts_codes(&error.error_description));
+    codes.sort_unstable();
+    codes.dedup();
+    let codes: String = codes.iter().map(|c| format!(", AADSTS{c}")).collect();
+    ApiTokenError::Failed(
+        Error::provider(format!(
+            "Microsoft didn't issue a token for the organization's API ({}{codes}).",
+            error.error
+        ))
+        .with_details(json!({ "error": error.error })),
     )
 }
 
@@ -2274,6 +2355,210 @@ mod tests {
                 .unwrap(),
             "access-1"
         );
+    }
+
+    const TENANT: &str = "11111111-2222-3333-4444-555555555555";
+    const SIGNATURE_SCOPE: &str =
+        "api://signature.example.org/99999999-8888-7777-6666-555555555555/access_as_user";
+
+    async fn api_tokens(server: &MockServer) -> ApiTokenSource {
+        let secrets = Arc::new(MemorySecretStore::default());
+        secrets
+            .set(&keys::refresh_token("acct"), "refresh-0")
+            .await
+            .unwrap();
+        let config = MicrosoftAuthConfig {
+            tenant: TENANT.into(),
+            ..config(server)
+        };
+        ApiTokenSource::new(config, "acct", secrets, SIGNATURE_SCOPE)
+    }
+
+    #[tokio::test]
+    async fn api_tokens_come_from_the_accounts_tenant_with_their_own_scope_and_cache() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/{TENANT}/oauth2/v2.0/token")))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .and(body_string_contains(
+                "scope=api%3A%2F%2Fsignature.example.org%2F99999999-8888-7777-6666-555555555555\
+                 %2Faccess_as_user+offline_access",
+            ))
+            .respond_with(token_success())
+            .expect(2)
+            .mount(&server)
+            .await;
+        let tokens = api_tokens(&server).await;
+        assert_eq!(tokens.api_token(false).await.unwrap(), "access-1");
+        // Cached...
+        assert_eq!(tokens.api_token(false).await.unwrap(), "access-1");
+        // ...unless the API refused it.
+        assert_eq!(tokens.api_token(true).await.unwrap(), "access-1");
+        // Rotation is saved for Graph too: they share the refresh token.
+        assert_eq!(
+            tokens
+                .0
+                .secrets
+                .get(&keys::refresh_token("acct"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("refresh-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn api_token_refusals_never_ask_to_sign_in_again() {
+        /// Microsoft's error, its description and code, and what it means.
+        type Case = (&'static str, &'static str, u32, fn(&ApiTokenError) -> bool);
+        let not_in_tenant: fn(&ApiTokenError) -> bool = |e| matches!(e, ApiTokenError::NotInTenant);
+        let not_allowed: fn(&ApiTokenError) -> bool = |e| matches!(e, ApiTokenError::NotAllowed);
+        let later: fn(&ApiTokenError) -> bool = |e| {
+            matches!(e, ApiTokenError::Failed(e) if e.code == ErrorCode::Provider
+                && !e.message.contains("adele"))
+        };
+        let cases: &[Case] = &[
+            (
+                "invalid_resource",
+                "AADSTS500011: The resource principal named api://signature.example.org/x was not found in the tenant named Contoso.",
+                500011,
+                not_in_tenant,
+            ),
+            (
+                "invalid_client",
+                "AADSTS650052: The app is trying to access a service that your organization lacks a service principal for.",
+                650052,
+                not_in_tenant,
+            ),
+            (
+                "invalid_request",
+                "AADSTS650057: Invalid resource. The client has requested access to a resource which isn't listed in the requested permissions.",
+                650057,
+                not_in_tenant,
+            ),
+            (
+                "unauthorized_client",
+                "AADSTS700016: Application with identifier 'x' was not found in the directory 'Contoso'.",
+                700016,
+                not_in_tenant,
+            ),
+            // Not "sign in again", as it would be for Graph.
+            (
+                "invalid_grant",
+                "AADSTS65001: The user or administrator has not consented to use the application with ID 'x' named 'Cumulas Mail'.",
+                65001,
+                not_allowed,
+            ),
+            (
+                "consent_required",
+                "AADSTS65001: consent required.",
+                65001,
+                not_allowed,
+            ),
+            (
+                "access_denied",
+                "AADSTS65004: User declined to consent to access the app.",
+                65004,
+                not_allowed,
+            ),
+            ("consent_required", "Consent is required.", 0, not_allowed),
+            (
+                "interaction_required",
+                "AADSTS50076: Due to a configuration change made by your administrator, you must use multi-factor authentication.",
+                50076,
+                later,
+            ),
+            (
+                "interaction_required",
+                "AADSTS50079: The user is required to use multi-factor authentication.",
+                50079,
+                later,
+            ),
+            (
+                "invalid_grant",
+                "AADSTS53003: Access has been blocked by Conditional Access policies.",
+                53003,
+                later,
+            ),
+            (
+                "invalid_grant",
+                "AADSTS700082: The refresh token has expired due to inactivity. adele@contoso.com",
+                700082,
+                later,
+            ),
+            (
+                "invalid_grant",
+                "AADSTS50173: The provided grant has expired due to it being revoked.",
+                50173,
+                later,
+            ),
+            (
+                "temporarily_unavailable",
+                "AADSTS90033: A transient error has occurred.",
+                90033,
+                later,
+            ),
+        ];
+        for (error, description, code, expected) in cases {
+            let server = MockServer::start().await;
+            let codes: &[u32] = if *code == 0 { &[] } else { &[*code] };
+            Mock::given(method("POST"))
+                .respond_with(token_error(error, description, codes))
+                .mount(&server)
+                .await;
+            let failure = api_tokens(&server)
+                .await
+                .api_token(false)
+                .await
+                .unwrap_err();
+            assert!(expected(&failure), "{error} {code}: {failure:?}");
+        }
+
+        // No network, or a sign-in that's gone from the keyring: later too.
+        let server = MockServer::start().await;
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tokens = ApiTokenSource(MicrosoftTokenSource {
+            config: MicrosoftAuthConfig {
+                authority_host: format!("http://{}", closed.local_addr().unwrap()),
+                ..api_tokens(&server).await.0.config
+            },
+            ..api_tokens(&server).await.0
+        });
+        drop(closed);
+        assert!(matches!(
+            tokens.api_token(false).await,
+            Err(ApiTokenError::Failed(e)) if e.code == ErrorCode::Network
+        ));
+        tokens
+            .0
+            .secrets
+            .delete(&keys::refresh_token("acct"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokens.api_token(false).await,
+            Err(ApiTokenError::Failed(e)) if e.code == ErrorCode::AuthRequired
+        ));
+    }
+
+    #[tokio::test]
+    async fn api_tokens_expire_while_the_computer_sleeps() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(token_success())
+            .mount(&server)
+            .await;
+        let (wall, clock) = wall_clock();
+        let tokens = ApiTokenSource(MicrosoftTokenSource {
+            wall_clock: clock,
+            ..api_tokens(&server).await.0
+        });
+        tokens.api_token(false).await.unwrap();
+        tokens.api_token(false).await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        *wall.lock().unwrap() += Duration::from_secs(8 * 3600);
+        tokens.api_token(false).await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 
     #[test]

@@ -65,3 +65,28 @@ pub trait SyncTokens: Send + Sync {
         fresh: bool,
     ) -> std::result::Result<String, SyncTokenError>;
 }
+
+/// Why no token for an organization's API (Cumulas Signatures') could be
+/// had. None of these is the account's problem: its sign-in and sync are
+/// unaffected.
+#[derive(Debug, Clone)]
+pub enum ApiTokenError {
+    /// The API, or the app it belongs to, isn't in the account's
+    /// organization: it doesn't use the service.
+    NotInTenant,
+    /// The organization has the API but hasn't let this app use it (no
+    /// consent, or it was declined).
+    NotAllowed,
+    /// Anything else (no network, Microsoft unavailable, the keyring, a
+    /// sign-in that needs the person, such as MFA): try again later.
+    Failed(Error),
+}
+
+/// Supplies tokens for an API in the account's own organization, from the
+/// account's sign-in. They go to that API only.
+#[async_trait]
+pub trait ApiTokens: Send + Sync {
+    /// A token; `fresh` gets a new one whatever the cache holds (the API
+    /// refused the last one).
+    async fn api_token(&self, fresh: bool) -> std::result::Result<String, ApiTokenError>;
+}
