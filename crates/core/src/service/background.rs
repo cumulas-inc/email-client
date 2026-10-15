@@ -1,6 +1,6 @@
 //! What runs while the app does: the periodic full sync, push for every
-//! account (see [`crate::push`]), the reminder scheduler and the resume
-//! detector.
+//! account (see [`crate::push`]), the reminder scheduler, the signature
+//! checks and the resume detector.
 
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
@@ -29,7 +29,8 @@ const UNSUBSCRIBE_LIMIT: Duration = Duration::from_secs(5);
 
 impl CoreService {
     /// Starts the background work: the periodic full sync, push for every
-    /// account, the reminder scheduler and the resume detector. Call once,
+    /// account, the reminder scheduler, the signature checks and the resume
+    /// detector. Call once,
     /// inside a Tokio runtime; later calls do nothing.
     pub fn start_background(self: &Arc<Self>) {
         let Ok(runtime) = Handle::try_current() else {
@@ -71,7 +72,13 @@ impl CoreService {
                 Arc::downgrade(self),
                 self.push.root.child_token(),
             ));
-            state.tasks.extend([periodic, resume, reminders]);
+            let signatures = runtime.spawn(super::signatures::signature_loop(
+                Arc::downgrade(self),
+                self.push.root.child_token(),
+            ));
+            state
+                .tasks
+                .extend([periodic, resume, reminders, signatures]);
         }
         for account in accounts {
             self.start_push(&account.id);
@@ -260,6 +267,7 @@ impl CoreService {
         match (was_available, available) {
             (false, true) => {
                 tracing::info!("network is back");
+                self.signatures.network_back();
                 self.wake(WakeReason::Network);
             }
             (true, false) => tracing::info!("network is gone; pausing push"),
@@ -275,6 +283,8 @@ impl CoreService {
         self.push.request(&SyncScope::full());
         // Reminders that came due in the meantime.
         self.reminders.poke.notify_one();
+        // Signature checks that came due while the computer slept.
+        self.signatures.poke.notify_one();
     }
 
     /// Stops all background work: cancels syncs, closes push connections

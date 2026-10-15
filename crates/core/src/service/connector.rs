@@ -7,7 +7,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::auth::microsoft::{
-    self, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult, SyncTokenSource, sync_scope,
+    self, ApiTokenSource, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult, SyncTokenSource,
+    sync_scope,
 };
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Account, AccountKind, AccountSettings, ImapSettings};
@@ -21,6 +22,9 @@ use crate::push::graph::RelaySource;
 use crate::push::relay::{self, HttpRelay, Relay};
 use crate::push::supervisor::{MICROSOFT_POLL, UNSUPPORTED_POLL};
 use crate::secrets::{SecretStore, keys};
+use crate::signatures::client::SignatureClient;
+use crate::signatures::config::SignatureService;
+use crate::signatures::{HttpOrganizationSignatures, OrganizationSignatures};
 use crate::store::Store;
 
 /// Client id baked in at build time (`CUMULAS_MS_CLIENT_ID=... cargo build`).
@@ -76,6 +80,17 @@ pub trait Connector: Send + Sync {
         login_hint: Option<&str>,
         push_consent: bool,
     ) -> Result<SignInResult>;
+
+    /// Asks a Microsoft 365 work account's organization for its signature
+    /// (Cumulas Signatures); `None` when the app can't (it was built
+    /// without the service's client ID). Only asked for work and school
+    /// accounts.
+    fn organization_signatures(
+        &self,
+        _account: &Account,
+    ) -> Option<Arc<dyn OrganizationSignatures>> {
+        None
+    }
 }
 
 /// The real connector: Microsoft Graph and IMAP/SMTP over the network.
@@ -85,6 +100,9 @@ pub struct LiveConnector {
     /// The push service, made on first use: one connection for every
     /// account.
     relay: OnceLock<Arc<dyn Relay>>,
+    /// The signature service and its API's scope, read on first use; `None`
+    /// when the build has no client ID for it.
+    signatures: OnceLock<Option<(String, Arc<SignatureClient>)>>,
 }
 
 impl LiveConnector {
@@ -93,6 +111,7 @@ impl LiveConnector {
             store,
             secrets,
             relay: OnceLock::new(),
+            signatures: OnceLock::new(),
         }
     }
 
@@ -213,5 +232,44 @@ impl Connector for LiveConnector {
             config.consent_scopes.push(sync_scope(&config.client_id));
         }
         microsoft::sign_in(&config, open_browser, login_hint, Duration::from_secs(300)).await
+    }
+
+    fn organization_signatures(
+        &self,
+        account: &Account,
+    ) -> Option<Arc<dyn OrganizationSignatures>> {
+        let AccountSettings::Microsoft(settings) = &account.settings else {
+            return None;
+        };
+        let (scope, client) = self
+            .signatures
+            .get_or_init(|| {
+                let Some(service) = SignatureService::configured() else {
+                    tracing::info!(
+                        "company signatures are off: no client ID for the signature service"
+                    );
+                    return None;
+                };
+                tracing::info!("company signatures come from {}", service.host());
+                let client = SignatureClient::new(&service.url)?;
+                Some((service.scope, Arc::new(client)))
+            })
+            .clone()?;
+        // The API is looked for in the account's own organization.
+        let config = MicrosoftAuthConfig {
+            tenant: settings.tenant_id.clone(),
+            ..self.microsoft_config().ok()?
+        };
+        let tokens = ApiTokenSource::new(
+            config,
+            account.id.clone(),
+            Arc::clone(&self.secrets),
+            &scope,
+        );
+        Some(Arc::new(HttpOrganizationSignatures::new(
+            client,
+            Arc::new(tokens),
+            scope,
+        )))
     }
 }

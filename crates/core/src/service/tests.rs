@@ -291,6 +291,11 @@ pub(crate) struct FakeConnector {
     pub sign_in: Mutex<Option<SignInResult>>,
     /// The calendar of Microsoft accounts, when set.
     pub calendar: Mutex<Option<Arc<dyn crate::providers::CalendarProvider>>>,
+    /// The signature service of Microsoft work accounts' organizations,
+    /// when set.
+    pub organization_signatures: Mutex<Option<Arc<dyn crate::signatures::OrganizationSignatures>>>,
+    /// How often it was asked for.
+    pub organization_requests: AtomicUsize,
 }
 
 impl FakeConnector {
@@ -305,6 +310,8 @@ impl FakeConnector {
             push_consent: Mutex::default(),
             sign_in: Mutex::default(),
             calendar: Mutex::default(),
+            organization_signatures: Mutex::default(),
+            organization_requests: AtomicUsize::new(0),
         }
     }
 }
@@ -352,6 +359,14 @@ impl Connector for FakeConnector {
             // Like a user who never finishes signing in in the browser.
             None => std::future::pending().await,
         }
+    }
+
+    fn organization_signatures(
+        &self,
+        _: &Account,
+    ) -> Option<Arc<dyn crate::signatures::OrganizationSignatures>> {
+        self.organization_requests.fetch_add(1, Ordering::SeqCst);
+        self.organization_signatures.lock().unwrap().clone()
     }
 
     async fn push_source(&self, account: &Account) -> Result<PushSource> {

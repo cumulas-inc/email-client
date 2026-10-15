@@ -10,6 +10,7 @@ mod connector;
 mod mail;
 mod pim;
 mod reminders;
+mod signatures;
 mod sync;
 pub(crate) mod targeted;
 
@@ -95,6 +96,8 @@ pub struct CoreService {
     /// Push and the other background work, once started.
     push: PushHub,
     reminders: reminders::ReminderHub,
+    /// Company signatures: checks in progress and when the next are due.
+    signatures: Arc<signatures::SignatureHub>,
 }
 
 impl CoreService {
@@ -116,6 +119,7 @@ impl CoreService {
             sign_in_seq: std::sync::atomic::AtomicU64::new(0),
             push: PushHub::default(),
             reminders: reminders::ReminderHub::default(),
+            signatures: Arc::default(),
         }
     }
 
@@ -362,6 +366,8 @@ impl CoreService {
             .set_consent_refusal(&account.id, result.consent_refused.clone());
         self.forget_providers(Some(&account.id)).await;
         self.restart_push(&account.id).await;
+        // A new sign-in may come with consent the organization gave since.
+        self.check_signature_soon(&account.id);
         self.notify(&[DataKind::Accounts], Some(&account.id));
         Ok(account)
     }
@@ -428,6 +434,7 @@ impl CoreService {
         // While the sign-in to do it with is still there.
         self.drop_push_subscriptions(account_id).await;
         self.forget_providers(Some(account_id)).await;
+        self.signatures.forget(account_id);
         self.store.delete_account(account_id)?;
         for key in [
             keys::imap_password(account_id),
@@ -445,6 +452,7 @@ impl CoreService {
                 DataKind::Calendar,
                 DataKind::Contacts,
                 DataKind::Tasks,
+                DataKind::Signatures,
             ],
             None,
         );
@@ -465,6 +473,7 @@ impl CoreService {
             || previous.microsoft_tenant != settings.microsoft_tenant;
         if microsoft_app_changed {
             self.forget_providers(None).await;
+            self.signatures.forget_services();
         }
         if microsoft_app_changed
             || previous.instant_push != settings.instant_push
