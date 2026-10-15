@@ -200,6 +200,8 @@ export function useMailActions(): MailActions {
             subject: draft.subject,
             bodyHtml: draft.bodyHtml ?? textToHtml(draft.bodyText ?? ""),
             importance: draft.importance,
+            // A saved draft has whatever signature it was written with.
+            signature: "off",
           });
         } catch (e) {
           toast.error(e);

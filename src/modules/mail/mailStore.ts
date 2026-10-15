@@ -18,6 +18,15 @@ export interface DraftAttachment {
   dataBase64: string;
 }
 
+/**
+ * The signature under what's written: "auto" follows the From account's
+ * (for a new message or this reply kind, as it changes); an edit is the
+ * person's own version of it, `own` when it started as their own signature
+ * rather than their organization's; "removed" they took it out; "off" a
+ * message that starts without one (a saved draft, reopened).
+ */
+export type DraftSignature = "auto" | { edited: string; own: boolean } | "removed" | "off";
+
 export interface ComposeDraft {
   /** Unique per draft; used as React key so the editor remounts. */
   id: number;
@@ -32,6 +41,7 @@ export interface ComposeDraft {
   bodyHtml: string;
   /** Quoted original (reply/forward), appended below the editor on send. */
   quoteHtml: string | null;
+  signature: DraftSignature;
   attachments: DraftAttachment[];
   importance: Importance;
   replyToMessageId: string | null;

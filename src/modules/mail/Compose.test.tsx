@@ -3,8 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { MockBackend } from "../../api/mock";
+import { ACME_SIGNATURE } from "../../api/mock/data";
+import type { ComposeSignature } from "../../api/types";
 import { useAppStore } from "../../app/store";
-import { renderMail, respondButton, row } from "./testUtils";
+import { useMailStore } from "./mailStore";
+import { deferred, editFrame, loadFrame, renderMail, respondButton, row } from "./testUtils";
 
 // Full-module tests in jsdom; allow for slow, busy CI machines.
 vi.setConfig({ testTimeout: 20_000 });
@@ -398,5 +401,193 @@ describe("Drafts", () => {
     await user.click(within(c).getByRole("button", { name: "Send" }));
     await waitFor(() => expect((backend as MockBackend).sent).toHaveLength(1));
     expect((backend as MockBackend).sent[0]!.accountId).toBe("acct-home");
+  });
+});
+
+describe("Signature", () => {
+  /** The letter's style, as the sent body's first block has it. */
+  const LETTER = /^<div style="(font-family:'Charis SIL'[^"]*)">/;
+
+  async function signatureFrame(c: HTMLElement) {
+    return (await within(c).findByTitle("Signature")) as HTMLIFrameElement;
+  }
+
+  async function address(user: User, c: HTMLElement, subject = "Plans") {
+    await user.type(within(c).getByRole("combobox", { name: "To" }), "ann@example.org{Enter}");
+    await user.type(within(c).getByRole("textbox", { name: "Subject" }), subject);
+  }
+
+  async function sent(backend: MockBackend) {
+    await waitFor(() => expect(backend.sent).toHaveLength(1));
+    return backend.sent[0]!.bodyHtml;
+  }
+
+  it("adds the organization's signature, in its own style, without asking to discard", async () => {
+    const user = userEvent.setup();
+    const { backend } = await renderMail();
+    let c = await newMessage(user);
+    const doc = await loadFrame(await signatureFrame(c));
+    expect(doc.body.innerHTML).toContain("Engineering Manager, Atlas");
+    expect(within(c).getByRole("group", { name: "Signature" })).toBeInTheDocument();
+    // Following the account's signature isn't a change: closing doesn't ask.
+    await user.click(within(c).getByRole("button", { name: "Discard" }));
+    expect(screen.queryByRole("dialog", { name: "Discard this draft?" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "New message" })).not.toBeInTheDocument();
+
+    c = await newMessage(user);
+    await address(user, c);
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    const html = await sent(backend as MockBackend);
+    const letter = LETTER.exec(html)![1];
+    // The body, one empty line, then the signature: not in the letter's
+    // style, so it keeps its own fonts.
+    expect(html).toBe(
+      `<div style="${letter}"><p style="margin:0"><br></p><p style="margin:0"><br></p></div>` +
+        `<div class="cumulas-signature">${ACME_SIGNATURE}</div>`,
+    );
+  });
+
+  it("puts the signature above the quoted original in a reply", async () => {
+    const user = userEvent.setup();
+    const { backend } = await renderMail();
+    await open(user, CHECKLIST);
+    await user.click(respondButton("Reply"));
+    const c = await screen.findByRole("region", { name: "Reply" });
+    await signatureFrame(c);
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    const html = await sent(backend as MockBackend);
+    const signature = html.indexOf('<div class="cumulas-signature">');
+    expect(signature).toBeGreaterThan(0);
+    expect(html.indexOf('<div class="cumulas-quote">')).toBeGreaterThan(signature);
+  });
+
+  it("sets the person's own signature like the letter", async () => {
+    const user = userEvent.setup();
+    const { backend } = await renderMail();
+    const c = await newMessage(user);
+    await user.selectOptions(within(c).getByRole("combobox", { name: "From" }), "acct-home");
+    const doc = await loadFrame(await signatureFrame(c));
+    expect(doc.body.innerHTML).toBe("<div>Alex Morgan</div><div>+1 (206) 555-0199</div>");
+    await address(user, c);
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    const html = await sent(backend as MockBackend);
+    const letter = LETTER.exec(html)![1];
+    expect(html).toContain(
+      `<div class="cumulas-signature" style="${letter}"><div>Alex Morgan</div><div>+1 (206) 555-0199</div></div>`,
+    );
+  });
+
+  it("sends the signature as edited; changing it asks before discarding", async () => {
+    const user = userEvent.setup();
+    const { backend } = await renderMail();
+    const c = await newMessage(user);
+    const doc = await loadFrame(await signatureFrame(c));
+    editFrame(doc, doc.body.innerHTML.replace("Engineering Manager", "Engineering Director"));
+    expect(useMailStore.getState().compose?.dirty).toBe(true);
+
+    await user.click(within(c).getByRole("button", { name: "Discard" }));
+    const dialog = await screen.findByRole("dialog", { name: "Discard this draft?" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await address(user, c);
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    const html = await sent(backend as MockBackend);
+    expect(html).toContain('<div class="cumulas-signature"><table');
+    expect(html).toContain("Engineering Director, Atlas");
+    expect(html).not.toContain("Engineering Manager");
+  });
+
+  it("removes, adds back and restores the signature", async () => {
+    const user = userEvent.setup();
+    const { backend } = await renderMail();
+    const c = await newMessage(user);
+    let doc = await loadFrame(await signatureFrame(c));
+    editFrame(doc, "<div>Alex</div>");
+    const restore = within(c).getByRole("button", { name: "Restore signature" });
+    await user.click(restore);
+    doc = await loadFrame(await signatureFrame(c));
+    expect(doc.body.innerHTML).toContain("Engineering Manager, Atlas");
+    expect(within(c).queryByRole("button", { name: "Restore signature" })).not.toBeInTheDocument();
+    // Focus moves to what took the pressed button's place.
+    expect(within(c).getByRole("button", { name: "Remove signature" })).toHaveFocus();
+
+    await user.click(within(c).getByRole("button", { name: "Remove signature" }));
+    expect(within(c).queryByTitle("Signature")).not.toBeInTheDocument();
+    const add = within(c).getByRole("button", { name: "Add signature" });
+    expect(add).toHaveFocus();
+    await user.click(add);
+    expect(await within(c).findByTitle("Signature")).toBeInTheDocument();
+    await user.click(within(c).getByRole("button", { name: "Remove signature" }));
+
+    await address(user, c);
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    expect(await sent(backend as MockBackend)).not.toContain("cumulas-signature");
+  });
+
+  it("follows the From account, replacing an edited signature", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    const c = await newMessage(user);
+    let doc = await loadFrame(await signatureFrame(c));
+    editFrame(doc, "<div>Edited</div>");
+    const from = within(c).getByRole("combobox", { name: "From" });
+    await user.selectOptions(from, "acct-home");
+    doc = await loadFrame(await signatureFrame(c));
+    await waitFor(() => expect(doc.body.textContent).toBe("Alex Morgan+1 (206) 555-0199"));
+    expect(useMailStore.getState().compose?.signature).toBe("auto");
+
+    // Removed, too.
+    await user.click(within(c).getByRole("button", { name: "Remove signature" }));
+    await user.selectOptions(from, "acct-work");
+    doc = await loadFrame(await signatureFrame(c));
+    await waitFor(() => expect(doc.body.textContent).toContain("Engineering Manager, Atlas"));
+  });
+
+  it("doesn't add one to a saved draft", async () => {
+    const user = userEvent.setup();
+    const { backend } = await renderMail();
+    const account = screen.getByRole("treeitem", { name: /^Alex Morgan \(/ });
+    await user.click(within(account).getByText("Drafts"));
+    await user.click(await screen.findByRole("option", { name: /Thoughts on the rollback plan/ }));
+    await user.click(await screen.findByRole("button", { name: "Continue editing" }));
+    const c = await screen.findByRole("region", { name: "New message" });
+    await within(c).findByRole("textbox", { name: "Message body" });
+    expect(within(c).queryByTitle("Signature")).not.toBeInTheDocument();
+    expect(within(c).queryByRole("button", { name: "Add signature" })).not.toBeInTheDocument();
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    expect(await sent(backend as MockBackend)).not.toContain("cumulas-signature");
+  });
+
+  it("waits for a signature that's still on its way before sending", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const slow = deferred<ComposeSignature>();
+    backend.getComposeSignature = () => slow.promise;
+    await renderMail({ backend });
+    const c = await newMessage(user);
+    await address(user, c);
+    expect(within(c).queryByTitle("Signature")).not.toBeInTheDocument();
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    expect(within(c).getByRole("button", { name: "Sending…" })).toBeDisabled();
+    expect(backend.sent).toHaveLength(0);
+
+    slow.resolve({ kind: "organization", html: "<p>Late, but here</p>" });
+    expect(await sent(backend)).toContain(
+      '<div class="cumulas-signature"><p>Late, but here</p></div>',
+    );
+  });
+
+  it("says when the organization signs on send, and adds none", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ signature: "addedOnSend" });
+    await renderMail({ backend });
+    const c = await newMessage(user);
+    expect(
+      await within(c).findByText("Your organization adds your signature when you send."),
+    ).toBeInTheDocument();
+    expect(within(c).queryByTitle("Signature")).not.toBeInTheDocument();
+    await address(user, c);
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    expect(await sent(backend)).not.toContain("cumulas-signature");
   });
 });

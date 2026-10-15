@@ -5,6 +5,7 @@ import {
   attributionLine,
   composeBodyHtml,
   isValidAddress,
+  newDraft,
   parseAddress,
   parseAddressList,
   parseMailto,
@@ -254,9 +255,48 @@ describe("reply helpers", () => {
   });
 
   it("builds the sent body from the editor and the quote", () => {
-    const body = composeBodyHtml("<p>Hi</p><p></p><p>Bye</p>", "<div>quote</div>");
+    const body = composeBodyHtml("<p>Hi</p><p></p><p>Bye</p>", null, "<div>quote</div>");
     expect(body).toContain('<p style="margin:0">Hi</p><p style="margin:0"><br></p>');
     expect(body).toContain("<br><div>quote</div>");
-    expect(composeBodyHtml("<p></p>", null)).toContain('<p style="margin:0"><br></p>');
+    expect(composeBodyHtml("<p></p>", null, null)).toContain('<p style="margin:0"><br></p>');
+  });
+
+  it("puts the signature after one empty line, above the quote", () => {
+    const style = /^<div style="(font-family:'Charis SIL'[^"]*)">/.exec(
+      composeBodyHtml("<p>Hi</p>", null, null),
+    )![1];
+    const quote = '<div class="cumulas-quote"><p>Original</p></div>';
+    const organization = '<table style="font-family:Arial"><tr><td>Ada</td></tr></table>';
+
+    // An organization's keeps its own fonts: not in the letter's style.
+    expect(composeBodyHtml("<p>Hi</p>", { html: organization, own: false }, quote)).toBe(
+      `<div style="${style}"><p style="margin:0">Hi</p><p style="margin:0"><br></p></div>` +
+        `<div class="cumulas-signature">${organization}</div>` +
+        `<div style="${style}"><br>${quote}</div>`,
+    );
+    // The person's own is set like the letter, so plain text matches it.
+    expect(composeBodyHtml("<p>Hi</p>", { html: "<div>Ada</div>", own: true }, null)).toBe(
+      `<div style="${style}"><p style="margin:0">Hi</p><p style="margin:0"><br></p></div>` +
+        `<div class="cumulas-signature" style="${style}"><div>Ada</div></div>`,
+    );
+    // A signature emptied in the editor is none.
+    expect(composeBodyHtml("<p>Hi</p>", { html: "<div><br></div>", own: true }, quote)).toBe(
+      composeBodyHtml("<p>Hi</p>", null, quote),
+    );
+    // A signature that's only a picture is one.
+    expect(
+      composeBodyHtml(
+        "<p>Hi</p>",
+        { html: '<img src="data:image/png;base64,AA">', own: false },
+        null,
+      ),
+    ).toContain('<div class="cumulas-signature"><img');
+  });
+
+  it("starts new messages and replies following the account's signature", () => {
+    const accounts = [{ displayName: me.name, email: me.address }] as Account[];
+    expect(replyDraft(message(), "reply", accounts).signature).toBe("auto");
+    expect(newDraft("a1").signature).toBe("auto");
+    expect(newDraft("a1", { signature: "off" }).signature).toBe("off");
   });
 });

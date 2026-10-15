@@ -4,6 +4,7 @@
 import type { Account, EmailAddress, Message, ReplyKind } from "../../api/types";
 import { formatDate, formatTime } from "../../lib/datetime";
 import { displayName } from "../../lib/format";
+import { isBlankHtml } from "./bodyHtml";
 import { messageDate } from "./dates";
 import type { ComposeDraft } from "./mailStore";
 
@@ -240,6 +241,7 @@ export function replyDraft(original: Message, kind: ReplyKind, accounts: Account
     subject: prefixSubject(original.subject, kind),
     bodyHtml: "",
     quoteHtml: quoteOriginal(original, kind),
+    signature: "auto",
     attachments: [],
     importance: "normal",
     replyToMessageId: original.id,
@@ -256,6 +258,7 @@ export function newDraft(accountId: string, init: Partial<DraftInput> = {}): Dra
     subject: "",
     bodyHtml: "",
     quoteHtml: null,
+    signature: "auto",
     attachments: [],
     importance: "normal",
     replyToMessageId: null,
@@ -319,17 +322,40 @@ export function isEmptyHtml(html: string): boolean {
 const BODY_STYLE =
   "font-family:'Charis SIL',Charter,'Bitstream Charter',Georgia,serif;font-size:12pt;line-height:1.5";
 
+/** The signature a message goes out with; `own` for the person's own, not their organization's. */
+export interface SentSignature {
+  html: string;
+  own: boolean;
+}
+
+/** Paragraphs without margins (each Enter is one line), empty ones keeping their height. */
+function letterParagraphs(html: string): string {
+  return html.replace(/<p><\/p>/g, "<p><br></p>").replace(/<p>/g, '<p style="margin:0">');
+}
+
 /**
- * The HTML that gets sent: the editor content, then the quoted original.
- * Paragraphs get no margins (each Enter is one line, as in most mail
- * programs) and empty ones keep their height.
+ * The HTML that gets sent: the editor content, then the signature, then the
+ * quoted original, as Outlook puts them. The signature is a
+ * `cumulas-signature` block after one empty line. The person's own is set
+ * in the letter's style like the rest; an organization's isn't, so it
+ * keeps its own fonts. The quote keeps its `cumulas-quote` block, which the
+ * signature relay puts its signatures above.
  */
-export function composeBodyHtml(bodyHtml: string, quoteHtml: string | null): string {
-  const body = (isEmptyHtml(bodyHtml) ? "<p></p>" : bodyHtml)
-    .replace(/<p><\/p>/g, "<p><br></p>")
-    .replace(/<p>/g, '<p style="margin:0">');
-  const quote = quoteHtml ? `<br>${quoteHtml}` : "";
-  return `<div style="${BODY_STYLE}">${body}${quote}</div>`;
+export function composeBodyHtml(
+  bodyHtml: string,
+  signature: SentSignature | null,
+  quoteHtml: string | null,
+): string {
+  const body = letterParagraphs(isEmptyHtml(bodyHtml) ? "<p></p>" : bodyHtml);
+  if (!signature || isBlankHtml(signature.html)) {
+    const quote = quoteHtml ? `<br>${quoteHtml}` : "";
+    return `<div style="${BODY_STYLE}">${body}${quote}</div>`;
+  }
+  const block = signature.own
+    ? `<div class="cumulas-signature" style="${BODY_STYLE}">${signature.html}</div>`
+    : `<div class="cumulas-signature">${signature.html}</div>`;
+  const quote = quoteHtml ? `<div style="${BODY_STYLE}"><br>${quoteHtml}</div>` : "";
+  return `<div style="${BODY_STYLE}">${body}<p style="margin:0"><br></p></div>${block}${quote}`;
 }
 
 export const ATTACHMENT_WARN_BYTES = 20 * 1024 * 1024;

@@ -8,6 +8,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import clsx from "clsx";
 import { type ChangeEvent, type KeyboardEvent, lazy, Suspense, useRef, useState } from "react";
 
 import { useAccounts } from "../../api/queries";
@@ -18,6 +19,7 @@ import { toast } from "../../components/toast";
 import { formatBytes } from "../../lib/format";
 import { FileBadge, FileName } from "./Attachments";
 import { bodyAppearance } from "./bodyHtml";
+import { ComposeSignatureBlock } from "./ComposeSignature";
 import { ATTACHMENT_WARN_BYTES, composeBodyHtml, readFileBase64 } from "./draft";
 import type { EditorHandle } from "./Editor";
 import { useIsDark } from "./hooks";
@@ -25,6 +27,7 @@ import { type DraftAttachment, useMailStore } from "./mailStore";
 import { MessageBody } from "./MessageBody";
 import { RecipientField, type RecipientFieldHandle } from "./RecipientField";
 import { useSendMessage } from "./queries";
+import { useSentSignature, useSignatureView } from "./signature";
 
 // The editor (TipTap/ProseMirror) is the largest dependency; load it on first use.
 const RichTextEditor = lazy(() => import("./Editor").then((m) => ({ default: m.RichTextEditor })));
@@ -70,6 +73,8 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
   const { data: accounts = [] } = useAccounts();
   const send = useSendMessage();
   const isDark = useIsDark();
+  const signature = useSignatureView(draft);
+  const signatureFor = useSentSignature();
 
   const toRef = useRef<RecipientFieldHandle>(null);
   const ccRef = useRef<RecipientFieldHandle>(null);
@@ -81,6 +86,9 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [confirmNoSubject, setConfirmNoSubject] = useState(false);
   const [showQuote, setShowQuote] = useState(true);
+  // Waiting for the account's signature before sending.
+  const [preparing, setPreparing] = useState(false);
+  const sending = send.isPending || preparing;
 
   if (!draft) return null;
 
@@ -100,7 +108,7 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
   };
 
   const doSend = async (allowEmptySubject = false) => {
-    if (send.isPending) return;
+    if (sending) return;
     const to = toRef.current ? toRef.current.commit() : draft.to;
     const cc = draft.showCc && ccRef.current ? ccRef.current.commit() : draft.cc;
     const bcc = draft.showBcc && bccRef.current ? bccRef.current.commit() : draft.bcc;
@@ -114,22 +122,28 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
       setConfirmNoSubject(true);
       return;
     }
+    setPreparing(true);
+    const sentSignature = await signatureFor(draft).finally(() => setPreparing(false));
+    // What was typed while waiting goes too; nothing goes if the draft was
+    // closed meanwhile.
+    const current = useMailStore.getState().compose;
+    if (current?.id !== draft.id) return;
     try {
       await send.mutateAsync({
-        accountId: draft.accountId,
+        accountId: current.accountId,
         to,
         cc,
         bcc,
-        subject: draft.subject.trim(),
-        bodyHtml: composeBodyHtml(draft.bodyHtml, draft.quoteHtml),
-        attachments: draft.attachments.map((a) => ({
+        subject: current.subject.trim(),
+        bodyHtml: composeBodyHtml(current.bodyHtml, sentSignature, current.quoteHtml),
+        attachments: current.attachments.map((a) => ({
           name: a.name,
           contentType: a.contentType,
           dataBase64: a.dataBase64,
         })),
-        importance: draft.importance,
-        replyToMessageId: draft.replyToMessageId,
-        replyKind: draft.replyKind,
+        importance: current.importance,
+        replyToMessageId: current.replyToMessageId,
+        replyKind: current.replyKind,
       });
       toast.success("Message sent");
       closeCompose();
@@ -278,11 +292,11 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
           type="button"
           className="btn btn--primary mail-compose__send"
           onClick={() => void doSend()}
-          disabled={send.isPending}
+          disabled={sending}
           title="Send (Ctrl+Enter)"
         >
           <Send size={16} strokeWidth={1.9} aria-hidden="true" />
-          {send.isPending ? "Sending…" : "Send"}
+          {sending ? "Sending…" : "Send"}
         </button>
         <button
           type="button"
@@ -297,7 +311,11 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
 
       <div className="mail-compose__scroll">
         <div
-          className={`mail-compose__page${draft.quoteHtml ? " mail-compose__page--quoted" : ""}`}
+          className={clsx(
+            "mail-compose__page",
+            draft.quoteHtml && "mail-compose__page--quoted",
+            signature.kind === "editor" && "mail-compose__page--signed",
+          )}
         >
           <div className="mail-compose__fields">
             {accounts.length > 1 && (
@@ -309,7 +327,14 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
                   id="mail-compose-from"
                   className="mail-compose__from"
                   value={draft.accountId}
-                  onChange={(e) => update({ accountId: e.target.value })}
+                  onChange={(e) =>
+                    // The new account's signature replaces the old one, edited
+                    // or not, as in Outlook.
+                    update({
+                      accountId: e.target.value,
+                      signature: draft.signature === "off" ? "off" : "auto",
+                    })
+                  }
                 >
                   {accounts.map((a) => (
                     <option key={a.id} value={a.id}>
@@ -407,6 +432,8 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
               onChange={(html) => update({ bodyHtml: html })}
             />
           </Suspense>
+
+          <ComposeSignatureBlock view={signature} />
 
           {draft.quoteHtml && (
             <div className="mail-compose__quote">

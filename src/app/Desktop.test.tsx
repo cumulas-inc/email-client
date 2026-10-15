@@ -276,6 +276,7 @@ describe("quitting", () => {
         subject: "Half written",
         bodyHtml: "",
         quoteHtml: null,
+        signature: "auto",
         attachments: [],
         importance: "normal",
         replyToMessageId: null,

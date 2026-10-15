@@ -2240,6 +2240,17 @@
   font-size: var(--text-sm);
 }
 
+/* With a signature, the editor starts at about five lines and grows with
+   the text, and the signature follows right under it. */
+.mail-compose__page--signed .mail-editor {
+  flex: none;
+}
+
+.mail-compose__page--signed .mail-editor__content {
+  min-height: calc(5 * 1.6em + 22px);
+  padding-bottom: 8px;
+}
+
 /* A reply or forward: the editor starts at about three lines and grows with
    the text, and the original follows right under it. */
 .mail-compose__page--quoted .mail-editor {
@@ -2395,6 +2406,87 @@
 .signature-editor--paper .signature-editor__frame {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
+}
+
+/* In the composer it's part of the letter: on the text's left edge, between
+   what's written and the original. Its name and buttons show when it's
+   pointed at or being edited, and are always there for the keyboard. */
+.mail-signature {
+  position: relative;
+  margin-bottom: var(--space-3);
+}
+
+.mail-signature__bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  margin-bottom: 2px;
+  opacity: 0;
+  transition: opacity var(--duration-normal) var(--ease-out);
+}
+
+.mail-signature:hover .mail-signature__bar {
+  opacity: 1;
+}
+
+/* No fade for the keyboard: it shows as focus arrives. */
+.mail-signature:focus-within .mail-signature__bar,
+.mail-signature:has(.signature-editor[data-focused]) .mail-signature__bar {
+  opacity: 1;
+  transition: none;
+}
+
+.mail-signature__label {
+  margin-right: 2px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.mail-signature__remove {
+  color: var(--fg-tertiary);
+}
+
+.mail-signature__restore {
+  color: var(--fg-secondary);
+}
+
+/* Being edited: a teal rule in the margin beside it, where it doesn't move
+   the text. */
+.mail-signature::before {
+  content: "";
+  position: absolute;
+  top: 34px;
+  bottom: 0;
+  left: -14px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--focus-ring);
+  opacity: 0;
+}
+
+.mail-signature:has(.signature-editor[data-focused])::before {
+  opacity: 1;
+}
+
+.mail-signature-add {
+  align-self: flex-start;
+  margin: 0 0 var(--space-2) -8px;
+  color: var(--fg-tertiary);
+}
+
+.mail-signature-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: var(--space-1) 0 var(--space-3);
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+}
+
+.mail-signature-note svg {
+  flex: none;
 }
 
 /* --- Draft tab --------------------------------------------------------------------- */
