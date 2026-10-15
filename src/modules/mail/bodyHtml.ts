@@ -295,8 +295,9 @@ export interface SignatureDocOptions {
   /**
    * Text the signature doesn't style is set like the letter, in the reading
    * font's size and leading (the person's own signature, which goes out in
-   * the letter's style). Otherwise the frame stays neutral (an
-   * organization's, which keeps its own).
+   * the letter's style). Otherwise it's in the reading font and size at the
+   * font's own leading (an organization's, which goes out in the letter
+   * font without the letter's line height, so its tables keep their layout).
    */
   letter: boolean;
   /** Shown while it's empty. */
@@ -312,10 +313,10 @@ function attribute(value: string): string {
 }
 
 /**
- * The document an editable signature is shown in: neutral, without the
- * reader's measure or paragraph spacing, so the signature looks as it will
- * be sent; its body is the editing host. The signature itself goes in once
- * the frame has loaded (see SignatureEditor).
+ * The document an editable signature is shown in: in the reading font,
+ * without the reader's measure or paragraph spacing, so the signature looks
+ * as it will be sent; its body is the editing host. The signature itself
+ * goes in once the frame has loaded (see SignatureEditor).
  */
 export function buildSignatureSrcDoc(options: SignatureDocOptions): string {
   const { appearance, font, letter } = options;
