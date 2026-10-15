@@ -15,8 +15,11 @@ raises a notification within seconds (IMAP IDLE), clicking it shows the window
 on the message (where Ctrl+U and Ctrl+Q mark it unread and read, as in
 Outlook, without quitting), its Mark as read and Archive buttons work without
 the window, and a notification goes once its message is read elsewhere.
-Finally it restarts the app to check that the account, cache and keyring
-password persist.
+Events starting in a minute (made through the app's commands) remind at once:
+the reminder's notification has Snooze and Dismiss, which work without the
+window. Finally it restarts the app to check that the account, cache and
+keyring password persist, and that the dismissed reminder doesn't go off
+again.
 
 Without a StatusNotifier host on the test's bus, the app shows no tray icon;
 starting without crashing with libayatana-appindicator installed is part of the

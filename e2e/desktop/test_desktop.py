@@ -2,7 +2,9 @@
 tauri-driver: add an IMAP account, read mail, send mail; then, with the window
 closed to the background, get notified of new mail (pushed over IMAP IDLE),
 open a message from its notification, use its buttons, and see notifications
-go once their mail is read elsewhere; finally restart.
+go once their mail is read elsewhere; get an event's reminder, snooze one and
+dismiss another from their notifications; finally restart, and check that the
+dismissed reminder doesn't go off again.
 
 Run via ./run.sh, which provides the mail server, keyring and display.
 """
@@ -13,6 +15,7 @@ import smtplib
 import subprocess
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -149,17 +152,25 @@ def test() -> None:
     try:
         first_run(driver)
         background_and_notifications(driver, notifications)
+        dismissed = reminders(driver, notifications)
     except Exception:
         shot(driver, "failure")
         raise
     finally:
         driver.quit()
 
-    # Restart: the account, cache and keyring password survive.
+    # Restart: the account, cache and keyring password survive, and the
+    # dismissed reminder stays dismissed.
     driver = start()
     try:
         wait_for(lambda: len(message_rows(driver)) >= 2, timeout=60, what="messages after restart")
         shot(driver, "06-after-restart")
+        wait_for(lambda: invoke(driver, "list_active_reminders") is not None, what="reminders")
+        active = invoke(driver, "list_active_reminders")
+        assert all(r["title"] != dismissed for r in active), active
+        time.sleep(3)
+        shows = [n for n in notifications.notified if n["summary"] == dismissed]
+        assert len(shows) == 1, f"the dismissed reminder went off again: {shows}"
     except Exception:
         shot(driver, "failure-restart")
         raise
@@ -402,6 +413,89 @@ def background_and_notifications(driver, notifications: FakeNotificationServer) 
     driver.execute_script("window.__TAURI_INTERNALS__.invoke('sync_all')")
     notifications.wait_closed(shown["id"], timeout=30)
     assert not window_shown()
+
+
+# --- reminders ---------------------------------------------------------------------
+
+
+def invoke(driver, command: str, args: dict | None = None):
+    """Calls one of the app's commands and returns its answer."""
+    result = driver.execute_async_script(
+        "const [command, args, done] = arguments;"
+        "window.__TAURI_INTERNALS__.invoke(command, args)"
+        ".then((ok) => done({ ok }), (err) => done({ err: String(err && err.message || err) }));",
+        command,
+        args or {},
+    )
+    assert "err" not in result, f"{command} failed: {result['err']}"
+    return result["ok"]
+
+
+def utc(at: datetime) -> str:
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def event_soon(driver, title: str) -> None:
+    """An event in the local calendar starting in a minute, reminding a
+    minute before: its reminder is due at once."""
+    calendar = invoke(driver, "list_calendars")[0]
+    start = datetime.now(timezone.utc) + timedelta(minutes=1)
+    invoke(
+        driver,
+        "create_event",
+        {
+            "draft": {
+                "calendarId": calendar["id"],
+                "subject": title,
+                "start": utc(start),
+                "end": utc(start + timedelta(minutes=30)),
+                "reminderMinutes": 1,
+                "showAs": "busy",
+            }
+        },
+    )
+
+
+def reminder_notification(notifications: FakeNotificationServer, title: str) -> dict:
+    return notifications.wait_for(
+        lambda n: n["summary"] == title, timeout=20, what=f"the reminder for {title!r}"
+    )
+
+
+def reminders(driver, notifications: FakeNotificationServer) -> str:
+    """Reminders go off as notifications with Snooze and Dismiss, which work
+    without the window. Returns the title of the dismissed one."""
+    run = uuid.uuid4().hex[:6]
+
+    snoozed = f"Design review {run}"
+    event_soon(driver, snoozed)
+    shown = reminder_notification(notifications, snoozed)
+    assert "Snooze 5 min" in shown["actions"] and "Dismiss" in shown["actions"], shown["actions"]
+    assert "Join" not in shown["actions"], shown["actions"]
+    hints = shown["hints"]
+    assert hints.get("urgency") == 1, hints
+    assert hints.get("sound-name") == "alarm-clock-elapsed", hints
+    assert "category" not in hints, hints
+    notifications.click(shown, action_key(shown, "Snooze 5 min"))
+    wait_for(
+        lambda: any(
+            r["title"] == snoozed and r["snoozedUntil"] for r in invoke(driver, "list_active_reminders")
+        ),
+        timeout=15,
+        what="the reminder snoozed",
+    )
+
+    dismissed = f"Standup {run}"
+    event_soon(driver, dismissed)
+    shown = reminder_notification(notifications, dismissed)
+    notifications.click(shown, action_key(shown, "Dismiss"))
+    wait_for(
+        lambda: all(r["title"] != dismissed for r in invoke(driver, "list_active_reminders")),
+        timeout=15,
+        what="the reminder dismissed",
+    )
+    assert not window_shown()
+    return dismissed
 
 
 def bob_has(subject: str) -> bool:
