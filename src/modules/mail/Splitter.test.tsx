@@ -5,11 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Splitter } from "./Splitter";
 
 /** A pane the user set to `initial` px (260 unless given), and its splitter. */
-function Panes({ initial = 260 }: { initial?: number }) {
+function Panes({ initial = 260, minWidth }: { initial?: number; minWidth?: number }) {
   const [width, setWidth] = useState(initial);
   return (
     <div>
-      <div className="pane" />
+      <div className="pane" style={minWidth ? { minWidth } : undefined} />
       <Splitter
         orientation="vertical"
         value={width}
@@ -100,6 +100,37 @@ describe("Splitter", () => {
     );
     render(<Panes />);
     expect(splitter()).toHaveAttribute("aria-valuenow", "208");
+  });
+
+  it("keeps the size the user chose after a press that doesn't move sideways", () => {
+    // A min-width holds the pane at 200, wider than the 180 chosen for smaller windows.
+    layOut(200);
+    render(<Panes initial={180} />);
+    fireEvent.pointerDown(splitter(), { button: 0, clientX: 300, clientY: 100 });
+    fireEvent.pointerMove(splitter(), { clientX: 300, clientY: 140 });
+    expect(splitter()).toHaveAttribute("aria-valuenow", "180");
+    fireEvent.pointerMove(splitter(), { clientX: 315, clientY: 140 });
+    expect(splitter()).toHaveAttribute("aria-valuenow", "215");
+    fireEvent.pointerMove(splitter(), { clientX: 300, clientY: 140 });
+    expect(splitter()).toHaveAttribute("aria-valuenow", "180");
+    fireEvent.pointerUp(splitter());
+  });
+
+  it("reports the least the pane can be at this window size", () => {
+    layOut(208);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private readonly callback: () => void) {}
+        observe() {
+          this.callback();
+        }
+        disconnect() {}
+      },
+    );
+    render(<Panes minWidth={200} />);
+    // Not 180: at this size a min-width holds the pane at 200.
+    expect(splitter()).toHaveAttribute("aria-valuemin", "200");
   });
 
   it("works from its value when nothing is laid out", () => {

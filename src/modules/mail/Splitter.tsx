@@ -17,6 +17,14 @@ function paneSize(splitter: Element | null, vertical: boolean): number {
   return vertical ? pane.offsetWidth : pane.offsetHeight;
 }
 
+/** The pane's CSS min-width (or min-height), which can hold it above `min`. */
+function paneFloor(splitter: Element | null, vertical: boolean): number {
+  const pane = splitter?.previousElementSibling;
+  if (!(pane instanceof HTMLElement)) return 0;
+  const style = getComputedStyle(pane);
+  return parseFloat(vertical ? style.minWidth : style.minHeight) || 0;
+}
+
 /** Draggable (and keyboard-adjustable) divider between two panes. */
 export function Splitter({ orientation, value, min, max, onChange, label }: SplitterProps) {
   const ref = useRef<HTMLDivElement>(null);
@@ -34,10 +42,14 @@ export function Splitter({ orientation, value, min, max, onChange, label }: Spli
   // so the pane moves at once; growing starts from the larger, so a squeezed
   // pane that cannot grow keeps the size the user chose for wider windows.
   const [shown, setShown] = useState(0);
+  const [floor, setFloor] = useState(0);
   useEffect(() => {
     const pane = ref.current?.previousElementSibling;
     if (!pane || typeof ResizeObserver !== "function") return;
-    const observer = new ResizeObserver(() => setShown(paneSize(ref.current, vertical)));
+    const observer = new ResizeObserver(() => {
+      setShown(paneSize(ref.current, vertical));
+      setFloor(paneFloor(ref.current, vertical));
+    });
     observer.observe(pane);
     return () => observer.disconnect();
   }, [vertical]);
@@ -62,8 +74,11 @@ export function Splitter({ orientation, value, min, max, onChange, label }: Spli
     const d = drag.current;
     if (!d) return;
     const delta = (vertical ? e.clientX : e.clientY) - d.start;
-    // Measured against the sizes when the drag began, not the live ones.
-    onChange(delta < 0 ? Math.min(d.shown, d.saved) + delta : Math.max(d.shown, d.saved) + delta);
+    // Measured against the sizes when the drag began, not the live ones. Back
+    // where it began, the size the user chose stands.
+    if (delta < 0) onChange(Math.min(d.shown, d.saved) + delta);
+    else if (delta > 0) onChange(Math.max(d.shown, d.saved) + delta);
+    else onChange(d.saved);
   };
 
   const end = () => {
@@ -90,7 +105,8 @@ export function Splitter({ orientation, value, min, max, onChange, label }: Spli
       aria-orientation={orientation}
       aria-label={label}
       aria-valuenow={shown || value}
-      aria-valuemin={min}
+      // The least it can be at this window size.
+      aria-valuemin={Math.min(Math.max(min, floor), max)}
       aria-valuemax={max}
       tabIndex={0}
       className={`mail-splitter mail-splitter--${orientation}`}

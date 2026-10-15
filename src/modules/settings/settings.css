@@ -1309,11 +1309,10 @@
   border-radius: var(--radius-sm);
   font-size: 14px;
   cursor: pointer;
-  /* Rows out of view aren't laid out, so their fonts load only once
-     they're scrolled to. Paint containment also keeps a face with tall
-     ascenders inside its row. */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 32px;
+  /* Keeps a face with tall ascenders inside its row. (Only the rows near
+     the view are rendered, so only their fonts load; skipping their paint
+     as well left rows blank while scrolling in WebKitGTK.) */
+  contain: paint;
 }
 
 .font-picker__option[aria-selected="true"] {

@@ -159,8 +159,8 @@ describe("FontPicker with thousands of fonts", () => {
     const user = userEvent.setup();
     const { input } = renderPicker();
     await user.click(input);
-    // Eight show under the preset and the heading, and eight more are rendered.
-    expect(rendered()).toHaveLength(16);
+    // Eight show under the preset and the heading, and 24 more are rendered.
+    expect(rendered()).toHaveLength(32);
     expect(screen.getByRole("option", { name: "Family 0000" })).toHaveAttribute(
       "aria-posinset",
       "1",
@@ -178,13 +178,13 @@ describe("FontPicker with thousands of fonts", () => {
     expect(highlighted(input)).toHaveTextContent("Family 0039");
     expect(rendered()).toContain("Family 0030");
     expect(rendered()).not.toContain("Family 0000");
-    expect(rendered().length).toBeLessThan(40);
+    expect(rendered().length).toBeLessThan(60);
 
     // Far down, the highlighted font is rendered first, then those around it.
     for (let i = 0; i < 100; i++) await user.keyboard("{PageDown}");
     expect(highlighted(input)).toHaveTextContent("Family 1039");
     expect(rendered()).toContain("Family 1035");
-    expect(rendered().length).toBeLessThan(40);
+    expect(rendered().length).toBeLessThan(60);
   });
 
   it("renders the fonts scrolled to, keeping the highlighted one", async () => {
@@ -228,6 +228,18 @@ describe("FontPicker with thousands of fonts", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(input).toHaveAttribute("aria-expanded", "false");
     expect(input).toHaveFocus();
+  });
+
+  it("keeps Page Up and Page Down in the list when nothing matches", async () => {
+    const user = userEvent.setup();
+    const { input } = renderPicker();
+    await user.click(input);
+    await user.keyboard("qqq");
+    // Not passed on, which would scroll the panel and close the list.
+    expect(fireEvent.keyDown(input, { key: "PageDown" })).toBe(false);
+    expect(fireEvent.keyDown(input, { key: "PageUp" })).toBe(false);
+    expect(input).toHaveValue("qqq");
+    expect(input).toHaveAttribute("aria-expanded", "true");
   });
 
   it("renders the fonts scrolled to before the frame is painted", async () => {

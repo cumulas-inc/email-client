@@ -90,8 +90,11 @@ const MAX_HEIGHT = 320;
 const ROW = 32;
 /** Room for four options and the list's padding, which the list wants below the input. */
 const MIN_BELOW = 4 * ROW + 8;
-/** Installed fonts rendered past each end of the list's visible part. */
-const OVERSCAN = 8;
+/**
+ * Installed fonts rendered past each end of the list's visible part: enough
+ * that a fast wheel or touchpad scroll in WebKitGTK lands on painted rows.
+ */
+const OVERSCAN = 24;
 /** Installed fonts rendered before the list is measured. */
 const FIRST_RANGE: [number, number] = [0, MAX_HEIGHT / ROW + OVERSCAN];
 
@@ -413,9 +416,12 @@ export function FontPicker<V>({
         break;
       case "PageDown":
       case "PageUp":
-        if (!open || last < 0) return;
+        if (!open) return;
+        // Even with nothing to move to, so the panel underneath doesn't scroll
+        // the field away (which closes the list and loses the filter).
         e.preventDefault();
-        move(Math.min(Math.max(current + (e.key === "PageDown" ? 10 : -10), 0), last));
+        if (last >= 0)
+          move(Math.min(Math.max(current + (e.key === "PageDown" ? 10 : -10), 0), last));
         break;
       case "Enter":
         if (!open) return;
@@ -523,8 +529,8 @@ export function FontPicker<V>({
           className="font-picker__popup"
           // Keeps focus in the input, so a click on an option isn't a blur first.
           onMouseDown={(e: MouseEvent) => e.preventDefault()}
-          // The rows scrolled to are rendered before the frame is painted,
-          // not after it, which would show a blank list for a frame.
+          // The DOM has the rows scrolled to before the frame is painted, not
+          // after it; the overscan covers what the compositor scrolls ahead.
           onScroll={() => flushSync(measure)}
         >
           <div
