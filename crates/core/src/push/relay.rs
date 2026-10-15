@@ -45,6 +45,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(25);
 /// The most a `Retry-After` or `bye` makes the app wait.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
+/// The connection is pinged after this long without a frame from the
+/// service (whose heartbeats come every 25 seconds), and closed when the
+/// ping goes unanswered for [`H2_PING_TIMEOUT`].
+const H2_PING_EVERY: Duration = Duration::from_secs(30);
+const H2_PING_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The push service's address: the `CUMULAS_SYNC_URL` environment variable,
 /// else the address built in with the same variable, else
@@ -256,6 +261,12 @@ impl HttpRelay {
             // No overall timeout: streams last for hours. Silence is caught
             // by the stream's own watchdog.
             .tcp_keepalive(Duration::from_secs(60))
+            // Every account shares one HTTP/2 connection. Pings find it dead
+            // (after a network change, say) before the watchdog fires, so
+            // reconnecting opens a new one instead of waiting on it.
+            .http2_keep_alive_interval(H2_PING_EVERY)
+            .http2_keep_alive_timeout(H2_PING_TIMEOUT)
+            .http2_keep_alive_while_idle(true)
             .user_agent(concat!("CumulasMail/", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or_default();

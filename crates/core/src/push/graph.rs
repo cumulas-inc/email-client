@@ -13,9 +13,12 @@
 //!    the calendar. Only then is push live.
 //! 3. While live, each change syncs what its subscription watches. Each
 //!    subscription is renewed at least every 30 minutes, since Graph pauses
-//!    one whose token has expired, and never twice within 10 minutes. `renew`
-//!    (or waking up) opens a new stream that replaces the old one once it is
-//!    ready: make before break.
+//!    one whose token has expired, and never twice within 10 minutes. Time
+//!    is told by both the wall clock, which counts time asleep but can be
+//!    set back, and Tokio's, which can't be set but stops while asleep:
+//!    whichever first says the 30 (or 10) minutes are up is believed.
+//!    `renew` (or waking up) opens a new stream that replaces the old one
+//!    once it is ready: make before break.
 //! 4. Whenever it isn't live, the Inbox is checked every 30 seconds.
 //!
 //! | The service or Microsoft says                | Then (polling meanwhile)              |
@@ -27,7 +30,9 @@
 //! | 400 `bad_installation`                       | Logged as a bug; 6 hours              |
 //! | 429 or 503                                   | Back off, at least `Retry-After`      |
 //! | `bye`, a dropped or silent stream            | Back off, at least its `retry`        |
+//! | `bye` `replaced`, not by a stream of its own | Another copy took over; 1 hour        |
 //! | Graph refuses the Inbox's subscription (403) | Unsupported; 6 hours                  |
+//! | The Inbox's is on another push service (409) | Degraded; ask again hourly            |
 //! | No sign-in, or a locked keyring              | Parked until a sync gets past it      |
 //!
 //! Subscriptions are only deleted when the account goes or stops using the
@@ -73,6 +78,9 @@ pub const SUBSCRIPTION_MINUTES: i64 = 4230;
 pub const RENEW_EVERY: Duration = Duration::from_secs(30 * 60);
 /// Graph wants a subscription's reauthorizations at least this far apart.
 pub const REAUTHORIZE_GAP: Duration = Duration::from_secs(10 * 60);
+/// How far ahead of this one another installation's clock can be, as
+/// synchronized clocks are, for its renewals to be taken at their word.
+const CLOCKS_DIFFER: Duration = Duration::from_secs(60);
 /// How long the service is left alone after it (or Microsoft) refused the
 /// account for a reason that won't pass soon.
 pub const COOL_DOWN: Duration = Duration::from_secs(6 * 3600);
@@ -83,9 +91,16 @@ const MAX_RETRY_SUBSCRIPTION: Duration = Duration::from_secs(3600);
 /// A replacement stream that failed while the old one still works is tried
 /// again after this, doubling with each failure.
 const RETRY_REPLACEMENT: Duration = Duration::from_secs(30);
+/// How long the stream is left to another running copy of the app that
+/// shares this installation's ID (the service keeps one stream per
+/// installation and account, and each copy's would replace the other's).
+pub const TAKEN_OVER_WAIT: Duration = Duration::from_secs(3600);
 
 /// The hint shown while consent to the service is missing.
 pub const CONSENT_HINT: &str = "Sign in again to turn on instant updates.";
+/// Why push polls while another copy of the app has the stream.
+pub const TAKEN_OVER: &str =
+    "Another copy of the app, sharing this one's data, took over instant updates for this account.";
 
 /// Receives the mode, health and an explanation for the user.
 pub type ReportFn = Arc<dyn Fn(PushMode, PushHealth, Option<String>) + Send + Sync>;
@@ -140,6 +155,65 @@ impl Watched {
     }
 }
 
+/// A moment by two clocks. The wall clock counts time asleep, as Graph
+/// does, but can be set back (and another installation's can run ahead);
+/// Tokio's can't be set, but stops while the computer sleeps. A deadline
+/// has come once either clock reaches it, and so a renewal's age is the
+/// longer of the two: neither clock's fault holds a renewal up.
+#[derive(Debug, Clone, Copy)]
+struct Moment {
+    wall: DateTime<Utc>,
+    /// `None` when it lies before anything Tokio's clock can express: the
+    /// wall clock alone tells.
+    mono: Option<Instant>,
+}
+
+impl Moment {
+    fn after(self, by: Duration) -> Self {
+        Moment {
+            wall: self.wall + by,
+            mono: self.mono.map(|at| at + by),
+        }
+    }
+
+    fn before(self, by: Duration) -> Self {
+        Moment {
+            wall: self.wall - by,
+            mono: self.mono.and_then(|at| at.checked_sub(by)),
+        }
+    }
+
+    /// Whether this deadline has come by `now`.
+    fn come(self, now: Moment) -> bool {
+        self.wall <= now.wall || matches!((self.mono, now.mono), (Some(at), Some(now)) if at <= now)
+    }
+
+    /// The deadline that comes when either of these does.
+    fn earliest(self, other: Moment) -> Self {
+        Moment {
+            wall: self.wall.min(other.wall),
+            mono: match (self.mono, other.mono) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+
+    /// The later of two renewals, by each clock.
+    fn latest(self, other: Moment) -> Self {
+        Moment {
+            wall: self.wall.max(other.wall),
+            mono: self.mono.max(other.mono),
+        }
+    }
+
+    /// When this deadline comes on Tokio's clock, as it stands at `now`.
+    fn instant(self, now: Instant, wall_now: DateTime<Utc>) -> Instant {
+        let by_wall = now + (self.wall - wall_now).to_std().unwrap_or_default();
+        self.mono.map_or(by_wall, |at| at.min(by_wall))
+    }
+}
+
 /// One of our subscriptions.
 #[derive(Debug, Clone)]
 struct Sub {
@@ -149,9 +223,9 @@ struct Sub {
     expires_at: DateTime<Utc>,
     /// When it was last created or renewed, here or (judging by its expiry)
     /// by another installation.
-    renewed: Instant,
+    renewed: Moment,
     /// When to renew it next.
-    due: Instant,
+    due: Moment,
     /// Renewals that failed in a row.
     failures: u32,
 }
@@ -161,7 +235,7 @@ struct Sub {
 struct Missing {
     watched: Watched,
     /// When to create it.
-    at: Instant,
+    at: Moment,
     /// Creations that failed in a row.
     failures: u32,
 }
@@ -169,6 +243,21 @@ struct Missing {
 /// How long to wait after `failures` failures in a row.
 fn retry_after(failures: u32) -> Duration {
     (RETRY_SUBSCRIPTION * 2u32.pow(failures.saturating_sub(1).min(5))).min(MAX_RETRY_SUBSCRIPTION)
+}
+
+/// Why a subscription wasn't made.
+#[derive(Debug)]
+enum Unmade {
+    Graph(Error),
+    /// Graph keeps one subscription per resource for the app, and another
+    /// installation has it on another push service (at this host).
+    Elsewhere(String),
+}
+
+impl From<Error> for Unmade {
+    fn from(e: Error) -> Self {
+        Unmade::Graph(e)
+    }
 }
 
 /// Why a connection ended, and what comes next.
@@ -417,6 +506,9 @@ struct Subs {
     clock: Clock,
     list: Vec<Sub>,
     missing: Vec<Missing>,
+    /// Ours on an old URL that Graph didn't delete: kept on record, so that
+    /// the next reconcile (or removing the account) tries again.
+    undeleted: Vec<PushSubscription>,
     /// Graph refused the calendar's subscription: the calendar syncs on
     /// schedule until the next reconcile tries again.
     calendar_refused: bool,
@@ -425,50 +517,68 @@ struct Subs {
 }
 
 impl Subs {
+    fn now(&self) -> Moment {
+        Moment {
+            wall: (self.clock)(),
+            mono: Some(Instant::now()),
+        }
+    }
+
     fn expiry(&self) -> DateTime<Utc> {
         (self.clock)() + chrono::Duration::minutes(SUBSCRIPTION_MINUTES)
     }
 
-    /// When a listed subscription was last renewed, by anyone: every
-    /// installation sets its expiry to the same distance from then.
-    fn renewed_from_expiry(&self, expires_at: DateTime<Utc>) -> Option<Instant> {
-        let renewed = expires_at - chrono::Duration::minutes(SUBSCRIPTION_MINUTES);
-        let age = ((self.clock)() - renewed).to_std().unwrap_or_default();
-        Instant::now().checked_sub(age)
-    }
-
     fn ours(&self, s: Subscription) -> Sub {
-        let now = Instant::now();
-        let known = self.list.iter().find(|k| k.id.eq_ignore_ascii_case(&s.id));
-        // Whichever renewal was later: ours, or another installation's.
-        let renewed = match (
-            known.map(|k| k.renewed),
-            self.renewed_from_expiry(s.expires_at),
-        ) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (a, b) => a.or(b),
+        let now = self.now();
+        let known = self
+            .list
+            .iter()
+            .find(|k| k.id.eq_ignore_ascii_case(&s.id))
+            .map(|k| k.renewed);
+        // Every installation sets the expiry the same distance from its
+        // renewal, so the expiry dates the latest one, by the clock of
+        // whoever made it. Dated after now, it was made by a clock running
+        // ahead (another installation's, or this one's before it was set
+        // back): a little, and it was just now; more, and it says nothing
+        // about when, so it is left out.
+        let from_expiry = s.expires_at - chrono::Duration::minutes(SUBSCRIPTION_MINUTES);
+        let by_expiry = (from_expiry <= now.wall + CLOCKS_DIFFER).then(|| {
+            let wall = from_expiry.min(now.wall);
+            Moment {
+                wall,
+                mono: now
+                    .mono
+                    .and_then(|at| at.checked_sub((now.wall - wall).to_std().ok()?)),
+            }
+        });
+        let renewed = match (known, by_expiry) {
+            // Another installation renewed it since this one did.
+            (Some(known), Some(theirs)) if theirs.wall > known.wall => known.latest(theirs),
+            (Some(known), _) => known,
+            (None, Some(theirs)) => theirs,
+            // Nobody knows when: renewed at once.
+            (None, None) => now.before(RENEW_EVERY),
         };
-        let renewed = renewed.unwrap_or_else(|| now.checked_sub(RENEW_EVERY).unwrap_or(now));
         Sub {
             watched: Watched::of(&s.resource),
             id: s.id,
             resource: s.resource,
             expires_at: s.expires_at,
             renewed,
-            due: renewed + RENEW_EVERY,
+            due: renewed.after(RENEW_EVERY),
             failures: 0,
         }
     }
 
-    fn created(s: Subscription, watched: Watched) -> Sub {
-        let now = Instant::now();
+    fn created(&self, s: Subscription, watched: Watched) -> Sub {
+        let now = self.now();
         Sub {
             id: s.id,
             resource: watched.resource().to_owned(),
             watched: Some(watched),
             expires_at: s.expires_at,
             renewed: now,
-            due: now + RENEW_EVERY,
+            due: now.after(RENEW_EVERY),
             failures: 0,
         }
     }
@@ -477,11 +587,17 @@ impl Subs {
         self.problem.is_none() && self.list.iter().any(|s| s.watched == Some(Watched::Inbox))
     }
 
-    /// When the next renewal or creation is due.
+    /// When the next renewal or creation is due, on Tokio's clock. That one
+    /// stops while the computer sleeps, and the wall clock can be set, so
+    /// this is asked again after every event and every wake.
     fn next_due(&self) -> Option<Instant> {
+        let (now, wall_now) = (Instant::now(), (self.clock)());
         let renewals = self.list.iter().map(|s| s.due);
         let creations = self.missing.iter().map(|m| m.at);
-        renewals.chain(creations).min()
+        renewals
+            .chain(creations)
+            .map(|due| due.instant(now, wall_now))
+            .min()
     }
 
     fn catch_up(&self) {
@@ -505,9 +621,8 @@ impl Subs {
     /// Graph asked for a reauthorization: renew as soon as the gap since
     /// the last one allows.
     fn reauthorize(&mut self, id: &str) {
-        let now = Instant::now();
         if let Some(sub) = self.list.iter_mut().find(|s| s.id.eq_ignore_ascii_case(id)) {
-            sub.due = sub.due.min((sub.renewed + REAUTHORIZE_GAP).max(now));
+            sub.due = sub.due.earliest(sub.renewed.after(REAUTHORIZE_GAP));
         }
     }
 
@@ -518,12 +633,12 @@ impl Subs {
         };
         let sub = self.list.remove(at);
         if let Some(watched) = sub.watched {
-            self.need(watched, Instant::now(), 0);
+            self.need(watched, self.now(), 0);
         }
         self.save();
     }
 
-    fn need(&mut self, watched: Watched, at: Instant, failures: u32) {
+    fn need(&mut self, watched: Watched, at: Moment, failures: u32) {
         if !self.missing.iter().any(|m| m.watched == watched) {
             self.missing.push(Missing {
                 watched,
@@ -542,6 +657,7 @@ impl Subs {
                 resource: s.resource.clone(),
                 expires_at: s.expires_at,
             })
+            .chain(self.undeleted.iter().cloned())
             .collect();
         if let Err(e) = self
             .store
@@ -592,29 +708,56 @@ impl Subs {
                 // or one this installation made for another service.
                 stale.push(s);
             }
-            // Anything else is another app's, or another service's: left
-            // alone.
+            // Graph lists only this app's, so anything else is another
+            // installation's, through another push service: left alone.
         }
-        // Stale ones go first, so their replacements don't conflict.
-        for s in &stale {
-            self.graph
-                .delete_subscription(&s.id)
-                .await
-                .map_err(|e| Ended::retry(graph_reason(&e)))?;
+        // Stale ones go first, so their replacements don't conflict. One
+        // that stays only holds up the calendar until the next reconcile;
+        // the Inbox's is tried again sooner, by connecting again.
+        let mut undeleted = Vec::new();
+        for s in stale {
+            if let Err(e) = self.graph.delete_subscription(&s.id).await {
+                if Watched::of(&s.resource) == Some(Watched::Inbox) {
+                    return Err(Ended::retry(graph_reason(&e)));
+                }
+                tracing::info!(
+                    "push for account {}: deleting an old subscription failed: {}",
+                    self.account_id,
+                    graph_reason(&e)
+                );
+                undeleted.push(PushSubscription {
+                    id: s.id,
+                    resource: s.resource,
+                    expires_at: s.expires_at,
+                });
+            }
         }
-        let now = Instant::now();
+        self.undeleted = undeleted;
+        let now = self.now();
         let mut renewed = Vec::new();
         for mut sub in current {
-            if now.saturating_duration_since(sub.renewed) >= REAUTHORIZE_GAP {
+            if sub.renewed.after(REAUTHORIZE_GAP).come(now) {
                 match self.graph.renew_subscription(&sub.id, self.expiry()).await {
                     Ok(s) => {
                         sub.expires_at = s.expires_at;
-                        sub.renewed = Instant::now();
-                        sub.due = sub.renewed + RENEW_EVERY;
+                        sub.renewed = self.now();
+                        sub.due = sub.renewed.after(RENEW_EVERY);
                     }
                     // Gone since it was listed.
                     Err(e) if e.code == ErrorCode::NotFound => continue,
-                    Err(e) => return Err(Ended::retry(graph_reason(&e))),
+                    Err(e) if sub.watched == Some(Watched::Inbox) => {
+                        return Err(Ended::retry(graph_reason(&e)));
+                    }
+                    // Tried again later; the Inbox doesn't wait for it.
+                    Err(e) => {
+                        tracing::info!(
+                            "push for account {}: renewing a subscription failed: {}",
+                            self.account_id,
+                            graph_reason(&e)
+                        );
+                        sub.failures = 1;
+                        sub.due = self.now().after(retry_after(sub.failures));
+                    }
                 }
             }
             renewed.push(sub);
@@ -628,7 +771,12 @@ impl Subs {
                 continue;
             }
             match self.create(watched, channel).await {
-                Ok(sub) => self.list.push(sub),
+                // Kept at once: if push stops before the next one is made,
+                // removing the account still finds this one.
+                Ok(sub) => {
+                    self.list.push(sub);
+                    self.save();
+                }
                 Err(e) => {
                     self.save();
                     self.refused(watched, e, 1)?;
@@ -644,21 +792,22 @@ impl Subs {
     /// whose turn has come. Failures are tried again later; meanwhile a
     /// broken Inbox subscription means polling.
     async fn maintain(&mut self, channel: &Channel) -> Result<(), Ended> {
-        let now = Instant::now();
+        let now = self.now();
         let mut changed = false;
         let mut gone = Vec::new();
         for at in 0..self.list.len() {
-            if self.list[at].due > now {
+            if !self.list[at].due.come(now) {
                 continue;
             }
             let id = self.list[at].id.clone();
             let result = self.graph.renew_subscription(&id, self.expiry()).await;
+            let answered = self.now();
             let sub = &mut self.list[at];
             match result {
                 Ok(s) => {
                     sub.expires_at = s.expires_at;
-                    sub.renewed = Instant::now();
-                    sub.due = sub.renewed + RENEW_EVERY;
+                    sub.renewed = answered;
+                    sub.due = answered.after(RENEW_EVERY);
                     sub.failures = 0;
                     if sub.watched == Some(Watched::Inbox) {
                         self.problem = None;
@@ -674,7 +823,7 @@ impl Subs {
                         self.account_id
                     );
                     sub.failures += 1;
-                    sub.due = Instant::now() + retry_after(sub.failures);
+                    sub.due = answered.after(retry_after(sub.failures));
                     if sub.watched == Some(Watched::Inbox) {
                         self.problem = Some(reason);
                     }
@@ -690,7 +839,7 @@ impl Subs {
         let due: Vec<Missing> = self
             .missing
             .iter()
-            .filter(|m| m.at <= now)
+            .filter(|m| m.at.come(now))
             .copied()
             .collect();
         for Missing {
@@ -701,6 +850,7 @@ impl Subs {
             match self.create(watched, channel).await {
                 Ok(sub) => {
                     self.list.push(sub);
+                    self.save();
                     if watched == Watched::Inbox {
                         self.problem = None;
                     }
@@ -724,9 +874,28 @@ impl Subs {
 
     /// A subscription couldn't be created (for the `failures`th time in a
     /// row): Graph not offering the Inbox's ends the connection; the
-    /// calendar's is left until the next reconcile; anything else is tried
-    /// again later.
-    fn refused(&mut self, watched: Watched, e: Error, failures: u32) -> Result<(), Ended> {
+    /// calendar's is left until the next reconcile; one another push
+    /// service has is asked for again hourly, in case it goes; anything
+    /// else is tried again later.
+    fn refused(&mut self, watched: Watched, unmade: Unmade, failures: u32) -> Result<(), Ended> {
+        let e = match unmade {
+            Unmade::Graph(e) => e,
+            Unmade::Elsewhere(host) => {
+                tracing::info!(
+                    "push for account {}: another installation watches {watched:?} through \
+                     the push service at {host}; asking again in an hour",
+                    self.account_id
+                );
+                if watched == Watched::Inbox {
+                    self.problem = Some(format!(
+                        "Another installation of the app gets this account's instant updates \
+                         through a different push service ({host})."
+                    ));
+                }
+                self.need(watched, self.now().after(MAX_RETRY_SUBSCRIPTION), failures);
+                return Ok(());
+            }
+        };
         if e.http_status() == Some(403) {
             return match watched {
                 Watched::Inbox => Err(Ended::unsupported(
@@ -753,14 +922,14 @@ impl Subs {
         if watched == Watched::Inbox {
             self.problem = Some(reason);
         }
-        self.need(watched, Instant::now() + retry_after(failures), failures);
+        self.need(watched, self.now().after(retry_after(failures)), failures);
         Ok(())
     }
 
     /// Creates the subscription for `watched` on the channel. A conflict
     /// means another installation of the account just made it: that one is
-    /// adopted.
-    async fn create(&self, watched: Watched, channel: &Channel) -> Result<Sub, Error> {
+    /// adopted. Unless it is on another push service, which keeps it.
+    async fn create(&self, watched: Watched, channel: &Channel) -> Result<Sub, Unmade> {
         let new = NewSubscription {
             resource: watched.resource().to_owned(),
             change_type: CHANGE_TYPES.to_owned(),
@@ -770,19 +939,26 @@ impl Subs {
             expires_at: self.expiry(),
         };
         match self.graph.create_subscription(&new).await {
-            Ok(s) => Ok(Self::created(s, watched)),
+            Ok(s) => Ok(self.created(s, watched)),
             Err(e) if e.http_status() == Some(409) => {
-                let listed = self.graph.list_subscriptions().await?;
-                listed
-                    .into_iter()
-                    .find(|s| {
-                        s.notification_url.as_deref() == Some(channel.notification_url.as_str())
-                            && Watched::of(&s.resource) == Some(watched)
-                    })
-                    .map(|s| self.ours(s))
-                    .ok_or(e)
+                let mut elsewhere = None;
+                for s in self.graph.list_subscriptions().await? {
+                    if Watched::of(&s.resource) != Some(watched) {
+                        continue;
+                    }
+                    let url = s.notification_url.as_deref().unwrap_or_default();
+                    if url == channel.notification_url {
+                        return Ok(self.ours(s));
+                    }
+                    if !same_origin(url, &channel.notification_url) {
+                        elsewhere = Url::parse(url)
+                            .ok()
+                            .and_then(|url| url.host_str().map(str::to_owned));
+                    }
+                }
+                Err(elsewhere.map_or(Unmade::Graph(e), Unmade::Elsewhere))
             }
-            Err(e) => Err(e),
+            Err(e) => Err(e.into()),
         }
     }
 }
@@ -801,11 +977,18 @@ struct Streams {
     /// Why `current` ended, once it did.
     ended: Option<Ended>,
     replacement: Option<Opening>,
+    /// Whether a replacement was opened since `current` was: the service
+    /// then says `bye` "replaced" to `current` because of it, not because
+    /// another copy of the app opened a stream.
+    replaced_here: bool,
     /// Whether the replacement asked for a fresh token.
     replacing_fresh: bool,
     /// Replacements that failed in a row, and when to try again.
     replacement_failures: u32,
     retry_replacement: Option<Instant>,
+    /// No replacement before this, by the wall clock: the service's
+    /// `Retry-After`, which waking up doesn't cut short.
+    replace_not_before: Option<DateTime<Utc>>,
     /// A replacement refused for a reason that won't pass soon: it applies
     /// once the current stream ends.
     replacement_refused: Option<Ended>,
@@ -909,6 +1092,7 @@ impl GraphPush {
                 clock: Arc::new(Utc::now),
                 list: Vec::new(),
                 missing: Vec::new(),
+                undeleted: Vec::new(),
                 calendar_refused: false,
                 problem: None,
             },
@@ -995,7 +1179,7 @@ impl GraphPush {
                         PushHealth::Degraded { reason },
                         None,
                     );
-                    (delay, true)
+                    (delay, Some(at_least))
                 }
                 Ended::CoolDown {
                     health,
@@ -1004,13 +1188,13 @@ impl GraphPush {
                 } => {
                     tracing::info!(
                         "push for account {}: {detail} Checking the Inbox every {}s; \
-                         asking again in {} hours",
+                         asking again in {} minutes",
                         self.account_id,
                         MICROSOFT_POLL.as_secs(),
-                        wait.as_secs() / 3600
+                        wait.as_secs() / 60
                     );
                     self.report(polling(MICROSOFT_POLL), health, Some(detail));
-                    (wait, false)
+                    (wait, None)
                 }
                 Ended::Park(e) => {
                     let health = if e.code == ErrorCode::AuthRequired {
@@ -1053,10 +1237,13 @@ impl GraphPush {
         }
     }
 
-    /// Waits `wait`; waking up ends it early when `woken_ends`. False when
+    /// Waits `wait`. When `woken_ends` is `Some(at_least)`, waking up ends
+    /// it early, though not before `at_least` (the service's `Retry-After`)
+    /// has passed by the wall clock, which counts time asleep. False when
     /// cancelled.
-    async fn pause(&mut self, wait: Duration, woken_ends: bool) -> bool {
-        let deadline = Instant::now() + wait;
+    async fn pause(&mut self, wait: Duration, woken_ends: Option<Duration>) -> bool {
+        let not_before = woken_ends.map(|at_least| (self.subs.clock)() + at_least);
+        let mut deadline = Instant::now() + wait;
         loop {
             tokio::select! {
                 biased;
@@ -1064,9 +1251,14 @@ impl GraphPush {
                 _ = went_offline(&mut self.signals.online) => return true,
                 _ = tokio::time::sleep_until(deadline) => return true,
                 _ = woken(&mut self.signals.wake) => {
-                    if woken_ends {
+                    if let Some(not_before) = not_before {
                         self.backoff.reset();
-                        return true;
+                        match (not_before - (self.subs.clock)()).to_std() {
+                            Ok(left) if !left.is_zero() => {
+                                deadline = deadline.min(Instant::now() + left);
+                            }
+                            _ => return true,
+                        }
                     }
                 }
             }
@@ -1125,9 +1317,11 @@ impl GraphPush {
             channel,
             ended: None,
             replacement: None,
+            replaced_here: false,
             replacing_fresh: false,
             replacement_failures: 0,
             retry_replacement: None,
+            replace_not_before: None,
             replacement_refused: None,
             held: VecDeque::new(),
         };
@@ -1148,7 +1342,21 @@ impl GraphPush {
             }
             if wake_pending {
                 wake_pending = false;
-                self.replace(&mut streams, false);
+                // Waking up ends the replacement's backoff, but not a wait
+                // the service asked for (nor, if the wall clock was set
+                // back, does it make that wait longer).
+                let wait = streams
+                    .replace_not_before
+                    .and_then(|at| (at - (self.subs.clock)()).to_std().ok())
+                    .filter(|left| !left.is_zero());
+                match wait {
+                    Some(left) => {
+                        let at = Instant::now() + left;
+                        streams.retry_replacement =
+                            Some(streams.retry_replacement.map_or(at, |retry| retry.min(at)));
+                    }
+                    None => self.replace(&mut streams, false),
+                }
             }
             if !streams.alive() {
                 return Err(streams
@@ -1175,6 +1383,7 @@ impl GraphPush {
                             streams.open = true;
                             streams.ended = None;
                             streams.channel = channel;
+                            streams.replaced_here = false;
                             streams.replacement_failures = 0;
                             jobs.push_back(Job::Reconcile);
                         }
@@ -1186,6 +1395,7 @@ impl GraphPush {
                             let wait = RETRY_REPLACEMENT * 2u32.pow(streams.replacement_failures.min(4));
                             streams.replacement_failures += 1;
                             streams.retry_replacement = Some(Instant::now() + wait.max(at_least));
+                            streams.replace_not_before = Some((self.subs.clock)() + at_least);
                         }
                         // The old stream serves until it ends.
                         Err(ended) if streams.open => streams.replacement_refused = Some(ended),
@@ -1208,6 +1418,8 @@ impl GraphPush {
             return;
         }
         streams.retry_replacement = None;
+        streams.replace_not_before = None;
+        streams.replaced_here = true;
         streams.replacing_fresh = fresh;
         let open = self.link.clone().open(streams.channel.clone(), None, fresh);
         streams.replacement = Some(Box::pin(open));
@@ -1254,6 +1466,23 @@ impl GraphPush {
             },
             RelayEvent::Resync => self.subs.catch_up(),
             RelayEvent::Renew => self.replace(streams, true),
+            // Another copy of the app with this installation's ID opened a
+            // stream: connecting again would only replace that one in turn.
+            RelayEvent::Bye { reason, .. } if reason == "replaced" && !streams.replaced_here => {
+                tracing::warn!(
+                    "push for account {}: another running copy of the app uses this \
+                     installation's ID; leaving the push service to it",
+                    self.account_id
+                );
+                streams.open = false;
+                streams.ended = Some(Ended::CoolDown {
+                    health: PushHealth::Degraded {
+                        reason: TAKEN_OVER.into(),
+                    },
+                    detail: TAKEN_OVER.into(),
+                    wait: TAKEN_OVER_WAIT,
+                });
+            }
             RelayEvent::Bye { reason, retry } => {
                 tracing::debug!(
                     "push for account {}: the service said bye ({reason})",

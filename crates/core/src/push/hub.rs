@@ -24,6 +24,10 @@ pub(crate) const STOP_LIMIT: Duration = Duration::from_secs(3);
 pub(crate) struct PushHub {
     pub(crate) state: Mutex<HubState>,
     statuses: Mutex<HashMap<String, PushStatus>>,
+    /// Why consent to the push service was refused at the account's last
+    /// sign-in (an administrator must approve it, or the user declined),
+    /// until push goes live.
+    consent_refusals: Mutex<HashMap<String, Error>>,
     /// Bumped to make every supervisor reconnect at once.
     pub(crate) wake: watch::Sender<u64>,
     pub(crate) online: watch::Sender<bool>,
@@ -70,6 +74,7 @@ impl Default for PushHub {
         Self {
             state: Mutex::default(),
             statuses: Mutex::default(),
+            consent_refusals: Mutex::default(),
             wake: watch::Sender::new(0),
             online: watch::Sender::new(true),
             root: CancellationToken::new(),
@@ -88,6 +93,23 @@ impl PushHub {
         health: PushHealth,
         detail: Option<String>,
     ) {
+        // Missing consent that the last sign-in was refused says why, rather
+        // than suggesting a sign-in that would be refused again.
+        let detail = {
+            let mut refusals = self.consent_refusals.lock().unwrap();
+            match health {
+                PushHealth::ConsentMissing => refusals
+                    .get(account_id)
+                    .map(|e| e.message.clone())
+                    .or(detail),
+                // Consent was given after all (an administrator approved).
+                PushHealth::Live => {
+                    refusals.remove(account_id);
+                    detail
+                }
+                _ => detail,
+            }
+        };
         let status = {
             let mut statuses = self.statuses.lock().unwrap();
             if statuses
@@ -115,6 +137,24 @@ impl PushHub {
 
     pub(crate) fn forget_status(&self, account_id: &str) {
         self.statuses.lock().unwrap().remove(account_id);
+        self.consent_refusals.lock().unwrap().remove(account_id);
+    }
+
+    /// Records the account's sign-in result for push consent: the refusal,
+    /// or `None` when consent wasn't refused.
+    pub(crate) fn set_consent_refusal(&self, account_id: &str, refusal: Option<Error>) {
+        let mut refusals = self.consent_refusals.lock().unwrap();
+        match refusal {
+            Some(e) => refusals.insert(account_id.to_owned(), e),
+            None => refusals.remove(account_id),
+        };
+    }
+
+    pub(crate) fn consent_refused(&self, account_id: &str) -> bool {
+        self.consent_refusals
+            .lock()
+            .unwrap()
+            .contains_key(account_id)
     }
 
     /// Stops the given accounts' push (all when `None`): cancels their

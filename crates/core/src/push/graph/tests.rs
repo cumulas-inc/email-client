@@ -28,13 +28,18 @@ struct Run {
     events: Arc<Mutex<Vec<(Instant, PushEvent)>>>,
     /// Why push asked to be parked, each time.
     parked: Arc<Mutex<Vec<ErrorCode>>>,
+    /// How long the computer has slept.
+    asleep: Arc<Mutex<chrono::Duration>>,
     task: tokio::task::JoinHandle<()>,
 }
 
-/// The wall clock, moving with Tokio's paused one.
-fn paused_clock() -> Clock {
+/// The wall clock, moving with Tokio's paused one, plus the time `asleep`,
+/// which Tokio's clock (like the monotonic one) doesn't count.
+fn paused_clock(asleep: Arc<Mutex<chrono::Duration>>) -> Clock {
     let (utc, origin) = (Utc::now(), Instant::now());
-    Arc::new(move || utc + chrono::Duration::from_std(origin.elapsed()).unwrap())
+    Arc::new(move || {
+        utc + chrono::Duration::from_std(origin.elapsed()).unwrap() + *asleep.lock().unwrap()
+    })
 }
 
 impl Run {
@@ -58,6 +63,7 @@ impl Run {
         let statuses = Arc::new(Mutex::new(Vec::new()));
         let events = Arc::new(Mutex::new(Vec::new()));
         let parked = Arc::new(Mutex::new(Vec::new()));
+        let asleep = Arc::new(Mutex::new(chrono::Duration::zero()));
         let push = GraphPush::new(
             "acct",
             "install-0123456789abcdef",
@@ -82,7 +88,7 @@ impl Run {
             online_rx,
         )
         .with_backoff(Backoff::seeded(3))
-        .with_clock(paused_clock())
+        .with_clock(paused_clock(asleep.clone()))
         .with_park({
             let parked = parked.clone();
             Arc::new(move |e: &Error| parked.lock().unwrap().push(e.code))
@@ -99,8 +105,31 @@ impl Run {
             statuses,
             events,
             parked,
+            asleep,
             task,
         }
+    }
+
+    /// The computer sleeps for `long`: the wall clock moves on, Tokio's
+    /// doesn't. Then the resume detector wakes push.
+    fn sleep_and_wake(&self, long: Duration) {
+        *self.asleep.lock().unwrap() += chrono::Duration::from_std(long).unwrap();
+        self.wake.send_modify(|n| *n += 1);
+    }
+
+    /// The wall clock is set back by `by`; Tokio's carries on.
+    fn set_clock_back(&self, by: Duration) {
+        *self.asleep.lock().unwrap() -= chrono::Duration::from_std(by).unwrap();
+    }
+
+    /// When the subscription for `resource` was renewed, in whole minutes
+    /// after `start`.
+    fn renewed_at(&self, resource: &str, start: Instant) -> Vec<u64> {
+        let renewals = self.graph.renewals_of(resource);
+        renewals
+            .iter()
+            .map(|at| (*at - start).as_secs() / 60)
+            .collect()
     }
 
     fn status(&self) -> Status {
@@ -158,6 +187,7 @@ async fn advance(by: Duration) {
 
 const SECOND: Duration = Duration::from_secs(1);
 const MINUTE: Duration = Duration::from_secs(60);
+const HOUR: Duration = Duration::from_secs(3600);
 
 #[tokio::test(start_paused = true)]
 async fn it_subscribes_on_ready_then_goes_live_and_follows_changes() {
@@ -287,7 +317,7 @@ async fn subscriptions_are_renewed_every_thirty_minutes_while_connected() {
     }
     // Each renewal asked for the full lifetime again.
     let sub = run.graph.state.lock().unwrap().subs[0].clone();
-    let minutes = (sub.expires_at - (paused_clock())()).num_minutes();
+    let minutes = (sub.expires_at - Utc::now()).num_minutes();
     assert!(minutes > SUBSCRIPTION_MINUTES - 35, "{minutes}");
     assert!(run.is_live());
     run.stop().await;
@@ -776,6 +806,406 @@ async fn a_silent_or_dropped_stream_backs_off() {
     run.stop().await;
 }
 
+/// A subscription on the channel, as another installation left it `age`
+/// ago.
+fn listed_on(id: &str, resource: &str, url: &str, age: chrono::Duration) -> Subscription {
+    Subscription {
+        id: id.into(),
+        resource: resource.into(),
+        notification_url: Some(url.into()),
+        expires_at: Utc::now() + chrono::Duration::minutes(SUBSCRIPTION_MINUTES) - age,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_long_sleep_the_subscriptions_are_renewed_at_once() {
+    let run = Run::start(|_, _, _| {});
+    advance(SECOND).await;
+    advance(30 * MINUTE).await;
+    assert_eq!(run.graph.state.lock().unwrap().renewals.len(), 2);
+    // Asleep five minutes after those renewals, for nine hours: the token
+    // behind them has long expired.
+    advance(5 * MINUTE).await;
+    run.sleep_and_wake(9 * HOUR);
+    advance(5 * SECOND).await;
+    assert_eq!(run.relay.opened(), 2);
+    assert_eq!(run.graph.state.lock().unwrap().renewals.len(), 4);
+    assert!(run.is_live());
+    // Then every thirty minutes again.
+    advance(29 * MINUTE).await;
+    assert_eq!(run.graph.state.lock().unwrap().renewals.len(), 4);
+    advance(2 * MINUTE).await;
+    assert_eq!(run.graph.state.lock().unwrap().renewals.len(), 6);
+    run.stop().await;
+
+    // Without a new stream (the service is busy), the old one carries on,
+    // and the renewals don't wait for one.
+    let run = Run::start(|_, _, _| {});
+    advance(5 * MINUTE).await;
+    run.relay.refuse_stream(RelayError::Busy {
+        retry_after: Some(MINUTE),
+    });
+    run.sleep_and_wake(9 * HOUR);
+    advance(5 * SECOND).await;
+    assert_eq!(run.relay.opened(), 1);
+    assert_eq!(run.graph.state.lock().unwrap().renewals.len(), 2);
+    assert!(run.is_live());
+    run.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_installations_clock_running_ahead_doesnt_hold_up_renewals() {
+    // Other installations renewed both just now. One, its clock two hours
+    // ahead, renewed the Inbox's: its expiry dates that two hours from now,
+    // which says nothing about when, so it's renewed at once. The other's
+    // clock is half a minute ahead, as synchronized clocks can be: the
+    // calendar's is taken as renewed just now...
+    let start = Instant::now();
+    let run = Run::start(|_, _, graph| {
+        graph.state.lock().unwrap().subs = vec![
+            listed_on(
+                "inbox",
+                INBOX_RESOURCE,
+                NOTIFICATION_URL,
+                -chrono::Duration::hours(2),
+            ),
+            listed_on(
+                "events",
+                EVENTS_RESOURCE,
+                NOTIFICATION_URL,
+                -chrono::Duration::seconds(30),
+            ),
+        ];
+    });
+    advance(SECOND).await;
+    assert!(run.is_live(), "{:?}", run.status());
+    assert_eq!(run.renewed_at(INBOX_RESOURCE, start), [0]);
+    assert!(run.renewed_at(EVENTS_RESOURCE, start).is_empty());
+    // ...Graph asking for a reauthorization fifteen minutes on is heeded
+    // at once...
+    advance(15 * MINUTE).await;
+    run.relay.send(RelayEvent::Lifecycle {
+        subscription: "inbox".into(),
+        event: Lifecycle::ReauthorizationRequired,
+    });
+    advance(SECOND).await;
+    assert_eq!(run.renewed_at(INBOX_RESOURCE, start), [0, 15]);
+    // ...and then they're renewed every thirty minutes.
+    advance(150 * MINUTE).await;
+    assert_eq!(
+        run.renewed_at(INBOX_RESOURCE, start),
+        [0, 15, 45, 75, 105, 135, 165]
+    );
+    assert_eq!(
+        run.renewed_at(EVENTS_RESOURCE, start),
+        [30, 60, 90, 120, 150]
+    );
+    assert!(run.is_live());
+    run.stop().await;
+
+    // Nor does such a renewal, seen at a later reconcile, put off one this
+    // installation's own clocks say is due.
+    let run = Run::start(|_, _, _| {});
+    advance(SECOND).await;
+    let start = Instant::now();
+    advance(20 * MINUTE).await;
+    for sub in &mut run.graph.state.lock().unwrap().subs {
+        sub.expires_at = Utc::now()
+            + chrono::Duration::minutes(SUBSCRIPTION_MINUTES)
+            + chrono::Duration::hours(2);
+    }
+    run.relay.drop_stream();
+    advance(5 * SECOND).await;
+    assert_eq!(run.relay.opened(), 2);
+    assert_eq!(run.renewed_at(INBOX_RESOURCE, start), [20]);
+    assert_eq!(run.renewed_at(EVENTS_RESOURCE, start), [20]);
+    advance(30 * MINUTE).await;
+    assert_eq!(run.renewed_at(INBOX_RESOURCE, start), [20, 50]);
+    assert!(run.is_live());
+    run.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wall_clock_set_back_doesnt_hold_up_renewals() {
+    let start = Instant::now();
+    let run = Run::start(|_, _, _| {});
+    advance(SECOND).await;
+    advance(35 * MINUTE).await;
+    assert_eq!(run.renewed_at(INBOX_RESOURCE, start), [30]);
+    // Set back two hours: by the wall clock, the last renewals are yet to
+    // come; by Tokio's, they were five minutes ago.
+    run.set_clock_back(2 * HOUR);
+    // A reauthorization is heeded ten minutes after the last...
+    advance(6 * MINUTE).await;
+    run.relay.send(RelayEvent::Lifecycle {
+        subscription: run.inbox_id(),
+        event: Lifecycle::ReauthorizationRequired,
+    });
+    advance(SECOND).await;
+    assert_eq!(run.renewed_at(INBOX_RESOURCE, start), [30, 41]);
+    // ...a reconcile renews what's ten minutes old...
+    advance(14 * MINUTE).await;
+    run.relay.drop_stream();
+    advance(5 * SECOND).await;
+    assert_eq!(run.relay.opened(), 2);
+    assert_eq!(run.renewed_at(INBOX_RESOURCE, start), [30, 41, 55]);
+    assert_eq!(run.renewed_at(EVENTS_RESOURCE, start), [30, 55]);
+    // ...and renewals come every thirty minutes.
+    advance(2 * HOUR).await;
+    assert_eq!(
+        run.renewed_at(INBOX_RESOURCE, start),
+        [30, 41, 55, 85, 115, 145, 175]
+    );
+    assert!(run.is_live());
+    run.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn waking_up_doesnt_cut_a_retry_after_short() {
+    let busy = || RelayError::Busy {
+        retry_after: Some(5 * MINUTE),
+    };
+    // Refused for five minutes; waking up a minute in changes nothing.
+    let run = Run::start(|relay, _, _| relay.refuse_stream(busy()));
+    advance(MINUTE).await;
+    run.wake.send_modify(|n| *n += 1);
+    advance(SECOND).await;
+    assert_eq!(run.relay.requests("events").len(), 1);
+    advance(4 * MINUTE).await;
+    assert_eq!(run.relay.requests("events").len(), 2);
+    assert!(run.is_live());
+    run.stop().await;
+
+    // Waking up after sleeping through it reconnects at once.
+    let run = Run::start(|relay, _, _| relay.refuse_stream(busy()));
+    advance(MINUTE).await;
+    run.sleep_and_wake(10 * MINUTE);
+    advance(SECOND).await;
+    assert_eq!(run.relay.requests("events").len(), 2);
+    assert!(run.is_live());
+    run.stop().await;
+
+    // Nor does waking up hurry a new stream the service turned away.
+    let run = Run::start(|_, _, _| {});
+    advance(SECOND).await;
+    run.relay.refuse_stream(busy());
+    run.relay.send(RelayEvent::Renew);
+    advance(MINUTE).await;
+    assert_eq!(run.relay.requests("events").len(), 2);
+    run.wake.send_modify(|n| *n += 1);
+    advance(SECOND).await;
+    assert_eq!(run.relay.requests("events").len(), 2);
+    advance(4 * MINUTE).await;
+    assert_eq!(run.relay.requests("events").len(), 3);
+    assert_eq!(run.relay.open(), 1);
+    assert!(run.is_live());
+    run.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_copy_taking_the_stream_over_is_left_to_it_for_an_hour() {
+    let bye = || RelayEvent::Bye {
+        reason: "replaced".into(),
+        retry: Some(5 * SECOND),
+    };
+    let taken_over = |run: &Run| {
+        let (mode, health, detail) = run.status();
+        mode == POLL
+            && matches!(health, PushHealth::Degraded { reason } if reason == TAKEN_OVER)
+            && detail.as_deref() == Some(TAKEN_OVER)
+    };
+    // Another copy with this installation's ID opened its stream.
+    let run = Run::start(|_, _, _| {});
+    advance(SECOND).await;
+    run.relay.send(bye());
+    advance(SECOND).await;
+    assert!(taken_over(&run), "{:?}", run.status());
+    let start = Instant::now();
+    advance(59 * MINUTE).await;
+    assert_eq!(run.relay.opened(), 1);
+    assert!(taken_over(&run));
+    assert!(run.polls(start, Instant::now()) > 100);
+    advance(2 * MINUTE).await;
+    assert_eq!(run.relay.opened(), 2);
+    assert!(run.is_live());
+    run.stop().await;
+
+    // Its own new stream replacing the old one is no such thing...
+    let run = Run::start(|_, _, _| {});
+    advance(SECOND).await;
+    run.relay.hold_ready();
+    run.relay.send(RelayEvent::Renew);
+    advance(SECOND).await;
+    run.relay.send_on(0, bye());
+    advance(SECOND).await;
+    run.relay.ready();
+    advance(SECOND).await;
+    assert_eq!((run.relay.opened(), run.relay.open()), (2, 1));
+    assert!(run.is_live());
+    // ...but once switched, another copy is told apart again.
+    run.relay.send(bye());
+    advance(SECOND).await;
+    assert!(taken_over(&run), "{:?}", run.status());
+    run.stop().await;
+
+    // Nor is a new stream of its own that failed before its `ready`.
+    let run = Run::start(|_, _, _| {});
+    advance(SECOND).await;
+    run.relay.hold_ready();
+    run.relay.send(RelayEvent::Renew);
+    advance(SECOND).await;
+    run.relay.drop_stream();
+    advance(SECOND).await;
+    run.relay.send_on(0, bye());
+    advance(10 * SECOND).await;
+    assert_eq!(run.relay.opened(), 3);
+    assert!(run.is_live());
+    run.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_calendar_renewal_failing_at_reconcile_leaves_push_live() {
+    let run = Run::start(|_, _, graph| {
+        let mut state = graph.state.lock().unwrap();
+        let hour = chrono::Duration::hours(1);
+        state.subs = vec![
+            listed_on("inbox", INBOX_RESOURCE, NOTIFICATION_URL, hour),
+            listed_on("events", EVENTS_RESOURCE, NOTIFICATION_URL, hour),
+        ];
+        state.fail_renew_of = Some("events".into());
+        for _ in 0..3 {
+            state.fail_renew.push_back(graph_status(403));
+        }
+    });
+    advance(SECOND).await;
+    assert!(run.is_live(), "{:?}", run.status());
+    assert_eq!(run.graph.renewals_of(INBOX_RESOURCE).len(), 1);
+    // The calendar's is tried again 2, 4 and 8 minutes apart, on the same
+    // stream.
+    advance(20 * MINUTE).await;
+    let attempts: Vec<Instant> = run
+        .graph
+        .state
+        .lock()
+        .unwrap()
+        .renew_attempts
+        .iter()
+        .filter(|(id, _)| id == "events")
+        .map(|(_, at)| *at)
+        .collect();
+    let gaps: Vec<Duration> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(gaps, [2 * MINUTE, 4 * MINUTE, 8 * MINUTE]);
+    assert_eq!(run.graph.renewals_of(EVENTS_RESOURCE).len(), 1);
+    assert_eq!(run.relay.opened(), 1);
+    assert!(run.is_live());
+    run.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_old_subscription_graph_wont_delete_is_tried_again_later() {
+    const OLD_URL: &str = "https://sync.example.org/graph/v1/k0OldRouteOldRouteOldRouteOldRoute0";
+    let run = Run::start(|_, _, graph| {
+        let mut state = graph.state.lock().unwrap();
+        state.subs = vec![listed_on(
+            "old-events",
+            EVENTS_RESOURCE,
+            OLD_URL,
+            chrono::Duration::hours(1),
+        )];
+        state.fail_delete.push_back(graph_status(503));
+    });
+    advance(SECOND).await;
+    // The calendar waits; the Inbox is live.
+    assert!(run.is_live(), "{:?}", run.status());
+    assert_eq!(run.relay.opened(), 1);
+    let stored = |run: &Run| -> Vec<String> {
+        let mut ids: Vec<String> = run
+            .store
+            .push_subscriptions("acct")
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let mut kept = vec!["old-events".to_owned(), run.inbox_id()];
+    kept.sort();
+    assert_eq!(stored(&run), kept);
+    // The next reconcile deletes it and makes the calendar's.
+    run.relay.drop_stream();
+    advance(5 * SECOND).await;
+    assert_eq!(run.graph.state.lock().unwrap().deleted, ["old-events"]);
+    let mut ours = vec![run.graph.id_of(EVENTS_RESOURCE), run.inbox_id()];
+    ours.sort();
+    assert_eq!(stored(&run), ours);
+    assert!(run.is_live());
+    run.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_inbox_watched_through_another_push_service_is_left_to_it() {
+    const ELSEWHERE: &str = "https://sync.other.example/graph/v1/k1OtherRouteOtherRouteOtherRoute1";
+    let run = Run::start(|_, _, graph| {
+        graph.state.lock().unwrap().subs = vec![listed_on(
+            "theirs",
+            INBOX_RESOURCE,
+            ELSEWHERE,
+            chrono::Duration::minutes(10),
+        )];
+    });
+    advance(SECOND).await;
+    let (mode, health, _) = run.status();
+    assert_eq!(mode, POLL);
+    assert!(
+        matches!(&health, PushHealth::Degraded { reason } if reason.contains("sync.other.example")),
+        "{health:?}"
+    );
+    // Left alone, and asked again hourly.
+    advance(90 * MINUTE).await;
+    let inbox_tries = |run: &Run| {
+        let state = run.graph.state.lock().unwrap();
+        state
+            .created
+            .iter()
+            .filter(|n| n.resource == INBOX_RESOURCE)
+            .count()
+    };
+    assert_eq!(inbox_tries(&run), 2);
+    assert!(run.graph.state.lock().unwrap().deleted.is_empty());
+    assert!(!run.is_live());
+    // Once it's gone, the next try works.
+    run.graph
+        .state
+        .lock()
+        .unwrap()
+        .subs
+        .retain(|s| s.id != "theirs");
+    advance(31 * MINUTE).await;
+    assert_eq!(inbox_tries(&run), 3);
+    assert!(run.is_live());
+    run.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopping_while_subscribing_keeps_record_of_what_was_made() {
+    let run = Run::start(|_, _, graph| {
+        graph.state.lock().unwrap().slow_create = Some((EVENTS_RESOURCE.into(), 10 * SECOND));
+    });
+    advance(SECOND).await;
+    // The Inbox's is made; the calendar's is on its way.
+    assert_eq!(run.graph.state.lock().unwrap().subs.len(), 1);
+    let (store, inbox) = (run.store.clone(), run.inbox_id());
+    run.stop().await;
+    let stored: Vec<String> = store
+        .push_subscriptions("acct")
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(stored, [inbox]);
+}
+
 // --- Graph's side, on wiremock ----------------------------------------------
 
 mod on_graph {
@@ -788,7 +1218,7 @@ mod on_graph {
     use crate::providers::graph::GraphProvider;
 
     const OLD_URL: &str = "https://sync.example.org/graph/v1/k0OldRouteOldRouteOldRouteOldRoute0";
-    const OTHER_APP: &str = "https://hooks.other.example/graph";
+    const OTHER_SERVICE: &str = "https://hooks.other.example/graph";
 
     fn subs(server: &MockServer) -> (Subs, Arc<Mutex<Vec<PushEvent>>>) {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -810,6 +1240,7 @@ mod on_graph {
             clock: Arc::new(Utc::now),
             list: Vec::new(),
             missing: Vec::new(),
+            undeleted: Vec::new(),
             calendar_refused: false,
             problem: None,
         };
@@ -850,7 +1281,7 @@ mod on_graph {
     }
 
     #[tokio::test]
-    async fn stale_urls_are_recreated_and_other_apps_left_alone() {
+    async fn stale_urls_are_recreated_and_other_services_left_alone() {
         let server = MockServer::start().await;
         let hour = chrono::Duration::hours(1);
         Mock::given(method("GET"))
@@ -859,8 +1290,8 @@ mod on_graph {
                 "value": [
                     // Ours, on the URL of the service's previous key.
                     listed("stale", INBOX_RESOURCE, OLD_URL, hour),
-                    // Another app's, and another service's.
-                    listed("other-inbox", INBOX_RESOURCE, OTHER_APP, hour),
+                    // Another installation's, through another service.
+                    listed("other-contacts", "me/contacts", OTHER_SERVICE, hour),
                 ],
                 "@odata.nextLink": format!("{}/subscriptions/next", server.uri()),
             })))
@@ -871,7 +1302,6 @@ mod on_graph {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "value": [
                     listed("ours-events", EVENTS_RESOURCE, NOTIFICATION_URL, hour),
-                    listed("other-events", "Me/Events", OTHER_APP, hour),
                 ],
             })))
             .mount(&server)
@@ -953,7 +1383,7 @@ mod on_graph {
                 "value": [
                     listed("new-inbox", INBOX_RESOURCE, NOTIFICATION_URL, chrono::Duration::minutes(1)),
                     listed("ours-events", EVENTS_RESOURCE, NOTIFICATION_URL, chrono::Duration::minutes(1)),
-                    listed("other-inbox", INBOX_RESOURCE, OTHER_APP, hour),
+                    listed("other-contacts", "me/contacts", OTHER_SERVICE, hour),
                 ],
             })))
             .mount(&server)
@@ -1006,6 +1436,52 @@ mod on_graph {
         assert_eq!(subs.find("theirs").unwrap().watched, Some(Watched::Inbox));
         // Adopted as it is: made seconds ago, so not renewed.
         assert!(requests(&server, "PATCH").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_conflict_with_another_push_service_is_left_alone_and_explained() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [listed("theirs", INBOX_RESOURCE, OTHER_SERVICE, chrono::Duration::hours(1))],
+            })))
+            .mount(&server)
+            .await;
+        // Graph keeps one subscription per resource for the app.
+        Mock::given(method("POST"))
+            .and(path("/subscriptions"))
+            .and(body_partial_json(json!({ "resource": INBOX_RESOURCE })))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "error": { "code": "ExtensionError", "message": "Conflict" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/subscriptions"))
+            .and(body_partial_json(json!({ "resource": EVENTS_RESOURCE })))
+            .respond_with(created("events", EVENTS_RESOURCE))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (mut subs, _) = subs(&server);
+        subs.reconcile(&crate::push::fakes::channel())
+            .await
+            .unwrap();
+        assert!(requests(&server, "DELETE").await.is_empty());
+        assert!(!subs.inbox_ok());
+        let problem = subs.problem.clone().unwrap();
+        assert!(problem.contains("hooks.other.example"), "{problem}");
+        // Asked for again in an hour, in case it went.
+        let retry = subs.missing.iter().find(|m| m.watched == Watched::Inbox);
+        let wait = retry.unwrap().at.wall - Utc::now();
+        assert!(
+            (59..=60).contains(&wait.num_minutes()),
+            "{}",
+            wait.num_minutes()
+        );
+        assert!(subs.find("events").is_some());
     }
 
     #[tokio::test]

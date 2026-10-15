@@ -349,6 +349,8 @@ impl CoreService {
         self.secrets
             .set(&keys::refresh_token(&account.id), &result.refresh_token)
             .await?;
+        self.push
+            .set_consent_refusal(&account.id, result.consent_refused.clone());
         self.forget_providers(Some(&account.id)).await;
         self.restart_push(&account.id).await;
         self.notify(&[DataKind::Accounts], Some(&account.id));
@@ -358,7 +360,8 @@ impl CoreService {
     /// Whether signing in again as `login_hint` should also ask consent for
     /// the push service: only for an account whose push reported the
     /// consent missing. That proves the app registration offers the scope;
-    /// asking for one it doesn't offer would fail the whole sign-in.
+    /// asking for one it doesn't offer would fail the whole sign-in. Not
+    /// again after it was refused, which would open the browser twice.
     fn wants_push_consent(&self, login_hint: Option<&str>) -> bool {
         let Some(hint) = login_hint.map(str::trim).filter(|h| !h.is_empty()) else {
             return false;
@@ -373,6 +376,7 @@ impl CoreService {
                     .push
                     .status(&a.id)
                     .is_some_and(|s| s.health == crate::push::PushHealth::ConsentMissing)
+                && !self.push.consent_refused(&a.id)
         })
     }
 

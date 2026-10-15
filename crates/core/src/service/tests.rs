@@ -287,6 +287,8 @@ pub(crate) struct FakeConnector {
     pub subscriptions: Mutex<Option<Arc<dyn ChangeSubscriptions>>>,
     /// Whether each Microsoft sign-in asked consent for the push service.
     pub push_consent: Mutex<Vec<bool>>,
+    /// What the next Microsoft sign-in returns; it never finishes when unset.
+    pub sign_in: Mutex<Option<SignInResult>>,
 }
 
 impl FakeConnector {
@@ -299,6 +301,7 @@ impl FakeConnector {
             relay: Mutex::default(),
             subscriptions: Mutex::default(),
             push_consent: Mutex::default(),
+            sign_in: Mutex::default(),
         }
     }
 }
@@ -337,8 +340,12 @@ impl Connector for FakeConnector {
         push_consent: bool,
     ) -> Result<SignInResult> {
         self.push_consent.lock().unwrap().push(push_consent);
-        // Like a user who never finishes signing in in the browser.
-        std::future::pending().await
+        let result = self.sign_in.lock().unwrap().take();
+        match result {
+            Some(result) => Ok(result),
+            // Like a user who never finishes signing in in the browser.
+            None => std::future::pending().await,
+        }
     }
 
     async fn push_source(&self, account: &Account) -> Result<PushSource> {
@@ -1940,6 +1947,71 @@ async fn missing_consent_polls_and_offers_it_at_the_next_sign_in() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn refused_push_consent_says_why_and_is_not_asked_again() {
+    let r = relay_background();
+    // Before the sign-in, and again as push restarts after it.
+    r.tokens.refuse(SyncTokenError::ConsentMissing);
+    r.tokens.refuse(SyncTokenError::ConsentMissing);
+    let account = microsoft_account(&r.b.h, "adele@contoso.com");
+    r.b.service.start_background();
+    r.b.settle().await;
+
+    // Signing in again asks consent for the push service, which the
+    // organization's settings refuse; the sign-in itself goes ahead.
+    let refusal = Error::new(
+        ErrorCode::AdminConsentRequired,
+        "Your organization requires an administrator to approve instant updates.",
+    );
+    *r.b.h.connector.sign_in.lock().unwrap() = Some(SignInResult {
+        email: "adele@contoso.com".into(),
+        display_name: "Adele".into(),
+        tenant_id: "11111111-2222-3333-4444-555555555555".into(),
+        user_id: "33333333-0000-0000-0000-00000000000a".into(),
+        access_token: "access".into(),
+        refresh_token: "refresh".into(),
+        expires_in: std::time::Duration::from_secs(3600),
+        consent_refused: Some(refusal.clone()),
+    });
+    let signed_in =
+        r.b.service
+            .add_microsoft_account(&|_| Ok(()), Some("adele@contoso.com"))
+            .await
+            .unwrap();
+    assert_eq!(signed_in.id, account.id);
+    r.b.settle().await;
+    let status = || {
+        r.b.service
+            .push_statuses()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.account_id == account.id)
+            .unwrap()
+    };
+    assert_eq!(status().health, PushHealth::ConsentMissing);
+    // Why, not "sign in again", which would be refused again.
+    assert_eq!(status().detail.as_deref(), Some(refusal.message.as_str()));
+
+    // A later sign-in doesn't ask again, which would open the browser twice.
+    let service = &r.b.service;
+    let (result, ()) = tokio::join!(
+        service.add_microsoft_account(&|_| Ok(()), Some("adele@contoso.com")),
+        async {
+            tokio::task::yield_now().await;
+            service.cancel_microsoft_sign_in();
+        }
+    );
+    assert_eq!(result.unwrap_err().code, ErrorCode::SignInCancelled);
+    assert_eq!(*r.b.h.connector.push_consent.lock().unwrap(), [true, false]);
+
+    // Once an administrator approves, push goes live (after the 6-hour
+    // wait) and the refusal goes.
+    tokio::time::sleep(std::time::Duration::from_secs(7 * 60 * 60)).await;
+    assert_eq!(status().health, PushHealth::Live);
+    assert!(!r.b.service.push.consent_refused(&account.id));
+    r.b.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn turning_the_push_service_off_unsubscribes_and_polls() {
     let r = relay_background();
     let account = microsoft_account(&r.b.h, "adele@contoso.com");
@@ -2049,15 +2121,48 @@ async fn removing_a_microsoft_account_deletes_its_subscriptions() {
         .unwrap();
     h.service.remove_account(&account.id).await.unwrap();
     assert!(h.service.list_accounts().unwrap().is_empty());
+}
 
-    // Unreachable Graph doesn't hold the removal up for long.
+#[tokio::test(start_paused = true)]
+async fn a_silent_graph_holds_up_removing_an_account_five_seconds_at_most() {
+    use crate::auth::StaticToken;
+    use crate::providers::graph::GraphProvider;
+    use crate::store::PushSubscription;
+
+    // Graph takes the request and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    let h = harness();
+    *h.connector.subscriptions.lock().unwrap() = Some(Arc::new(GraphProvider::with_base_url(
+        "acct",
+        Arc::new(StaticToken("graph-token".into())),
+        format!("http://{address}"),
+    )));
     let account = microsoft_account(&h, "grace@contoso.com");
     h.service
         .store()
-        .replace_push_subscriptions(&account.id, &[sub("x", INBOX_RESOURCE)])
+        .replace_push_subscriptions(
+            &account.id,
+            &[PushSubscription {
+                id: "x".into(),
+                resource: INBOX_RESOURCE.into(),
+                expires_at: Utc::now(),
+            }],
+        )
         .unwrap();
-    drop(server);
-    let started = std::time::Instant::now();
+    let started = tokio::time::Instant::now();
     h.service.remove_account(&account.id).await.unwrap();
-    assert!(started.elapsed() < std::time::Duration::from_secs(6));
+    let took = started.elapsed();
+    assert!(
+        took >= std::time::Duration::from_secs(5) && took < std::time::Duration::from_secs(6),
+        "{took:?}"
+    );
+    assert!(h.service.list_accounts().unwrap().is_empty());
+    silent.abort();
 }

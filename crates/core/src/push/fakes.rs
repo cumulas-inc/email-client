@@ -104,6 +104,12 @@ impl ScriptedRelay {
         self.push(Ok(event));
     }
 
+    /// Sends an event on the `index`th stream opened, from 0.
+    pub(crate) fn send_on(&self, index: usize, event: RelayEvent) {
+        let state = self.state.lock().unwrap();
+        let _ = state.streams[index].events.send(Ok(event));
+    }
+
     /// Ends the latest stream as if the connection dropped.
     pub(crate) fn drop_stream(&self) {
         self.send_end(StreamEnd {
@@ -262,6 +268,9 @@ pub(crate) struct GraphState {
     pub fail_renew: VecDeque<Error>,
     /// `fail_renew` applies only to this subscription, when set.
     pub fail_renew_of: Option<String>,
+    pub fail_delete: VecDeque<Error>,
+    /// Creating a subscription for this resource takes this long.
+    pub slow_create: Option<(String, Duration)>,
     next_id: usize,
 }
 
@@ -312,10 +321,29 @@ impl ChangeSubscriptions for FakeGraph {
     }
 
     async fn create_subscription(&self, new: &NewSubscription) -> Result<Subscription> {
+        let slow = {
+            let state = self.state.lock().unwrap();
+            state
+                .slow_create
+                .clone()
+                .filter(|(resource, _)| *resource == new.resource)
+        };
+        if let Some((_, takes)) = slow {
+            tokio::time::sleep(takes).await;
+        }
         let mut state = self.state.lock().unwrap();
         state.created.push(new.clone());
         if let Some(e) = state.fail_create.pop_front() {
             return Err(e);
+        }
+        // Graph keeps one subscription per resource for an app.
+        let resource = new.resource.to_ascii_lowercase();
+        if state
+            .subs
+            .iter()
+            .any(|s| s.resource.trim_start_matches('/').to_ascii_lowercase() == resource)
+        {
+            return Err(graph_status(409));
         }
         state.next_id += 1;
         let sub = Subscription {
@@ -351,6 +379,9 @@ impl ChangeSubscriptions for FakeGraph {
 
     async fn delete_subscription(&self, id: &str) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+        if let Some(e) = state.fail_delete.pop_front() {
+            return Err(e);
+        }
         state.deleted.push(id.to_owned());
         state.subs.retain(|s| s.id != id);
         Ok(())
