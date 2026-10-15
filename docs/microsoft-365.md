@@ -30,6 +30,10 @@ themselves by default:
 One more scope is not a Graph permission but the app's own:
 `api://<client ID>/Sync.Receive` lets the app open a stream to the Cumulas push
 service (see [Instant updates](#instant-updates-the-cumulas-push-service)).
+Work and school accounts also ask for a scope of Cumulas Signatures' shared
+app, `api://<service host>/<its client ID>/access_as_user`, which the
+service's operator pre-authorizes for Cumulas Mail (see
+[Company signatures](#company-signatures-cumulas-signatures)).
 
 ## "Need admin approval"
 
@@ -205,6 +209,95 @@ Graph allows the app one subscription per mailbox and resource. If the same
 account uses Cumulas Mail with two different relays, only one of them gets
 instant updates; the other checks the Inbox every 30 seconds, and its push
 status names the relay that has them.
+
+## Company signatures (Cumulas Signatures)
+
+Organizations that use Cumulas Signatures get their signature in Cumulas Mail
+with nothing for their people to set up. The app adds it to new messages, and
+to replies and forwards when the organization says so, as ordinary content the
+person can change; when the organization's mail server adds signatures on send
+(the service's relay), the app adds none, so mail never carries two. Only
+Microsoft 365 work and school accounts take part: personal Microsoft accounts
+(tenant `9188040d-6c67-4c5b-b112-36a304b66dad`) and IMAP accounts never do.
+While an organization's signature is in use, the person's own signature for
+that account isn't used.
+
+For each work or school account, the app:
+
+1. Asks Microsoft, at the account's own tenant, for a token for the service's
+   API from the account's refresh token: the scope
+   `api://<service host>/<shared app's client ID>/access_as_user` (with
+   `offline_access`). The app makes this scope itself from its build settings,
+   never from a server's answer, and names the host's port only when it isn't
+   the default.
+2. In an organization without the shared app, Microsoft refuses
+   (AADSTS500011, 650052, 650057 or 700016): the organization doesn't use the
+   service, and nothing reaches it. A refusal for consent (AADSTS65001 or the
+   other admin consent codes, 65004, or `consent_required`) means the
+   organization uses it but hasn't allowed Cumulas Mail. Anything else (no
+   network, MFA or Conditional Access wanting the person, an expired sign-in)
+   is tried again later, and is never an account error: the Graph sync
+   reports sign-in problems on its own.
+3. With a token, calls `GET <service>/apps/signature`, sending the last
+   answer's ETag in `If-None-Match` and following no redirects, and keeps the
+   answer: the signature (`"source": "app"`), added on send (`"relay"`), or
+   none (`"none"`, and 404 `not-managed` or `not-set-up`). 403
+   `app-not-allowed` means the service's operator hasn't allowed Cumulas Mail.
+
+Signatures are sanitized before use, like message bodies, but stricter:
+pictures and CSS backgrounds only over HTTPS or as `data:` images, links only
+to the web, email and phone numbers, and relative links resolved against the
+service. A check that fails keeps the last answer, marked stale, so a
+signature keeps working offline.
+
+| When the app asks                |                                                                                                                              |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| About 15 seconds after it starts | Every work or school account.                                                                                                |
+| Every 6 hours                    | While the organization signs the account's mail (the app adds the signature, or the relay does on send).                     |
+| Every 24 hours                   | While the organization doesn't use the service, has no signature for the person, or hasn't allowed the app.                  |
+| 30 minutes after a failure       | Or when the service's `Retry-After` says (at most 6 hours), or as soon as the network is back.                               |
+| Right after signing in           | Signing in again picks up consent the organization gave meanwhile.                                                           |
+| When starting a message          | Waits up to 4 seconds for an account never checked; checks again in the background when the last answer is over an hour old. |
+| When asked to check now          | At most once a minute, and not before the service's `Retry-After`.                                                           |
+
+Times go by the wall clock, so a check due while the computer slept comes
+within a minute of waking.
+
+### Setting it up (signature service operators)
+
+The service's shared multi-tenant app registration (the shared Outlook
+add-in's, whose client ID is the server's `microsoft.clientId`) exposes
+`api://<host>/<client ID>/access_as_user`, where `<host>` is the host of the
+server's public address. For Cumulas Mail:
+
+1. In the [Microsoft Entra admin center](https://entra.microsoft.com), on that
+   registration: **Expose an API → Authorized client applications → Add a
+   client application**. Enter Cumulas Mail's Application (client) ID and tick
+   `api://<host>/<client ID>/access_as_user`. Pre-authorized, Cumulas Mail
+   gets tokens in every organization that has the shared app, without asking
+   anyone to consent again.
+2. On the server, add Cumulas Mail's client ID under **Settings → Desktop mail
+   apps**. Until then the service answers 403 `app-not-allowed`.
+
+Organizations that sign in with [their own registration](#using-your-organizations-own-registration-it-admins)
+of Cumulas Mail need its client ID added in both places too.
+
+### Building it in
+
+- `CUMULAS_SIGNATURE_CLIENT_ID`: the shared app's client ID (a GUID).
+  Without it, company signatures are off: every account shows them as
+  unsupported, and the app never asks Microsoft or the service for them.
+- `CUMULAS_SIGNATURE_URL`: the service's address, `https://signature.cumulas.co`
+  unless set. As with `CUMULAS_SYNC_URL`, it must start with `https://`
+  (`http://` only for `localhost`, `127.0.0.1` and `[::1]`) and carry no user
+  name, query or fragment; any other value is ignored, with a warning in the
+  log. The scope follows its host, so the shared app must expose
+  `api://<that host>/<client ID>`.
+
+Both are read at build time (`CUMULAS_SIGNATURE_CLIENT_ID=<id> cargo build
+--release ...`, or the Flatpak manifest's `build-options.env`, where the
+client ID is empty) and at run time, which takes precedence:
+`flatpak run --env=CUMULAS_SIGNATURE_URL=https://signature.example.org co.cumulas.Mail`.
 
 ## Using your organization's own registration (IT admins)
 

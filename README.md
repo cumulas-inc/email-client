@@ -22,6 +22,12 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   reply/reply all/forward, flag, archive, move (drag and drop), undo, instant
   offline search, and the keyboard shortcuts people switching from other mail
   clients expect (Ctrl+R, Ctrl+Shift+R, Ctrl+F, Ctrl+Q or Q to mark read…).
+- **Signatures**: a signature of your own for each account and, for
+  Microsoft 365 work and school accounts whose organization uses Cumulas
+  Signatures, the company signature, added automatically with nothing to set
+  up and editable in each message (none is added when the organization's mail
+  server signs mail on send). See [PRIVACY.md](PRIVACY.md) for what this sends
+  where.
 - **New mail within seconds**: IMAP accounts keep a connection open (IMAP
   IDLE, and NOTIFY where the server offers it); Microsoft accounts get
   Microsoft's change notifications through the Cumulas push service
@@ -107,6 +113,10 @@ CI runs all of these, plus a Flatpak build.
 - Deploy the Cumulas push service at `sync.cumulas.co` and set up its scope
   on the Entra registration ([steps](docs/microsoft-365.md#instant-updates-the-cumulas-push-service));
   until then Microsoft accounts check the Inbox every 30 seconds.
+- Pre-authorize Cumulas Mail on Cumulas Signatures' shared app, allow it on
+  the server, and build in `CUMULAS_SIGNATURE_CLIENT_ID`
+  ([steps](docs/microsoft-365.md#setting-it-up-signature-service-operators));
+  builds without the client ID have company signatures off.
 
 Not built yet: saving drafts to the server, conversation threading, recurring
 event editing (single occurrence vs series), CalDAV/CardDAV for IMAP accounts,

@@ -19,6 +19,7 @@ system webview (WebKitGTK on Linux).
 │  service/   CoreService: every UI operation, sync engine           │
 │  push/      IMAP IDLE/NOTIFY watchers, the push service client     │
 │  reminders/ which reminders are due (a pure planner)               │
+│  signatures/ company signatures (Cumulas Signatures client)        │
 │  store/     SQLite cache (+ FTS5 search)                           │
 │  providers/ MailProvider · CalendarProvider · ContactsProvider ·   │
 │             TasksProvider                                          │
@@ -26,7 +27,7 @@ system webview (WebKitGTK on Linux).
 │     └─ imap/   IMAP + SMTP                                         │
 │  auth/      Microsoft OAuth (PKCE, loopback redirect)              │
 │  secrets.rs Secret Service / Flatpak secret portal (oo7)           │
-│  html.rs    sanitizing untrusted email HTML                        │
+│  html.rs    sanitizing email HTML and signatures                   │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -168,6 +169,49 @@ Tasks (`navigate` with kind `event`, `task` or `reminders`). The page gets
 `reminders-changed` for the bell in the header and its Reminders panel, and
 reads out reminders as they come due (a live region).
 
+## Signatures
+
+Every account has a signature of its own, and Microsoft 365 work and school
+accounts can have their organization's, from Cumulas Signatures (see
+[microsoft-365.md](microsoft-365.md#company-signatures-cumulas-signatures)).
+
+**In the core** (`crates/core/src/signatures`, `service/signatures.rs`):
+
+- **Configuration** (`signatures/config.rs`): the service's address
+  (`CUMULAS_SIGNATURE_URL`) and its shared app's client ID
+  (`CUMULAS_SIGNATURE_CLIENT_ID`), from the environment or the build. The API
+  scope is made from the two, never taken from an answer. Without a client ID
+  the feature is off.
+- **The check** (`OrganizationSignatures`, made by the `Connector` for work
+  and school accounts only): a token for the API from the account's refresh
+  token (`auth::microsoft::ApiTokenSource`, whose refusals never become
+  account errors), then `GET /apps/signature` (`signatures/client.rs`), once
+  more with a new token after a 401. The outcome is an answer (signature,
+  added on send, not used, not allowed), "unchanged" (304), or a failure to
+  try again later.
+- **State** (`account_signatures`, one row per account): the own signature,
+  and the organization's last answer with its ETag, when it came, when the
+  app last asked, whether that failed (`stale`) and the service's
+  `Retry-After`. Only answers change it; a failure only marks it stale. Each
+  answer is kept for the scope it came for, so a build pointed at another
+  service starts afresh. Both signatures are sanitized before they're kept
+  (`html::sanitize_signature_html`).
+- **The scheduler** asks about 15 seconds after start, then every 6 hours
+  while the organization signs the mail, every 24 hours while it doesn't, 30
+  minutes after a failure (or at the `Retry-After`), at once after a sign-in
+  and when the network is back, by the wall clock and sleeping a minute at
+  most. One check runs per account at a time, at most one a minute.
+- **Compose** (`get_compose_signature`): the organization's signature (on
+  replies and forwards only if it says so), nothing when its server adds it
+  on send, else the account's own (on replies only if the person said so). An
+  account never checked waits up to 4 seconds for its first answer; an
+  answer over an hour old is refreshed in the background.
+- Changes reach the UI as `data-changed` with `signatures`.
+
+**In the UI**, the signature goes in the message as ordinary content that can
+be changed, in a `cumulas-signature` block above the quoted original (in
+`cumulas-quote`), as Outlook does.
+
 ## Security
 
 - Email HTML is sanitized in Rust (`html.rs`: no scripts, event handlers,
@@ -175,6 +219,10 @@ reads out reminders as they come due (a live region).
   `<iframe sandbox>` **without** `allow-scripts`, with a Content Security Policy
   that blocks remote images and styles unless the user allows them (tracking
   pixels are blocked by default).
+- Signatures, which go into messages the person sends, are sanitized more
+  strictly: pictures and CSS backgrounds only over HTTPS or as `data:` images,
+  links only to `http`, `https`, `mailto` and `tel`, and no style block that
+  imports or loads from elsewhere.
 - Passwords and refresh tokens are kept in the Secret Service through `oo7`
   (inside Flatpak, in `oo7`'s encrypted keyring file in the app's data folder,
   keyed by the Secret portal), never in SQLite.
