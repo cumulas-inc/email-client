@@ -6,6 +6,7 @@ mod calendar;
 mod client;
 mod contacts;
 mod mail;
+mod subscriptions;
 mod tasks;
 
 use std::sync::Arc;

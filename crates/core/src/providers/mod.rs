@@ -141,6 +141,60 @@ pub trait MailProvider: Send + Sync {
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()>;
 }
 
+/// A Microsoft Graph change subscription, as Graph lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subscription {
+    pub id: String,
+    /// What it watches, such as `me/mailFolders('inbox')/messages`.
+    pub resource: String,
+    /// Where Graph posts its notifications; absent for some other apps'.
+    pub notification_url: Option<String>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// A subscription to create. Never with resource data: notifications only
+/// say what changed, and the app fetches it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NewSubscription {
+    pub resource: String,
+    /// Such as `created,updated,deleted`.
+    pub change_type: String,
+    pub notification_url: String,
+    pub lifecycle_notification_url: String,
+    /// Graph sends it back with every notification; the push service checks
+    /// it.
+    pub client_state: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for NewSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewSubscription")
+            .field("resource", &self.resource)
+            .field("change_type", &self.change_type)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Change subscriptions (Microsoft Graph webhooks), for push through the
+/// Cumulas push service. Errors keep Graph's HTTP status
+/// ([`crate::Error::http_status`]); a missing subscription is `NotFound`.
+#[async_trait]
+pub trait ChangeSubscriptions: Send + Sync {
+    /// This app's subscriptions for the signed-in user (every page).
+    async fn list_subscriptions(&self) -> Result<Vec<Subscription>>;
+
+    async fn create_subscription(&self, new: &NewSubscription) -> Result<Subscription>;
+
+    /// Renews a subscription until `expires_at`, which also reauthorizes it.
+    async fn renew_subscription(&self, id: &str, expires_at: DateTime<Utc>)
+    -> Result<Subscription>;
+
+    /// Deletes a subscription; one already gone counts as deleted.
+    async fn delete_subscription(&self, id: &str) -> Result<()>;
+}
+
 #[async_trait]
 pub trait CalendarProvider: Send + Sync {
     async fn list_calendars(&self) -> Result<Vec<Calendar>>;

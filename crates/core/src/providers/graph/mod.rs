@@ -1,4 +1,5 @@
-//! Microsoft Graph provider (mail, calendar, contacts, Microsoft To Do).
+//! Microsoft Graph provider (mail, calendar, contacts, Microsoft To Do, and
+//! the change subscriptions push relies on).
 //!
 //! All requests go through [`client::GraphClient`], which adds the bearer
 //! token, retries throttled requests, follows paging links and maps Graph
@@ -10,6 +11,7 @@ mod calendar;
 mod client;
 mod contacts;
 mod mail;
+mod subscriptions;
 mod tasks;
 mod types;
 

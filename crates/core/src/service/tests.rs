@@ -302,6 +302,7 @@ impl Connector for FakeConnector {
             calendar: None,
             contacts: None,
             tasks: None,
+            subscriptions: None,
         })
     }
 

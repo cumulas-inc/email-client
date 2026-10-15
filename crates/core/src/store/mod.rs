@@ -5,6 +5,7 @@ mod accounts;
 mod calendar;
 mod contacts;
 mod mail;
+mod push;
 mod schema;
 mod settings;
 mod tasks;
@@ -20,6 +21,7 @@ use serde::de::DeserializeOwned;
 use crate::error::Result;
 
 pub use mail::{BatchOutcome, FolderUnreadDelta};
+pub use push::PushSubscription;
 
 pub struct Store {
     conn: Mutex<Connection>,

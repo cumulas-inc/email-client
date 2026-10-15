@@ -11,7 +11,9 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Account, AccountKind, AccountSettings, ImapSettings};
 use crate::providers::graph::GraphProvider;
 use crate::providers::imap::{self, IdleConfig, ImapCredentials, ImapIdleWatcher, ImapProvider};
-use crate::providers::{CalendarProvider, ContactsProvider, MailProvider, TasksProvider};
+use crate::providers::{
+    CalendarProvider, ChangeSubscriptions, ContactsProvider, MailProvider, TasksProvider,
+};
 use crate::push::MailWatcher;
 use crate::push::supervisor::{MICROSOFT_POLL, UNSUPPORTED_POLL};
 use crate::secrets::{SecretStore, keys};
@@ -29,6 +31,8 @@ pub struct ProviderSet {
     pub calendar: Option<Arc<dyn CalendarProvider>>,
     pub contacts: Option<Arc<dyn ContactsProvider>>,
     pub tasks: Option<Arc<dyn TasksProvider>>,
+    /// Graph change subscriptions, for the push service (Microsoft only).
+    pub subscriptions: Option<Arc<dyn ChangeSubscriptions>>,
 }
 
 pub type BrowserOpener = dyn Fn(&str) -> Result<()> + Send + Sync;
@@ -134,7 +138,8 @@ impl Connector for LiveConnector {
                     mail: graph.clone(),
                     calendar: Some(graph.clone()),
                     contacts: Some(graph.clone()),
-                    tasks: Some(graph),
+                    tasks: Some(graph.clone()),
+                    subscriptions: Some(graph),
                 })
             }
             AccountSettings::Imap(settings) => {
@@ -144,6 +149,7 @@ impl Connector for LiveConnector {
                     calendar: None,
                     contacts: None,
                     tasks: None,
+                    subscriptions: None,
                 })
             }
         }

@@ -198,6 +198,12 @@ impl GraphClient {
         }
     }
 
+    /// Makes sure the cached token lasts at least `at_least` more, so the
+    /// requests that follow use one that does.
+    pub async fn token_lasting(&self, at_least: Duration) -> Result<()> {
+        self.tokens.access_token_lasting(at_least).await.map(|_| ())
+    }
+
     /// Absolute URL for a path such as `/me/messages`.
     pub fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)

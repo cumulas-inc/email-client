@@ -82,6 +82,16 @@ impl Error {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::Internal, message)
     }
+
+    /// The HTTP status the server answered with, when the error came from
+    /// one that said (Microsoft Graph's errors carry it in `details`).
+    pub fn http_status(&self) -> Option<u16> {
+        self.details
+            .as_ref()?
+            .get("status")?
+            .as_u64()
+            .and_then(|s| u16::try_from(s).ok())
+    }
 }
 
 impl From<rusqlite::Error> for Error {

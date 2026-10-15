@@ -125,6 +125,17 @@ const MIGRATIONS: &[&str] = &[
         value  TEXT NOT NULL
     );
     "#,
+    // 2: Microsoft Graph subscriptions push keeps (no clientState: the push
+    // service gives it each time)
+    r#"
+    CREATE TABLE push_subscriptions (
+        account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        id          TEXT NOT NULL,
+        resource    TEXT NOT NULL,
+        expires_at  INTEGER NOT NULL,
+        PRIMARY KEY (account_id, id)
+    );
+    "#,
 ];
 
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
