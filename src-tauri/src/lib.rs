@@ -1,20 +1,26 @@
 //! Tauri shell: wires [`CoreService`] to the webview through commands and
-//! events, and starts and stops the core's background work (sync and push).
+//! events, starts and stops the core's background work (sync and push), and
+//! fits the app into the desktop (`desktop`): notifications, the tray,
+//! running in the background, one instance per user.
 
 mod commands;
+mod desktop;
 mod fonts;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use cumulas_core::CoreService;
-use cumulas_core::model::{Account, DataKind, MessageSummary, SyncStatus};
+use cumulas_core::model::{Account, DataKind, SyncStatus};
 use cumulas_core::push::PushStatus;
 use cumulas_core::secrets::{KeyringSecretStore, MemorySecretStore, SecretStore};
 use cumulas_core::service::{EventSink, LiveConnector, MailAlert};
 use cumulas_core::store::Store;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
+
+use crate::desktop::Desktop;
+use crate::desktop::background::BACKGROUND_ARG;
 
 /// The most the app waits on exit for push connections to close.
 const SHUTDOWN_LIMIT: Duration = Duration::from_secs(2);
@@ -28,9 +34,9 @@ pub(crate) struct AppState {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DataChanged<'a> {
-    kinds: &'a [DataKind],
-    account_id: Option<&'a str>,
+pub(crate) struct DataChanged<'a> {
+    pub kinds: &'a [DataKind],
+    pub account_id: Option<&'a str>,
 }
 
 /// Forwards core events to the webview and the desktop.
@@ -43,6 +49,18 @@ impl EventSink for TauriSink {
         let _ = self
             .app
             .emit("data-changed", DataChanged { kinds, account_id });
+        if self.app.try_state::<Desktop>().is_none() {
+            return;
+        }
+        if kinds.contains(&DataKind::Mail) {
+            desktop::tray::mail_changed(&self.app);
+        }
+        if kinds.contains(&DataKind::Accounts) {
+            let app = self.app.clone();
+            tauri::async_runtime::spawn(async move {
+                desktop::background::set_status(&app).await;
+            });
+        }
     }
 
     fn sync_status(&self, status: &SyncStatus) {
@@ -51,58 +69,25 @@ impl EventSink for TauriSink {
 
     /// The core decided these should be shown (the alert policy).
     fn new_mail(&self, account: &Account, alert: &MailAlert) {
-        let show_preview = self
-            .app
-            .try_state::<AppState>()
-            .and_then(|s| s.service.get_settings().ok())
-            .is_none_or(|s| s.notify_show_preview);
-        let toasts: Vec<(String, String)> = match alert {
-            MailAlert::Each(messages) if show_preview => messages
-                .iter()
-                .map(|m| (sender(m, account), m.subject.clone()))
-                .collect(),
-            MailAlert::Each(messages) => messages
-                .iter()
-                .map(|_| ("New message".to_owned(), account.email.clone()))
-                .collect(),
-            MailAlert::Summary(messages) => vec![(
-                format!("{} new messages", messages.len()),
-                format!("in {}", account.email),
-            )],
-        };
-        // Straight to the notification server, not through the notification
-        // plugin: its desktop show() runs notify-rust's blocking call on a
-        // Tokio worker, which panics (zbus starts a runtime of its own), so
-        // nothing was ever shown.
-        for (title, body) in toasts {
-            tauri::async_runtime::spawn(async move {
-                let shown = notify_rust::Notification::new()
-                    .appname("Cumulas Mail")
-                    .icon("co.cumulas.Mail")
-                    .hint(notify_rust::Hint::DesktopEntry("co.cumulas.Mail".into()))
-                    .summary(&title)
-                    .body(&body)
-                    .show_async()
-                    .await;
-                if let Err(e) = shown {
-                    tracing::warn!("could not show notification: {e}");
-                }
-            });
-        }
+        let (app, account, alert) = (self.app.clone(), account.clone(), alert.clone());
+        tauri::async_runtime::spawn(async move {
+            desktop::new_mail(&app, &account, alert).await;
+        });
+    }
+
+    /// Read, moved or deleted: their notifications go.
+    fn mail_settled(&self, message_ids: &[String]) {
+        let (app, ids) = (self.app.clone(), message_ids.to_vec());
+        tauri::async_runtime::spawn(async move {
+            if let Some(desktop) = app.try_state::<Desktop>() {
+                desktop.notifications.settle(&ids).await;
+            }
+        });
     }
 
     fn push_status(&self, status: &PushStatus) {
         let _ = self.app.emit("push-status", status);
     }
-}
-
-/// Who a message is from, for a notification title.
-fn sender(message: &MessageSummary, account: &Account) -> String {
-    message
-        .from
-        .as_ref()
-        .map(|f| f.name.clone().unwrap_or_else(|| f.address.clone()))
-        .unwrap_or_else(|| account.display_name.clone())
 }
 
 async fn open_secret_store() -> (Arc<dyn SecretStore>, bool) {
@@ -117,6 +102,25 @@ async fn open_secret_store() -> (Arc<dyn SecretStore>, bool) {
     }
 }
 
+/// One process per user: a second launch shows the first one's window
+/// (unless it's another start at login) and exits. Registered first, so
+/// the second launch stops before anything else starts.
+fn single_instance(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    // The plugin can't run without a usable session bus address (and its
+    // version for this Tauri panics then); every launch then runs on its own.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = zbus::Address::session() {
+        tracing::warn!("no session bus ({e}); not checking for another running copy");
+        return builder;
+    }
+    builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        if argv.iter().any(|a| a == BACKGROUND_ARG) {
+            return;
+        }
+        desktop::window::show_main(app, None);
+    }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -125,12 +129,13 @@ pub fn run() {
                 .unwrap_or_else(|_| "info,cumulas_core=debug".into()),
         )
         .init();
+    // Started at login without a window: none is created until asked for.
+    let in_background = std::env::args().any(|a| a == BACKGROUND_ARG);
 
-    tauri::Builder::default()
+    single_instance(tauri::Builder::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
-        .setup(|app| {
+        .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
             let store = Arc::new(Store::open(&data_dir.join("mail.db"))?);
             let (secrets, persistent_secrets) = tauri::async_runtime::block_on(open_secret_store());
@@ -139,28 +144,28 @@ pub fn run() {
                 app: app.handle().clone(),
             });
             let service = Arc::new(CoreService::new(store, secrets, connector, sink));
-            // The UI sets the zoom when the text size changes; setting the
-            // saved one now means the first frame is already the right size.
-            if let (Ok(settings), Some(window)) =
-                (service.get_settings(), app.get_webview_window("main"))
-            {
-                let zoom = settings.text_size.zoom();
-                if let Err(e) = window.set_zoom(zoom) {
-                    tracing::warn!("could not set the zoom to {zoom}: {e}");
-                }
+            app.manage(AppState {
+                service: Arc::clone(&service),
+                persistent_secrets,
+            });
+            let (desktop, clicks) = Desktop::new(app.handle());
+            app.manage(desktop);
+            // Without an account there's nothing to watch in the background.
+            let watching = service.list_accounts().is_ok_and(|a| !a.is_empty());
+            if !in_background || !watching {
+                desktop::window::create_main(app.handle())?;
             }
             // Periodic sync, push and the resume detector; inside the
             // runtime, where their tasks live.
             tauri::async_runtime::block_on(async { service.start_background() });
-            app.manage(AppState {
-                service,
-                persistent_secrets,
-            });
+            desktop::start(app.handle(), clicks);
             Ok(())
         })
+        .on_window_event(desktop::window::on_window_event)
         .invoke_handler(tauri::generate_handler![
             commands::get_app_info,
             commands::open_link,
+            commands::quit_app,
             // accounts & settings
             commands::list_accounts,
             commands::add_imap_account,
@@ -176,6 +181,12 @@ pub fn run() {
             commands::sync_all,
             commands::get_sync_statuses,
             commands::get_push_statuses,
+            // desktop
+            commands::get_background_state,
+            commands::set_run_in_background,
+            commands::set_start_at_login,
+            commands::send_test_notification,
+            commands::take_pending_navigation,
             // mail
             commands::list_folders,
             commands::list_messages,
@@ -212,15 +223,28 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Cumulas Mail")
-        .run(|app, event| {
-            if let RunEvent::Exit = event
-                && let Some(state) = app.try_state::<AppState>()
+        .run(|app, event| match event {
+            // The last window closed (it's hidden instead while the app
+            // stays in the background, and none exists after a start at
+            // login): keep running when that's what the user chose.
+            // `app.exit` (Quit) comes with a code and always exits.
+            RunEvent::ExitRequested {
+                code: None, api, ..
+            } if app
+                .try_state::<Desktop>()
+                .is_some_and(|d| d.stays_alive(app)) =>
             {
-                // Close push connections (IMAP LOGOUT) and stop syncing.
-                let service = Arc::clone(&state.service);
-                tauri::async_runtime::block_on(async move {
-                    let _ = tokio::time::timeout(SHUTDOWN_LIMIT, service.shutdown()).await;
-                });
+                api.prevent_exit();
             }
+            RunEvent::Exit => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    // Close push connections (IMAP LOGOUT) and stop syncing.
+                    let service = Arc::clone(&state.service);
+                    tauri::async_runtime::block_on(async move {
+                        let _ = tokio::time::timeout(SHUTDOWN_LIMIT, service.shutdown()).await;
+                    });
+                }
+            }
+            _ => {}
         });
 }

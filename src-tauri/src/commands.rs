@@ -18,6 +18,9 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::AppState;
+use crate::desktop::background::{self, BackgroundState};
+use crate::desktop::router::Navigate;
+use crate::desktop::{self as desktop_shell, Desktop, tray};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +58,12 @@ pub fn open_link(app: AppHandle, url: String) -> Result<()> {
     app.opener()
         .open_url(parsed.as_str(), None::<&str>)
         .map_err(|e| Error::internal(format!("could not open link: {e}")))
+}
+
+/// Quits, even while running in the background is on (Ctrl+Q, the menu).
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 // --- accounts & settings ------------------------------------------------------
@@ -145,9 +154,28 @@ pub async fn list_fonts() -> Vec<String> {
     crate::fonts::installed_families().await
 }
 
+/// Saves the settings. Running in the background and starting at login
+/// change only through their own commands (which also tell the system), so
+/// those fields keep their saved values here.
 #[tauri::command]
-pub async fn update_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
-    state.service.update_settings(settings).await
+pub async fn update_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mut settings: Settings,
+) -> Result<Settings> {
+    let before = state.service.get_settings()?;
+    settings.run_in_background = before.run_in_background;
+    settings.start_at_login = before.start_at_login;
+    settings.start_hidden = before.start_hidden;
+    let saved = state.service.update_settings(settings).await?;
+    if saved.show_tray_icon != before.show_tray_icon {
+        tray::sync(&app);
+        background::announce(&app).await;
+    }
+    if saved.notifications_paused_until != before.notifications_paused_until {
+        tray::pause_changed(&app);
+    }
+    Ok(saved)
 }
 
 fn spawn_sync(state: &State<'_, AppState>, account_id: &str) {
@@ -182,6 +210,49 @@ pub fn get_sync_statuses(state: State<'_, AppState>) -> Result<Vec<SyncStatus>> 
 #[tauri::command]
 pub fn get_push_statuses(state: State<'_, AppState>) -> Result<Vec<PushStatus>> {
     state.service.push_statuses()
+}
+
+// --- desktop --------------------------------------------------------------------
+
+/// Running in the background, starting at login, the tray and how
+/// notifications are shown; changes arrive as `background-state` events.
+#[tauri::command]
+pub async fn get_background_state(app: AppHandle) -> BackgroundState {
+    background::state(&app).await
+}
+
+/// Keeps the app running when its window closes (asking the system first
+/// in a Flatpak).
+#[tauri::command]
+pub async fn set_run_in_background(app: AppHandle, enabled: bool) -> Result<BackgroundState> {
+    background::set_run_in_background(&app, enabled).await
+}
+
+/// Starts the app at login; `hidden` starts it without a window.
+#[tauri::command]
+pub async fn set_start_at_login(
+    app: AppHandle,
+    enabled: bool,
+    hidden: bool,
+) -> Result<BackgroundState> {
+    background::set_start_at_login(&app, enabled, hidden).await
+}
+
+/// Shows a notification like new mail's, so the user can see what they
+/// look like (and whether the desktop lets them through).
+#[tauri::command]
+pub async fn send_test_notification(app: AppHandle) -> Result<()> {
+    desktop_shell::test_notification(&app)
+        .await
+        .map_err(|e| Error::unsupported(format!("Couldn't show a notification. {e}")))
+}
+
+/// Navigation that waited for the page (a notification was clicked while
+/// the app ran without a window). The page calls this once it listens for
+/// `navigate` events.
+#[tauri::command]
+pub fn take_pending_navigation(desktop: State<'_, Desktop>) -> Option<Navigate> {
+    desktop.router.take_pending()
 }
 
 // --- mail -----------------------------------------------------------------------
