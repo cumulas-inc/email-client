@@ -21,7 +21,15 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   bottom or off), rich-text compose with attachments,
   reply/reply all/forward, flag, archive, move (drag and drop), undo, instant
   offline search, and the keyboard shortcuts people switching from other mail
-  clients expect (Ctrl+R, Ctrl+Shift+R, Ctrl+F, Ctrl+Q…).
+  clients expect (Ctrl+R, Ctrl+Shift+R, Ctrl+F, Q to mark read…).
+- **New mail within seconds**: IMAP accounts keep a connection open (IMAP
+  IDLE, and NOTIFY where the server offers it); Microsoft accounts get
+  Microsoft's change notifications through the Cumulas push service
+  (`sync.cumulas.co`, see [PRIVACY.md](PRIVACY.md)), or check the Inbox every
+  30 seconds without it. Desktop notifications with Mark as read and Archive
+  buttons; a click opens the message.
+- **Runs in the background**: closing the window keeps the app running for
+  notifications (Ctrl+Q quits), with an optional tray icon and start at login.
 - **Calendar**: day, work week, week and month views, all-day and multi-day
   events, meeting invitations (accept / tentative / decline), Teams meetings
   for Microsoft accounts.
@@ -35,7 +43,7 @@ React, packaged for Flathub as `co.cumulas.Mail`.
 - **Privacy and security**: remote images and tracking pixels blocked by
   default; message HTML sanitized and shown in a sandbox without scripts;
   passwords and tokens kept in the system keyring (Secret portal in Flatpak);
-  no telemetry.
+  no telemetry. The [privacy policy](PRIVACY.md) says what goes where.
 
 ## Development
 
@@ -70,6 +78,7 @@ CI runs all of these, plus a Flatpak build.
 
 ## Documentation
 
+- [Privacy policy](PRIVACY.md)
 - [Architecture](docs/architecture.md)
 - [Microsoft 365: permissions, admin consent, app registration](docs/microsoft-365.md)
 - [Flatpak packaging and Flathub submission](packaging/flatpak/README.md)
@@ -80,10 +89,14 @@ CI runs all of these, plus a Flatpak build.
   and test against real Microsoft 365 and Outlook.com accounts.
 - Make the repository or the screenshots public for the Flathub listing.
 
+- Deploy the Cumulas push service at `sync.cumulas.co` and set up its scope
+  on the Entra registration ([steps](docs/microsoft-365.md#instant-updates-the-cumulas-push-service));
+  until then Microsoft accounts check the Inbox every 30 seconds.
+
 Not built yet: saving drafts to the server, conversation threading, recurring
 event editing (single occurrence vs series), CalDAV/CardDAV for IMAP accounts,
-IMAP IDLE push, `mailto:` handling, and OAuth for Gmail/Yahoo IMAP (app
-passwords work today).
+event and task reminders, `mailto:` handling, and OAuth for Gmail/Yahoo IMAP
+(app passwords work today).
 
 ## License
 

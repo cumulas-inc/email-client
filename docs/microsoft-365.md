@@ -148,9 +148,10 @@ ID to `SYNC_CLIENT_IDS`; until then their users get the 30-second Inbox check.
 
 ### What users see before it is set up
 
-The app records why in each account's push status. Settings doesn't show it
-yet; a coming version will, with a **Sign in again** action where signing in
-helps.
+Each account's push status says why. **Settings → Accounts** shows it under
+**New mail** (for example "Instant (Microsoft push)", or "Every 30 seconds —
+push service unreachable"), with a **Sign in again** button where signing in
+helps, and the approval link where an administrator must approve.
 
 | Situation                                                       | What happens                                                                                                                                                                                                                                                                          |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -160,14 +161,15 @@ helps.
 | The relay is unreachable or busy                                | The Inbox is checked every 30 seconds while the app reconnects, backing off up to 5 minutes (and honoring `Retry-After`).                                                                                                                                                             |
 | Graph refuses to watch the mailbox                              | The Inbox is checked every 30 seconds; status "unsupported"; tried again every 6 hours.                                                                                                                                                                                               |
 
-Until Settings offers **Sign in again** for a missing consent, signing in
-through **Add account** with the account's address does the same. If the scope
-needs an administrator's approval, or the user declines it, the sign-in goes
-ahead without it: the browser page says "Signing in without instant updates"
-and the sign-in opens again in a new tab, for the Graph permissions alone. The
-Inbox is still checked every 30 seconds. The app doesn't show an approval link
-for the scope yet, and each later sign-in as that account asks for it again
-the same way.
+**Sign in again** (or signing in through **Add account** with the account's
+address) asks consent for the scope too. If the scope needs an administrator's
+approval, or the user declines it, the sign-in goes ahead without it: the
+browser page says "Signing in without instant updates" and the sign-in opens
+again in a new tab, for the Graph permissions alone. The Inbox is still checked
+every 30 seconds. Settings then says why instead of offering **Sign in again**,
+and when an administrator must approve, it shows the approval link (covering
+the Graph permissions and `Sync.Receive`) with **Copy** and **Email IT**
+buttons. Later sign-ins don't ask for the scope again while the app runs.
 
 Pre-authorizing the app for its own scope
 ([step 3](#setting-up-the-app-registration-for-it-publisher)) fixes it for
