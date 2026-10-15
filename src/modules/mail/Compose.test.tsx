@@ -438,12 +438,14 @@ describe("Signature", () => {
     await address(user, c);
     await user.click(within(c).getByRole("button", { name: "Send" }));
     const html = await sent(backend as MockBackend);
-    const letter = LETTER.exec(html)![1];
-    // The body, one empty line, then the signature: not in the letter's
-    // style, so it keeps its own fonts.
+    const letter = LETTER.exec(html)![1]!;
+    // The body, then the signature after one empty line: in the letter's
+    // font but not its leading, so its table keeps its layout, and marked
+    // for the relay as signed.
     expect(html).toBe(
-      `<div style="${letter}"><p style="margin:0"><br></p><p style="margin:0"><br></p></div>` +
-        `<div class="cumulas-signature">${ACME_SIGNATURE}</div>`,
+      `<div style="${letter}"><p style="margin:0"><br></p></div>` +
+        `<div class="cumulas-signature" data-signature-stamp="1" style="${letter.replace(";line-height:1.5", "")}">` +
+        `<br>${ACME_SIGNATURE}</div>`,
     );
   });
 
@@ -456,9 +458,9 @@ describe("Signature", () => {
     await signatureFrame(c);
     await user.click(within(c).getByRole("button", { name: "Send" }));
     const html = await sent(backend as MockBackend);
-    const signature = html.indexOf('<div class="cumulas-signature">');
+    const signature = html.indexOf('<div class="cumulas-signature"');
     expect(signature).toBeGreaterThan(0);
-    expect(html.indexOf('<div class="cumulas-quote">')).toBeGreaterThan(signature);
+    expect(html.indexOf('<div class="cumulas-quote"')).toBeGreaterThan(signature);
   });
 
   it("sets the person's own signature like the letter", async () => {
@@ -473,7 +475,7 @@ describe("Signature", () => {
     const html = await sent(backend as MockBackend);
     const letter = LETTER.exec(html)![1];
     expect(html).toContain(
-      `<div class="cumulas-signature" style="${letter}"><div>Alex Morgan</div><div>+1 (206) 555-0199</div></div>`,
+      `<div class="cumulas-signature" style="${letter}"><br><div>Alex Morgan</div><div>+1 (206) 555-0199</div></div>`,
     );
   });
 
@@ -492,7 +494,9 @@ describe("Signature", () => {
     await address(user, c);
     await user.click(within(c).getByRole("button", { name: "Send" }));
     const html = await sent(backend as MockBackend);
-    expect(html).toContain('<div class="cumulas-signature"><table');
+    expect(html).toMatch(
+      /<div class="cumulas-signature" data-signature-stamp="1" [^>]*><br><table/,
+    );
     expect(html).toContain("Engineering Director, Atlas");
     expect(html).not.toContain("Engineering Manager");
   });
@@ -572,8 +576,8 @@ describe("Signature", () => {
     expect(backend.sent).toHaveLength(0);
 
     slow.resolve({ kind: "organization", html: "<p>Late, but here</p>" });
-    expect(await sent(backend)).toContain(
-      '<div class="cumulas-signature"><p>Late, but here</p></div>',
+    expect(await sent(backend)).toMatch(
+      /<div class="cumulas-signature" [^>]*><br><p>Late, but here<\/p><\/div>/,
     );
   });
 

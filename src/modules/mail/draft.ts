@@ -319,8 +319,9 @@ export function isEmptyHtml(html: string): boolean {
 // Charter and Georgia stand in where Charis SIL isn't installed. A reading
 // font chosen in Settings only changes how this computer shows mail; it
 // isn't sent.
-const BODY_STYLE =
-  "font-family:'Charis SIL',Charter,'Bitstream Charter',Georgia,serif;font-size:12pt;line-height:1.5";
+const LETTER_FONT =
+  "font-family:'Charis SIL',Charter,'Bitstream Charter',Georgia,serif;font-size:12pt";
+const BODY_STYLE = `${LETTER_FONT};line-height:1.5`;
 
 /** The signature a message goes out with; `own` for the person's own, not their organization's. */
 export interface SentSignature {
@@ -333,13 +334,33 @@ function letterParagraphs(html: string): string {
   return html.replace(/<p><\/p>/g, "<p><br></p>").replace(/<p>/g, '<p style="margin:0">');
 }
 
+const QUOTE_OPENING = /^<div class="(cumulas-quote(?: [^"]*)?)">/;
+
+/**
+ * The quoted original in the letter's style, a line below what comes
+ * before it. Its `cumulas-quote` block stays at the top level: the
+ * signature relay puts its signature just above it, which then sits
+ * outside the letter's style, as on a new message.
+ */
+function quoteBlock(quoteHtml: string): string {
+  const style = `${BODY_STYLE};margin-top:1.5em`;
+  if (!QUOTE_OPENING.test(quoteHtml)) return `<div style="${style}">${quoteHtml}</div>`;
+  return quoteHtml.replace(
+    QUOTE_OPENING,
+    (_, name: string) => `<div class="${name}" style="${style}">`,
+  );
+}
+
 /**
  * The HTML that gets sent: the editor content, then the signature, then the
- * quoted original, as Outlook puts them. The signature is a
- * `cumulas-signature` block after one empty line. The person's own is set
- * in the letter's style like the rest; an organization's isn't, so it
- * keeps its own fonts. The quote keeps its `cumulas-quote` block, which the
- * signature relay puts its signatures above.
+ * quoted original, as Outlook puts them, each a block of its own. The
+ * signature is a `cumulas-signature` block that starts with one empty line.
+ * The person's own is set in the letter's style like the rest. An
+ * organization's gets the letter's font but not its leading, so text it
+ * doesn't style matches the letter while its tables keep their layout, and
+ * it carries the relay's `data-signature-stamp`, so a relay that signs the
+ * organization's mail doesn't sign it a second time. The person's own
+ * doesn't: the relay still adds the organization's to it.
  */
 export function composeBodyHtml(
   bodyHtml: string,
@@ -347,15 +368,14 @@ export function composeBodyHtml(
   quoteHtml: string | null,
 ): string {
   const body = letterParagraphs(isEmptyHtml(bodyHtml) ? "<p></p>" : bodyHtml);
-  if (!signature || isBlankHtml(signature.html)) {
-    const quote = quoteHtml ? `<br>${quoteHtml}` : "";
-    return `<div style="${BODY_STYLE}">${body}${quote}</div>`;
+  let block = "";
+  if (signature && !isBlankHtml(signature.html)) {
+    block = signature.own
+      ? `<div class="cumulas-signature" style="${BODY_STYLE}"><br>${signature.html}</div>`
+      : `<div class="cumulas-signature" data-signature-stamp="1" style="${LETTER_FONT}"><br>${signature.html}</div>`;
   }
-  const block = signature.own
-    ? `<div class="cumulas-signature" style="${BODY_STYLE}">${signature.html}</div>`
-    : `<div class="cumulas-signature">${signature.html}</div>`;
-  const quote = quoteHtml ? `<div style="${BODY_STYLE}"><br>${quoteHtml}</div>` : "";
-  return `<div style="${BODY_STYLE}">${body}<p style="margin:0"><br></p></div>${block}${quote}`;
+  const quote = quoteHtml ? quoteBlock(quoteHtml) : "";
+  return `<div style="${BODY_STYLE}">${body}</div>${block}${quote}`;
 }
 
 export const ATTACHMENT_WARN_BYTES = 20 * 1024 * 1024;

@@ -255,42 +255,82 @@ describe("reply helpers", () => {
   });
 
   it("builds the sent body from the editor and the quote", () => {
-    const body = composeBodyHtml("<p>Hi</p><p></p><p>Bye</p>", null, "<div>quote</div>");
+    const body = composeBodyHtml("<p>Hi</p><p></p><p>Bye</p>", null, null);
     expect(body).toContain('<p style="margin:0">Hi</p><p style="margin:0"><br></p>');
-    expect(body).toContain("<br><div>quote</div>");
     expect(composeBodyHtml("<p></p>", null, null)).toContain('<p style="margin:0"><br></p>');
   });
 
-  it("puts the signature after one empty line, above the quote", () => {
-    const style = /^<div style="(font-family:'Charis SIL'[^"]*)">/.exec(
-      composeBodyHtml("<p>Hi</p>", null, null),
-    )![1];
-    const quote = '<div class="cumulas-quote"><p>Original</p></div>';
+  describe("sends the letter, the signature and the quote as blocks of their own", () => {
+    const BODY_STYLE =
+      "font-family:'Charis SIL',Charter,'Bitstream Charter',Georgia,serif;font-size:12pt;line-height:1.5";
+    const LETTER_FONT =
+      "font-family:'Charis SIL',Charter,'Bitstream Charter',Georgia,serif;font-size:12pt";
+    const letter = `<div style="${BODY_STYLE}"><p style="margin:0">Hi</p></div>`;
     const organization = '<table style="font-family:Arial"><tr><td>Ada</td></tr></table>';
+    // An organization's: the letter's font without its leading, so its
+    // tables keep their layout, and the relay's mark, so the relay doesn't
+    // sign it again.
+    const organizationBlock =
+      `<div class="cumulas-signature" data-signature-stamp="1" style="${LETTER_FONT}">` +
+      `<br>${organization}</div>`;
+    // The person's own is set like the letter, and not marked: the relay
+    // still adds the organization's.
+    const ownBlock = `<div class="cumulas-signature" style="${BODY_STYLE}"><br><div>Ada</div></div>`;
+    const signatures = [
+      ["organization", { html: organization, own: false }, organizationBlock],
+      ["own", { html: "<div>Ada</div>", own: true }, ownBlock],
+      ["no", null, ""],
+    ] as const;
 
-    // An organization's keeps its own fonts: not in the letter's style.
-    expect(composeBodyHtml("<p>Hi</p>", { html: organization, own: false }, quote)).toBe(
-      `<div style="${style}"><p style="margin:0">Hi</p><p style="margin:0"><br></p></div>` +
-        `<div class="cumulas-signature">${organization}</div>` +
-        `<div style="${style}"><br>${quote}</div>`,
-    );
-    // The person's own is set like the letter, so plain text matches it.
-    expect(composeBodyHtml("<p>Hi</p>", { html: "<div>Ada</div>", own: true }, null)).toBe(
-      `<div style="${style}"><p style="margin:0">Hi</p><p style="margin:0"><br></p></div>` +
-        `<div class="cumulas-signature" style="${style}"><div>Ada</div></div>`,
-    );
-    // A signature emptied in the editor is none.
-    expect(composeBodyHtml("<p>Hi</p>", { html: "<div><br></div>", own: true }, quote)).toBe(
-      composeBodyHtml("<p>Hi</p>", null, quote),
-    );
-    // A signature that's only a picture is one.
-    expect(
-      composeBodyHtml(
-        "<p>Hi</p>",
-        { html: '<img src="data:image/png;base64,AA">', own: false },
-        null,
-      ),
-    ).toContain('<div class="cumulas-signature"><img');
+    // The quote is a block of its own, not inside the letter's: the relay
+    // puts its signature just above it, where it isn't set in the letter's
+    // style.
+    const reply = quoteOriginal(message({ bodyHtml: "<p>Original</p>" }), "reply");
+    const forward = quoteOriginal(message({ bodyHtml: "<p>Original</p>" }), "forward");
+    const quotes = [
+      ["a new message", null, ""],
+      [
+        "a reply",
+        reply,
+        reply.replace(
+          '<div class="cumulas-quote">',
+          `<div class="cumulas-quote" style="${BODY_STYLE};margin-top:1.5em">`,
+        ),
+      ],
+      [
+        "a forward",
+        forward,
+        forward.replace(
+          '<div class="cumulas-quote cumulas-forward">',
+          `<div class="cumulas-quote cumulas-forward" style="${BODY_STYLE};margin-top:1.5em">`,
+        ),
+      ],
+    ] as const;
+
+    for (const [kind, quoteHtml, quote] of quotes) {
+      for (const [whose, signature, block] of signatures) {
+        it(`${kind} with ${whose} signature`, () => {
+          expect(composeBodyHtml("<p>Hi</p>", signature, quoteHtml)).toBe(
+            `${letter}${block}${quote}`,
+          );
+        });
+      }
+    }
+
+    it("leaves out a signature with nothing in it", () => {
+      // A signature emptied in the editor is none.
+      expect(composeBodyHtml("<p>Hi</p>", { html: "<div><br></div>", own: true }, reply)).toBe(
+        composeBodyHtml("<p>Hi</p>", null, reply),
+      );
+      // A signature that's only a picture is one.
+      expect(
+        composeBodyHtml(
+          "<p>Hi</p>",
+          { html: '<img src="data:image/png;base64,AA">', own: false },
+          null,
+        ),
+      ).toContain('style="' + LETTER_FONT + '"><br><img');
+    });
   });
 
   it("starts new messages and replies following the account's signature", () => {
