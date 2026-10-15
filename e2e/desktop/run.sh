@@ -23,7 +23,7 @@ export E2E_OUTPUT="${E2E_OUTPUT:-$root/e2e/.output/desktop}"
 # Screenshots and logs (GreenMail's, tauri-driver's and the app's, which
 # app.sh adds to), for when a test fails.
 mkdir -p "$E2E_OUTPUT"
-rm -f "$E2E_OUTPUT/app.log"
+rm -f "$E2E_OUTPUT/app.log" "$E2E_OUTPUT/opened.log"
 
 greenmail_jar="${GREENMAIL_JAR:-${XDG_CACHE_HOME:-$HOME/.cache}/cumulas/greenmail-standalone-2.1.14.jar}"
 if [ ! -f "$greenmail_jar" ]; then
@@ -50,6 +50,9 @@ if [ -z "${DISPLAY:-}" ]; then
   Xvfb :97 -screen 0 1440x900x24 >/dev/null 2>&1 &
   export DISPLAY=:97
 fi
+
+# Links the app opens go to bin/xdg-open, which records them.
+export PATH="$root/e2e/desktop/bin:$PATH"
 
 # Fresh app data for every run.
 export XDG_DATA_HOME="$work/data" XDG_CACHE_HOME="$work/cache" XDG_CONFIG_HOME="$work/config"

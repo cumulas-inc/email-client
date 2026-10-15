@@ -6,8 +6,13 @@ Drives the real desktop app (Tauri + Rust core, WebKitGTK webview) through
 inside a private D-Bus session with GNOME Keyring as the Secret Service.
 
 It adds an IMAP account through the UI, reads mail (checking the sandboxed
-body and blocked tracking pixel), sends a message over SMTP and checks its
-delivery and the copy in Sent. It types a signature into Settings →
+body and blocked tracking pixel), and in a message's frame points at a link
+(the reader shows where it goes), clicks a web link (`bin/xdg-open`, first on
+the app's `PATH`, records it in `opened.log` instead of opening it), a mail
+link (a new message), a link to further down (the reader scrolls) and presses
+Ctrl+R (a reply); the message's own script never runs, neither as delivered
+nor put into the frame's document past the sanitizer. It sends a message over
+SMTP and checks its delivery and the copy in Sent. It types a signature into Settings →
 Signatures (the signature editor is a sandboxed frame), adds a word to it in
 a new message and checks that the delivered HTML has it, edited, in its
 `cumulas-signature` block under the body. Then it closes the window (as a window manager

@@ -1,6 +1,7 @@
 """End-to-end test of the real desktop app (Tauri + Rust core) through
-tauri-driver: add an IMAP account, read mail, send mail, set up a signature
-and send it, edited; then, with the window
+tauri-driver: add an IMAP account, read mail (following, pointing at and
+pressing shortcuts in a message, whose own script never runs), send mail,
+set up a signature and send it, edited; then, with the window
 closed to the background, get notified of new mail (pushed over IMAP IDLE),
 open a message from its notification, use its buttons, and see notifications
 go once their mail is read elsewhere; get an event's reminder, snooze one and
@@ -38,6 +39,8 @@ from selenium.webdriver.support.select import Select
 # The app, through app.sh, which keeps its output (tauri-driver drops it).
 APP = str(Path(__file__).with_name("app.sh"))
 OUT = Path(os.environ.get("E2E_OUTPUT", "e2e/.output"))
+# What the app asked the desktop to open (bin/xdg-open records it).
+OPENED = OUT / "opened.log"
 IMAP_PORT = int(os.environ.get("IMAP_PORT", "3143"))
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "3025"))
 
@@ -206,7 +209,9 @@ def first_run(driver) -> None:
         # with the tracking pixel blocked.
         by_text(driver, "Quarterly numbers").click()
         frame = wait_for(lambda: driver.find_element(By.CSS_SELECTOR, "iframe"), what="message frame")
-        assert "allow-scripts" not in (frame.get_attribute("sandbox") or "")
+        # An opaque origin: only the app's bridge runs in it, and nothing in
+        # it reaches the app.
+        assert frame.get_attribute("sandbox") == "allow-scripts", frame.get_attribute("sandbox")
         button(driver, "Show blocked content")  # tracking pixel was blocked
         driver.switch_to.frame(frame)
         body = wait_for(lambda: driver.find_element(By.TAG_NAME, "body").text, what="message body")
@@ -214,6 +219,8 @@ def first_run(driver) -> None:
         assert not driver.find_elements(By.CSS_SELECTOR, "img[src^='https://tracker']")
         driver.switch_to.default_content()
         shot(driver, "03-reading")
+
+        reader_links(driver)
 
         # Attachment metadata comes from the real MIME structure.
         by_text(driver, "Signed contract").click()
@@ -247,6 +254,159 @@ def first_run(driver) -> None:
         shot(driver, "05-sent")
 
         signature(driver)
+
+
+# --- links, the link's address and shortcuts in a message --------------------------
+
+
+def opened() -> list[str]:
+    return OPENED.read_text().splitlines() if OPENED.exists() else []
+
+
+def reader_frame(driver) -> WebElement:
+    """The open message's frame, once its document has the seeded links."""
+    frame = wait_for(
+        lambda: next(
+            (
+                e
+                for e in driver.find_elements(By.CSS_SELECTOR, ".mail-reader iframe.mail-body-frame")
+                if e.is_displayed()
+            ),
+            None,
+        ),
+        what="the message's frame",
+    )
+    in_frame(driver, frame, lambda: wait_for(lambda: driver.find_element(By.ID, "report"), what="its links"))
+    return frame
+
+
+def in_frame(driver, frame: WebElement, fn):
+    driver.switch_to.frame(frame)
+    try:
+        return fn()
+    finally:
+        driver.switch_to.default_content()
+
+
+def composer(driver) -> WebElement | None:
+    return next((e for e in driver.find_elements(By.CSS_SELECTOR, ".mail-compose") if e.is_displayed()), None)
+
+
+def discard_composer(driver) -> None:
+    button(driver, "Discard").click()
+    time.sleep(0.3)
+    for dialog in driver.find_elements(By.CSS_SELECTOR, "dialog[open]"):
+        for b in dialog.find_elements(By.XPATH, ".//button[normalize-space(.)='Discard']"):
+            if b.is_displayed():
+                b.click()
+    wait_for(lambda: composer(driver) is None, timeout=10, what="the composer to close")
+
+
+# Everything frames post to the app's window.
+RECORD_MESSAGES = """
+window.__e2eMessages = [];
+window.addEventListener("message", (e) => {
+  if (e.source !== window) window.__e2eMessages.push(e.data);
+});
+"""
+
+# Script that got past the sanitizer, put first in the frame's document: the
+# frame's policy runs the bridge and refuses all of it. Each would post a string;
+# the bridge posts only objects.
+INJECT_PAYLOAD = """
+const [frame, done] = arguments;
+const payload =
+  `<p><a id="js" href="javascript:parent.postMessage('payload: javascript', '*')">js</a></p>` +
+  `<img src="x" onerror="parent.postMessage('payload: onerror', '*')">` +
+  `<script>parent.postMessage('payload: script', '*')</` + `script>` +
+  `<svg onload="parent.postMessage('payload: svg', '*')"></svg>`;
+frame.addEventListener("load", () => setTimeout(() => done(true), 500), { once: true });
+frame.setAttribute("srcdoc", frame.getAttribute("srcdoc").replace(/<body[^>]*>/, (body) => body + payload));
+"""
+
+
+def reader_links(driver) -> None:
+    """In a message's frame (an opaque origin, which only the app's bridge
+    runs in): a web link opens in the browser, a mail link starts a message,
+    pointing at a link shows its real address, a link to further down
+    scrolls the reader, and Ctrl+R replies. The mail's own script never
+    runs, past the sanitizer or not."""
+    driver.execute_script(RECORD_MESSAGES)
+    by_text(driver, "Links and a payload").click()
+    frame = reader_frame(driver)
+    assert frame.get_attribute("sandbox") == "allow-scripts", frame.get_attribute("sandbox")
+    # The sanitizer took the handler off.
+    payload = in_frame(
+        driver, frame, lambda: driver.find_element(By.ID, "payload").get_dom_attribute("onerror")
+    )
+    assert payload is None, payload
+
+    def status() -> str | None:
+        shown = [e for e in driver.find_elements(By.CSS_SELECTOR, ".mail-reader__status") if e.is_displayed()]
+        return shown[0].get_attribute("textContent") if shown else None
+
+    # Pointing at a link shows where it really goes, whatever its text says.
+    in_frame(
+        driver,
+        frame,
+        lambda: ActionChains(driver).move_to_element(driver.find_element(By.ID, "spoof")).perform(),
+    )
+    wait_for(lambda: status() == "https://evil.example/login", what="the link's address in the status line")
+    shot(driver, "03a-link-address")
+
+    # A web link opens in the browser.
+    in_frame(driver, frame, lambda: driver.find_element(By.ID, "report").click())
+    wait_for(lambda: "https://example.com/report" in opened(), what="the link opened in the browser")
+
+    # A link to further down scrolls the reader there.
+    scroller = driver.find_element(By.CSS_SELECTOR, ".mail-reader__scroll")
+
+    def scrolled() -> int:
+        return driver.execute_script("return arguments[0].scrollTop", scroller)
+
+    before = scrolled()
+    in_frame(driver, frame, lambda: driver.find_element(By.ID, "jump").click())
+    wait_for(lambda: scrolled() > before + 1000, what="the reader scrolled to the details")
+    shot(driver, "03b-link-within")
+
+    # Shortcuts work after clicking into the message: Ctrl+R replies.
+    def reply():
+        driver.find_element(By.ID, "para").click()
+        ctrl(driver, "r")
+
+    in_frame(driver, frame, reply)
+    subject = wait_for(
+        lambda: driver.find_element(By.CSS_SELECTOR, ".mail-compose input[aria-label='Subject']"),
+        what="the reply",
+    )
+    assert subject.get_attribute("value") == "Re: Links and a payload", subject.get_attribute("value")
+    shot(driver, "03c-reply-from-frame")
+    discard_composer(driver)
+
+    # A mail link starts a message to its address.
+    frame = reader_frame(driver)
+    in_frame(driver, frame, lambda: driver.find_element(By.ID, "carol").click())
+    wait_for(
+        lambda: "carol@example.com" in ((c := composer(driver)) and c.get_attribute("textContent") or ""),
+        what="a message to Carol",
+    )
+    discard_composer(driver)
+
+    frame = reader_frame(driver)
+    before = driver.execute_script("return window.__e2eMessages.length")
+    assert driver.execute_async_script(INJECT_PAYLOAD, frame)
+    in_frame(driver, frame, lambda: driver.find_element(By.ID, "js").click())
+    time.sleep(1)
+    messages = driver.execute_script("return window.__e2eMessages")
+    # Only the bridge's reports came from the frame, as delivered or with the
+    # payload put in: none of the mail's script ran.
+    assert all(isinstance(m, dict) and m.get("channel") for m in messages), messages
+    # The bridge ran in that document too, and reported the javascript: link,
+    # which the app left alone.
+    assert any(
+        m["type"] == "link" and m["href"].startswith("javascript:") for m in messages[before:]
+    ), messages[before:]
+    assert opened() == ["https://example.com/report"], opened()
 
 
 # --- signatures ------------------------------------------------------------------
