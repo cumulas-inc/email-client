@@ -9,7 +9,13 @@ export * from "./types";
 export { errorMessage, hasErrorCode, isBackendError } from "./errors";
 
 const DEMO_PUSH: readonly DemoPush[] = ["consent", "refused", "unreachable"];
-const DEMO_SIGNATURE: readonly DemoSignature[] = ["addedOnSend", "notAllowed", "stale", "notUsed"];
+const DEMO_SIGNATURE: readonly DemoSignature[] = [
+  "addedOnSend",
+  "notAllowed",
+  "stale",
+  "notUsed",
+  "unreachable",
+];
 
 /**
  * The Rust backend inside the desktop app; the in-memory demo backend in a
@@ -18,8 +24,8 @@ const DEMO_SIGNATURE: readonly DemoSignature[] = ["addedOnSend", "notAllowed", "
  * the UI. `?push=consent|refused|unreachable` shows the Microsoft account's
  * push in that state, `?notray` a desktop without tray icons, and
  * `?reminders` a task reminder 12 minutes overdue besides the events' own.
- * `?signature=addedOnSend|notAllowed|stale|notUsed` shows its company
- * signature in that state.
+ * `?signature=addedOnSend|notAllowed|stale|notUsed|unreachable` shows its
+ * company signature in that state.
  */
 export function createBackend(): Backend {
   if (isTauri()) return tauriBackend;

@@ -177,6 +177,8 @@ describe("the demo's signatures", () => {
     expect(work.organization.html).toContain('src="data:image/svg+xml;base64,');
     expect(work.organization.html).toContain(">Alex Morgan</div>");
     expect(work.organization.html).toContain('href="https://acme.example"');
+    // Sanitized as the core keeps it, which a frame shows as it is.
+    expect(work.organization.html).toContain("<tbody>");
     expect(await backend.getComposeSignature("acct-work", null)).toEqual({
       kind: "organization",
       html: work.organization.html,
@@ -243,10 +245,46 @@ describe("the demo's signatures", () => {
       kind: "addedOnSend",
       html: null,
     });
+    expect((await relay.getComposeSignature("acct-work", "forward")).kind).toBe("addedOnSend");
     const blocked = new MockBackend({ signature: "notAllowed" });
     expect((await blocked.getAccountSignature("acct-work")).organization.state).toBe("notAllowed");
     const stale = new MockBackend({ signature: "stale" });
     const checked = await stale.checkOrganizationSignature("acct-work");
     expect(checked.organization).toMatchObject({ state: "ready", stale: true });
+    // Its first check failed: nothing known, and asking again fails too.
+    const unreachable = new MockBackend({ signature: "unreachable" });
+    expect((await unreachable.checkOrganizationSignature("acct-work")).organization).toMatchObject({
+      state: "unchecked",
+      checkedAt: null,
+      stale: true,
+    });
+  });
+
+  it("follow the core's rules for replies and for asking again", async () => {
+    const backend = new MockBackend();
+    const check = vi.spyOn(backend, "checkOrganizationSignature");
+    const relay = { state: "addedOnSend", html: null, onReplies: false } as const;
+    const now = new Date().toISOString();
+    // A relay that leaves replies and forwards unsigned: nothing is said
+    // for them, and the own signature isn't used either.
+    backend.setOrganizationSignature("acct-work", { ...relay, checkedAt: now }, relay);
+    await backend.updateOwnSignature("acct-work", "<div>Alex</div>", true);
+    expect((await backend.getComposeSignature("acct-work", null)).kind).toBe("addedOnSend");
+    expect((await backend.getComposeSignature("acct-work", "reply")).kind).toBe("none");
+    expect(check).not.toHaveBeenCalled();
+
+    // One that signs is asked again when its answer is over an hour old...
+    const old = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    backend.setOrganizationSignature("acct-work", { checkedAt: old }, relay);
+    await backend.getComposeSignature("acct-work", null);
+    expect(check).toHaveBeenCalledTimes(1);
+    // ...but one that doesn't sign the account's mail isn't (once a day).
+    backend.setOrganizationSignature(
+      "acct-work",
+      { state: "notUsed", html: null, onReplies: false, checkedAt: old },
+      { state: "notUsed", html: null, onReplies: false },
+    );
+    expect((await backend.getComposeSignature("acct-work", null)).kind).toBe("own");
+    expect(check).toHaveBeenCalledTimes(1);
   });
 });

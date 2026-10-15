@@ -445,7 +445,8 @@ describe("Signature", () => {
     expect(html).toBe(
       `<div style="${letter}"><p style="margin:0"><br></p></div>` +
         `<div class="cumulas-signature" data-signature-stamp="1" style="${letter.replace(";line-height:1.5", "")}">` +
-        `<br>${ACME_SIGNATURE}</div>`,
+        // Sanitized, as the core keeps it.
+        `<br>${new DOMParser().parseFromString(ACME_SIGNATURE, "text/html").body.innerHTML}</div>`,
     );
   });
 
@@ -657,5 +658,35 @@ describe("Signature", () => {
     await address(user, c);
     await user.click(within(c).getByRole("button", { name: "Send" }));
     expect(await sent(backend)).not.toContain("cumulas-signature");
+  });
+
+  it("says the organization signs a reply on send only when it does", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ signature: "addedOnSend" });
+    const { client } = await renderMail({ backend });
+    const note = "Your organization adds your signature when you send.";
+    // The demo's relay signs replies and forwards too.
+    await open(user, CHECKLIST);
+    await user.click(respondButton("Reply"));
+    let c = await screen.findByRole("region", { name: "Reply" });
+    expect(await within(c).findByText(note)).toBeInTheDocument();
+    await user.click(within(c).getByRole("button", { name: "Discard" }));
+
+    // One that leaves them unsigned: no note, and no own signature either.
+    const relay = { state: "addedOnSend", html: null, onReplies: false } as const;
+    backend.setOrganizationSignature(
+      "acct-work",
+      { ...relay, checkedAt: new Date().toISOString() },
+      relay,
+    );
+    await backend.updateOwnSignature("acct-work", "<div>Alex</div>", true);
+    // As the app does when the backend says signatures changed.
+    await act(() => client.invalidateQueries({ queryKey: ["signatures"] }));
+    await user.click(respondButton("Reply"));
+    c = await screen.findByRole("region", { name: "Reply" });
+    await within(c).findByRole("textbox", { name: "Message body" });
+    await waitFor(() => expect(within(c).queryByText(note)).not.toBeInTheDocument());
+    expect(within(c).queryByTitle("Signature")).not.toBeInTheDocument();
+    expect(within(c).queryByRole("button", { name: "Add signature" })).not.toBeInTheDocument();
   });
 });

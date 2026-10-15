@@ -208,12 +208,18 @@ function zoomViewport(factor: number): void {
 /** Microsoft's tenant for personal accounts, which never have company signatures. */
 const CONSUMER_TENANT = "9188040d-6c67-4c5b-b112-36a304b66dad";
 const MAX_SIGNATURE_BYTES = 512 * 1024;
+/** Starting a message asks an organization that signs again after this long. */
+const COMPOSE_RECHECK_MS = 60 * 60_000;
 
 /** What an organization says when asked for its signature; "unreachable" when it can't be asked. */
-type OrganizationAnswer =
+export type OrganizationAnswer =
   Pick<OrganizationSignature, "state" | "html" | "onReplies"> | "unreachable";
 
-const NOT_USED: OrganizationAnswer = { state: "notUsed", html: null, onReplies: false };
+const NOT_USED: Exclude<OrganizationAnswer, "unreachable"> = {
+  state: "notUsed",
+  html: null,
+  onReplies: false,
+};
 
 /**
  * Like the core's signature sanitizer, roughly: no scripts, frames or event
@@ -235,11 +241,12 @@ function cleanSignature(html: string): string {
 
 /**
  * States the demo's Microsoft account's company signature can show
- * (`?signature=` in the URL): the organization adds it on send, hasn't
- * allowed Cumulas Mail, couldn't be reached since its last answer, or
- * doesn't use Cumulas Signatures.
+ * (`?signature=` in the URL): the organization adds it on send (to
+ * replies and forwards too), hasn't allowed Cumulas Mail, couldn't be
+ * reached since its last answer, doesn't use Cumulas Signatures, or
+ * couldn't be reached to ask at all.
  */
-export type DemoSignature = "addedOnSend" | "notAllowed" | "stale" | "notUsed";
+export type DemoSignature = "addedOnSend" | "notAllowed" | "stale" | "notUsed" | "unreachable";
 
 /** Push states the demo can show for its Microsoft account (`?push=` in the URL). */
 export type DemoPush = "consent" | "refused" | "unreachable";
@@ -355,8 +362,11 @@ export class MockBackend implements Backend {
     const microsoft = this.state.accounts.find((a) => a.kind === "microsoft");
     if (options.push && microsoft) this.pushOverrides.set(microsoft.id, demoPush(options.push));
     for (const signature of this.state.signatures ?? []) {
+      // As the core keeps them: sanitized.
+      const organization = signature.organization;
+      if (organization.html) organization.html = cleanSignature(organization.html);
       this.signatures.set(signature.accountId, signature);
-      const { state, html, onReplies } = signature.organization;
+      const { state, html, onReplies } = organization;
       if (state !== "unsupported" && state !== "unchecked") {
         this.organizationAnswers.set(signature.accountId, { state, html, onReplies });
       }
@@ -1119,20 +1129,45 @@ export class MockBackend implements Backend {
 
   /** Puts the demo's company signature in a state (`?signature=`). */
   private demoSignature(accountId: string, kind: DemoSignature): void {
+    const answered = (answer: Exclude<OrganizationAnswer, "unreachable">) =>
+      this.setOrganizationSignature(
+        accountId,
+        { ...answer, checkedAt: new Date().toISOString(), stale: false },
+        answer,
+      );
+    switch (kind) {
+      case "addedOnSend":
+        return answered({ state: "addedOnSend", html: null, onReplies: true });
+      case "notAllowed":
+        return answered({ state: "notAllowed", html: null, onReplies: false });
+      case "notUsed":
+        return answered(NOT_USED);
+      case "stale":
+        return this.setOrganizationSignature(accountId, { stale: true }, "unreachable");
+      case "unreachable":
+        // Its first check failed: nothing is known.
+        return this.setOrganizationSignature(
+          accountId,
+          { state: "unchecked", html: null, onReplies: false, checkedAt: null, stale: true },
+          "unreachable",
+        );
+    }
+  }
+
+  /**
+   * Sets what the account's organization last said (`known`) and what it
+   * says when asked again, as the desktop app would have them (tests,
+   * demos).
+   */
+  setOrganizationSignature(
+    accountId: string,
+    known: Partial<OrganizationSignature>,
+    next: OrganizationAnswer,
+  ): void {
     const signature = this.accountSignature(accountId);
-    const answer: OrganizationAnswer =
-      kind === "addedOnSend"
-        ? { state: "addedOnSend", html: null, onReplies: false }
-        : kind === "notAllowed"
-          ? { state: "notAllowed", html: null, onReplies: false }
-          : kind === "notUsed"
-            ? NOT_USED
-            : "unreachable";
-    this.organizationAnswers.set(accountId, answer);
-    signature.organization =
-      answer === "unreachable"
-        ? { ...signature.organization, stale: true }
-        : { ...answer, checkedAt: new Date().toISOString(), stale: false };
+    signature.organization = { ...signature.organization, ...known };
+    this.organizationAnswers.set(accountId, next);
+    this.emit(["signatures"], accountId);
   }
 
   /** Like the core: IMAP and personal Microsoft accounts have no company signature. */
@@ -1192,7 +1227,12 @@ export class MockBackend implements Backend {
     signature.organization =
       answer === "unreachable"
         ? { ...before, stale: true }
-        : { ...answer, checkedAt: new Date().toISOString(), stale: false };
+        : {
+            ...answer,
+            html: answer.html && cleanSignature(answer.html),
+            checkedAt: new Date().toISOString(),
+            stale: false,
+          };
     const after = signature.organization;
     if (
       after.state !== before.state ||
@@ -1205,20 +1245,33 @@ export class MockBackend implements Backend {
     return clone(signature);
   }
 
+  /**
+   * Like the core: waits for an organization's first answer; asks one that
+   * signs the account's mail again, for the next message, when its answer
+   * is more than an hour old, but not one that doesn't (asked once a day).
+   */
   async getComposeSignature(accountId: string, replyKind: ReplyKind | null) {
     await this.delay();
     let signature = this.accountSignature(accountId);
-    if (signature.organization.state === "unchecked") {
+    const { state, checkedAt } = signature.organization;
+    if (state === "unchecked") {
       signature = await this.checkOrganizationSignature(accountId);
+    } else if (
+      (state === "ready" || state === "addedOnSend") &&
+      (!checkedAt || Date.now() - new Date(checkedAt).getTime() > COMPOSE_RECHECK_MS)
+    ) {
+      void this.checkOrganizationSignature(accountId);
     }
     const organization = signature.organization;
     const fresh = replyKind === null;
+    // While the organization signs the account's mail, the own signature
+    // isn't used, not even on the replies and forwards it leaves unsigned.
+    const signed = fresh || organization.onReplies;
     let result: ComposeSignature = { kind: "none", html: null };
     if (organization.state === "ready" && organization.html) {
-      if (fresh || organization.onReplies)
-        result = { kind: "organization", html: organization.html };
+      if (signed) result = { kind: "organization", html: organization.html };
     } else if (organization.state === "addedOnSend") {
-      result = { kind: "addedOnSend", html: null };
+      if (signed) result = { kind: "addedOnSend", html: null };
     } else if (signature.ownHtml && (fresh || signature.ownOnReplies)) {
       result = { kind: "own", html: signature.ownHtml };
     }
