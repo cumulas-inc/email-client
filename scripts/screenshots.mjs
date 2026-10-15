@@ -107,6 +107,32 @@ const scenes = [
     },
   },
   {
+    shots: ["compose-signature"],
+    async run(page, shot) {
+      // A new message from the work account, which Acme signs with Cumulas Signatures.
+      await page.getByRole("button", { name: "New message", exact: true }).first().click();
+      await page.locator(".mail-signature iframe").waitFor();
+      await page.keyboard.type("Priya");
+      await page
+        .getByRole("listbox", { name: "Suggested contacts" })
+        .getByRole("option", { name: /Priya Raman/ })
+        .waitFor();
+      await page.keyboard.press("Enter");
+      await page.getByRole("textbox", { name: "Subject" }).fill("Atlas launch: go for Thursday");
+      await page.getByRole("textbox", { name: "Message body" }).click();
+      await page.keyboard.type("Hi Priya,");
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type(
+        "Security signed off this morning, so we're go for Thursday. I'll send the customer note once Mei has had a last look.",
+      );
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type("Thanks for pulling the checklist together.");
+      await shot("compose-signature");
+    },
+  },
+  {
     shots: ["mail-search"],
     themes: ["light"],
     async run(page, shot) {
@@ -232,6 +258,7 @@ const scenes = [
       "settings-accounts",
       "settings-general",
       "settings-mail",
+      "settings-signatures",
       "settings-microsoft",
       "settings-about",
     ],
@@ -244,10 +271,12 @@ const scenes = [
       for (const [tab, name] of [
         ["General", "settings-general"],
         ["Mail", "settings-mail"],
+        ["Signatures", "settings-signatures"],
         ["Microsoft app registration", "settings-microsoft"],
         ["About", "settings-about"],
       ]) {
         await page.getByRole("tab", { name: tab }).click();
+        if (tab === "Signatures") await page.locator(".signature-field iframe").waitFor();
         await shot(name);
       }
     },
