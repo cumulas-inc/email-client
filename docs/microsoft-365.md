@@ -44,9 +44,14 @@ organization's consent settings**, not by the app. Organizations commonly:
 In the last two cases the user sees "Need admin approval" in the browser. The
 app detects this and shows a screen with an **admin consent link** and a
 ready-to-send email to IT. An administrator opening the link can approve the
-app once for the whole organization. If the organization has the admin consent
-workflow enabled, users can also request approval directly from Microsoft's
-page.
+app once for the whole organization; when the sign-in also asked consent for
+the push service's scope, the link covers that too. If the organization has
+the admin consent workflow enabled, users can also request approval directly
+from Microsoft's page.
+
+When only the push service's scope needs approval, the sign-in goes ahead
+without it and the app shows no link yet (see
+[What users see before it is set up](#what-users-see-before-it-is-set-up)).
 
 Personal Microsoft accounts (Outlook.com, Hotmail, Live) never need admin
 approval.
@@ -124,12 +129,16 @@ your mail or calendar changed. The notices don't contain your mail.`
    tick `api://<client ID>/Sync.Receive`. This pre-authorizes the app for its
    own scope, so users (including everyone already signed in) get the token
    without being asked to consent again.
-4. **Manifest**: set the requested access token version to 2. In the current
-   manifest editor (Microsoft Graph format) that is
+4. **Manifest**: check that the requested access token version is 2. In the
+   current manifest editor (Microsoft Graph format) that is
    `"api": { "requestedAccessTokenVersion": 2 }`; in the older Azure AD Graph
-   format it is `"accessTokenAcceptedVersion": 2`. Version 2 tokens are what the
-   relay checks, and registrations that include personal Microsoft accounts
-   require them.
+   format it is `"accessTokenAcceptedVersion": 2`. Registrations that include
+   personal Microsoft accounts, like the published one, require version 2. The
+   relay accepts version 1 and version 2 tokens alike: it takes the client ID
+   (version 2) or `api://<client ID>` (version 1) as the audience, either
+   version's issuer, and the app that asked for the token from `azp`
+   (version 2) or `appid` (version 1), and never reads the version. A
+   registration for work and school accounts only can keep version 1.
 5. The relay must accept the client ID: its operator lists it in
    `SYNC_CLIENT_IDS` (for `sync.cumulas.co`, the published ID already is).
 
@@ -139,7 +148,9 @@ ID to `SYNC_CLIENT_IDS`; until then their users get the 30-second Inbox check.
 
 ### What users see before it is set up
 
-The push status (per account, in Settings) says why:
+The app records why in each account's push status. Settings doesn't show it
+yet; a coming version will, with a **Sign in again** action where signing in
+helps.
 
 | Situation                                                       | What happens                                                                                                                                                                                                                                                                          |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -148,6 +159,23 @@ The push status (per account, in Settings) says why:
 | The relay doesn't accept the client ID or the organization      | The Inbox is checked every 30 seconds; status "unsupported"; asked again every 6 hours.                                                                                                                                                                                               |
 | The relay is unreachable or busy                                | The Inbox is checked every 30 seconds while the app reconnects, backing off up to 5 minutes (and honoring `Retry-After`).                                                                                                                                                             |
 | Graph refuses to watch the mailbox                              | The Inbox is checked every 30 seconds; status "unsupported"; tried again every 6 hours.                                                                                                                                                                                               |
+
+Until Settings offers **Sign in again** for a missing consent, signing in
+through **Add account** with the account's address does the same. If the scope
+needs an administrator's approval, or the user declines it, the sign-in goes
+ahead without it: the browser page says "Signing in without instant updates"
+and the sign-in opens again in a new tab, for the Graph permissions alone. The
+Inbox is still checked every 30 seconds. The app doesn't show an approval link
+for the scope yet, and each later sign-in as that account asks for it again
+the same way.
+
+Pre-authorizing the app for its own scope
+([step 3](#setting-up-the-app-registration-for-it-publisher)) fixes it for
+everyone. Until then, an administrator can approve the scope for their
+organization by opening
+`https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=<client ID>&scope=api://<client ID>/Sync.Receive&redirect_uri=http://localhost`
+and signing in to their own tenant. The app turns instant updates on within 6
+hours, or when it next starts.
 
 None of these is an account error: mail, calendar, contacts and tasks keep
 syncing through Graph as usual.
@@ -171,6 +199,11 @@ The relay must accept the build's client ID (`SYNC_CLIENT_IDS`), and Graph only
 posts to an HTTPS address it can reach, so a relay on `localhost` serves for
 testing the stream only.
 
+Graph allows the app one subscription per mailbox and resource. If the same
+account uses Cumulas Mail with two different relays, only one of them gets
+instant updates; the other checks the Inbox every 30 seconds, and its push
+status names the relay that has them.
+
 ## Using your organization's own registration (IT admins)
 
 Organizations that prefer to control the app themselves can register it in
@@ -180,14 +213,14 @@ under **Settings → Microsoft app registration**.
 
 ## Troubleshooting
 
-| What the user sees                                                                            | Meaning                                                                                                                                                                          |
-| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "Your organization needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981) | The organization requires an administrator to approve the app. The app shows the admin consent link and an email to send to IT.                                                  |
-| Same screen, with "Request approval" mentioned (AADSTS90095)                                  | The organization has the admin consent workflow enabled: the user can also request approval on Microsoft's page.                                                                 |
-| "Cumulas Mail needs your permission" (AADSTS65004)                                            | The permission prompt was declined. Microsoft also sends this when the user clicks "Back to app" after requesting approval, so retry once IT has approved.                       |
-| "Sign in again to keep … up to date"                                                          | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction).                                                  |
-| "Sign in again to turn on instant updates"                                                    | The account hasn't consented to the push service's scope; mail still syncs, with the Inbox checked every 30 seconds. See [Instant updates](#what-users-see-before-it-is-set-up). |
-| Sign-in never returns to the app                                                              | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again.                                                     |
+| What the user sees                                                                            | Meaning                                                                                                                                                                                |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Your organization needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981) | The organization requires an administrator to approve the app. The app shows the admin consent link and an email to send to IT.                                                        |
+| Same screen, with "Request approval" mentioned (AADSTS90095)                                  | The organization has the admin consent workflow enabled: the user can also request approval on Microsoft's page.                                                                       |
+| "Cumulas Mail needs your permission" (AADSTS65004)                                            | The permission prompt was declined. Microsoft also sends this when the user clicks "Back to app" after requesting approval, so retry once IT has approved.                             |
+| "Signing in without instant updates" (in the browser)                                         | The push service's scope needs an administrator's approval or was declined. The sign-in continues in a new tab without it; see [Instant updates](#what-users-see-before-it-is-set-up). |
+| "Sign in again to keep … up to date"                                                          | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction).                                                        |
+| Sign-in never returns to the app                                                              | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again.                                                           |
 
 After an administrator grants consent through the link, Microsoft redirects
 their browser to `http://localhost`, which shows a "can't connect" page. The
