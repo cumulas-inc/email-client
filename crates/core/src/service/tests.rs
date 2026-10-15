@@ -11,10 +11,12 @@ use crate::auth::microsoft::SignInResult;
 use crate::error::ErrorCode;
 use crate::model::{
     AccountSettings, AttachmentMeta, EmailAddress, EventDraft, Folder, FolderRole,
-    ImapAccountUpdate, ImapSettings, Importance, Message, MessageQuery, OutgoingMessage, ShowAs,
-    TaskDraft, TaskPatch, TaskStatus,
+    ImapAccountUpdate, ImapSettings, Importance, Message, MessageQuery, MessageSummary,
+    OutgoingMessage, ShowAs, TaskDraft, TaskPatch, TaskStatus,
 };
-use crate::providers::{MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow};
+use crate::providers::{
+    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow,
+};
 use crate::secrets::MemorySecretStore;
 
 /// A tiny IMAP-like server: folders by remote id, messages by remote id.
@@ -24,6 +26,8 @@ pub(crate) struct FakeServer {
     pub messages: HashMap<String, (String, MessageSummary)>,
     pub sent: Vec<OutgoingMessage>,
     pub fail_sync: bool,
+    /// How often folder counts were asked for.
+    pub count_requests: usize,
     next_uid: u32,
 }
 
@@ -112,6 +116,21 @@ impl MailProvider for FakeMail {
             sync_state: Some("state".into()),
             ..Default::default()
         })
+    }
+
+    async fn folder_counts(&self, folder: &Folder) -> Result<Option<FolderCounts>> {
+        let mut server = self.server.lock().unwrap();
+        server.count_requests += 1;
+        let in_folder = || {
+            server
+                .messages
+                .values()
+                .filter(|(f, _)| *f == folder.remote_id)
+        };
+        Ok(Some(FolderCounts {
+            unread: in_folder().filter(|(_, m)| !m.is_read).count() as u32,
+            total: in_folder().count() as u32,
+        }))
     }
 
     async fn fetch_message(&self, m: &MessageLocator) -> Result<MessageContent> {
@@ -251,14 +270,20 @@ impl Connector for FakeConnector {
 #[derive(Default)]
 struct RecordingSink {
     new_mail: Mutex<Vec<String>>,
+    alerts: Mutex<Vec<MailAlert>>,
+    settled: Mutex<Vec<String>>,
 }
 
 impl EventSink for RecordingSink {
     fn data_changed(&self, _: &[DataKind], _: Option<&str>) {}
     fn sync_status(&self, _: &SyncStatus) {}
-    fn new_mail(&self, _: &Account, messages: &[MessageSummary]) {
+    fn new_mail(&self, _: &Account, alert: &MailAlert) {
         let mut seen = self.new_mail.lock().unwrap();
-        seen.extend(messages.iter().map(|m| m.subject.clone()));
+        seen.extend(alert.messages().iter().map(|m| m.subject.clone()));
+        self.alerts.lock().unwrap().push(alert.clone());
+    }
+    fn mail_settled(&self, message_ids: &[String]) {
+        self.settled.lock().unwrap().extend_from_slice(message_ids);
     }
 }
 
@@ -834,6 +859,26 @@ async fn appearance_settings_are_validated_and_saved() {
     );
     // A rejected change leaves the saved settings alone.
     assert_eq!(h.service.get_settings().unwrap(), chosen);
+}
+
+#[tokio::test]
+async fn reading_moving_and_deleting_here_settle_notifications() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let ids: Vec<String> = h
+        .service
+        .list_messages(&inbox(&h, &account).id, &MessageQuery::default())
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    h.service.set_read(&ids[..1], false).await.unwrap();
+    assert!(h.sink.settled.lock().unwrap().is_empty(), "already unread");
+    h.service.set_read(&ids[..1], true).await.unwrap();
+    assert_eq!(*h.sink.settled.lock().unwrap(), ids[..1]);
+    h.service.archive_messages(&ids[1..]).await.unwrap();
+    assert_eq!(*h.sink.settled.lock().unwrap(), ids);
 }
 
 #[tokio::test]

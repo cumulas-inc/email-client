@@ -69,6 +69,13 @@ pub struct MessageBatch {
     pub sync_state: Option<String>,
 }
 
+/// A folder's message counts as the server reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderCounts {
+    pub unread: u32,
+    pub total: u32,
+}
+
 /// Body and full headers of a message, as fetched from the server.
 #[derive(Debug, Clone, Default)]
 pub struct MessageContent {
@@ -97,6 +104,13 @@ pub trait MailProvider: Send + Sync {
         sync_state: Option<&str>,
         window: SyncWindow,
     ) -> Result<MessageBatch>;
+
+    /// The folder's current unread and total counts. Targeted syncs ask for
+    /// them when messages changed, since they don't list every folder.
+    /// `None` when the provider can't tell.
+    async fn folder_counts(&self, _folder: &Folder) -> Result<Option<FolderCounts>> {
+        Ok(None)
+    }
 
     async fn fetch_message(&self, message: &MessageLocator) -> Result<MessageContent>;
 

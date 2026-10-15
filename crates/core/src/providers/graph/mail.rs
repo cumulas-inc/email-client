@@ -24,10 +24,13 @@ use crate::model::{
     AttachmentMeta, EntityKind, Folder, FolderRole, Importance, Message, MessageSummary,
     OutgoingMessage, ReplyKind, local_id,
 };
-use crate::providers::{MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow};
+use crate::providers::{
+    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow,
+};
 
 const FOLDER_FIELDS: &str =
     "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
+const FOLDER_COUNT_FIELDS: &str = "unreadItemCount,totalItemCount";
 const SUMMARY_FIELDS: &str = "id,conversationId,subject,from,sender,toRecipients,ccRecipients,\
      bodyPreview,receivedDateTime,isRead,flag,isDraft,hasAttachments,importance";
 const DETAIL_FIELDS: &str =
@@ -821,6 +824,26 @@ impl MailProvider for GraphProvider {
             }
         }
         self.full_sync(folder, window).await
+    }
+
+    async fn folder_counts(&self, folder: &Folder) -> Result<Option<FolderCounts>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Counts {
+            #[serde(default, deserialize_with = "null_default")]
+            unread_item_count: u32,
+            #[serde(default, deserialize_with = "null_default")]
+            total_item_count: u32,
+        }
+        let url = self.client.url_with_query(
+            &format!("/me/mailFolders/{}", segment(&folder.remote_id)),
+            &[("$select", FOLDER_COUNT_FIELDS)],
+        );
+        let counts: Counts = self.client.get_json(&url, &[PREFER_IMMUTABLE_ID]).await?;
+        Ok(Some(FolderCounts {
+            unread: counts.unread_item_count,
+            total: counts.total_item_count,
+        }))
     }
 
     async fn fetch_message(&self, message: &MessageLocator) -> Result<MessageContent> {

@@ -4,6 +4,7 @@
 //! and are then reflected locally, so the cache never claims something the
 //! server rejected.
 
+mod alerts;
 mod connector;
 mod mail;
 mod pim;
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use uuid::Uuid;
 
+pub use alerts::{MAX_AGE_HOURS, MailAlert, SUMMARY_THRESHOLD};
 pub use connector::{
     BUILTIN_MICROSOFT_CLIENT_ID, BrowserOpener, Connector, LiveConnector, ProviderSet,
 };
@@ -22,21 +24,33 @@ pub use mail::Attachment;
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
-    Account, AccountKind, AccountSettings, Calendar, DataKind, EntityKind, ImapAccountUpdate,
-    ImapSettings, MessageSummary, MicrosoftSettings, NewImapAccount, Settings, SyncState,
+    Account, AccountKind, AccountSettings, ActiveReminder, Calendar, DataKind, EntityKind,
+    ImapAccountUpdate, ImapSettings, MicrosoftSettings, NewImapAccount, Settings, SyncState,
     SyncStatus, TaskList, TlsMode, is_valid_font_family, local_id,
 };
 use crate::providers::imap::ImapCredentials;
 use crate::secrets::{SecretStore, keys};
 use crate::store::Store;
 
-/// Receives notifications for the UI.
+/// Receives notifications for the UI and the desktop.
 pub trait EventSink: Send + Sync {
     /// Cached data changed; the UI should re-query the given kinds.
     fn data_changed(&self, kinds: &[DataKind], account_id: Option<&str>);
     fn sync_status(&self, status: &SyncStatus);
-    /// New unread messages arrived in an inbox.
-    fn new_mail(&self, account: &Account, messages: &[MessageSummary]);
+    /// New mail that passed the alert policy (see [`MailAlert`]).
+    fn new_mail(&self, account: &Account, alert: &MailAlert);
+    /// These messages were read, moved or deleted, here or elsewhere: their
+    /// notifications can go.
+    fn mail_settled(&self, _message_ids: &[String]) {}
+    /// The due reminders changed: all `active` ones, the ones that just
+    /// became due, and the keys of those no longer due.
+    fn reminders_changed(
+        &self,
+        _active: &[ActiveReminder],
+        _newly_due: &[ActiveReminder],
+        _cleared: &[String],
+    ) {
+    }
 }
 
 /// Sink that drops everything; for tests and headless use.
@@ -45,7 +59,7 @@ pub struct NullSink;
 impl EventSink for NullSink {
     fn data_changed(&self, _: &[DataKind], _: Option<&str>) {}
     fn sync_status(&self, _: &SyncStatus) {}
-    fn new_mail(&self, _: &Account, _: &[MessageSummary]) {}
+    fn new_mail(&self, _: &Account, _: &MailAlert) {}
 }
 
 /// Accent colors assigned to new accounts in turn: teal, sky, apricot, plum,

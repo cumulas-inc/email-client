@@ -10,7 +10,7 @@ use std::time::Duration;
 use cumulas_core::CoreService;
 use cumulas_core::model::{Account, DataKind, MessageSummary, SyncStatus};
 use cumulas_core::secrets::{KeyringSecretStore, MemorySecretStore, SecretStore};
-use cumulas_core::service::{EventSink, LiveConnector};
+use cumulas_core::service::{EventSink, LiveConnector, MailAlert};
 use cumulas_core::store::Store;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -46,39 +46,49 @@ impl EventSink for TauriSink {
         let _ = self.app.emit("sync-status", status);
     }
 
-    fn new_mail(&self, account: &Account, messages: &[MessageSummary]) {
-        let enabled = self
+    /// The core decided these should be shown (the alert policy).
+    fn new_mail(&self, account: &Account, alert: &MailAlert) {
+        let show_preview = self
             .app
             .try_state::<AppState>()
             .and_then(|s| s.service.get_settings().ok())
-            .is_none_or(|s| s.notifications_enabled);
-        if !enabled {
-            return;
-        }
-        let (title, body) = match messages {
-            [one] => (
-                one.from
-                    .as_ref()
-                    .map(|f| f.name.clone().unwrap_or_else(|| f.address.clone()))
-                    .unwrap_or_else(|| account.display_name.clone()),
-                one.subject.clone(),
-            ),
-            many => (
-                format!("{} new messages", many.len()),
+            .is_none_or(|s| s.notify_show_preview);
+        let toasts: Vec<(String, String)> = match alert {
+            MailAlert::Each(messages) if show_preview => messages
+                .iter()
+                .map(|m| (sender(m, account), m.subject.clone()))
+                .collect(),
+            MailAlert::Each(messages) => messages
+                .iter()
+                .map(|_| ("New message".to_owned(), account.email.clone()))
+                .collect(),
+            MailAlert::Summary(messages) => vec![(
+                format!("{} new messages", messages.len()),
                 format!("in {}", account.email),
-            ),
+            )],
         };
-        if let Err(e) = self
-            .app
-            .notification()
-            .builder()
-            .title(title)
-            .body(body)
-            .show()
-        {
-            tracing::warn!("could not show notification: {e}");
+        for (title, body) in toasts {
+            if let Err(e) = self
+                .app
+                .notification()
+                .builder()
+                .title(title)
+                .body(body)
+                .show()
+            {
+                tracing::warn!("could not show notification: {e}");
+            }
         }
     }
+}
+
+/// Who a message is from, for a notification title.
+fn sender(message: &MessageSummary, account: &Account) -> String {
+    message
+        .from
+        .as_ref()
+        .map(|f| f.name.clone().unwrap_or_else(|| f.address.clone()))
+        .unwrap_or_else(|| account.display_name.clone())
 }
 
 async fn open_secret_store() -> (Arc<dyn SecretStore>, bool) {

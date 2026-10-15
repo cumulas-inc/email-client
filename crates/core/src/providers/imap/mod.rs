@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, MutexGuard};
 
 use self::connection::{ImapSession, MailboxInfo, quote};
-use super::{MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow};
+use super::{FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Folder, ImapSettings, Message, OutgoingMessage};
 
@@ -453,6 +453,11 @@ impl MailProvider for ImapProvider {
         with_session!(self, |session| sync::sync_folder(
             session, folder, sync_state, window
         ))
+    }
+
+    async fn folder_counts(&self, folder: &Folder) -> Result<Option<FolderCounts>> {
+        let counts = with_session!(self, |session| folders::counts(session, &folder.remote_id))?;
+        Ok(counts.map(|(total, unread)| FolderCounts { unread, total }))
     }
 
     async fn fetch_message(&self, message: &MessageLocator) -> Result<MessageContent> {

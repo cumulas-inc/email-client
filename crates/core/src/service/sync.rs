@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 
-use super::{CoreService, ProviderSet};
+use super::{CoreService, ProviderSet, alerts};
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{Account, DataKind, FolderRole, SyncState, SyncStatus};
+use crate::model::{Account, DataKind, Folder, SyncState, SyncStatus};
 use crate::providers::SyncWindow;
+use crate::store::BatchOutcome;
 
 /// How far back the first sync of a folder reaches.
 const MAIL_WINDOW_DAYS: i64 = 90;
@@ -28,20 +29,28 @@ impl CoreService {
         };
         for account in accounts {
             if let Err(e) = self.sync_account(&account.id).await {
-                tracing::warn!("sync of {} failed: {e}", account.email);
+                log_sync_failure(&account.id, &e);
             }
         }
     }
 
+    /// The lock held while an account syncs.
+    pub(super) fn account_lock(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.sync_locks.lock().unwrap();
+        Arc::clone(locks.entry(account_id.to_owned()).or_default())
+    }
+
     /// Syncs one account. Returns immediately if it is already syncing.
     pub async fn sync_account(&self, account_id: &str) -> Result<()> {
-        let lock = {
-            let mut locks = self.sync_locks.lock().unwrap();
-            Arc::clone(locks.entry(account_id.to_owned()).or_default())
-        };
+        let lock = self.account_lock(account_id);
         let Ok(_guard) = lock.try_lock() else {
             return Ok(());
         };
+        self.sync_account_locked(account_id).await
+    }
+
+    /// Syncs one account; the caller holds its lock.
+    async fn sync_account_locked(&self, account_id: &str) -> Result<()> {
         let account = self.store.get_account(account_id)?;
 
         let result = self.run_sync(&account).await;
@@ -97,15 +106,15 @@ impl CoreService {
         // vice versa, but one failing module must not stop the others.
         let mut first_error: Option<Error> = None;
         if let Err(e) = self.sync_calendar(account, &providers).await {
-            tracing::warn!("calendar sync for {} failed: {e}", account.email);
+            tracing::warn!("calendar sync for account {} failed: {e}", account.id);
             first_error.get_or_insert(e);
         }
         if let Err(e) = self.sync_contacts(account, &providers).await {
-            tracing::warn!("contacts sync for {} failed: {e}", account.email);
+            tracing::warn!("contacts sync for account {} failed: {e}", account.id);
             first_error.get_or_insert(e);
         }
         if let Err(e) = self.sync_tasks(account, &providers).await {
-            tracing::warn!("tasks sync for {} failed: {e}", account.email);
+            tracing::warn!("tasks sync for account {} failed: {e}", account.id);
             first_error.get_or_insert(e);
         }
         first_error.map_or(Ok(()), Err)
@@ -120,45 +129,109 @@ impl CoreService {
         let mut ordered = self.store.list_folders(Some(&account.id))?;
         // Inbox first, then other well-known folders, then the rest.
         ordered.sort_by_key(|f| f.role.sort_rank());
-        let window = SyncWindow {
-            since: Utc::now() - Duration::days(MAIL_WINDOW_DAYS),
-            max_messages: MAIL_MAX_PER_FOLDER,
-        };
         let mut first_error = None;
         for folder in ordered {
             self.progress(account, format!("Syncing {}…", folder.name));
-            let state = self.store.folder_sync_state(&folder.id)?;
-            let batch = match providers
-                .mail
-                .sync_messages(&folder, state.as_deref(), window)
+            match self
+                .sync_one_folder(account, providers, &folder, false)
                 .await
             {
-                Ok(batch) => batch,
+                Ok(_) => {}
                 Err(e) if e.code == ErrorCode::AuthRequired => return Err(e),
                 Err(e) => {
                     tracing::warn!("syncing folder {} failed: {e}", folder.name);
                     first_error.get_or_insert(e);
-                    continue;
-                }
-            };
-            let inserted = self.store.apply_message_batch(&folder, &batch)?;
-            // The first sync of a folder is not "new mail".
-            if folder.role == FolderRole::Inbox && state.is_some() {
-                let unread: Vec<_> = inserted.into_iter().filter(|m| !m.is_read).collect();
-                if !unread.is_empty() {
-                    self.sink.new_mail(account, &unread);
                 }
             }
-            self.notify(&[DataKind::Mail], Some(&account.id));
         }
         first_error.map_or(Ok(()), Err)
     }
 
+    /// Syncs one folder's messages into the store, raises notifications for
+    /// new mail and withdraws those for mail read or removed elsewhere.
+    /// A `targeted` sync also refreshes the folder's counts when messages
+    /// changed, since it doesn't list the folders.
+    pub(super) async fn sync_one_folder(
+        &self,
+        account: &Account,
+        providers: &ProviderSet,
+        folder: &Folder,
+        targeted: bool,
+    ) -> Result<BatchOutcome> {
+        let window = SyncWindow {
+            since: Utc::now() - Duration::days(MAIL_WINDOW_DAYS),
+            max_messages: MAIL_MAX_PER_FOLDER,
+        };
+        let state = self.store.folder_sync_state(&folder.id)?;
+        let batch = providers
+            .mail
+            .sync_messages(folder, state.as_deref(), window)
+            .await?;
+        let outcome = self.store.apply_message_batch(folder, &batch)?;
+        if targeted && outcome.changes_counts() {
+            match providers.mail.folder_counts(folder).await {
+                Ok(Some(counts)) => {
+                    self.store
+                        .set_folder_counts(&folder.id, counts.unread, counts.total)?;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!("reading folder counts failed ({:?})", e.code),
+            }
+        }
+
+        if !outcome.inserted.is_empty() {
+            let settings = self.store.get_settings()?;
+            // The first sync of a folder is not "new mail".
+            let first_sync = state.is_none();
+            if let Some(alert) = alerts::mail_alert(
+                &settings,
+                &account.id,
+                folder,
+                first_sync,
+                &outcome.inserted,
+                Utc::now(),
+            ) {
+                self.sink.new_mail(account, &alert);
+            }
+        }
+        let settled: Vec<String> = outcome
+            .became_read
+            .iter()
+            .chain(&outcome.removed)
+            .cloned()
+            .collect();
+        if !settled.is_empty() {
+            self.sink.mail_settled(&settled);
+        }
+
+        // Targeted syncs run often; only bother the UI when something changed.
+        let changed = !batch.upserts.is_empty()
+            || !batch.flag_updates.is_empty()
+            || !outcome.removed.is_empty()
+            || batch.full_resync;
+        if !targeted || changed {
+            self.notify(&[DataKind::Mail], Some(&account.id));
+        }
+        Ok(outcome)
+    }
+
     async fn sync_calendar(&self, account: &Account, providers: &ProviderSet) -> Result<()> {
+        if providers.calendar.is_some() {
+            self.progress(account, "Syncing calendars…");
+        }
+        self.refresh_calendars(account, providers).await
+    }
+
+    /// Syncs the calendars without reporting progress, as targeted syncs
+    /// don't: nothing would report the end.
+    pub(super) async fn refresh_calendars(
+        &self,
+        account: &Account,
+        providers: &ProviderSet,
+    ) -> Result<()> {
         let Some(provider) = &providers.calendar else {
             return Ok(());
         };
-        self.progress(account, "Syncing calendars…");
         let calendars = provider.list_calendars().await?;
         self.store.replace_calendars(&account.id, &calendars)?;
         let today = Utc::now()
@@ -201,5 +274,15 @@ impl CoreService {
         }
         self.notify(&[DataKind::Tasks], Some(&account.id));
         Ok(())
+    }
+}
+
+/// Logs a failed sync without the user name an authentication error names.
+pub(super) fn log_sync_failure(account_id: &str, error: &Error) {
+    match error.code {
+        ErrorCode::AuthRequired => tracing::warn!(
+            "sync of account {account_id} failed: the server rejected the credentials"
+        ),
+        _ => tracing::warn!("sync of account {account_id} failed: {error}"),
     }
 }

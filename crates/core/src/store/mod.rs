@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::Result;
 
-pub use mail::FolderUnreadDelta;
+pub use mail::{BatchOutcome, FolderUnreadDelta};
 
 pub struct Store {
     conn: Mutex<Connection>,

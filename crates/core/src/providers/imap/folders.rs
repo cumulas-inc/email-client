@@ -113,6 +113,24 @@ pub(super) async fn list(session: &mut ImapSession, account_id: &str) -> Result<
     Ok(build_folders(account_id, &mailboxes))
 }
 
+/// `(MESSAGES, UNSEEN)` of one mailbox; `None` when the server won't say.
+pub(super) async fn counts(session: &mut ImapSession, mailbox: &str) -> Result<Option<(u32, u32)>> {
+    let mut counts = HashMap::new();
+    let command = format!("STATUS {} (MESSAGES UNSEEN)", quote(mailbox)?);
+    let mut results = session
+        .run(&[command], |response| collect_status(response, &mut counts))
+        .await?;
+    if let Some(Err(e)) = results.pop() {
+        tracing::debug!("the server refused STATUS: {e}");
+        return Ok(None);
+    }
+    // Servers may spell INBOX differently from the request.
+    if counts.len() == 1 {
+        return Ok(counts.into_values().next());
+    }
+    Ok(counts.remove(mailbox))
+}
+
 /// The raw name of the folder sent mail should be saved to, if any.
 pub(super) async fn sent_mailbox(session: &mut ImapSession) -> Result<Option<String>> {
     let mailboxes = list_mailboxes(session, false).await?;

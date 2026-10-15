@@ -26,6 +26,30 @@ pub struct FolderUnreadDelta {
     pub delta: i64,
 }
 
+/// What applying a folder sync changed in the store.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BatchOutcome {
+    /// Messages that were not stored before (candidates for new-mail
+    /// notifications).
+    pub inserted: Vec<MessageSummary>,
+    /// Local ids of stored messages that were unread and are now read.
+    pub became_read: Vec<String>,
+    /// Local ids of stored messages that were read and are now unread.
+    pub became_unread: Vec<String>,
+    /// Local ids of stored messages that were removed from the folder.
+    pub removed: Vec<String>,
+}
+
+impl BatchOutcome {
+    /// Whether the folder's unread or total count may have changed.
+    pub fn changes_counts(&self) -> bool {
+        !(self.inserted.is_empty()
+            && self.became_read.is_empty()
+            && self.became_unread.is_empty()
+            && self.removed.is_empty())
+    }
+}
+
 /// Header fields that are only known once the full message has been fetched.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoredContent {
@@ -104,12 +128,10 @@ fn index_message(tx: &Transaction<'_>, m: &MessageSummary, body: &str) -> rusqli
 }
 
 /// Inserts or updates the summary columns of a message, leaving any fetched
-/// body untouched.
-fn upsert_summary(tx: &Transaction<'_>, m: &MessageSummary) -> rusqlite::Result<bool> {
-    let existed: bool = tx
-        .query_row("SELECT 1 FROM messages WHERE id = ?1", [&m.id], |_| Ok(()))
-        .optional()?
-        .is_some();
+/// body untouched. Returns the read state stored before, `None` for a new
+/// message.
+fn upsert_summary(tx: &Transaction<'_>, m: &MessageSummary) -> rusqlite::Result<Option<bool>> {
+    let previous = stored_read_state(tx, &m.id)?;
     tx.execute(
         &format!(
             "INSERT INTO messages ({SUMMARY_COLUMNS})
@@ -144,18 +166,29 @@ fn upsert_summary(tx: &Transaction<'_>, m: &MessageSummary) -> rusqlite::Result<
             m.importance.as_str(),
         ],
     )?;
-    if !existed {
+    if previous.is_none() {
         index_message(tx, m, &m.preview)?;
     }
-    Ok(!existed)
+    Ok(previous)
 }
 
-fn delete_message_rows(tx: &Transaction<'_>, ids: &[String]) -> rusqlite::Result<()> {
+fn stored_read_state(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<bool>> {
+    tx.query_row("SELECT is_read FROM messages WHERE id = ?1", [id], |r| {
+        r.get(0)
+    })
+    .optional()
+}
+
+/// Deletes messages; returns the ids that were stored.
+fn delete_message_rows(tx: &Transaction<'_>, ids: &[String]) -> rusqlite::Result<Vec<String>> {
+    let mut deleted = Vec::new();
     for id in ids {
         tx.execute("DELETE FROM messages_fts WHERE message_id = ?1", [id])?;
-        tx.execute("DELETE FROM messages WHERE id = ?1", [id])?;
+        if tx.execute("DELETE FROM messages WHERE id = ?1", [id])? > 0 {
+            deleted.push(id.clone());
+        }
     }
-    Ok(())
+    Ok(deleted)
 }
 
 /// Turns free text into an FTS5 query: every word becomes a quoted prefix
@@ -262,6 +295,33 @@ impl Store {
             .optional()?)
     }
 
+    pub fn find_folder_by_remote_id(
+        &self,
+        account_id: &str,
+        remote_id: &str,
+    ) -> Result<Option<Folder>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {FOLDER_COLUMNS} FROM folders WHERE account_id = ?1 AND remote_id = ?2
+                     LIMIT 1"
+                ),
+                params![account_id, remote_id],
+                row_to_folder,
+            )
+            .optional()?)
+    }
+
+    /// Stores a folder's counts as the server reported them.
+    pub fn set_folder_counts(&self, folder_id: &str, unread: u32, total: u32) -> Result<()> {
+        self.conn().execute(
+            "UPDATE folders SET unread_count = ?2, total_count = ?3 WHERE id = ?1",
+            params![folder_id, unread, total],
+        )?;
+        Ok(())
+    }
+
     pub fn folder_sync_state(&self, folder_id: &str) -> Result<Option<String>> {
         Ok(self
             .conn()
@@ -284,16 +344,15 @@ impl Store {
 
     // --- messages ---------------------------------------------------------
 
-    /// Applies the result of a folder sync. Returns the messages that were not
-    /// in the store before (used for new-mail notifications).
+    /// Applies the result of a folder sync and reports what changed.
     pub fn apply_message_batch(
         &self,
         folder: &Folder,
         batch: &MessageBatch,
-    ) -> Result<Vec<MessageSummary>> {
+    ) -> Result<BatchOutcome> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let mut inserted = Vec::new();
+        let mut outcome = BatchOutcome::default();
         if batch.full_resync {
             let keep: HashSet<&str> = batch.upserts.iter().map(|m| m.id.as_str()).collect();
             let existing: Vec<String> = {
@@ -305,7 +364,7 @@ impl Store {
                 .into_iter()
                 .filter(|id| !keep.contains(id.as_str()))
                 .collect();
-            delete_message_rows(&tx, &stale)?;
+            outcome.removed = delete_message_rows(&tx, &stale)?;
         }
         let mut removed: Vec<String> = batch
             .removed_remote_ids
@@ -325,25 +384,38 @@ impl Store {
                 }
             }
         }
-        delete_message_rows(&tx, &removed)?;
+        removed.sort_unstable();
+        removed.dedup();
+        outcome.removed.extend(delete_message_rows(&tx, &removed)?);
         for m in &batch.upserts {
-            if upsert_summary(&tx, m)? {
-                inserted.push(m.clone());
+            match upsert_summary(&tx, m)? {
+                None => outcome.inserted.push(m.clone()),
+                Some(false) if m.is_read => outcome.became_read.push(m.id.clone()),
+                Some(true) if !m.is_read => outcome.became_unread.push(m.id.clone()),
+                Some(_) => {}
             }
         }
         for update in &batch.flag_updates {
             let id = local_id(&folder.account_id, EntityKind::Message, &update.remote_id);
+            let Some(was_read) = stored_read_state(&tx, &id)? else {
+                continue;
+            };
             tx.execute(
                 "UPDATE messages SET is_read = ?2, is_flagged = ?3 WHERE id = ?1",
                 params![id, update.is_read, update.is_flagged],
             )?;
+            match (was_read, update.is_read) {
+                (false, true) => outcome.became_read.push(id),
+                (true, false) => outcome.became_unread.push(id),
+                _ => {}
+            }
         }
         tx.execute(
             "UPDATE folders SET sync_state = ?2 WHERE id = ?1",
             params![folder.id, batch.sync_state],
         )?;
         tx.commit()?;
-        Ok(inserted)
+        Ok(outcome)
     }
 
     pub fn list_messages(&self, folder_id: &str, query: &MessageQuery) -> Result<MessagePage> {
@@ -573,7 +645,9 @@ impl Store {
                     params![id, new_id],
                 )?;
             }
-            None => delete_message_rows(&tx, &[id.to_owned()])?,
+            None => {
+                delete_message_rows(&tx, &[id.to_owned()])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -711,8 +785,8 @@ mod tests {
             sync_state: Some("cursor-1".into()),
             ..Default::default()
         };
-        let inserted = store.apply_message_batch(&inbox, &batch).unwrap();
-        assert_eq!(inserted.len(), 2);
+        let outcome = store.apply_message_batch(&inbox, &batch).unwrap();
+        assert_eq!(outcome.inserted.len(), 2);
         assert_eq!(
             store.folder_sync_state(&inbox.id).unwrap().as_deref(),
             Some("cursor-1")
@@ -742,13 +816,10 @@ mod tests {
             .unwrap();
         assert_eq!(unread.total, 1);
 
-        // Re-applying is not reported as new.
-        assert!(
-            store
-                .apply_message_batch(&inbox, &batch)
-                .unwrap()
-                .is_empty()
-        );
+        // Re-applying is not reported as new, nor as any other change.
+        let again = store.apply_message_batch(&inbox, &batch).unwrap();
+        assert_eq!(again, BatchOutcome::default());
+        assert!(!again.changes_counts());
 
         let resync = MessageBatch {
             upserts: vec![message(&inbox, "1", "Quarterly report", false)],
@@ -802,6 +873,102 @@ mod tests {
         let two = page.items.iter().find(|m| m.remote_id == "2").unwrap();
         assert!(two.is_read && two.is_flagged);
         assert!(store.search_messages("three", None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn batch_outcome_reports_read_changes_and_removals() {
+        let (store, inbox, _) = setup();
+        store
+            .apply_message_batch(
+                &inbox,
+                &MessageBatch {
+                    upserts: vec![
+                        message(&inbox, "1", "One", false),
+                        message(&inbox, "2", "Two", false),
+                        message(&inbox, "3", "Three", true),
+                        message(&inbox, "4", "Four", false),
+                    ],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let id = |remote: &str| local_id("a", EntityKind::Message, remote);
+        let flag = |remote: &str, is_read: bool| crate::providers::FlagUpdate {
+            remote_id: remote.into(),
+            is_read,
+            is_flagged: false,
+        };
+
+        // Read elsewhere (flag update and upsert), unread elsewhere, deleted
+        // elsewhere, and an update for a message that isn't stored.
+        let outcome = store
+            .apply_message_batch(
+                &inbox,
+                &MessageBatch {
+                    upserts: vec![message(&inbox, "2", "Two", true)],
+                    flag_updates: vec![flag("1", true), flag("3", false), flag("99", true)],
+                    removed_remote_ids: vec!["4".into(), "missing".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(outcome.inserted.is_empty());
+        let mut became_read = outcome.became_read.clone();
+        became_read.sort();
+        let mut expected = vec![id("1"), id("2")];
+        expected.sort();
+        assert_eq!(became_read, expected);
+        assert_eq!(outcome.became_unread, [id("3")]);
+        assert_eq!(outcome.removed, [id("4")]);
+        assert!(outcome.changes_counts());
+
+        // Messages missing from `retain_only` are reported as removed once.
+        let outcome = store
+            .apply_message_batch(
+                &inbox,
+                &MessageBatch {
+                    removed_remote_ids: vec!["3".into()],
+                    retain_only: Some(vec!["1".into()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut removed = outcome.removed.clone();
+        removed.sort();
+        let mut expected = vec![id("2"), id("3")];
+        expected.sort();
+        assert_eq!(removed, expected);
+
+        // A full resync reports the stale messages it drops.
+        let outcome = store
+            .apply_message_batch(
+                &inbox,
+                &MessageBatch {
+                    upserts: vec![message(&inbox, "5", "Five", false)],
+                    full_resync: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.removed, [id("1")]);
+        assert_eq!(outcome.inserted.len(), 1);
+    }
+
+    #[test]
+    fn folder_counts_and_lookup_by_remote_id() {
+        let (store, inbox, archive) = setup();
+        store.set_folder_counts(&inbox.id, 7, 42).unwrap();
+        let stored = store.get_folder(&inbox.id).unwrap();
+        assert_eq!((stored.unread_count, stored.total_count), (7, 42));
+        assert_eq!(
+            store
+                .find_folder_by_remote_id("a", "Archive")
+                .unwrap()
+                .map(|f| f.id),
+            Some(archive.id)
+        );
+        assert_eq!(store.find_folder_by_remote_id("a", "Nope").unwrap(), None);
+        assert_eq!(store.find_folder_by_remote_id("b", "INBOX").unwrap(), None);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::model::{
     OutgoingAttachment, OutgoingMessage, ReplyKind, local_id,
 };
 use crate::providers::graph::client::{PREFER_HTML_BODY, PREFER_IMMUTABLE_ID, PREFER_PAGE_SIZE};
-use crate::providers::{MailProvider, MessageLocator, SyncWindow};
+use crate::providers::{FolderCounts, MailProvider, MessageLocator, SyncWindow};
 
 const MSG_QUARTERLY: &str = "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAIgAA";
 const MSG_OLD: &str = "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAIwAA";
@@ -156,6 +156,28 @@ async fn folders_are_listed_recursively_with_roles() {
 
 fn summary<'a>(batch: &'a [MessageSummary], remote_id: &str) -> &'a MessageSummary {
     batch.iter().find(|m| m.remote_id == remote_id).unwrap()
+}
+
+#[tokio::test]
+async fn folder_counts_are_read_from_the_folder() {
+    let (server, provider) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/me/mailFolders/AAMkInbox"))
+        .and(query_param("$select", "unreadItemCount,totalItemCount"))
+        .and(prefers(PREFER_IMMUTABLE_ID))
+        .respond_with(ok_json(
+            json!({ "unreadItemCount": 3, "totalItemCount": null }),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        provider.folder_counts(&inbox()).await.unwrap(),
+        Some(FolderCounts {
+            unread: 3,
+            total: 0
+        })
+    );
 }
 
 #[tokio::test]

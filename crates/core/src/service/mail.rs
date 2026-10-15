@@ -175,6 +175,9 @@ impl CoreService {
                 .await?;
             let ids: Vec<_> = changed.iter().map(|(s, _)| s.id.clone()).collect();
             self.store.set_messages_read(&ids, read)?;
+            if read {
+                self.sink.mail_settled(&ids);
+            }
         }
         self.notify(&[DataKind::Mail], None);
         Ok(())
@@ -222,6 +225,9 @@ impl CoreService {
                 self.store
                     .relocate_message(&summary.id, &destination, new_remote.as_deref())?;
             }
+            // Moved messages get new ids; the old ones are settled.
+            let moved: Vec<_> = items.iter().map(|(s, _)| s.id.clone()).collect();
+            self.sink.mail_settled(&moved);
         }
         self.notify(&[DataKind::Mail], Some(&destination.account_id));
         Ok(())
@@ -272,6 +278,7 @@ impl CoreService {
                     .await?;
                 let ids: Vec<_> = permanent.into_iter().map(|(id, _)| id).collect();
                 self.store.delete_messages(&ids)?;
+                self.sink.mail_settled(&ids);
             }
         }
         self.notify(&[DataKind::Mail], None);
