@@ -439,7 +439,8 @@ describe("Task details", () => {
     const pane = details();
     expect(within(pane).getByText("Created Oct 14")).toBeInTheDocument();
     expect(within(pane).getByLabelText("Due date")).toHaveValue("");
-    expect(within(pane).getByText("None")).toBeInTheDocument();
+    // No due date, no reminder.
+    expect(within(pane).getAllByText("None")).toHaveLength(2);
 
     // Title: saved on blur.
     const title = within(pane).getByRole("textbox", { name: "Task title" });
@@ -637,5 +638,88 @@ describe("Completed section and search", () => {
     // Another module's search text is ignored.
     act(() => useAppStore.setState({ module: "mail" }));
     expect(taskTitles(openList("All tasks"))).toHaveLength(17);
+  });
+});
+
+describe("Task reminders", () => {
+  it("sets a reminder from the quick picks, the date and time, and removes it", async () => {
+    const user = userEvent.setup();
+    const { backend } = renderTasks();
+    const update = vi.spyOn(backend, "updateTask");
+    const list = await screen.findByRole("listbox", { name: "Tasks" });
+    await user.click(within(list).getByRole("option", { name: /^Read load test report/ }));
+    const pane = details();
+    const quick = within(pane).getByRole("group", { name: "Quick reminders" });
+    // At 10 AM: later today is 1 PM.
+    expect(
+      within(quick)
+        .getAllByRole("button")
+        .map((b) => [b.textContent, b.getAttribute("aria-label")]),
+    ).toEqual([
+      ["Later today", "Remind later today"],
+      ["Tomorrow", "Remind tomorrow"],
+      ["Next week", "Remind next week"],
+    ]);
+
+    await user.click(within(quick).getByRole("button", { name: "Remind tomorrow" }));
+    const tomorrow = new Date(2026, 9, 15, 9, 0);
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(expect.any(String), {
+        reminderAt: tomorrow.toISOString(),
+      }),
+    );
+    expect(await within(pane).findByText("Tomorrow at 9:00 AM")).toBeInTheDocument();
+    expect(within(quick).getByRole("button", { name: "Remind tomorrow" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(pane).getByLabelText("Reminder date")).toHaveValue("2026-10-15");
+    expect(within(pane).getByLabelText("Reminder time")).toHaveValue("09:00");
+
+    // A time typed in: the same day at that time.
+    fireEvent.change(within(pane).getByLabelText("Reminder time"), {
+      target: { value: "16:30" },
+    });
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(expect.any(String), {
+        reminderAt: new Date(2026, 9, 15, 16, 30).toISOString(),
+      }),
+    );
+    // A date picked: that day at the same time.
+    fireEvent.change(within(pane).getByLabelText("Reminder date"), {
+      target: { value: "2026-10-20" },
+    });
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(expect.any(String), {
+        reminderAt: new Date(2026, 9, 20, 16, 30).toISOString(),
+      }),
+    );
+    fireEvent.blur(within(pane).getByLabelText("Reminder date"));
+    expect(await within(pane).findByText("Tue, Oct 20 at 4:30 PM")).toBeInTheDocument();
+
+    await user.click(within(pane).getByRole("button", { name: "Remove reminder" }));
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(expect.any(String), { clearReminder: true }),
+    );
+    const task = await findTask(backend, "Read load test report");
+    expect(task?.reminderAt).toBeNull();
+    expect(within(pane).getAllByText("None")).toHaveLength(2);
+  });
+
+  it("starts a reminder with a date alone at 9 AM", async () => {
+    const { backend } = renderTasks();
+    const update = vi.spyOn(backend, "updateTask");
+    const list = await screen.findByRole("listbox", { name: "Tasks" });
+    await userEvent
+      .setup()
+      .click(within(list).getByRole("option", { name: /^Read load test report/ }));
+    fireEvent.change(within(details()).getByLabelText("Reminder date"), {
+      target: { value: "2026-10-16" },
+    });
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(expect.any(String), {
+        reminderAt: new Date(2026, 9, 16, 9, 0).toISOString(),
+      }),
+    );
   });
 });

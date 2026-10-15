@@ -1,6 +1,6 @@
 import "./calendar.css";
 
-import { addMonths, startOfDay, startOfMonth } from "date-fns";
+import { addMonths, isSameDay, startOfDay, startOfMonth } from "date-fns";
 import { CalendarDays, CalendarPlus, CircleAlert, EyeOff } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -8,9 +8,10 @@ import { useAccounts } from "../../api/queries";
 import type { Account, Calendar, CalendarEvent } from "../../api/types";
 import { errorMessage } from "../../api/errors";
 import { ModuleSidebar } from "../../app/ModuleSidebar";
-import { useAppStore } from "../../app/store";
+import { type CalendarRequest, useAppStore } from "../../app/store";
 import { EmptyState } from "../../components/EmptyState";
 import { Spinner } from "../../components/Spinner";
+import { toast } from "../../components/toast";
 import { Agenda } from "./Agenda";
 import { CalendarList } from "./CalendarList";
 import { defaultNewEventTimes, eventRange, timesFromRange } from "./dates";
@@ -32,9 +33,18 @@ const NO_EVENTS: CalendarEvent[] = [];
 /** Range titles longer than this (in characters) get a short form for narrow windows. */
 const SHORT_TITLE_AFTER = 24;
 
+/** The day a request shows: an all-day event's (UTC) date, else the local day it starts on. */
+function requestedDay(request: CalendarRequest): Date {
+  const start = new Date(request.start);
+  return request.isAllDay
+    ? new Date(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate())
+    : startOfDay(start);
+}
+
 interface Selection {
   event: CalendarEvent;
-  anchor: HTMLElement;
+  /** The event as shown, which the details point at; null when it isn't shown. */
+  anchor: HTMLElement | null;
 }
 
 export function CalendarModule() {
@@ -63,6 +73,28 @@ export function CalendarModule() {
     () => allEvents.filter((e) => !hidden.has(e.calendarId)),
     [allEvents, hidden],
   );
+
+  // Asked to show an event (a reminder was clicked): its day, then its
+  // details once the day's events are in.
+  const calendarRequest = useAppStore((s) => s.calendarRequest);
+  const [seenRequest, setSeenRequest] = useState<CalendarRequest | null>(null);
+  const [pendingEventId, setPendingEventId] = useState<string | null>(null);
+  const [missingEvents, setMissingEvents] = useState(0);
+  if (calendarRequest && calendarRequest !== seenRequest) {
+    const day = requestedDay(calendarRequest);
+    setSeenRequest(calendarRequest);
+    setAnchor(day);
+    // A weekend day isn't in the work week: the whole week then, this time.
+    if (!viewRange(view, day).days.some((d) => isSameDay(d, day))) setView("week");
+    setSelection(null);
+    setPendingEventId(calendarRequest.eventId);
+  }
+  useEffect(() => {
+    if (calendarRequest) useAppStore.getState().clearCalendarRequest();
+  }, [calendarRequest]);
+  useEffect(() => {
+    if (missingEvents > 0) toast.info("That event isn't in the calendar anymore.");
+  }, [missingEvents]);
 
   const changeView = useCallback((next: CalendarView) => {
     setView(next);
@@ -181,14 +213,22 @@ export function CalendarModule() {
     return () => window.removeEventListener("keydown", onKey);
   }, [changeView, step, newEvent, goToday]);
 
+  const eventsSettled = eventsQuery.isSuccess && !eventsQuery.isPlaceholderData;
+  if (pendingEventId && eventsSettled) {
+    setPendingEventId(null);
+    const event = allEvents.find((e) => e.id === pendingEventId);
+    // The details find the event on the day drawn (see EventDetails).
+    if (event) setSelection({ event, anchor: null });
+    else setMissingEvents((n) => n + 1);
+  }
+
   const selectedEvent = selection
     ? (allEvents.find((e) => e.id === selection.event.id) ?? selection.event)
     : null;
   const selectedCalendar = selectedEvent ? calendarsById.get(selectedEvent.calendarId) : undefined;
   const allHidden = calendars.length > 0 && calendars.every((c) => hidden.has(c.id));
   const noCalendars = calendarsQuery.isSuccess && calendars.length === 0;
-  const settled = eventsQuery.isSuccess && !eventsQuery.isPlaceholderData;
-  const nothingScheduled = settled && !allHidden && events.length === 0;
+  const nothingScheduled = eventsSettled && !allHidden && events.length === 0;
   const title = rangeTitle(view, anchor);
   // Narrow windows shorten titles that wouldn't fit ("Wed, Oct 14, 2026");
   // shorter ones only in the narrowest (a small window at a larger text size).

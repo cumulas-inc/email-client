@@ -180,6 +180,12 @@
   transform-origin: top right;
 }
 
+/* Placed over the window by the component (see Menu's `fixed`). */
+.menu--fixed {
+  position: fixed;
+  z-index: 1000;
+}
+
 .menu__item {
   display: flex;
   align-items: center;

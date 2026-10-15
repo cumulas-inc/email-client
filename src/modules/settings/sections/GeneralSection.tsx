@@ -22,6 +22,13 @@ import { SettingRow, SettingsGroup } from "../SettingsLayout";
 import { AppearanceGroup } from "./AppearanceGroup";
 
 const SYNC_INTERVALS = [1, 5, 15, 30, 60];
+const SNOOZE_MINUTES = [5, 10, 15, 30, 60];
+
+function snoozeLabel(minutes: number): string {
+  if (minutes === 60) return "1 hour";
+  if (minutes % 60 === 0) return `${minutes / 60} hours`;
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
 
 function intervalLabel(minutes: number): string {
   if (minutes === 1) return "Every minute";
@@ -147,10 +154,38 @@ function NotificationsGroup({
       </div>
       <div className="setting-row">
         <Switch
+          label="Event and task reminders"
+          description="Before events start and when a task's reminder is due, even while you're looking at Cumulas Mail. The bell at the top lists them."
+          checked={settings.remindersEnabled}
+          onChange={(remindersEnabled) => void save({ remindersEnabled })}
+        />
+      </div>
+      <SettingRow label="Snooze for" description="How long a reminder's Snooze button puts it off.">
+        {({ controlId, descriptionId }) => (
+          <select
+            id={controlId}
+            className="select setting-select"
+            aria-describedby={descriptionId}
+            value={settings.defaultSnoozeMinutes}
+            disabled={!settings.remindersEnabled}
+            onChange={(e) => void save({ defaultSnoozeMinutes: Number(e.target.value) })}
+          >
+            {[
+              ...new Set([...SNOOZE_MINUTES, settings.defaultSnoozeMinutes].sort((a, b) => a - b)),
+            ].map((m) => (
+              <option key={m} value={m}>
+                {snoozeLabel(m)}
+              </option>
+            ))}
+          </select>
+        )}
+      </SettingRow>
+      <div className="setting-row">
+        <Switch
           label="Play a sound"
-          description="Your desktop's sound for new mail."
+          description="Your desktop's sound for new mail and reminders."
           checked={settings.notifySound}
-          disabled={!on}
+          disabled={!on && !settings.remindersEnabled}
           onChange={(notifySound) => void save({ notifySound })}
         />
       </div>

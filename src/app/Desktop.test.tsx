@@ -12,6 +12,7 @@ import type { MessageSummary, Settings } from "../api/types";
 import { toast, useToasts } from "../components/toast";
 import { ALL_INBOXES, resetMailStore, useMailStore } from "../modules/mail/mailStore";
 import { useAddAccountRequest } from "../modules/settings/addAccountStore";
+import { useTasksStore } from "../modules/tasks/store";
 import { App } from "./App";
 import { OFFERED_KEY } from "./offers";
 import { useAppStore } from "./store";
@@ -37,13 +38,79 @@ beforeEach(() => {
     composeRequest: null,
     quitConfirmOpen: false,
     startAtLoginOffer: false,
+    remindersOpen: false,
+    calendarRequest: null,
   });
+  useTasksStore.setState({ view: null, selectedTaskId: null, showCompleted: false });
   useAddAccountRequest.setState({ request: { step: "choose" } });
   useToasts.setState({ toasts: [] });
   window.localStorage.clear();
 });
 
 describe("following the desktop", () => {
+  it("opens the event a reminder was clicked for, on its day", async () => {
+    const backend = new MockBackend();
+    renderApp(backend);
+    await screen.findByRole("navigation", { name: "Apps" });
+    const events = await backend.listEvents(
+      new Date(Date.now() - 86_400_000 * 14).toISOString(),
+      new Date(Date.now() + 86_400_000 * 14).toISOString(),
+    );
+    const lunch = events.find((e) => e.subject === "Lunch with Sam")!;
+    act(() =>
+      backend.navigate({ kind: "event", eventId: lunch.id, start: lunch.start, isAllDay: false }),
+    );
+    expect(await screen.findByRole("dialog", { name: "Lunch with Sam" })).toBeInTheDocument();
+    expect(useAppStore.getState()).toMatchObject({ module: "calendar", calendarRequest: null });
+
+    // An all-day event opens on its date wherever the computer is.
+    const holiday = events.find((e) => e.subject === "Working from home")!;
+    act(() =>
+      backend.navigate({
+        kind: "event",
+        eventId: holiday.id,
+        start: holiday.start,
+        isAllDay: true,
+      }),
+    );
+    expect(await screen.findByRole("dialog", { name: "Working from home" })).toBeInTheDocument();
+
+    // One that's gone says so.
+    act(() =>
+      backend.navigate({ kind: "event", eventId: "gone", start: lunch.start, isAllDay: false }),
+    );
+    expect(
+      await screen.findByText("That event isn't in the calendar anymore."),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the task a reminder was clicked for, in its list", async () => {
+    const backend = new MockBackend();
+    renderApp(backend);
+    await screen.findByRole("navigation", { name: "Apps" });
+    const task = (await backend.listTasks(null, false)).find(
+      (t) => t.title === "Book car service",
+    )!;
+    act(() => backend.navigate({ kind: "task", taskId: task.id, listId: task.listId }));
+    const pane = await screen.findByRole("complementary", { name: "Task details" });
+    expect(within(pane).getByRole("textbox", { name: "Task title" })).toHaveValue(
+      "Book car service",
+    );
+    expect(useTasksStore.getState()).toMatchObject({
+      view: { kind: "list", id: task.listId },
+      selectedTaskId: task.id,
+    });
+  });
+
+  it("opens the Reminders panel, saying why when the item is gone", async () => {
+    const backend = new MockBackend();
+    renderApp(backend);
+    await screen.findByRole("navigation", { name: "Apps" });
+    act(() => backend.navigate({ kind: "reminders", notice: "That event was moved or deleted." }));
+    expect(await screen.findByRole("dialog", { name: "Reminders" })).toBeInTheDocument();
+    expect(await screen.findByText("That event was moved or deleted.")).toBeInTheDocument();
+  });
+
   it("opens the message a notification was clicked for", async () => {
     const backend = new MockBackend();
     renderApp(backend);

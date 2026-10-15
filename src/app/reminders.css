@@ -1,0 +1,256 @@
+/* The header's bell and the Reminders panel it opens. */
+
+.reminders {
+  position: relative;
+  display: inline-flex;
+}
+
+.reminders__bell {
+  position: relative;
+}
+
+.reminders__bell--due {
+  color: var(--brand-text);
+}
+
+/* The count of due reminders, on the bell's shoulder. */
+.reminders__badge {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-round);
+  background: var(--brand);
+  box-shadow: 0 0 0 2px var(--bg-app);
+  color: var(--on-brand);
+  font-size: 10.5px;
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  pointer-events: none;
+}
+
+/* --- Panel ----------------------------------------------------------------------- */
+
+.reminders-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  width: min(400px, calc(100vw - 2 * var(--space-2)));
+  max-height: calc(100vh - var(--header-height) - var(--space-3));
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-lg);
+  transform-origin: top right;
+  outline: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .reminders-panel {
+    transition:
+      opacity 150ms var(--ease-out),
+      transform 150ms var(--ease-out);
+  }
+
+  @starting-style {
+    .reminders-panel {
+      opacity: 0;
+      transform: scale(0.97);
+    }
+  }
+}
+
+.reminders-panel:focus-visible {
+  box-shadow:
+    var(--shadow-lg),
+    0 0 0 2px var(--focus-ring);
+}
+
+.reminders-panel__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+}
+
+.reminders-panel__title {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.reminders-panel__count {
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.reminders-panel__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--space-1);
+}
+
+.reminders-panel__list {
+  margin: 0;
+  padding: 0 var(--space-2);
+  list-style: none;
+}
+
+.reminders-panel__section {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-4) var(--space-1);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.reminders-panel__foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.reminders-panel__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-6) var(--space-6) var(--space-8);
+  color: var(--fg-tertiary);
+  text-align: center;
+}
+
+.reminders-panel__empty-title {
+  margin: var(--space-1) 0 0;
+  color: var(--fg-primary);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.reminders-panel__empty-text {
+  margin: 0;
+  max-width: 280px;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+/* --- Rows ---------------------------------------------------------------------- */
+
+.reminder-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-2);
+  border-radius: var(--radius-lg);
+}
+
+.reminder-row + .reminder-row {
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+}
+
+.reminder-row__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+}
+
+.reminder-row__icon--task {
+  background: var(--bg-field);
+  color: var(--fg-secondary);
+}
+
+.reminder-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.reminder-row__title {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-primary);
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: start;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  /* Two lines at most; the rest is in the event or task. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.reminder-row__title:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.reminder-row__when {
+  margin: 0;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.reminder-row__time {
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.reminder-row__time--soon {
+  color: var(--brand-text);
+}
+
+.reminder-row__time--overdue {
+  color: var(--danger);
+}
+
+.reminder-row__time--snoozed,
+.reminder-row__time--missed {
+  color: var(--fg-tertiary);
+}
+
+.reminder-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--space-2);
+}
+
+.reminder-row__dismiss {
+  margin-left: auto;
+}

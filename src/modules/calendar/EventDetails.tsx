@@ -62,7 +62,10 @@ interface EventDetailsProps {
   event: CalendarEvent;
   calendar: Calendar | undefined;
   account: Account | undefined;
-  /** Element the card points at (the clicked event). */
+  /**
+   * Element the card points at (the clicked event); null to point at the
+   * event wherever it's drawn inside `boundary`, if it is.
+   */
   anchor: HTMLElement | null;
   /** The calendar's card, which the details stay inside. */
   boundary?: RefObject<HTMLElement | null>;
@@ -244,7 +247,13 @@ export function EventDetails({
   useLayoutEffect(() => {
     const card = ref.current;
     if (!card) return;
-    const rect = anchor?.isConnected ? anchor.getBoundingClientRect() : null;
+    // Without an anchor (opened from a reminder), the event where it's drawn.
+    const shown = anchor?.isConnected
+      ? anchor
+      : Array.from(boundary?.current?.querySelectorAll<HTMLElement>("[data-event-id]") ?? []).find(
+          (el) => el.dataset.eventId === event.id,
+        );
+    const rect = shown ? shown.getBoundingClientRect() : null;
     const area = placementArea(boundary?.current ?? null);
     // Taller details scroll inside the card.
     card.style.maxHeight = `${Math.floor(area.bottom - area.top)}px`;

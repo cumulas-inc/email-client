@@ -1,5 +1,5 @@
 import { clsx } from "clsx";
-import { ChevronDown, Trash2, X } from "lucide-react";
+import { Bell, ChevronDown, Trash2, X } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -19,7 +19,12 @@ import {
   longDate,
   parseDue,
   quickDueDates,
+  quickReminders,
+  reminderFromInputs,
+  reminderLabel,
   shortDate,
+  toDateString,
+  toTimeString,
 } from "./taskUtils";
 
 interface TaskDetailsProps {
@@ -103,7 +108,125 @@ export function TaskDetailsPane({
   );
 }
 
-/** Contents of the details card: title, completion, due date, list, star, notes. */
+/**
+ * When to be reminded: quick picks (later today, tomorrow, next week), a
+ * date and a time, and Remove. A complete date commits at once, as the due
+ * date does; the time, once it's whole.
+ */
+function ReminderField({
+  task,
+  now,
+  onUpdate,
+}: {
+  task: Task;
+  now: Date;
+  onUpdate: (patch: TaskPatch) => void;
+}) {
+  const id = useId();
+  const current = task.reminderAt ? new Date(task.reminderAt) : null;
+  // Drafts while a field has focus; otherwise the reminder's own values.
+  const [date, setDate] = useState<string | null>(null);
+  const [time, setTime] = useState<string | null>(null);
+  const dateValue = date ?? (current ? toDateString(current) : "");
+  const timeValue = time ?? (current ? toTimeString(current) : "");
+  const done = task.status === "completed";
+  const past = current !== null && current <= now && !done;
+
+  const setReminder = (at: Date | null) => {
+    if (at === null) {
+      if (task.reminderAt) onUpdate({ clearReminder: true });
+    } else if (!current || at.getTime() !== current.getTime()) {
+      onUpdate({ reminderAt: at.toISOString() });
+    }
+  };
+
+  const commitInputs = (nextDate: string, nextTime: string) => {
+    const at = reminderFromInputs(nextDate, nextTime, now);
+    if (at) setReminder(at);
+  };
+
+  return (
+    <div className="tasks-field">
+      <div className="tasks-field__head">
+        <label className="tasks-field__label" htmlFor={`${id}-date`}>
+          Reminder
+        </label>
+        <span
+          className={clsx(
+            "tasks-field__value",
+            !current && "tasks-field__value--empty",
+            current && !past && !done && "tasks-field__value--today",
+          )}
+        >
+          {current && (
+            <Bell size={12} strokeWidth={2} aria-hidden="true" className="tasks-field__icon" />
+          )}
+          {current ? reminderLabel(current, now) : "None"}
+        </span>
+      </div>
+      <div className="tasks-quick" role="group" aria-label="Quick reminders">
+        {quickReminders(now).map((q) => (
+          <button
+            key={q.label}
+            type="button"
+            className="tasks-quick__option"
+            aria-pressed={current?.getTime() === q.at.getTime()}
+            aria-label={`Remind ${q.label.toLowerCase()}`}
+            title={reminderLabel(q.at, now)}
+            onClick={() => setReminder(q.at)}
+          >
+            {q.label}
+          </button>
+        ))}
+      </div>
+      <div className="tasks-details__date-row tasks-details__reminder-row">
+        <input
+          id={`${id}-date`}
+          type="date"
+          className="input tasks-details__date"
+          aria-label="Reminder date"
+          value={dateValue}
+          onFocus={() => setDate(dateValue)}
+          onChange={(e) => {
+            const value = e.target.value;
+            setDate(value);
+            if (isValidDateString(value) && Number(value.slice(0, 4)) >= 1900) {
+              commitInputs(value, timeValue);
+            }
+          }}
+          onBlur={() => setDate(null)}
+        />
+        <input
+          type="time"
+          className="input tasks-details__time"
+          aria-label="Reminder time"
+          value={timeValue}
+          onFocus={() => setTime(timeValue)}
+          onChange={(e) => {
+            const value = e.target.value;
+            setTime(value);
+            if (/^\d{2}:\d{2}$/.test(value)) commitInputs(dateValue, value);
+          }}
+          onBlur={() => setTime(null)}
+        />
+        {current && (
+          <button
+            type="button"
+            className="btn btn--subtle btn--sm tasks-details__remove"
+            aria-label="Remove reminder"
+            title="Remove reminder"
+            onClick={() => setReminder(null)}
+          >
+            <X size={14} strokeWidth={2} aria-hidden="true" />
+            Remove
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Contents of the details card: title, completion, due date, reminder, list, star, notes. */
 export function TaskDetails({
   task,
   list,
@@ -315,6 +438,8 @@ export function TaskDetails({
           )}
         </div>
       </div>
+
+      <ReminderField task={task} now={now} onUpdate={onUpdate} />
 
       {list && (
         <div className="tasks-field tasks-field--row">

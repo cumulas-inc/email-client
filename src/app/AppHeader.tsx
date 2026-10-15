@@ -4,11 +4,12 @@ import { useAccounts } from "../api/queries";
 import { Avatar } from "../components/Avatar";
 import { Menu } from "../components/Menu";
 import { LogoMark } from "./LogoMark";
+import { RemindersButton } from "./Reminders";
 import { useQuit } from "./useQuit";
 import { useAppStore } from "./store";
 
-/** The quiet strip above the cards: the name on the left, the main menu and
-    the signed-in person on the right. */
+/** The quiet strip above the cards: the name on the left; the reminders, the
+    main menu and the signed-in person on the right. */
 export function AppHeader() {
   const openSettings = useAppStore((s) => s.openSettings);
   const quit = useQuit();
@@ -24,6 +25,7 @@ export function AppHeader() {
         </span>
       </div>
       <div className="app-header__spacer" />
+      {me && <RemindersButton />}
       <Menu
         label="Main menu"
         align="end"

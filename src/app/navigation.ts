@@ -9,6 +9,7 @@ import { qk } from "../api/queries";
 import type { Folder, Navigate } from "../api/types";
 import { toast } from "../components/toast";
 import { ALL_INBOXES, useMailStore } from "../modules/mail/mailStore";
+import { useTasksStore } from "../modules/tasks/store";
 import { useAppStore } from "./store";
 
 async function folders(backend: Backend, client: QueryClient): Promise<Folder[]> {
@@ -32,6 +33,22 @@ export async function followNavigation(
   app.closeSettings();
   if (to.kind === "compose") {
     app.requestCompose({});
+    return;
+  }
+  if (to.kind === "event") {
+    app.requestCalendarEvent({ eventId: to.eventId, start: to.start, isAllDay: to.isAllDay });
+    return;
+  }
+  if (to.kind === "task") {
+    app.setModule("tasks");
+    const tasks = useTasksStore.getState();
+    tasks.setView({ kind: "list", id: to.listId });
+    tasks.selectTask(to.taskId);
+    return;
+  }
+  if (to.kind === "reminders") {
+    if (to.notice) toast.info(to.notice);
+    app.setRemindersOpen(true);
     return;
   }
   app.setModule("mail");

@@ -1026,9 +1026,36 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The reminder's date and time side by side; Remove goes under them when
+   the card is narrow. */
+.tasks-details__reminder-row {
+  flex-wrap: wrap;
+}
+
+.tasks .tasks-details__reminder-row .tasks-details__date {
+  flex: 1 1 140px;
+  min-width: 140px;
+}
+
+.tasks .tasks-details__time {
+  flex: 1 1 112px;
+  width: auto;
+  min-width: 112px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tasks .tasks-details__reminder-row .tasks-details__remove {
+  margin-left: auto;
+}
+
 .tasks .tasks-details__remove {
   flex-shrink: 0;
   gap: var(--space-1);
+}
+
+.tasks-field__icon {
+  margin-right: 4px;
+  vertical-align: -1px;
 }
 
 .tasks-field__list {

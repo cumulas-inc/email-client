@@ -5,10 +5,12 @@ import { useBackend } from "../api/context";
 import { applyBackgroundState, qk } from "../api/queries";
 import type { PushStatus, SyncStatus } from "../api/types";
 import { followNavigation } from "./navigation";
+import { announcement, useReminderAnnouncer } from "./reminders";
 
 /**
- * Keeps React Query caches in step with backend change notifications, and
- * follows the desktop's requests to show a message or a folder.
+ * Keeps React Query caches in step with backend change notifications,
+ * follows the desktop's requests to show a message, an event or a task,
+ * and announces reminders as they come due.
  */
 export function useBackendEvents(): void {
   const backend = useBackend();
@@ -35,6 +37,11 @@ export function useBackendEvents(): void {
       });
     });
     const offBackground = backend.onBackgroundState((state) => applyBackgroundState(client, state));
+    const offReminders = backend.onRemindersChanged((event) => {
+      client.setQueryData(qk.reminders(), event.active);
+      const text = announcement(event.newlyDue, new Date());
+      if (text) useReminderAnnouncer.getState().announce(text);
+    });
     const offNavigate = backend.onNavigate((to) => void followNavigation(to, backend, client));
     // A notification clicked while the app ran without a window opened it
     // for this. (Followed even if this effect is torn down meanwhile, as in
@@ -48,6 +55,7 @@ export function useBackendEvents(): void {
       offSync();
       offPush();
       offBackground();
+      offReminders();
       offNavigate();
     };
   }, [backend, client]);

@@ -1,16 +1,19 @@
 import {
   addDays,
+  addHours,
   differenceInCalendarDays,
   endOfWeek,
   format,
+  isSameDay,
   isSameYear,
   isValid,
   nextMonday,
   parseISO,
+  startOfHour,
 } from "date-fns";
 
 import type { Account, Task, TaskList, TaskPatch } from "../../api/types";
-import { formatDate, weekStartsOn } from "../../lib/datetime";
+import { formatDate, formatTime, weekStartsOn } from "../../lib/datetime";
 
 // --- Views -------------------------------------------------------------------
 
@@ -162,6 +165,63 @@ export function quickDueDates(now = new Date()): QuickDue[] {
   ];
 }
 
+// --- Reminders ----------------------------------------------------------------------
+
+/** "Today at 4:00 PM", "Tomorrow at 9:00 AM", "Wed, Oct 21 at 9:00 AM" (+ year if needed). */
+export function reminderLabel(at: Date, now = new Date()): string {
+  const days = differenceInCalendarDays(at, now);
+  const time = formatTime(at);
+  if (days === 0) return `Today at ${time}`;
+  if (days === 1) return `Tomorrow at ${time}`;
+  if (days === -1) return `Yesterday at ${time}`;
+  return `${formatDate(at, isSameYear(at, now) ? "weekdayShort" : "weekdayShortYear")} at ${time}`;
+}
+
+export interface QuickReminder {
+  label: string;
+  at: Date;
+}
+
+/** The hour quick reminders go off at, the next morning or Monday. */
+const MORNING_HOUR = 9;
+
+function morning(day: Date): Date {
+  const d = new Date(day);
+  d.setHours(MORNING_HOUR, 0, 0, 0);
+  return d;
+}
+
+/**
+ * Quick picks for a reminder: later today (three hours on, on the hour,
+ * while that's still today), tomorrow morning and next Monday morning.
+ */
+export function quickReminders(now = new Date()): QuickReminder[] {
+  const later = addHours(startOfHour(now), 3);
+  return [
+    ...(isSameDay(later, now) ? [{ label: "Later today", at: later }] : []),
+    { label: "Tomorrow", at: morning(addDays(now, 1)) },
+    { label: "Next week", at: morning(nextMonday(now)) },
+  ];
+}
+
+/** "14:30" for a time input. */
+export function toTimeString(date: Date): string {
+  return format(date, "HH:mm");
+}
+
+/**
+ * The reminder the date and time inputs say: the time on the date, 9:00 AM
+ * when only the date is set, today when only the time is. Null when
+ * neither is usable.
+ */
+export function reminderFromInputs(date: string, time: string, now = new Date()): Date | null {
+  const day = isValidDateString(date) ? date : time ? toDateString(now) : null;
+  if (!day || Number(day.slice(0, 4)) < 1900) return null;
+  const at = /^\d{2}:\d{2}$/.test(time) ? time : `${String(MORNING_HOUR).padStart(2, "0")}:00`;
+  const result = new Date(`${day}T${at}`);
+  return isValid(result) ? result : null;
+}
+
 // --- Optimistic updates -------------------------------------------------------------
 
 /** Applies a patch the way the backend does, for optimistic updates. */
@@ -173,6 +233,8 @@ export function applyTaskPatch(task: Task, patch: TaskPatch, now = new Date()): 
   if (patch.importance) t.importance = patch.importance;
   if (patch.clearDueDate) t.dueDate = null;
   else if (patch.dueDate) t.dueDate = patch.dueDate;
+  if (patch.clearReminder) t.reminderAt = null;
+  else if (patch.reminderAt) t.reminderAt = new Date(patch.reminderAt).toISOString();
   if (patch.status) {
     if (patch.status === "completed" && t.status !== "completed") {
       t.completedAt = now.toISOString();

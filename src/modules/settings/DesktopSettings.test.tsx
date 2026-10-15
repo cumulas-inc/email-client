@@ -60,7 +60,34 @@ beforeEach(() => {
 });
 
 describe("Notifications", () => {
-  it("saves the preview and sound choices, which need notifications on", async () => {
+  it("turns reminders off and sets how long Snooze waits", async () => {
+    const user = userEvent.setup();
+    const { lastSaved } = openAt("general");
+    const reminders = await screen.findByRole("switch", { name: "Event and task reminders" });
+    const snooze = screen.getByRole("combobox", { name: "Snooze for" });
+    expect(reminders).toBeChecked();
+    expect(snooze).toHaveValue("5");
+    expect(
+      within(snooze)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["5 minutes", "10 minutes", "15 minutes", "30 minutes", "1 hour"]);
+
+    await user.selectOptions(snooze, "15");
+    await waitFor(() => expect(lastSaved()).toMatchObject({ defaultSnoozeMinutes: 15 }));
+    await user.click(reminders);
+    await waitFor(() => expect(lastSaved()).toMatchObject({ remindersEnabled: false }));
+    expect(snooze).toBeDisabled();
+    // Reminders don't depend on new mail's notifications.
+    await user.click(screen.getByRole("switch", { name: "New message notifications" }));
+    await user.click(reminders);
+    await waitFor(() =>
+      expect(lastSaved()).toMatchObject({ remindersEnabled: true, notificationsEnabled: false }),
+    );
+    expect(snooze).toBeEnabled();
+  });
+
+  it("saves the preview and sound choices, which need notifications or reminders on", async () => {
     const user = userEvent.setup();
     const { lastSaved } = openAt("general");
     const preview = await screen.findByRole("switch", { name: "Show sender and subject" });
@@ -75,7 +102,10 @@ describe("Notifications", () => {
 
     await user.click(screen.getByRole("switch", { name: "New message notifications" }));
     expect(preview).toBeDisabled();
-    expect(sound).toBeDisabled();
+    // Reminders play the sound too.
+    expect(sound).toBeEnabled();
+    await user.click(screen.getByRole("switch", { name: "Event and task reminders" }));
+    await waitFor(() => expect(sound).toBeDisabled());
   });
 
   it("notifies for the Inbox or all folders, which needs notifications on", async () => {

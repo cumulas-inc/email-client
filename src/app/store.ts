@@ -6,6 +6,14 @@ export type Module = "mail" | "calendar" | "people" | "tasks";
 
 export type SettingsSection = "accounts" | "general" | "mail" | "microsoft" | "about";
 
+/** A request to show an event in Calendar (a reminder was clicked). */
+export interface CalendarRequest {
+  eventId: string;
+  /** The event's start (ISO 8601); for an all-day event, midnight UTC of its first day. */
+  start: string;
+  isAllDay: boolean;
+}
+
 /** A request to open the mail composer, possibly from another module. */
 export interface ComposeRequest {
   to?: EmailAddress[];
@@ -43,6 +51,15 @@ interface AppState {
   /** The one-time offer to start at login, after the first account was added. */
   startAtLoginOffer: boolean;
   setStartAtLoginOffer: (open: boolean) => void;
+
+  /** The header's Reminders panel is open. */
+  remindersOpen: boolean;
+  setRemindersOpen: (open: boolean) => void;
+
+  calendarRequest: CalendarRequest | null;
+  /** Switches to Calendar and shows the event. */
+  requestCalendarEvent: (request: CalendarRequest) => void;
+  clearCalendarRequest: () => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -68,4 +85,16 @@ export const useAppStore = create<AppState>((set) => ({
 
   startAtLoginOffer: false,
   setStartAtLoginOffer: (startAtLoginOffer) => set({ startAtLoginOffer }),
+
+  remindersOpen: false,
+  setRemindersOpen: (remindersOpen) => set({ remindersOpen }),
+
+  calendarRequest: null,
+  requestCalendarEvent: (calendarRequest) =>
+    set((state) => ({
+      calendarRequest,
+      module: "calendar",
+      search: state.module === "calendar" ? state.search : "",
+    })),
+  clearCalendarRequest: () => set({ calendarRequest: null }),
 }));

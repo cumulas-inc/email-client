@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
@@ -35,10 +36,26 @@ interface MenuProps {
   items: MenuItem[];
   align?: "start" | "end";
   label: string;
+  /**
+   * Place the menu over the window rather than inside its anchor, so a
+   * scrolling container around the trigger doesn't cut it off. It opens
+   * above the trigger when there's no room below, and closes when the page
+   * under it scrolls.
+   */
+  fixed?: boolean;
+}
+
+/** Space kept between a fixed menu and the window's edges. */
+const EDGE = 8;
+
+/** A rendered element's CSS zoom (the browser demo zooms with CSS; the desktop app doesn't). */
+function cssZoom(el: Element): number {
+  const zoom = (el as Element & { currentCSSZoom?: number }).currentCSSZoom;
+  return typeof zoom === "number" && zoom > 0 ? zoom : 1;
 }
 
 /** Dropdown menu with keyboard navigation (arrows, Home/End, Escape). */
-export function Menu({ trigger, items, align = "start", label }: MenuProps) {
+export function Menu({ trigger, items, align = "start", label, fixed = false }: MenuProps) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -64,6 +81,32 @@ export function Menu({ trigger, items, align = "start", label }: MenuProps) {
     document.addEventListener("mousedown", onPointer);
     return () => document.removeEventListener("mousedown", onPointer);
   }, [open, close]);
+
+  // A fixed menu goes under the trigger (or over it), inside the window.
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    const button = triggerRef.current;
+    if (!open || !fixed || !menu || !button) return;
+    const r = button.getBoundingClientRect();
+    const zoom = cssZoom(menu);
+    const width = menu.offsetWidth * zoom;
+    const height = menu.offsetHeight * zoom;
+    const left = Math.min(
+      Math.max(align === "end" ? r.right - width : r.left, EDGE),
+      window.innerWidth - EDGE - width,
+    );
+    const below = r.bottom + 4;
+    const top =
+      below + height <= window.innerHeight - EDGE ? below : Math.max(EDGE, r.top - 4 - height);
+    menu.style.left = `${left / zoom}px`;
+    menu.style.top = `${top / zoom}px`;
+    menu.style.right = "auto";
+    const onScroll = (e: Event) => {
+      if (!menu.contains(e.target as Node)) close(false);
+    };
+    window.addEventListener("scroll", onScroll, true);
+    return () => window.removeEventListener("scroll", onScroll, true);
+  }, [open, fixed, align, close]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     const buttons = Array.from(
@@ -111,7 +154,7 @@ export function Menu({ trigger, items, align = "start", label }: MenuProps) {
           ref={menuRef}
           role="menu"
           aria-label={label}
-          className={`menu menu--${align}`}
+          className={`menu menu--${align}${fixed ? " menu--fixed" : ""}`}
           onKeyDown={onKeyDown}
         >
           {items.map((item) => (
