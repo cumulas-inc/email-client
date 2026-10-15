@@ -27,6 +27,10 @@ themselves by default:
 | `Contacts.ReadWrite`                      | Contacts and address autocomplete                  |
 | `Tasks.ReadWrite`                         | Microsoft To Do lists and tasks                    |
 
+One more scope is not a Graph permission but the app's own:
+`api://<client ID>/Sync.Receive` lets the app open a stream to the Cumulas push
+service (see [Instant updates](#instant-updates-the-cumulas-push-service)).
+
 ## "Need admin approval"
 
 Whether a user may grant these permissions is decided by **their
@@ -68,6 +72,105 @@ secret.
    Program ID. Verification is what lets users in organizations that only
    allow verified publishers sign in without an administrator.
 
+## Instant updates (the Cumulas push service)
+
+Microsoft Graph tells apps about new mail with change notifications, but only
+by posting them to a public HTTPS address, which an app on someone's computer
+doesn't have. Cumulas Mail therefore uses a small relay, **Cumulas Sync**, at
+`https://sync.cumulas.co`:
+
+1. The app gets a token for the relay's own scope,
+   `api://<client ID>/Sync.Receive`, from the account's refresh token. The
+   relay never receives a Graph token, so it can't read anyone's mail.
+2. It asks the relay for the account's channel, and keeps a stream of
+   server-sent events open to it.
+3. In Graph it subscribes, without resource data, to the Inbox's messages and
+   to calendar events, with the channel's URL and `clientState`.
+4. Graph posts each change to the relay, which passes on only the
+   subscription ID and the change type. The app then fetches what changed from
+   Graph itself.
+
+Each time the stream opens, the app reconciles the subscriptions (renewing,
+recreating or replacing them as needed) and catches up on the Inbox and the
+calendar, so nothing is missed while it was disconnected. While connected it
+renews every subscription at least every 30 minutes. When the push service is
+turned off in Settings, unavailable, or not set up, Microsoft accounts check
+the Inbox about every 30 seconds instead (the calendar keeps its regular sync).
+Turning the service off, or removing the account, deletes the account's
+subscriptions.
+
+### Setting up the app registration for it (publisher)
+
+These steps are needed once on the published registration. Until they're done,
+everything works as before, with the 30-second Inbox check (see
+[below](#what-users-see-before-it-is-set-up)).
+
+1. **Expose an API → Application ID URI → Add**: keep the suggested
+   `api://<client ID>` (the app asks for exactly this form) and save.
+2. **Expose an API → Add a scope**:
+   - Scope name: `Sync.Receive`
+   - Who can consent: **Admins and users**
+   - Admin consent display name: `Receive change notices for Cumulas Mail`
+   - Admin consent description: `Lets Cumulas Mail receive notices from the
+Cumulas Sync service that mail or events changed, so it can fetch them
+right away. The notices don't contain mail or event content, and the
+service gets no access to the mailbox.`
+   - User consent display name: `Receive instant mail updates`
+   - User consent description: `Lets Cumulas Mail hear within seconds that
+your mail or calendar changed. The notices don't contain your mail.`
+   - State: **Enabled**
+3. **Expose an API → Authorized client applications → Add a client
+   application**: enter the registration's own Application (client) ID and
+   tick `api://<client ID>/Sync.Receive`. This pre-authorizes the app for its
+   own scope, so users (including everyone already signed in) get the token
+   without being asked to consent again.
+4. **Manifest**: set the requested access token version to 2. In the current
+   manifest editor (Microsoft Graph format) that is
+   `"api": { "requestedAccessTokenVersion": 2 }`; in the older Azure AD Graph
+   format it is `"accessTokenAcceptedVersion": 2`. Version 2 tokens are what the
+   relay checks, and registrations that include personal Microsoft accounts
+   require them.
+5. The relay must accept the client ID: its operator lists it in
+   `SYNC_CLIENT_IDS` (for `sync.cumulas.co`, the published ID already is).
+
+Organizations that use [their own registration](#using-your-organizations-own-registration-it-admins)
+follow the same steps on it, and ask the relay's operator to add their client
+ID to `SYNC_CLIENT_IDS`; until then their users get the 30-second Inbox check.
+
+### What users see before it is set up
+
+The push status (per account, in Settings) says why:
+
+| Situation                                                       | What happens                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The registration doesn't expose `Sync.Receive` yet              | The Inbox is checked every 30 seconds. Status "unsupported": "This app registration doesn't offer instant updates for Microsoft accounts yet." The app asks again every 6 hours and at each start.                                                                                    |
+| The scope exists, but isn't pre-authorized and wasn't consented | The Inbox is checked every 30 seconds. Status "consent missing": "Sign in again to turn on instant updates." Signing in again as that account then asks consent for the scope too (only then, since a sign-in that asks for a scope the registration doesn't offer fails altogether). |
+| The relay doesn't accept the client ID or the organization      | The Inbox is checked every 30 seconds; status "unsupported"; asked again every 6 hours.                                                                                                                                                                                               |
+| The relay is unreachable or busy                                | The Inbox is checked every 30 seconds while the app reconnects, backing off up to 5 minutes (and honoring `Retry-After`).                                                                                                                                                             |
+| Graph refuses to watch the mailbox                              | The Inbox is checked every 30 seconds; status "unsupported"; tried again every 6 hours.                                                                                                                                                                                               |
+
+None of these is an account error: mail, calendar, contacts and tasks keep
+syncing through Graph as usual.
+
+### Pointing a build at another relay
+
+The relay's address is `https://sync.cumulas.co` unless `CUMULAS_SYNC_URL`
+says otherwise:
+
+- **At build time**, like the client ID:
+  `CUMULAS_SYNC_URL=https://sync.example.org cargo build --release ...`, or an
+  entry in the Flatpak manifest's `build-options.env`.
+- **At run time**, which takes precedence:
+  `CUMULAS_SYNC_URL=https://sync.example.org cumulas-mail`, or
+  `flatpak run --env=CUMULAS_SYNC_URL=https://sync.example.org co.cumulas.Mail`.
+
+The address must start with `https://`; `http://` is accepted only for
+`localhost`, `127.0.0.1` and `[::1]`, for testing a relay on the same computer.
+Any other value is ignored (with a warning in the log) and the default is used.
+The relay must accept the build's client ID (`SYNC_CLIENT_IDS`), and Graph only
+posts to an HTTPS address it can reach, so a relay on `localhost` serves for
+testing the stream only.
+
 ## Using your organization's own registration (IT admins)
 
 Organizations that prefer to control the app themselves can register it in
@@ -77,13 +180,14 @@ under **Settings → Microsoft app registration**.
 
 ## Troubleshooting
 
-| What the user sees                                                                            | Meaning                                                                                                                                                    |
-| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "Your organization needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981) | The organization requires an administrator to approve the app. The app shows the admin consent link and an email to send to IT.                            |
-| Same screen, with "Request approval" mentioned (AADSTS90095)                                  | The organization has the admin consent workflow enabled: the user can also request approval on Microsoft's page.                                           |
-| "Cumulas Mail needs your permission" (AADSTS65004)                                            | The permission prompt was declined. Microsoft also sends this when the user clicks "Back to app" after requesting approval, so retry once IT has approved. |
-| "Sign in again to keep … up to date"                                                          | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction).                            |
-| Sign-in never returns to the app                                                              | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again.                               |
+| What the user sees                                                                            | Meaning                                                                                                                                                                          |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Your organization needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981) | The organization requires an administrator to approve the app. The app shows the admin consent link and an email to send to IT.                                                  |
+| Same screen, with "Request approval" mentioned (AADSTS90095)                                  | The organization has the admin consent workflow enabled: the user can also request approval on Microsoft's page.                                                                 |
+| "Cumulas Mail needs your permission" (AADSTS65004)                                            | The permission prompt was declined. Microsoft also sends this when the user clicks "Back to app" after requesting approval, so retry once IT has approved.                       |
+| "Sign in again to keep … up to date"                                                          | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction).                                                  |
+| "Sign in again to turn on instant updates"                                                    | The account hasn't consented to the push service's scope; mail still syncs, with the Inbox checked every 30 seconds. See [Instant updates](#what-users-see-before-it-is-set-up). |
+| Sign-in never returns to the app                                                              | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again.                                                     |
 
 After an administrator grants consent through the link, Microsoft redirects
 their browser to `http://localhost`, which shows a "can't connect" page. The
