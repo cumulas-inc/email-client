@@ -773,10 +773,14 @@ describe("About", () => {
     expect(screen.queryByText(/No keyring service was found/)).not.toBeInTheDocument();
     // What company signatures send, and where.
     expect(screen.getByText("Company signatures")).toBeInTheDocument();
-    expect(
-      screen.getByText(/asks Microsoft whether your organization uses Cumulas Signatures/),
-    ).toHaveTextContent(
-      "Only if it does, the app fetches your signature from signature.cumulas.co; nothing else is sent.",
+    // Microsoft hands out the token wherever the organization has added the
+    // service's app, which isn't only where it uses the service.
+    expect(screen.getByText(/asks Microsoft for a sign-in token/)).toHaveTextContent(
+      "For Microsoft 365 work and school accounts, Cumulas Mail asks Microsoft for a sign-in " +
+        "token for Cumulas Signatures. Microsoft gives one only if your organization has added " +
+        "the Cumulas Signatures app; the app then sends that token, which names you and your " +
+        "organization, to signature.cumulas.co to get your signature. No mail, contacts or " +
+        "recipients are sent.",
     );
   });
 

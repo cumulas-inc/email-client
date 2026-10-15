@@ -76,9 +76,11 @@ export function AboutSection() {
               <div className="about-row__text">
                 <p className="about-row__title">Company signatures</p>
                 <p>
-                  For Microsoft 365 work accounts, Cumulas Mail asks Microsoft whether your
-                  organization uses Cumulas Signatures. Only if it does, the app fetches your
-                  signature from {info.signatureServer}; nothing else is sent.
+                  For Microsoft 365 work and school accounts, Cumulas Mail asks Microsoft for a
+                  sign-in token for Cumulas Signatures. Microsoft gives one only if your
+                  organization has added the Cumulas Signatures app; the app then sends that token,
+                  which names you and your organization, to {info.signatureServer} to get your
+                  signature. No mail, contacts or recipients are sent.
                 </p>
               </div>
             </div>
