@@ -1217,6 +1217,49 @@ async fn removing_an_account_stops_its_check_and_forgets_it() {
     assert_eq!(s.organization.calls(), 1);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_removed_account_is_never_checked_again() {
+    let s = setup();
+    let account = work_account(&s);
+    s.organization
+        .answer(signature("<p>Org</p>", true, "\"1\""));
+    // The scheduler lists the accounts just before the account is
+    // removed...
+    let listed = s.service.store().list_accounts().unwrap();
+    s.service.remove_account(&account.id).await.unwrap();
+    // ...and reaches it after: nothing is due, and nothing starts.
+    let now = s.service.signatures.now();
+    for account in &listed {
+        assert_eq!(
+            s.service
+                .start_signature_check_if_due(account, true, None, now),
+            None
+        );
+    }
+    settle().await;
+    assert_eq!(s.organization.calls(), 0);
+    // Nor for anyone else who found the account before it went.
+    assert!(s.service.organization_service(&account).is_none());
+    let organization: Arc<dyn OrganizationSignatures> = s.organization.clone();
+    let done = s.service.start_signature_check(&account.id, organization);
+    assert!(*done.borrow());
+    s.service.check_signature_soon(&account.id);
+    settle().await;
+    sleep(2 * 3600).await;
+    // Its sign-in was never redeemed, and nothing of it is kept.
+    assert_eq!(s.organization.calls(), 0);
+    assert!(s.service.signatures.in_flight(&account.id).is_none());
+    assert!(
+        !s.service
+            .signatures
+            .services
+            .lock()
+            .unwrap()
+            .contains_key(&account.id)
+    );
+    assert!(!s.service.signatures.asked_this_run(&account.id));
+}
+
 #[test]
 fn the_next_check_follows_what_was_said() {
     use OrganizationSignatureState as State;

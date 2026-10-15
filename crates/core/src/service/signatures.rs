@@ -19,7 +19,7 @@
 //! said. Times go by the wall clock, which keeps counting while the
 //! computer sleeps; the scheduler looks at it at least every minute.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration as StdDuration;
@@ -82,6 +82,9 @@ pub(crate) struct SignatureHub {
     /// When the network last came back: checks that failed before then go
     /// again at once.
     network_back_at: Mutex<Option<DateTime<Utc>>>,
+    /// Accounts removed this run, which no check is started for again
+    /// (account ids are never reused).
+    removed: Mutex<HashSet<String>>,
     next_check_id: AtomicU64,
     /// Wakes the scheduler.
     pub(crate) poke: Arc<Notify>,
@@ -101,6 +104,7 @@ impl Default for SignatureHub {
             services: Mutex::default(),
             finished: Mutex::default(),
             network_back_at: Mutex::default(),
+            removed: Mutex::default(),
             next_check_id: AtomicU64::new(0),
             poke: Arc::new(Notify::new()),
             clock: RwLock::new(Arc::new(Utc::now)),
@@ -138,6 +142,10 @@ impl SignatureHub {
         self.finished.lock().unwrap().contains_key(account_id)
     }
 
+    fn is_removed(&self, account_id: &str) -> bool {
+        self.removed.lock().unwrap().contains(account_id)
+    }
+
     /// A check ended: it's no longer in progress, and the scheduler looks
     /// at when the next is due.
     fn finish(&self, account_id: &str, id: u64) {
@@ -148,19 +156,26 @@ impl SignatureHub {
                 return;
             }
             checks.remove(account_id);
+            // Still under `checks`, so that removing the account forgets
+            // this too.
+            self.finished
+                .lock()
+                .unwrap()
+                .insert(account_id.to_owned(), Instant::now());
         }
-        self.finished
-            .lock()
-            .unwrap()
-            .insert(account_id.to_owned(), Instant::now());
         self.poke.notify_one();
     }
 
-    /// Forgets an account: its check in progress stops.
+    /// Forgets a removed account: its check in progress stops, and none
+    /// starts again, even for whoever found the account just before.
     pub(crate) fn forget(&self, account_id: &str) {
-        if let Some(check) = self.checks.lock().unwrap().remove(account_id)
-            && let Some(task) = check.task
-        {
+        let check = {
+            let mut checks = self.checks.lock().unwrap();
+            // Under `checks`, where checks start: none starts after this.
+            self.removed.lock().unwrap().insert(account_id.to_owned());
+            checks.remove(account_id)
+        };
+        if let Some(task) = check.and_then(|check| check.task) {
             task.abort();
         }
         self.services.lock().unwrap().remove(account_id);
@@ -563,8 +578,9 @@ impl CoreService {
     }
 
     /// The account's organization signature service; `None` for IMAP
-    /// accounts, personal Microsoft accounts, and a build without the
-    /// service's client ID. Those never reach the network for it.
+    /// accounts, personal Microsoft accounts, a build without the
+    /// service's client ID, and an account being removed. Those never reach
+    /// the network for it.
     fn organization_service(&self, account: &Account) -> Option<Arc<dyn OrganizationSignatures>> {
         let AccountSettings::Microsoft(settings) = &account.settings else {
             return None;
@@ -573,6 +589,9 @@ impl CoreService {
             return None;
         }
         let mut services = self.signatures.services.lock().unwrap();
+        if self.signatures.is_removed(&account.id) {
+            return None;
+        }
         services
             .entry(account.id.clone())
             .or_insert_with(|| self.connector.organization_signatures(account))
@@ -594,13 +613,17 @@ impl CoreService {
 
     /// Starts a check of the account's organization signature on its own
     /// task, or joins the one in progress. The receiver turns true when it
-    /// has ended.
+    /// has ended; at once for an account being removed, which no check
+    /// starts for (it would redeem, and keep, the sign-in being deleted).
     fn start_signature_check(
         &self,
         account_id: &str,
         organization: Arc<dyn OrganizationSignatures>,
     ) -> watch::Receiver<bool> {
         let mut checks = self.signatures.checks.lock().unwrap();
+        if self.signatures.is_removed(account_id) {
+            return watch::channel(true).1;
+        }
         if let Some(check) = checks.get(account_id) {
             return check.done.clone();
         }
@@ -652,36 +675,45 @@ impl CoreService {
         let online = *self.push.online.borrow();
         let network_back_at = *self.signatures.network_back_at.lock().unwrap();
         let now = self.signatures.now();
-        let mut next: Option<DateTime<Utc>> = None;
-        for account in accounts {
-            let Some(organization) = self.organization_service(&account) else {
-                continue;
-            };
-            // It pokes the scheduler when it ends.
-            if self.signatures.in_flight(&account.id).is_some() {
-                continue;
-            }
-            let stored = match self.store.account_signatures(&account.id) {
-                Ok(stored) => effective(stored.organization, organization.scope()),
-                Err(e) => {
-                    tracing::warn!("signature check for account {}: {e}", account.id);
-                    continue;
-                }
-            };
-            let asked = self.signatures.asked_this_run(&account.id);
-            // Failed while the network was away.
-            let retry_failed = network_back_at
-                .is_some_and(|back| stored.stale && stored.attempted_at.is_none_or(|at| at < back));
-            let cooling =
-                Duration::from_std(self.signatures.cooling(&account.id)).unwrap_or_default();
-            let due = next_check(&stored, asked, retry_failed, now).max(now + cooling);
-            if due <= now && online {
-                drop(self.start_signature_check(&account.id, organization));
-            } else if due > now {
-                next = Some(next.map_or(due, |next| next.min(due)));
-            }
+        accounts
+            .iter()
+            .filter_map(|account| {
+                self.start_signature_check_if_due(account, online, network_back_at, now)
+            })
+            .min()
+    }
+
+    /// Starts the account's check if it's due (and the computer `online`);
+    /// returns when it is, if later.
+    fn start_signature_check_if_due(
+        &self,
+        account: &Account,
+        online: bool,
+        network_back_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        let organization = self.organization_service(account)?;
+        // It pokes the scheduler when it ends.
+        if self.signatures.in_flight(&account.id).is_some() {
+            return None;
         }
-        next
+        let stored = match self.store.account_signatures(&account.id) {
+            Ok(stored) => effective(stored.organization, organization.scope()),
+            Err(e) => {
+                tracing::warn!("signature check for account {}: {e}", account.id);
+                return None;
+            }
+        };
+        let asked = self.signatures.asked_this_run(&account.id);
+        // Failed while the network was away.
+        let retry_failed = network_back_at
+            .is_some_and(|back| stored.stale && stored.attempted_at.is_none_or(|at| at < back));
+        let cooling = Duration::from_std(self.signatures.cooling(&account.id)).unwrap_or_default();
+        let due = next_check(&stored, asked, retry_failed, now).max(now + cooling);
+        if due <= now && online {
+            drop(self.start_signature_check(&account.id, organization));
+        }
+        (due > now).then_some(due)
     }
 }
 

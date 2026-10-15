@@ -434,6 +434,7 @@ impl CoreService {
         // While the sign-in to do it with is still there.
         self.drop_push_subscriptions(account_id).await;
         self.forget_providers(Some(account_id)).await;
+        // From here on no signature check starts for it, whoever found it.
         self.signatures.forget(account_id);
         self.store.delete_account(account_id)?;
         for key in [
