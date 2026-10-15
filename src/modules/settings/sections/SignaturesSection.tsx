@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 
+import { errorMessage } from "../../../api/errors";
 import {
   useAccounts,
   useAccountSignature,
@@ -16,8 +17,10 @@ import {
   useUpdateOwnSignature,
 } from "../../../api/queries";
 import type { Account, AccountSignature, OrganizationSignature } from "../../../api/types";
+import { useAppStore } from "../../../app/store";
 import { EmptyState } from "../../../components/EmptyState";
 import { PaneSpinner } from "../../../components/Spinner";
+import { useToasts } from "../../../components/toast";
 import { signatureAppearance } from "../../mail/bodyHtml";
 import { useIsDark } from "../../mail/hooks";
 import { SignatureEditor, type SignatureEditorHandle } from "../../mail/SignatureEditor";
@@ -73,7 +76,7 @@ function AccountSignatures({ account }: { account: Account }) {
   if (isError) {
     body = <p className="signature-caption">Couldn&apos;t load this account&apos;s signature.</p>;
   } else if (signature) {
-    body = <SignatureSettings signature={signature} checking={checking} />;
+    body = <SignatureSettings signature={signature} email={account.email} checking={checking} />;
   }
 
   return (
@@ -97,9 +100,11 @@ function AccountSignatures({ account }: { account: Account }) {
 /** What the account's organization said; `checking` while Settings asks it again. */
 function SignatureSettings({
   signature,
+  email,
   checking,
 }: {
   signature: AccountSignature;
+  email: string;
   checking: boolean;
 }) {
   const organization = signature.organization;
@@ -154,7 +159,7 @@ function SignatureSettings({
           </span>
         </p>
       )}
-      <OwnSignature signature={signature} />
+      <OwnSignature signature={signature} email={email} />
     </>
   );
 }
@@ -195,29 +200,75 @@ function OrganizationPreview({
   );
 }
 
+interface OwnEdit {
+  html: string;
+  onReplies: boolean;
+}
+
+/**
+ * Own signatures whose save hasn't gone through, by account. A save that
+ * ends after the editor is gone (Settings closed, or another section
+ * opened) and fails leaves its edit here; the editor starts from it next
+ * time, rather than from the saved signature, and saves it again.
+ */
+const unsaved = new Map<string, OwnEdit>();
+
 /** The account's own signature; edits save as you type. */
-function OwnSignature({ signature }: { signature: AccountSignature }) {
+function OwnSignature({ signature, email }: { signature: AccountSignature; email: string }) {
   const { accountId } = signature;
   const { mutateAsync } = useUpdateOwnSignature();
   const editorRef = useRef<SignatureEditorHandle>(null);
-  // The editor starts from the saved signature and keeps what's typed;
-  // saves don't put their (sanitized) answer back into it mid-edit.
-  const [initial] = useState(signature.ownHtml);
-  const [onReplies, setOnReplies] = useState(signature.ownOnReplies);
-  const latest = useRef({ html: signature.ownHtml, onReplies: signature.ownOnReplies });
+  // The editor starts from the saved signature (or an edit not saved yet)
+  // and keeps what's typed; saves don't put their (sanitized) answer back
+  // into it mid-edit.
+  const [start] = useState<OwnEdit>(
+    () => unsaved.get(accountId) ?? { html: signature.ownHtml, onReplies: signature.ownOnReplies },
+  );
+  const [onReplies, setOnReplies] = useState(start.onReplies);
+  const latest = useRef(start);
   const pending = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const shown = useRef(false);
 
   const flush = useCallback(() => {
     clearTimeout(timer.current);
     if (!pending.current) return;
     pending.current = false;
-    // A failure shows next to the title; the editor keeps the text.
-    trackSave(mutateAsync({ accountId, ...latest.current })).catch(() => undefined);
-  }, [accountId, mutateAsync]);
+    const edit = latest.current;
+    unsaved.set(accountId, edit);
+    trackSave(mutateAsync({ accountId, ...edit })).then(
+      () => {
+        if (unsaved.get(accountId) === edit) unsaved.delete(accountId);
+      },
+      (e: unknown) => {
+        // A failure shows next to the title while the editor is there;
+        // once it's gone, app-wide.
+        if (shown.current) return;
+        useToasts.getState().push({
+          kind: "error",
+          message: `Couldn't save the signature for ${email}. ${errorMessage(e)}`,
+          action: {
+            label: "Edit signature",
+            onClick: () => useAppStore.getState().openSettings("signatures"),
+          },
+        });
+      },
+    );
+  }, [accountId, email, mutateAsync]);
 
-  // Closing Settings mid-pause still saves.
-  useEffect(() => () => flush(), [flush]);
+  useEffect(() => {
+    shown.current = true;
+    // An edit whose save failed goes again, once the dialog has settled.
+    if (unsaved.has(accountId)) {
+      pending.current = true;
+      timer.current = setTimeout(flush, 0);
+    }
+    return () => {
+      shown.current = false;
+      // Closing Settings mid-pause still saves.
+      flush();
+    };
+  }, [accountId, flush]);
 
   const change = (patch: Partial<typeof latest.current>, delay: number) => {
     latest.current = { ...latest.current, ...patch };
@@ -242,7 +293,7 @@ function OwnSignature({ signature }: { signature: AccountSignature }) {
       >
         <SignatureEditor
           ref={editorRef}
-          html={initial}
+          html={start.html}
           letter
           minLines={3}
           placeholder="Add a signature"

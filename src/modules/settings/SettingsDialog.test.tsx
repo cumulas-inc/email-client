@@ -887,6 +887,48 @@ describe("Signatures", () => {
     expect(update).toHaveBeenCalledWith("acct-home", "<div>Bye</div>", true);
   });
 
+  it("says so when a save fails after Settings closed, and keeps the edit", async () => {
+    const user = userEvent.setup();
+    const { backend } = openAt("signatures");
+    const update = vi.spyOn(backend, "updateOwnSignature");
+    let home = await screen.findByRole("region", { name: /^Alex \(Personal\)/ });
+    let doc = await loadFrame((await within(home).findByTitle("Signature")) as HTMLIFrameElement);
+    // More than the 512 KB a signature can be.
+    const huge = `<div>${"x".repeat(512 * 1024)}</div>`;
+    editFrame(doc, huge);
+    await user.click(within(settingsDialog()).getByRole("button", { name: "Close" }));
+    expect(update).toHaveBeenCalledWith("acct-home", huge, true);
+    // The dialog is gone, so the app says it.
+    await waitFor(() =>
+      expect(useToasts.getState().toasts).toContainEqual(
+        expect.objectContaining({
+          kind: "error",
+          message:
+            "Couldn't save the signature for alex@morgan-family.example. " +
+            "That signature is too large. Signatures can be 512 KB at most.",
+        }),
+      ),
+    );
+
+    // Opened again, it shows the edit, and saves it again.
+    act(() => useToasts.getState().toasts[0]!.action!.onClick());
+    expect(useAppStore.getState().settingsOpen).toBe("signatures");
+    home = await screen.findByRole("region", { name: /^Alex \(Personal\)/ });
+    doc = await loadFrame((await within(home).findByTitle("Signature")) as HTMLIFrameElement);
+    expect(doc.body.innerHTML).toBe(huge);
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(await within(settingsDialog()).findByRole("alert")).toHaveTextContent(
+      "Couldn't save: That signature is too large.",
+    );
+    // A smaller one saves, and the next time starts from it.
+    editFrame(doc, "<div>Alex</div>");
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith("acct-home", "<div>Alex</div>", true),
+    );
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    expect(useToasts.getState().toasts).toHaveLength(1);
+  });
+
   it("says when Cumulas Mail isn't allowed the company signature, and offers the own one", async () => {
     openAt("signatures", new MockBackend({ signature: "notAllowed" }));
     const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
