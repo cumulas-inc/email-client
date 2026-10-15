@@ -357,7 +357,7 @@ export function MicrosoftSignIn({
           <Zap size={16} aria-hidden="true" />
           <p>
             For instant updates, Microsoft tells Cumulas&apos;s push service ({pushService}) when
-            your Inbox changes, but never what&apos;s in it.
+            your Inbox or calendar changes, but never what&apos;s in it.
           </p>
         </div>
       )}

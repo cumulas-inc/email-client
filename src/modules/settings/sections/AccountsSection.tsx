@@ -18,6 +18,7 @@ import type { Account, PushStatus, SyncStatus } from "../../../api/types";
 import { ColorPicker } from "../../../components/ColorPicker";
 import { EmptyState } from "../../../components/EmptyState";
 import { PaneSpinner } from "../../../components/Spinner";
+import { Switch } from "../../../components/Switch";
 import { toast } from "../../../components/toast";
 import { openAddAccount } from "../addAccountStore";
 import { AccountBadge } from "../../../components/AccountBadge";
@@ -26,10 +27,11 @@ import { Callout, TextField } from "../Fields";
 import { focusLater } from "../focus";
 import { ImapAccountEditor } from "../ImapAccountEditor";
 import { ApprovalLink } from "../AdminConsent";
+import { notifyWhere } from "../notifyScope";
 import { describePush } from "../pushStatus";
 import { TLS_LABELS } from "../presets";
 import { useSyncAccount, useUpdateAccount } from "../queries";
-import { trackSave } from "../saveStatus";
+import { trackSave, useSaveSettings } from "../saveStatus";
 
 /** Re-renders every half minute so "Synced 2 minutes ago" stays true. */
 function useTick(ms = 30_000) {
@@ -366,6 +368,7 @@ function AccountItem({
           </div>
 
           {push && <PushField account={account} push={push} onSignIn={signInAgain} />}
+          <NotifyField account={account} />
 
           {!syncError && servers}
 
@@ -422,6 +425,36 @@ function PushField({ account, push, onSignIn }: PushFieldProps) {
           purpose="push"
         />
       )}
+    </div>
+  );
+}
+
+/** Whether new mail for this account shows a notification. */
+function NotifyField({ account }: { account: Account }) {
+  const { data: settings } = useSettings();
+  const save = useSaveSettings();
+  if (!settings) return null;
+  const muted = settings.mutedAccountIds;
+  const on = settings.notificationsEnabled;
+  return (
+    <div className="account-field">
+      <Switch
+        label="Notify me about new mail"
+        description={
+          on
+            ? `Show a notification when mail arrives in ${notifyWhere(settings.notifyScope, "this account's")}.`
+            : "New message notifications are off for all accounts. You can turn them on in General."
+        }
+        checked={!muted.includes(account.id)}
+        disabled={!on}
+        onChange={(notify) =>
+          void save({
+            mutedAccountIds: notify
+              ? muted.filter((id) => id !== account.id)
+              : [...muted, account.id],
+          })
+        }
+      />
     </div>
   );
 }

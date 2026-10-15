@@ -1,7 +1,7 @@
 // Keyboard shortcuts for the Mail module, the ones people know from other
-// desktop mail programs. The app shell owns Ctrl+1–4 (modules), Ctrl+E /
-// Ctrl+Shift+F (search), Ctrl+, (Settings) and Ctrl+Q (Quit, as everywhere
-// on Linux; marking read is Q, as in Outlook on the web).
+// desktop mail programs: Ctrl+Q marks read, as in Outlook (so quitting has
+// no shortcut), and Q and U as in Outlook on the web. The app shell owns
+// Ctrl+1–4 (modules), Ctrl+E / Ctrl+Shift+F (search) and Ctrl+, (Settings).
 
 import { useEffect } from "react";
 
@@ -14,7 +14,7 @@ export const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Ctrl+R", action: "Reply" },
   { keys: "Ctrl+Shift+R", action: "Reply all" },
   { keys: "Ctrl+F", action: "Forward" },
-  { keys: "Q", action: "Mark as read" },
+  { keys: "Ctrl+Q / Q", action: "Mark as read" },
   { keys: "Ctrl+U / U", action: "Mark as unread" },
   { keys: "Insert / Ctrl+Shift+G", action: "Flag or unflag" },
   { keys: "Delete", action: "Delete" },
@@ -62,6 +62,8 @@ export function useMailShortcuts(actions: MailActions, readingPane: ReadingPane)
           else e.preventDefault(); // Never reload the window.
         } else if (key === "f" && !e.shiftKey) {
           if (active) run(() => void actions.reply(active, "forward"));
+        } else if (key === "q" && !e.shiftKey) {
+          run(() => actions.markRead(actions.targetIds(), true));
         } else if (key === "u" && !e.shiftKey) {
           run(() => actions.markRead(actions.targetIds(), false));
         } else if (key === "g" && e.shiftKey) {

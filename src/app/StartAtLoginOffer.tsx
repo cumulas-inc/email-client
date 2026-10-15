@@ -1,9 +1,9 @@
 import { LogIn } from "lucide-react";
-import { useId } from "react";
+import { useId, useState } from "react";
 
 import { errorMessage } from "../api/errors";
 import { useBackgroundState, useSetStartAtLogin, useSettings } from "../api/queries";
-import { toast } from "../components/toast";
+import { toast, useToasts } from "../components/toast";
 import { useAppStore } from "./store";
 
 /**
@@ -13,8 +13,14 @@ import { useAppStore } from "./store";
 export function StartAtLoginOffer() {
   const open = useAppStore((s) => s.startAtLoginOffer);
   const close = () => useAppStore.getState().setStartAtLoginOffer(false);
-  // Waits for the add-account dialog and Settings to close.
+  // Waits for the add-account dialog and Settings to close, and comes after
+  // the toast that says an account is ready, which would cover it in a
+  // narrow window. Once there, it stays for later toasts, until a dialog
+  // covers it: then it comes back after the toasts again (adding a second
+  // account from Settings shows another "is ready" toast).
   const covered = useAppStore((s) => s.addAccountOpen || s.settingsOpen !== null);
+  const toasting = useToasts((s) => s.toasts.length > 0);
+  const [arrived, setArrived] = useState(false);
   const { data: settings } = useSettings();
   const { data: background } = useBackgroundState();
   const startAtLogin = useSetStartAtLogin();
@@ -26,7 +32,9 @@ export function StartAtLoginOffer() {
     !settings.startAtLogin &&
     background !== undefined &&
     background.autostart !== "unsupported";
-  const shown = open && !covered && applies;
+  const shown = open && !covered && applies && (arrived || !toasting);
+  if (shown && !arrived) setArrived(true);
+  else if (arrived && (!open || covered)) setArrived(false);
 
   const accept = () => {
     startAtLogin.mutate(

@@ -16,7 +16,7 @@ import { StartAtLoginOffer } from "./StartAtLoginOffer";
 import { type Module, useAppStore } from "./store";
 import { useAppearance } from "./useAppearance";
 import { useBackendEvents } from "./useBackendEvents";
-import { useQuit } from "./useQuit";
+import { useQuitRequests } from "./useQuit";
 import { useTheme } from "./useTheme";
 
 // Mail is the start screen; the other modules load on first use.
@@ -37,19 +37,15 @@ const MODULE_KEYS: Record<string, Module> = {
   "4": "tasks",
 };
 
+// Ctrl+Q is Mail's Mark as read, as in Outlook; quitting is in the main
+// menu and the tray.
 function useGlobalShortcuts() {
   const setModule = useAppStore((s) => s.setModule);
-  const quit = useQuit();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.ctrlKey || e.altKey || e.metaKey) return;
       const module = MODULE_KEYS[e.key];
-      if (e.key.toLowerCase() === "q" && !e.shiftKey) {
-        // Quit, from anywhere (GNOME's shortcut; the app may be set to keep
-        // running when its window closes).
-        e.preventDefault();
-        quit();
-      } else if (e.key === "," && !e.shiftKey) {
+      if (e.key === "," && !e.shiftKey) {
         e.preventDefault();
         useAppStore.getState().openSettings();
       } else if (module) {
@@ -69,7 +65,7 @@ function useGlobalShortcuts() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [setModule, quit]);
+  }, [setModule]);
 }
 
 function Shell() {
@@ -77,6 +73,7 @@ function Shell() {
   useTheme();
   useAppearance();
   useGlobalShortcuts();
+  useQuitRequests();
   const module = useAppStore((s) => s.module);
   const { data: accounts, isLoading } = useAccounts();
 

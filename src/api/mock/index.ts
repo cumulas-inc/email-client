@@ -260,6 +260,7 @@ export class MockBackend implements Backend {
   private pushHandlers = new Set<(s: PushStatus) => void>();
   private navigateHandlers = new Set<(to: Navigate) => void>();
   private backgroundHandlers = new Set<(state: BackgroundState) => void>();
+  private quitHandlers = new Set<() => void>();
   /** When each account's push status last changed. */
   private pushSince = new Map<string, string>();
   /** Push statuses set by tests or the demo, by account. */
@@ -270,7 +271,7 @@ export class MockBackend implements Backend {
   >;
   private pendingNavigation: Navigate | null = null;
   /** Calls the desktop app would have acted on, for tests. */
-  readonly calls = { quit: 0, testNotifications: 0 };
+  readonly calls = { quit: 0, quitCanceled: 0, testNotifications: 0 };
   private seq = 1000;
   private latency: number;
   private pendingSignIn: (() => void) | null = null;
@@ -335,6 +336,10 @@ export class MockBackend implements Backend {
   async quitApp() {
     // A page can't quit the browser; the count is for tests.
     this.calls.quit += 1;
+  }
+
+  async cancelQuit() {
+    this.calls.quitCanceled += 1;
   }
 
   // --- accounts & settings ------------------------------------------------------
@@ -673,6 +678,11 @@ export class MockBackend implements Backend {
   navigate(to: Navigate) {
     if (this.navigateHandlers.size === 0) this.pendingNavigation = to;
     else this.navigateHandlers.forEach((h) => h(to));
+  }
+
+  /** What the tray's Quit does while the page is there: asks the page. */
+  requestQuit() {
+    this.quitHandlers.forEach((h) => h());
   }
 
   async getSyncStatuses() {
@@ -1191,6 +1201,11 @@ export class MockBackend implements Backend {
   onBackgroundState(handler: (state: BackgroundState) => void): Unsubscribe {
     this.backgroundHandlers.add(handler);
     return () => this.backgroundHandlers.delete(handler);
+  }
+
+  onQuitRequested(handler: () => void): Unsubscribe {
+    this.quitHandlers.add(handler);
+    return () => this.quitHandlers.delete(handler);
   }
 }
 

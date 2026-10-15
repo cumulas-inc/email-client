@@ -73,11 +73,11 @@ describe("Microsoft sign-in", () => {
     );
   });
 
-  it("says that the push service hears when the Inbox changes", async () => {
+  it("says that the push service hears when the Inbox or calendar changes", async () => {
     openFlow({ step: "microsoft" });
     expect(
       await screen.findByText(
-        /Microsoft tells Cumulas's push service \(sync\.cumulas\.co\) when your Inbox changes, but never what's in it/,
+        /Microsoft tells Cumulas's push service \(sync\.cumulas\.co\) when your Inbox or calendar changes, but never what's in it/,
       ),
     ).toBeInTheDocument();
   });

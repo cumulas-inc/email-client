@@ -1,6 +1,6 @@
 import { format, isToday, isTomorrow } from "date-fns";
-import { BellRing, ShieldCheck, TriangleAlert } from "lucide-react";
-import { useState } from "react";
+import { BellRing, Check, ShieldCheck, TriangleAlert } from "lucide-react";
+import { useRef, useState } from "react";
 
 import { useBackend } from "../../../api/context";
 import { errorMessage } from "../../../api/errors";
@@ -11,11 +11,12 @@ import {
   useSetStartAtLogin,
   useSettings,
 } from "../../../api/queries";
-import type { BackgroundState, Settings } from "../../../api/types";
+import type { BackgroundState, NotifyScope, Settings } from "../../../api/types";
 import { PaneSpinner } from "../../../components/Spinner";
 import { Switch } from "../../../components/Switch";
 import { toast } from "../../../components/toast";
 import { PRIVACY_URL } from "../constants";
+import { NOTIFY_SCOPES, notifyWhere } from "../notifyScope";
 import { trackSave, useSaveSettings } from "../saveStatus";
 import { SettingRow, SettingsGroup } from "../SettingsLayout";
 import { AppearanceGroup } from "./AppearanceGroup";
@@ -41,6 +42,13 @@ function untilLabel(iso: string): string {
 function pausedUntil(settings: Settings): string | null {
   const until = settings.notificationsPausedUntil;
   return until !== null && new Date(until).getTime() > Date.now() ? until : null;
+}
+
+/** After a test notification: whether new mail will show up like it. */
+function testSentLabel(on: boolean, paused: string | null): string {
+  if (!on) return "Sent. New message notifications are off, so new mail won't show up like this.";
+  if (paused) return `Sent. New message notifications are paused until ${untilLabel(paused)}.`;
+  return "Sent. If nothing appeared, check that notifications are on for Cumulas Mail in your system's settings.";
 }
 
 type Save = (patch: Partial<Settings>) => Promise<boolean>;
@@ -72,19 +80,28 @@ function NotificationsGroup({
   save,
 }: GroupProps & { background: BackgroundState | undefined }) {
   const backend = useBackend();
-  const [sending, setSending] = useState(false);
+  // A press while one is on its way does nothing. (Disabling the button
+  // would take the keyboard focus away.)
+  const sending = useRef(false);
+  /** The settings when the last test was sent; what it said holds while they do. */
+  const [sent, setSent] = useState<{ on: boolean; paused: string | null } | null>(null);
   const on = settings.notificationsEnabled;
   const paused = pausedUntil(settings);
   const unavailable = background !== undefined && background.notifications === null;
+  const sentLabel =
+    sent && sent.on === on && sent.paused === paused ? testSentLabel(on, paused) : null;
 
   const sendTest = async () => {
-    setSending(true);
+    if (sending.current) return;
+    sending.current = true;
+    setSent(null);
     try {
       await backend.sendTestNotification();
+      setSent({ on, paused });
     } catch (e) {
       toast.error(errorMessage(e));
     } finally {
-      setSending(false);
+      sending.current = false;
     }
   };
 
@@ -93,11 +110,32 @@ function NotificationsGroup({
       <div className="setting-row">
         <Switch
           label="New message notifications"
-          description="When mail arrives in your Inbox. They don't appear while you're looking at Cumulas Mail."
+          description={`When mail arrives in ${notifyWhere(settings.notifyScope, "your")}. They don't appear while you're looking at Cumulas Mail. You can turn them off for one account in Accounts.`}
           checked={on}
           onChange={(notificationsEnabled) => void save({ notificationsEnabled })}
         />
       </div>
+      <SettingRow
+        label="Notify for"
+        description="All folders includes mail that rules move out of your Inbox. Instant updates cover only the Inbox, so notifications for other folders can come later."
+      >
+        {({ controlId, descriptionId }) => (
+          <select
+            id={controlId}
+            className="select setting-select"
+            aria-describedby={descriptionId}
+            value={settings.notifyScope}
+            disabled={!on}
+            onChange={(e) => void save({ notifyScope: e.target.value as NotifyScope })}
+          >
+            {NOTIFY_SCOPES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        )}
+      </SettingRow>
       <div className="setting-row">
         <Switch
           label="Show sender and subject"
@@ -137,14 +175,25 @@ function NotificationsGroup({
         label="Test notification"
         labelFor={false}
         description={
-          unavailable ? (
-            <span className="setting-note setting-note--warning">
-              <TriangleAlert size={14} aria-hidden="true" />
-              No notification service is running, so notifications can&apos;t be shown.
-            </span>
-          ) : (
-            "Do Not Disturb keeps notifications quiet. If nothing appears, check that notifications are on for Cumulas Mail in your system's settings."
-          )
+          <>
+            {unavailable ? (
+              <span className="setting-note setting-note--warning">
+                <TriangleAlert size={14} aria-hidden="true" />
+                No notification service is running, so notifications can&apos;t be shown.
+              </span>
+            ) : (
+              "Do Not Disturb keeps notifications quiet."
+            )}
+            {/* There before it has something to say, so that it's announced. */}
+            <div role="status">
+              {sentLabel && (
+                <span className="setting-note">
+                  <Check size={14} aria-hidden="true" />
+                  {sentLabel}
+                </span>
+              )}
+            </div>
+          </>
         }
       >
         {({ descriptionId }) => (
@@ -153,7 +202,7 @@ function NotificationsGroup({
             className="btn btn--sm"
             aria-label="Send a test notification"
             aria-describedby={descriptionId}
-            disabled={sending || unavailable}
+            disabled={unavailable}
             onClick={() => void sendTest()}
           >
             <BellRing size={14} aria-hidden="true" />
@@ -176,9 +225,26 @@ function BackgroundGroup({
   const portal = background.autostart === "portal";
   const refused = background.backgroundAllowed === false;
   const loginUnsupported = background.autostart === "unsupported";
+  const tray = background.trayAvailable && settings.showTrayIcon;
+  // While the system answers (in a Flatpak, it may ask the user first), the
+  // switches show the choice and ignore more presses. Disabling them would
+  // take the keyboard focus away.
+  const keepRunning = runInBackground.isPending
+    ? runInBackground.variables
+    : settings.runInBackground;
+  const login = startAtLogin.isPending
+    ? startAtLogin.variables
+    : { enabled: settings.startAtLogin, hidden: settings.startHidden };
 
-  const setLogin = (enabled: boolean, hidden: boolean) =>
+  const setKeepRunning = (enabled: boolean) => {
+    if (runInBackground.isPending) return;
+    void trackSave(runInBackground.mutateAsync(enabled)).catch(failed);
+  };
+
+  const setLogin = (enabled: boolean, hidden: boolean) => {
+    if (startAtLogin.isPending) return;
     void trackSave(startAtLogin.mutateAsync({ enabled, hidden })).catch(failed);
+  };
 
   return (
     <SettingsGroup title="Background">
@@ -187,8 +253,8 @@ function BackgroundGroup({
           label="Keep running when closed"
           description={
             <>
-              Closing the window keeps Cumulas Mail running, so new mail still shows up. Quit with
-              Ctrl+Q.
+              Closing the window keeps Cumulas Mail running, so new mail still shows up. To quit,
+              choose Quit in the main menu{tray && " or the tray icon's menu"}.
               {portal && refused && (
                 <span className="setting-note setting-note--warning">
                   <TriangleAlert size={14} aria-hidden="true" />
@@ -206,9 +272,8 @@ function BackgroundGroup({
               )}
             </>
           }
-          checked={settings.runInBackground}
-          disabled={runInBackground.isPending}
-          onChange={(enabled) => void trackSave(runInBackground.mutateAsync(enabled)).catch(failed)}
+          checked={keepRunning}
+          onChange={setKeepRunning}
         />
       </div>
       <div className="setting-row">
@@ -219,22 +284,21 @@ function BackgroundGroup({
               ? "Not available on this system."
               : "Start Cumulas Mail when you log in, so new mail shows up from the start."
           }
-          checked={settings.startAtLogin}
-          disabled={loginUnsupported || startAtLogin.isPending}
-          onChange={(enabled) => setLogin(enabled, settings.startHidden)}
+          checked={login.enabled}
+          disabled={loginUnsupported}
+          onChange={(enabled) => setLogin(enabled, login.hidden)}
         />
       </div>
-      {settings.startAtLogin && (
+      {login.enabled && (
         <div className="setting-row setting-row--nested">
           <Switch
             label="Without a window"
             description={
-              background.trayAvailable && settings.showTrayIcon
+              tray
                 ? "Start in the background. Open it from the app launcher or the tray icon."
                 : "Start in the background. Open it from the app launcher."
             }
-            checked={settings.startHidden}
-            disabled={startAtLogin.isPending}
+            checked={login.hidden}
             onChange={(hidden) => setLogin(true, hidden)}
           />
         </div>
@@ -283,8 +347,8 @@ function SyncGroup({ settings, save }: GroupProps) {
               <ShieldCheck size={14} aria-hidden="true" />
               <span>
                 For Microsoft accounts, Microsoft tells Cumulas&apos;s push service ({server}) when
-                your Inbox changes, never what&apos;s in it. Turned off, the Inbox is checked every
-                30 seconds.{" "}
+                your Inbox or calendar changes, never what&apos;s in it. Turned off, the Inbox is
+                checked every 30 seconds.{" "}
                 <button
                   type="button"
                   className="link-button"

@@ -23,6 +23,7 @@ export const tauriBackend: Backend = {
   getAppInfo: () => invoke("get_app_info"),
   openLink: (url) => invoke("open_link", { url }),
   quitApp: () => invoke("quit_app"),
+  cancelQuit: () => invoke("quit_canceled"),
 
   listAccounts: () => invoke("list_accounts"),
   addImapAccount: (input) => invoke("add_imap_account", { input }),
@@ -97,4 +98,5 @@ export const tauriBackend: Backend = {
   onPushStatus: (handler) => subscribe<PushStatus>("push-status", handler),
   onNavigate: (handler) => subscribe<Navigate>("navigate", handler),
   onBackgroundState: (handler) => subscribe<BackgroundState>("background-state", handler),
+  onQuitRequested: (handler) => subscribe<null>("quit-requested", () => handler()),
 };

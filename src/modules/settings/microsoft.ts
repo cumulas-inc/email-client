@@ -71,7 +71,7 @@ interface AdminConsentRequest {
 
 /** The push service's permission, as IT sees it (Settings → Accounts). */
 const PUSH_PERMISSION =
-  "Receive new-mail alerts through the Cumulas push service (Sync.Receive, on Cumulas Mail's own API)";
+  "Receive notices that my mail or calendar changed, through the Cumulas push service (Sync.Receive, on Cumulas Mail's own API)";
 
 export function adminConsentEmail({
   adminConsentUrl,
@@ -101,7 +101,7 @@ export function adminConsentEmail({
     ...MICROSOFT_PERMISSIONS.map((p) => `- ${p.request} (${p.scopes.join(", ")})`),
     ...(push ? [`- ${PUSH_PERMISSION}`] : []),
     "",
-    "The app runs on my computer and keeps mail there; it sends no telemetry. Mail goes only between my computer and Microsoft 365. For instant updates, Microsoft tells the Cumulas push service when my mailbox changes, but never what's in it. Approving it once makes it available to everyone in the organization, so nobody else will need to ask.",
+    "The app runs on my computer and keeps mail there; it sends no telemetry. Mail goes only between my computer and Microsoft 365. For instant updates, Microsoft tells the Cumulas push service when my Inbox or calendar changes, but never what's in it. Approving it once makes it available to everyone in the organization, so nobody else will need to ask.",
     "",
     "Thank you!",
   ];

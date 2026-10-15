@@ -132,7 +132,7 @@ describe("admin consent request", () => {
     });
     expect(subject).toBe("Please approve instant updates for Cumulas Mail");
     expect(body).toContain("Sync.Receive");
-    expect(body).toContain("never what's in it");
+    expect(body).toContain("when my Inbox or calendar changes, but never what's in it");
     expect(body).toContain(url);
   });
 

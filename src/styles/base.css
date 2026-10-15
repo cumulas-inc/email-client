@@ -370,6 +370,13 @@ a {
   box-shadow: 0 0 0 3px var(--brand-subtle);
 }
 
+/* Dimmed like a disabled switch, which settings rows put it next to. */
+.select:disabled {
+  border-color: var(--border-control);
+  opacity: 0.5;
+  cursor: default;
+}
+
 .input[aria-invalid="true"] {
   border-color: var(--danger);
 }

@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MockBackend } from "../api/mock";
 import { qk } from "../api/queries";
 import type { MessageSummary, Settings } from "../api/types";
-import { useToasts } from "../components/toast";
+import { toast, useToasts } from "../components/toast";
 import { ALL_INBOXES, resetMailStore, useMailStore } from "../modules/mail/mailStore";
 import { useAddAccountRequest } from "../modules/settings/addAccountStore";
 import { App } from "./App";
@@ -152,27 +152,7 @@ describe("following the desktop", () => {
 });
 
 describe("quitting", () => {
-  it("quits with Ctrl+Q and from the main menu", async () => {
-    const user = userEvent.setup();
-    const backend = new MockBackend();
-    renderApp(backend);
-    await screen.findByRole("navigation", { name: "Apps" });
-
-    await user.keyboard("{Control>}q{/Control}");
-    await waitFor(() => expect(backend.calls.quit).toBe(1));
-
-    await user.click(screen.getByRole("button", { name: "Main menu" }));
-    const menu = screen.getByRole("menu", { name: "Main menu" });
-    expect(within(menu).getByRole("menuitem", { name: /Quit/ })).toHaveTextContent("Ctrl+Q");
-    await user.click(within(menu).getByRole("menuitem", { name: /Quit/ }));
-    await waitFor(() => expect(backend.calls.quit).toBe(2));
-  });
-
-  it("asks before an unsent message is lost", async () => {
-    const user = userEvent.setup();
-    const backend = new MockBackend();
-    renderApp(backend);
-    await screen.findByRole("navigation", { name: "Apps" });
+  function startUnsentMessage() {
     act(() => {
       useMailStore.getState().startCompose({
         accountId: "acct-work",
@@ -192,14 +172,44 @@ describe("quitting", () => {
       });
       useMailStore.getState().updateCompose({ subject: "Half written, edited" });
     });
+  }
+
+  async function quitFromMenu(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: "Main menu" }));
+    const menu = screen.getByRole("menu", { name: "Main menu" });
+    await user.click(within(menu).getByRole("menuitem", { name: /Quit/ }));
+  }
+
+  it("quits from the main menu, and Ctrl+Q stays Mark as read", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    renderApp(backend);
+    await screen.findByRole("navigation", { name: "Apps" });
 
     await user.keyboard("{Control>}q{/Control}");
+    expect(backend.calls.quit).toBe(0);
+
+    await user.click(screen.getByRole("button", { name: "Main menu" }));
+    const menu = screen.getByRole("menu", { name: "Main menu" });
+    expect(within(menu).getByRole("menuitem", { name: /Quit/ })).toHaveTextContent(/^Quit$/);
+    await user.click(within(menu).getByRole("menuitem", { name: /Quit/ }));
+    await waitFor(() => expect(backend.calls.quit).toBe(1));
+  });
+
+  it("asks before an unsent message is lost", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    renderApp(backend);
+    await screen.findByRole("navigation", { name: "Apps" });
+    startUnsentMessage();
+
+    await quitFromMenu(user);
     const dialog = await screen.findByRole("dialog", { name: "Quit Cumulas Mail?" });
     expect(backend.calls.quit).toBe(0);
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(backend.calls.quit).toBe(0);
 
-    await user.keyboard("{Control>}q{/Control}");
+    await quitFromMenu(user);
     await user.click(
       within(await screen.findByRole("dialog", { name: "Quit Cumulas Mail?" })).getByRole(
         "button",
@@ -207,6 +217,48 @@ describe("quitting", () => {
       ),
     );
     await waitFor(() => expect(backend.calls.quit).toBe(1));
+  });
+
+  it("quits from the tray the same way", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    renderApp(backend);
+    await screen.findByRole("navigation", { name: "Apps" });
+
+    act(() => backend.requestQuit());
+    await waitFor(() => expect(backend.calls.quit).toBe(1));
+
+    startUnsentMessage();
+    act(() => backend.requestQuit());
+    const dialog = await screen.findByRole("dialog", { name: "Quit Cumulas Mail?" });
+    expect(backend.calls.quit).toBe(1);
+    await user.click(within(dialog).getByRole("button", { name: "Discard and quit" }));
+    await waitFor(() => expect(backend.calls.quit).toBe(2));
+    expect(backend.calls.quitCanceled).toBe(0);
+  });
+
+  it("tells the desktop when the user keeps the message", async () => {
+    // Otherwise the tray's next Quit would quit at once, as for a page that
+    // never answered, and the message would be lost.
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    renderApp(backend);
+    await screen.findByRole("navigation", { name: "Apps" });
+    startUnsentMessage();
+
+    act(() => backend.requestQuit());
+    let dialog = await screen.findByRole("dialog", { name: "Quit Cumulas Mail?" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(backend.calls.quitCanceled).toBe(1));
+    expect(screen.queryByRole("dialog", { name: "Quit Cumulas Mail?" })).not.toBeInTheDocument();
+    expect(useMailStore.getState().compose?.subject).toBe("Half written, edited");
+
+    // The tray's next Quit asks again; closing the dialog keeps the message too.
+    act(() => backend.requestQuit());
+    dialog = await screen.findByRole("dialog", { name: "Quit Cumulas Mail?" });
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(backend.calls.quitCanceled).toBe(2));
+    expect(backend.calls.quit).toBe(0);
   });
 
   it("opens Settings from the main menu and with Ctrl+,", async () => {
@@ -223,10 +275,14 @@ describe("quitting", () => {
 });
 
 describe("the start at login offer", () => {
+  /** Adds the first account, and dismisses the toast that says it's ready. */
   async function addFirstAccount(user: ReturnType<typeof userEvent.setup>) {
     await user.click(await screen.findByRole("button", { name: "Microsoft 365 or Outlook.com" }));
     await user.click(await screen.findByRole("button", { name: "Sign in with Microsoft" }));
     await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
+    const ready = within(screen.getByRole("region", { name: "Notifications" })).getByRole("status");
+    expect(ready).toHaveTextContent(/is ready/);
+    await user.click(within(ready).getByRole("button", { name: "Dismiss" }));
   }
 
   it("comes once, after the first account, and turns it on", async () => {
@@ -241,6 +297,9 @@ describe("the start at login offer", () => {
     });
     expect(offer).toHaveAccessibleDescription(/without a window/);
     expect(window.localStorage.getItem(OFFERED_KEY)).toBe("offered");
+    // Later toasts don't take it away.
+    act(() => toast.info("Archived"));
+    expect(offer).toBeInTheDocument();
     await user.click(within(offer).getByRole("button", { name: "Start at login" }));
     await waitFor(() => expect(setLogin).toHaveBeenCalledWith(true, true));
     await waitFor(() => expect(offer).not.toBeInTheDocument());
@@ -266,6 +325,43 @@ describe("the start at login offer", () => {
     const { offerStartAtLoginOnce } = await import("./offers");
     offerStartAtLoginOnce();
     expect(useAppStore.getState().startAtLoginOffer).toBe(false);
+  });
+
+  it("waits for the toast that says the account is ready", async () => {
+    const user = userEvent.setup();
+    renderApp(new MockBackend({ empty: true }));
+    await user.click(await screen.findByRole("button", { name: "Microsoft 365 or Outlook.com" }));
+    await user.click(await screen.findByRole("button", { name: "Sign in with Microsoft" }));
+    await waitFor(() => expect(useAppStore.getState().startAtLoginOffer).toBe(true));
+    // In a narrow window the toast would cover the card's buttons.
+    expect(useToasts.getState().toasts).toHaveLength(1);
+    expect(screen.queryByRole("region", { name: /log in/ })).not.toBeInTheDocument();
+    act(() => useToasts.setState({ toasts: [] }));
+    expect(await screen.findByRole("region", { name: /log in/ })).toBeInTheDocument();
+  });
+
+  it("waits for the toasts again after a dialog covered it", async () => {
+    const user = userEvent.setup();
+    renderApp(new MockBackend({ empty: true }));
+    await addFirstAccount(user);
+    expect(await screen.findByRole("region", { name: /log in/ })).toBeInTheDocument();
+
+    // Unanswered, while a second account is added from Settings: its toast
+    // would cover the card's buttons once Settings closes.
+    act(() => useAppStore.getState().openSettings("accounts"));
+    expect(screen.queryByRole("region", { name: /log in/ })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Add account" }));
+    await user.click(await screen.findByRole("button", { name: "Microsoft 365 or Outlook.com" }));
+    await user.click(await screen.findByRole("button", { name: "Sign in with Microsoft" }));
+    await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
+    expect(useToasts.getState().toasts.map((t) => t.message)).toEqual([
+      expect.stringMatching(/is ready/),
+    ]);
+    act(() => useAppStore.getState().closeSettings());
+    expect(screen.queryByRole("region", { name: /log in/ })).not.toBeInTheDocument();
+
+    act(() => useToasts.setState({ toasts: [] }));
+    expect(await screen.findByRole("region", { name: /log in/ })).toBeInTheDocument();
   });
 
   it("isn't offered when starting at login is already on or can't be", async () => {

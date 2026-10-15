@@ -53,7 +53,6 @@ export function AppHeader() {
           {
             label: "Quit",
             icon: <Power size={16} />,
-            shortcut: "Ctrl+Q",
             separator: true,
             onSelect: quit,
           },

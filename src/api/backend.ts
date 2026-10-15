@@ -42,6 +42,11 @@ export interface Backend {
   openLink(url: string): Promise<void>;
   /** Quits, even while running in the background is on. */
   quitApp(): Promise<void>;
+  /**
+   * The user kept their unsent message when asked whether to quit: the
+   * tray's next Quit asks again, rather than quitting at once.
+   */
+  cancelQuit(): Promise<void>;
 
   // Accounts & settings
   listAccounts(): Promise<Account[]>;
@@ -140,4 +145,9 @@ export interface Backend {
   onPushStatus(handler: (status: PushStatus) => void): Unsubscribe;
   onNavigate(handler: (to: Navigate) => void): Unsubscribe;
   onBackgroundState(handler: (state: BackgroundState) => void): Unsubscribe;
+  /**
+   * Quit from outside the page (the tray): the page quits as for its own
+   * Quit, asking first when an unsent message would be lost.
+   */
+  onQuitRequested(handler: () => void): Unsubscribe;
 }

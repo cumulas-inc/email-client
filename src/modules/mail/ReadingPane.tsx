@@ -359,7 +359,7 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
         <ToolButton
           icon={message.isRead ? <Mail {...ICON} /> : <MailOpen {...ICON} />}
           label={message.isRead ? "Mark as unread" : "Mark as read"}
-          title={message.isRead ? "Mark as unread (Ctrl+U)" : "Mark as read (Q)"}
+          title={message.isRead ? "Mark as unread (Ctrl+U)" : "Mark as read (Ctrl+Q)"}
           onClick={() => actions.markRead(ids, !message.isRead)}
           secondary
         />

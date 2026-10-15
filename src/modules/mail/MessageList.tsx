@@ -98,7 +98,7 @@ function SelectionBar({ ids, actions, folders, messages }: SelectionBarProps) {
         type="button"
         className="icon-btn"
         aria-label="Mark as read"
-        title="Mark as read (Q)"
+        title="Mark as read (Ctrl+Q)"
         onClick={() => actions.markRead(ids, true)}
       >
         <MailOpen size={16} />

@@ -56,9 +56,9 @@ export function AboutSection() {
             <div className="about-row__text">
               <p className="about-row__title">Instant updates for Microsoft accounts</p>
               <p>
-                Microsoft tells Cumulas&apos;s push service ({info.syncServer}) when your Inbox
-                changes, but never what&apos;s in it, and the service passes that on to this
-                computer. You can turn it off in Settings → General.
+                Microsoft tells Cumulas&apos;s push service ({info.syncServer}) when your Inbox or
+                calendar changes, but never what&apos;s in it, and the service passes that on to
+                this computer. You can turn it off in Settings → General.
               </p>
             </div>
             <button
