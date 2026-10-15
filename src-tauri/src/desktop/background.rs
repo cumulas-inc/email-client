@@ -38,6 +38,27 @@ pub enum AutostartBackend {
     Unsupported,
 }
 
+/// The Background portal's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// What it allows: running without a window, and starting at login.
+    Portal { background: bool, autostart: bool },
+    /// This desktop has no Background portal. Nothing stops an app without
+    /// a window then (the portal does that), as outside a Flatpak, but
+    /// nothing starts it at login either.
+    NoPortal,
+}
+
+impl Answer {
+    /// The app may run without a window.
+    pub fn background(self) -> bool {
+        match self {
+            Answer::Portal { background, .. } => background,
+            Answer::NoPortal => true,
+        }
+    }
+}
+
 /// What Settings shows about running in the background.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,16 +178,24 @@ pub async fn set_start_at_login(
 ) -> Result<BackgroundState> {
     let desktop = app.state::<Desktop>();
     match desktop.background.backend {
-        AutostartBackend::Portal => {
-            let (_, autostart) = request(app, enabled, hidden).await?;
-            if enabled && !autostart {
+        AutostartBackend::Portal => match request(app, enabled, hidden).await? {
+            Answer::Portal {
+                autostart: false, ..
+            } if enabled => {
                 announce(app).await;
                 return Err(Error::unsupported(
                     "Your system didn't allow Cumulas Mail to start at login. You can allow it \
                      in your system's settings for apps.",
                 ));
             }
-        }
+            Answer::NoPortal if enabled => {
+                announce(app).await;
+                return Err(Error::unsupported(
+                    "Starting at login isn't available on this desktop.",
+                ));
+            }
+            _ => {}
+        },
         AutostartBackend::XdgAutostartFile => {
             let path = autostart_path(&config_home());
             if enabled {
@@ -193,7 +222,7 @@ pub async fn set_start_at_login(
 /// Asks the Background portal to let the app run without a window, and to
 /// start it at login when `autostart`; returns what it allowed and keeps it.
 #[cfg(target_os = "linux")]
-pub async fn request(app: &AppHandle, autostart: bool, hidden: bool) -> Result<(bool, bool)> {
+pub async fn request(app: &AppHandle, autostart: bool, hidden: bool) -> Result<Answer> {
     use ashpd::desktop::ResponseError;
     use ashpd::desktop::background::Background as Portal;
 
@@ -211,7 +240,14 @@ pub async fn request(app: &AppHandle, autostart: bool, hidden: bool) -> Result<(
         .and_then(|request| request.response());
     let (background, autostart) = match response {
         Ok(answer) => (answer.run_in_background(), answer.auto_start()),
+        // How the portal refuses.
         Err(ashpd::Error::Response(ResponseError::Cancelled)) => (false, false),
+        Err(e) if no_portal(&e) => {
+            // Only kept for this run: another desktop may have the portal.
+            tracing::info!("no Background portal; running without a window as natively ({e})");
+            *app.state::<Desktop>().background.allowed.lock().unwrap() = Some(true);
+            return Ok(Answer::NoPortal);
+        }
         Err(e) => {
             tracing::warn!("the Background portal didn't answer: {e}");
             return Err(Error::unsupported(
@@ -223,14 +259,81 @@ pub async fn request(app: &AppHandle, autostart: bool, hidden: bool) -> Result<(
     app.state::<Desktop>()
         .background
         .remember_allowed(app, background);
-    Ok((background, autostart))
+    Ok(Answer::Portal {
+        background,
+        autostart,
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
-pub async fn request(_app: &AppHandle, _autostart: bool, _hidden: bool) -> Result<(bool, bool)> {
+pub async fn request(_app: &AppHandle, _autostart: bool, _hidden: bool) -> Result<Answer> {
     Err(Error::unsupported(
         "Running in the background isn't available on this system.",
     ))
+}
+
+/// The portal's error says it isn't there: xdg-desktop-portal offers the
+/// Background portal only with a desktop backend for it (Sway, Hyprland,
+/// XFCE and others have none), or no portals run at all.
+#[cfg(target_os = "linux")]
+fn no_portal(e: &ashpd::Error) -> bool {
+    use zbus::fdo::Error as Fdo;
+
+    let e = match e {
+        ashpd::Error::PortalNotFound(_) => return true,
+        ashpd::Error::Zbus(e) | ashpd::Error::Portal(ashpd::PortalError::ZBus(e)) => e,
+        _ => return false,
+    };
+    match e {
+        zbus::Error::MethodError(name, ..) => matches!(
+            name.as_str(),
+            "org.freedesktop.DBus.Error.UnknownMethod"
+                | "org.freedesktop.DBus.Error.UnknownInterface"
+                | "org.freedesktop.DBus.Error.UnknownObject"
+                | "org.freedesktop.DBus.Error.ServiceUnknown"
+        ),
+        zbus::Error::FDO(e) => matches!(
+            **e,
+            Fdo::UnknownMethod(_)
+                | Fdo::UnknownInterface(_)
+                | Fdo::UnknownObject(_)
+                | Fdo::ServiceUnknown(_)
+        ),
+        _ => false,
+    }
+}
+
+/// Flatpak: asks the Background portal again at startup when it answered
+/// in an earlier run, since the user may have changed that in the system's
+/// settings for apps meanwhile. Once it has an answer, the portal gives it
+/// at once, without asking the user.
+pub async fn check_again(app: &AppHandle) {
+    let desktop = app.state::<Desktop>();
+    let Ok(current) = settings(app) else {
+        return;
+    };
+    if !worth_asking_again(
+        desktop.background.backend,
+        desktop.background.allowed(),
+        &current,
+    ) {
+        return;
+    }
+    if let Err(e) = request(app, current.start_at_login, current.start_hidden).await {
+        tracing::info!("could not check the background permission again: {e}");
+    }
+}
+
+/// The portal answered in an earlier run (else the first close asks), and
+/// the answer matters: the app is to run in the background or at login.
+fn worth_asking_again(
+    backend: AutostartBackend,
+    allowed: Option<bool>,
+    settings: &Settings,
+) -> bool {
+    backend == AutostartBackend::Portal
+        && allowed.is_some()
+        && (settings.run_in_background || settings.start_at_login)
 }
 
 /// Tells the desktop what the app does while it runs without a window
@@ -315,7 +418,8 @@ pub(crate) fn autostart_path(config_home: &Path) -> PathBuf {
 }
 
 /// The program to start: the AppImage when running from one (its
-/// executable is in a temporary mount), else this executable.
+/// executable is in a temporary mount), else this executable where it's
+/// installed.
 fn executable() -> PathBuf {
     executable_from(
         std::env::var_os("APPIMAGE").map(PathBuf::from),
@@ -326,8 +430,18 @@ fn executable() -> PathBuf {
 pub(crate) fn executable_from(appimage: Option<PathBuf>, current: Option<PathBuf>) -> PathBuf {
     appimage
         .filter(|p| p.is_absolute())
-        .or(current)
+        .or_else(|| current.map(installed))
         .unwrap_or_else(|| PathBuf::from("cumulas-mail"))
+}
+
+/// Where the running executable is installed. Once a package upgrade has
+/// replaced it there, Linux names it "<path> (deleted)"; the new one is at
+/// the path.
+fn installed(current: PathBuf) -> PathBuf {
+    match current.to_str().and_then(|p| p.strip_suffix(" (deleted)")) {
+        Some(path) => PathBuf::from(path),
+        None => current,
+    }
 }
 
 pub(crate) fn write_autostart(path: &Path, executable: &Path, hidden: bool) -> Result<()> {
@@ -469,6 +583,90 @@ mod tests {
         );
         assert_eq!(executable_from(None, Some(mount.clone())), mount);
         assert_eq!(executable_from(None, None), PathBuf::from("cumulas-mail"));
+    }
+
+    #[test]
+    fn an_upgraded_executable_is_started_where_it_was_installed() {
+        // What /proc/self/exe reads once dpkg or rpm replaced the file.
+        let replaced = PathBuf::from("/usr/bin/cumulas-mail (deleted)");
+        let executable = executable_from(None, Some(replaced));
+        assert_eq!(executable, PathBuf::from("/usr/bin/cumulas-mail"));
+        assert_eq!(
+            exec_line(&autostart_entry(&executable, true)),
+            "/usr/bin/cumulas-mail --background"
+        );
+        let spaced = PathBuf::from("/opt/Cumulas Mail/cumulas-mail");
+        assert_eq!(executable_from(None, Some(spaced.clone())), spaced);
+    }
+
+    #[test]
+    fn a_kept_answer_is_checked_again_at_startup() {
+        let wants = Settings::default();
+        assert!(wants.run_in_background);
+        // Refused or allowed in an earlier run: either may have changed in
+        // the system's settings since.
+        for kept in [Some(false), Some(true)] {
+            assert!(worth_asking_again(AutostartBackend::Portal, kept, &wants));
+        }
+        // Never asked: the first close asks.
+        assert!(!worth_asking_again(AutostartBackend::Portal, None, &wants));
+        // Native installs don't ask.
+        let native = AutostartBackend::XdgAutostartFile;
+        assert!(!worth_asking_again(native, Some(true), &wants));
+        // Neither running in the background nor starting at login.
+        let neither = Settings {
+            run_in_background: false,
+            start_at_login: false,
+            ..Settings::default()
+        };
+        let portal = AutostartBackend::Portal;
+        assert!(!worth_asking_again(portal, Some(false), &neither));
+        let login = Settings {
+            start_at_login: true,
+            ..neither
+        };
+        assert!(worth_asking_again(portal, Some(false), &login));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_portal_is_not_a_refusal() {
+        use ashpd::desktop::ResponseError;
+        use zbus::fdo::Error as Fdo;
+
+        let missing = [
+            // Its interface isn't exported (no backend for it).
+            ashpd::Error::PortalNotFound("org.freedesktop.portal.Background".try_into().unwrap()),
+            ashpd::Error::Portal(ashpd::PortalError::ZBus(zbus::Error::FDO(Box::new(
+                Fdo::UnknownMethod("No such interface".into()),
+            )))),
+            // No portals at all.
+            ashpd::Error::Zbus(zbus::Error::FDO(Box::new(Fdo::ServiceUnknown(
+                "The name is not activatable".into(),
+            )))),
+        ];
+        for e in &missing {
+            assert!(no_portal(e), "{e}");
+        }
+        let answered = [
+            // How the portal refuses.
+            ashpd::Error::Response(ResponseError::Cancelled),
+            ashpd::Error::Response(ResponseError::Other),
+            ashpd::Error::Portal(ashpd::PortalError::NotAllowed("no".into())),
+            ashpd::Error::Zbus(zbus::Error::FDO(Box::new(Fdo::AccessDenied("no".into())))),
+            ashpd::Error::NoResponse,
+        ];
+        for e in &answered {
+            assert!(!no_portal(e), "{e}");
+        }
+        assert!(Answer::NoPortal.background());
+        assert!(
+            !Answer::Portal {
+                background: false,
+                autostart: false
+            }
+            .background()
+        );
     }
 
     #[test]

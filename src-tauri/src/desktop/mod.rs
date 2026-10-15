@@ -10,10 +10,12 @@ pub mod router;
 pub mod tray;
 pub mod window;
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cumulas_core::model::{Account, FolderRole};
+use chrono::{DateTime, Local};
+use cumulas_core::model::{Account, FolderRole, Settings};
 use cumulas_core::service::MailAlert;
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
@@ -87,7 +89,7 @@ impl Desktop {
                     .unwrap_or((false, true));
                 let allowed = background::request(&app, login, hidden)
                     .await
-                    .is_ok_and(|(allowed, _)| allowed);
+                    .is_ok_and(background::Answer::background);
                 background::announce(&app).await;
                 if !allowed {
                     tracing::info!("not allowed to run in the background; quitting");
@@ -102,18 +104,18 @@ impl Desktop {
 
 /// Starts the desktop side once the core runs: notification clicks, the
 /// tray, the network monitor and the background status.
-pub fn start(app: &AppHandle, mut invoked: mpsc::UnboundedReceiver<notify::Invoked>) {
+pub fn start(app: &AppHandle, invoked: mpsc::UnboundedReceiver<notify::Invoked>) {
     let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(click) = invoked.recv().await {
-            router::handle(&handle, click).await;
-        }
-    });
+    tauri::async_runtime::spawn(serve_clicks(invoked, move |click| {
+        let handle = handle.clone();
+        async move { router::handle(&handle, click).await }
+    }));
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         // Connects early, so that Settings knows how notifications go.
         let _ = handle.state::<Desktop>().notifications.notifier().await;
         background::reconcile_autostart(&handle).await;
+        background::check_again(&handle).await;
         background::set_status(&handle).await;
         background::announce(&handle).await;
     });
@@ -124,6 +126,24 @@ pub fn start(app: &AppHandle, mut invoked: mpsc::UnboundedReceiver<notify::Invok
     {
         let service = Arc::clone(&app.state::<AppState>().service);
         tauri::async_runtime::spawn(network::watch(service));
+    }
+}
+
+/// Carries out clicks as they come. Marking read and archiving wait on the
+/// server, so each runs on its own and no other click waits for them;
+/// opening and showing wait on nothing, and stay in order.
+async fn serve_clicks<F>(
+    mut invoked: mpsc::UnboundedReceiver<notify::Invoked>,
+    handle: impl Fn(notify::Invoked) -> F,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
+    while let Some(click) = invoked.recv().await {
+        if matches!(click.action, Action::MarkRead(_) | Action::Archive(_)) {
+            tauri::async_runtime::spawn(handle(click));
+        } else {
+            handle(click).await;
+        }
     }
 }
 
@@ -185,15 +205,15 @@ async fn background_notice(app: &AppHandle) {
         return;
     }
     let desktop = app.state::<Desktop>();
-    let body = if desktop.tray.available() {
-        "New mail still shows up here. To quit, use the Cumulas Mail icon in the top bar."
-    } else {
-        "New mail still shows up here. To quit, open Cumulas Mail and press Ctrl+Q."
-    };
+    let tray = app
+        .state::<AppState>()
+        .service
+        .get_settings()
+        .is_ok_and(|s| desktop.tray.shown(s.show_tray_icon));
     let toast = Toast {
         id: "app:background".into(),
         title: "Still running in the background".into(),
-        body: body.into(),
+        body: background_notice_body(tray).into(),
         kind: ToastKind::App,
         default_action: Action::ShowWindow,
         buttons: Vec::new(),
@@ -209,27 +229,67 @@ async fn background_notice(app: &AppHandle) {
     }
 }
 
+/// Where to quit from: the tray icon when it shows (wherever the desktop
+/// puts it), else the window's main menu.
+fn background_notice_body(tray: bool) -> &'static str {
+    if tray {
+        "New mail still shows up here. To quit, use the Cumulas Mail tray icon."
+    } else {
+        "New mail still shows up here. To quit, open Cumulas Mail and choose Quit in the main menu."
+    }
+}
+
 /// The notification Settings sends to show what one looks like.
 pub async fn test_notification(app: &AppHandle) -> Result<(), String> {
-    let sound = app
+    let settings = app
         .state::<AppState>()
         .service
         .get_settings()
-        .map(|s| s.notify_sound)
-        .unwrap_or(true);
-    let toast = Toast {
+        .unwrap_or_default();
+    app.state::<Desktop>()
+        .notifications
+        .show(&test_toast(&settings, Local::now()), Vec::new())
+        .await
+}
+
+/// The test notification: true whatever the settings, so it says when new
+/// mail wouldn't show up like this.
+fn test_toast(settings: &Settings, now: DateTime<Local>) -> Toast {
+    let paused = settings
+        .notifications_paused_until
+        .map(|until| until.with_timezone(&Local))
+        .filter(|until| *until > now);
+    let body = if !settings.notifications_enabled {
+        "New message notifications are off, so new mail won't show up like this.".to_owned()
+    } else if let Some(until) = paused {
+        format!(
+            "New message notifications are paused until {}.",
+            until_label(until, now)
+        )
+    } else {
+        "New message notifications are on.".to_owned()
+    };
+    Toast {
         id: "app:test".into(),
-        title: "Notifications are on".into(),
-        body: "New mail will show up like this.".into(),
+        title: "Test notification".into(),
+        body,
         kind: ToastKind::App,
         default_action: Action::ShowWindow,
         buttons: Vec::new(),
-        sound,
-    };
-    app.state::<Desktop>()
-        .notifications
-        .show(&toast, Vec::new())
-        .await
+        sound: settings.notify_sound,
+    }
+}
+
+/// "9:30 AM", "tomorrow at 8:00 AM" or "Oct 17 at 8:00 AM", as Settings
+/// says it.
+fn until_label(until: DateTime<Local>, now: DateTime<Local>) -> String {
+    let time = until.format("%-I:%M %p");
+    let days = (until.date_naive() - now.date_naive()).num_days();
+    match days {
+        0 => time.to_string(),
+        1 => format!("tomorrow at {time}"),
+        _ => format!("{} at {time}", until.format("%b %-d")),
+    }
 }
 
 /// The desktop file notifications belong to: the Flatpak's, else the first
@@ -290,7 +350,111 @@ pub(crate) fn find_desktop_entry(dirs: &[PathBuf]) -> Option<notify::fdo::Deskto
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+
     use super::*;
+
+    #[tokio::test]
+    async fn a_slow_mark_as_read_holds_up_no_other_click() {
+        let (clicks, invoked) = mpsc::unbounded_channel();
+        let (handled, mut done) = mpsc::unbounded_channel();
+        let (release, server) = tokio::sync::watch::channel(false);
+        let serving = tokio::spawn(serve_clicks(invoked, move |click: notify::Invoked| {
+            let (handled, mut server) = (handled.clone(), server.clone());
+            async move {
+                if matches!(click.action, Action::MarkRead(_) | Action::Archive(_)) {
+                    // The server doesn't answer until released.
+                    let _ = server.wait_for(|answered| *answered).await;
+                }
+                let _ = handled.send(click.action);
+            }
+        }));
+        let click = |action| notify::Invoked {
+            action,
+            activation_token: None,
+        };
+        for action in [
+            Action::MarkRead("a".into()),
+            Action::Archive("b".into()),
+            Action::OpenMessage("c".into()),
+            Action::ShowWindow,
+        ] {
+            clicks.send(click(action)).unwrap();
+        }
+        async fn next(done: &mut mpsc::UnboundedReceiver<Action>) -> Action {
+            let next = tokio::time::timeout(std::time::Duration::from_secs(5), done.recv());
+            next.await.expect("a click handled").unwrap()
+        }
+        // Opening and showing go first, while the server doesn't answer.
+        assert_eq!(next(&mut done).await, Action::OpenMessage("c".into()));
+        assert_eq!(next(&mut done).await, Action::ShowWindow);
+        release.send(true).unwrap();
+        let mut slow = vec![next(&mut done).await, next(&mut done).await];
+        slow.sort_by_key(Action::encode);
+        assert_eq!(
+            slow,
+            [Action::Archive("b".into()), Action::MarkRead("a".into())]
+        );
+        drop(clicks);
+        serving.await.unwrap();
+    }
+
+    #[test]
+    fn the_background_notice_says_where_to_quit() {
+        let tray = background_notice_body(true);
+        assert!(tray.contains("Cumulas Mail tray icon"), "{tray}");
+        let menu = background_notice_body(false);
+        assert!(menu.contains("Quit in the main menu"), "{menu}");
+        for body in [tray, menu] {
+            assert!(
+                !body.contains("Ctrl+Q") && !body.contains("top bar"),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_test_notification_says_when_new_mail_wouldnt_show() {
+        let now = Local.with_ymd_and_hms(2026, 10, 15, 22, 30, 0).unwrap();
+        let on = Settings::default();
+        assert!(on.notifications_enabled);
+        let toast = test_toast(&on, now);
+        assert_eq!(toast.title, "Test notification");
+        assert_eq!(toast.body, "New message notifications are on.");
+        assert_eq!(toast.sound, on.notify_sound);
+
+        let off = Settings {
+            notifications_enabled: false,
+            ..Settings::default()
+        };
+        assert_eq!(
+            test_toast(&off, now).body,
+            "New message notifications are off, so new mail won't show up like this."
+        );
+
+        let paused = |until: DateTime<Local>| Settings {
+            notifications_paused_until: Some(until.with_timezone(&chrono::Utc)),
+            ..Settings::default()
+        };
+        let tomorrow = Local.with_ymd_and_hms(2026, 10, 16, 8, 0, 0).unwrap();
+        assert_eq!(
+            test_toast(&paused(tomorrow), now).body,
+            "New message notifications are paused until tomorrow at 8:00 AM."
+        );
+        let soon = Local.with_ymd_and_hms(2026, 10, 15, 23, 15, 0).unwrap();
+        assert_eq!(
+            test_toast(&paused(soon), now).body,
+            "New message notifications are paused until 11:15 PM."
+        );
+        let later = Local.with_ymd_and_hms(2026, 10, 17, 8, 0, 0).unwrap();
+        assert_eq!(until_label(later, now), "Oct 17 at 8:00 AM");
+        // A pause that ended doesn't count.
+        let ended = Local.with_ymd_and_hms(2026, 10, 15, 21, 0, 0).unwrap();
+        assert_eq!(
+            test_toast(&paused(ended), now).body,
+            "New message notifications are on."
+        );
+    }
 
     #[test]
     fn the_desktop_entry_is_found_under_any_package_name() {

@@ -166,6 +166,7 @@ pub fn run() {
             commands::get_app_info,
             commands::open_link,
             commands::quit_app,
+            commands::quit_canceled,
             // accounts & settings
             commands::list_accounts,
             commands::add_imap_account,

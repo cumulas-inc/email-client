@@ -4,7 +4,11 @@
 //! with the AppIndicator extension) and the libayatana-appindicator (or
 //! libappindicator) library, which tray-icon loads at run time and panics
 //! without. So the library is looked for first, and the host followed on
-//! the session bus: the icon comes and goes with it.
+//! the session bus: the icon is added once there is one.
+//!
+//! Once added, the icon is hidden and shown, never removed: the library
+//! can't really remove it (it stays on the bus, and a new icon then can't
+//! take its place), and it registers it again with a host that restarts.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -54,6 +58,13 @@ impl Tray {
         self.host.load(Ordering::Relaxed) && self.library()
     }
 
+    /// The icon shows, with the setting `enabled`.
+    pub fn shown(&self, enabled: bool) -> bool {
+        wanted(enabled, self.host.load(Ordering::Relaxed), || {
+            self.library()
+        })
+    }
+
     fn library(&self) -> bool {
         *self.library.get_or_init(library_loads)
     }
@@ -78,8 +89,7 @@ fn library_loads() -> bool {
     false
 }
 
-/// Follows the StatusNotifier host, adding or removing the icon as it comes
-/// and goes.
+/// Follows the StatusNotifier host, adding the icon when one comes.
 #[cfg(target_os = "linux")]
 pub async fn watch(app: AppHandle) {
     use futures::StreamExt;
@@ -122,7 +132,9 @@ async fn host_changed(app: &AppHandle, present: bool) {
     super::background::announce(app).await;
 }
 
-/// Adds or removes the icon to match the setting and the desktop.
+/// Adds the icon when it should show and there's none yet, or shows or
+/// hides it to match the setting. (The host coming and going is the
+/// library's business once the icon exists.)
 pub fn sync(app: &AppHandle) {
     let desktop = app.state::<Desktop>();
     let enabled = app
@@ -131,20 +143,20 @@ pub fn sync(app: &AppHandle) {
         .get_settings()
         .map(|s| s.show_tray_icon)
         .unwrap_or(true);
-    let show = wanted(enabled, desktop.tray.host.load(Ordering::Relaxed), || {
-        desktop.tray.library()
-    });
+    let show = desktop.tray.shown(enabled);
     let handle = app.clone();
-    let result = app.run_on_main_thread(move || {
-        let present = handle.tray_by_id(TRAY_ID).is_some();
-        if show && !present {
+    let result = app.run_on_main_thread(move || match handle.tray_by_id(TRAY_ID) {
+        Some(tray) => {
+            if let Err(e) = tray.set_visible(enabled) {
+                tracing::warn!("could not show or hide the tray icon: {e}");
+            }
+        }
+        None if show => {
             if let Err(e) = build(&handle) {
                 tracing::warn!("could not add the tray icon: {e}");
             }
-        } else if !show && present {
-            handle.remove_tray_by_id(TRAY_ID);
-            *handle.state::<Desktop>().tray.items.lock().unwrap() = None;
         }
+        None => {}
     });
     if let Err(e) = result {
         tracing::warn!("could not update the tray icon: {e}");
@@ -315,7 +327,7 @@ fn on_menu(app: &AppHandle, id: &str) {
         "pause-hour" => pause(app, Some(Utc::now() + Duration::hours(1))),
         "pause-tomorrow" => pause(app, Some(tomorrow_morning(Local::now()))),
         "pause-resume" => pause(app, None),
-        "quit" => app.exit(0),
+        "quit" => window::quit(app),
         _ => {}
     }
 }

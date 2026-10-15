@@ -60,10 +60,19 @@ pub fn open_link(app: AppHandle, url: String) -> Result<()> {
         .map_err(|e| Error::internal(format!("could not open link: {e}")))
 }
 
-/// Quits, even while running in the background is on (Ctrl+Q, the menu).
+/// Quits, even while running in the background is on: the main menu's
+/// Quit, and the page's answer to the tray's (`quit-requested`).
 #[tauri::command]
-pub fn quit_app(app: AppHandle) {
+pub fn quit_app(app: AppHandle, desktop: State<'_, Desktop>) {
+    desktop.window.forget_quit();
     app.exit(0);
+}
+
+/// The user kept the unsent message when asked whether to quit: the tray's
+/// next Quit asks again, rather than quitting at once.
+#[tauri::command]
+pub fn quit_canceled(desktop: State<'_, Desktop>) {
+    desktop.window.forget_quit();
 }
 
 // --- accounts & settings ------------------------------------------------------
