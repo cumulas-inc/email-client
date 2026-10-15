@@ -66,12 +66,17 @@ async fn tasks_are_mapped() {
     assert_eq!(contract.due_date, NaiveDate::from_ymd_opt(2026, 10, 20));
     assert_eq!(contract.completed_at, None);
     assert_eq!(
+        contract.reminder_at,
+        Some(Utc.with_ymd_and_hms(2026, 10, 19, 16, 30, 0).unwrap())
+    );
+    assert_eq!(
         contract.updated_at.date_naive(),
         NaiveDate::from_ymd_opt(2026, 10, 2).unwrap()
     );
 
     let flights = &tasks[1];
     assert_eq!(flights.status, TaskStatus::Completed);
+    assert_eq!(flights.reminder_at, None, "isReminderOn is false");
     assert_eq!(flights.notes, None);
     assert_eq!(flights.due_date, NaiveDate::from_ymd_opt(2026, 9, 25));
     assert_eq!(
@@ -88,6 +93,7 @@ async fn tasks_are_mapped() {
     assert_eq!(garage.importance, Importance::Low);
     assert_eq!(garage.due_date, None);
     assert_eq!(garage.notes.as_deref(), Some("Some day."));
+    assert_eq!(garage.reminder_at, None);
 }
 
 fn graph_task(id: &str, body: &Value) -> Value {
@@ -118,7 +124,9 @@ async fn tasks_are_created_with_due_dates_in_the_mailbox_zone() {
         "title": "Renew passport",
         "body": { "content": "Photos first", "contentType": "text" },
         "importance": "high",
-        "dueDateTime": { "dateTime": "2026-11-02T00:00:00", "timeZone": "Pacific Standard Time" }
+        "dueDateTime": { "dateTime": "2026-11-02T00:00:00", "timeZone": "Pacific Standard Time" },
+        "isReminderOn": true,
+        "reminderDateTime": { "dateTime": "2026-11-01T17:00:00", "timeZone": "UTC" }
     });
     Mock::given(method("POST"))
         .and(path("/me/todo/lists/AAMkList-tasks/tasks"))
@@ -138,6 +146,7 @@ async fn tasks_are_created_with_due_dates_in_the_mailbox_zone() {
                 notes: Some("Photos first".into()),
                 importance: Some(Importance::High),
                 due_date: NaiveDate::from_ymd_opt(2026, 11, 2),
+                reminder_at: Some(Utc.with_ymd_and_hms(2026, 11, 1, 17, 0, 0).unwrap()),
             },
         )
         .await
@@ -157,6 +166,7 @@ fn current() -> Task {
         status: TaskStatus::NotStarted,
         importance: Importance::Normal,
         due_date: NaiveDate::from_ymd_opt(2026, 10, 30),
+        reminder_at: None,
         completed_at: None,
         created_at: Utc.with_ymd_and_hms(2026, 10, 14, 8, 0, 0).unwrap(),
         updated_at: Utc.with_ymd_and_hms(2026, 10, 14, 8, 0, 0).unwrap(),
@@ -170,6 +180,11 @@ async fn task_patches_send_only_the_changed_fields() {
     for expected in [
         json!({ "status": "completed" }),
         json!({ "dueDateTime": null, "body": { "content": "", "contentType": "text" } }),
+        json!({ "isReminderOn": false }),
+        json!({
+            "isReminderOn": true,
+            "reminderDateTime": { "dateTime": "2026-10-29T08:15:00", "timeZone": "UTC" }
+        }),
         json!({
             "title": "Renamed",
             "importance": "low",
@@ -205,6 +220,28 @@ async fn task_patches_send_only_the_changed_fields() {
             &TaskPatch {
                 clear_due_date: true,
                 clear_notes: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    provider
+        .update_task(
+            &list(),
+            &current(),
+            &TaskPatch {
+                clear_reminder: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    provider
+        .update_task(
+            &list(),
+            &current(),
+            &TaskPatch {
+                reminder_at: Some(Utc.with_ymd_and_hms(2026, 10, 29, 8, 15, 0).unwrap()),
                 ..Default::default()
             },
         )

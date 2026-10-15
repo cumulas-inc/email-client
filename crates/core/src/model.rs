@@ -593,6 +593,9 @@ pub struct Task {
     pub status: TaskStatus,
     pub importance: Importance,
     pub due_date: Option<NaiveDate>,
+    /// When to remind about the task; `None` for no reminder.
+    #[serde(default)]
+    pub reminder_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -609,10 +612,13 @@ pub struct TaskDraft {
     pub importance: Option<Importance>,
     #[serde(default)]
     pub due_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub reminder_at: Option<DateTime<Utc>>,
 }
 
-/// Partial update; `None` leaves a field unchanged. To clear the due date or
-/// notes, set `clear_due_date` / `clear_notes`.
+/// Partial update; `None` leaves a field unchanged. To clear the due date,
+/// notes or reminder, set `clear_due_date` / `clear_notes` /
+/// `clear_reminder`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskPatch {
@@ -630,6 +636,10 @@ pub struct TaskPatch {
     pub due_date: Option<NaiveDate>,
     #[serde(default)]
     pub clear_due_date: bool,
+    #[serde(default)]
+    pub reminder_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub clear_reminder: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +671,23 @@ pub enum ReminderKind {
     Task,
 }
 
+impl ReminderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReminderKind::Event => "event",
+            ReminderKind::Task => "task",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "event" => Some(ReminderKind::Event),
+            "task" => Some(ReminderKind::Task),
+            _ => None,
+        }
+    }
+}
+
 /// A reminder that is due or snoozed. Produced by the reminder scheduler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -671,14 +698,35 @@ pub struct ActiveReminder {
     pub item_id: String,
     pub account_id: String,
     pub title: String,
+    /// When the event starts (an all-day event: local midnight of its first
+    /// day); `None` for tasks.
     pub starts_at: Option<DateTime<Utc>>,
     pub ends_at: Option<DateTime<Utc>>,
     pub location: Option<String>,
     pub online_meeting_url: Option<String>,
     pub fire_at: DateTime<Utc>,
+    /// Snoozed until then: not due again yet.
     pub snoozed_until: Option<DateTime<Utc>>,
     /// The event has started or the task is past its reminder time.
     pub overdue: bool,
+    /// The event was over before its reminder could be shown: it's listed,
+    /// but it never showed as a notification.
+    #[serde(default)]
+    pub missed: bool,
+}
+
+impl ActiveReminder {
+    /// Due now, rather than snoozed.
+    pub fn is_due(&self) -> bool {
+        self.snoozed_until.is_none()
+    }
+}
+
+/// How long to snooze a reminder for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Snooze {
+    Minutes(u32),
+    Until(DateTime<Utc>),
 }
 
 /// Which parts of the local store changed; sent to the UI so it can refresh.

@@ -96,6 +96,11 @@ pub(crate) fn apply_task_patch(task: &Task, patch: &TaskPatch) -> Task {
     } else if let Some(due) = patch.due_date {
         t.due_date = Some(due);
     }
+    if patch.clear_reminder {
+        t.reminder_at = None;
+    } else if let Some(at) = patch.reminder_at {
+        t.reminder_at = Some(at);
+    }
     if let Some(status) = patch.status {
         if status == TaskStatus::Completed && t.status != TaskStatus::Completed {
             t.completed_at = Some(Utc::now());
@@ -110,6 +115,20 @@ pub(crate) fn apply_task_patch(task: &Task, patch: &TaskPatch) -> Task {
 
 impl CoreService {
     // --- calendar -------------------------------------------------------------
+
+    /// The server keeps the account's reminders, and an event was just
+    /// made or changed there: its reminders (and calendars) are read again
+    /// soon, so that the event's reminder isn't taken as dismissed, or at
+    /// its old time.
+    fn request_server_reminders(&self, account_id: &str) {
+        self.push.request_for(
+            account_id,
+            super::SyncScope {
+                calendar: true,
+                ..Default::default()
+            },
+        );
+    }
 
     pub fn list_calendars(&self) -> Result<Vec<Calendar>> {
         self.store.list_calendars()
@@ -152,7 +171,11 @@ impl CoreService {
             return Err(Error::invalid_input("This calendar is read-only."));
         }
         let event = match self.providers_for(&calendar.account_id).await?.calendar {
-            Some(provider) => provider.create_event(&calendar, &draft).await?,
+            Some(provider) => {
+                let event = provider.create_event(&calendar, &draft).await?;
+                self.request_server_reminders(&calendar.account_id);
+                event
+            }
             None => local_event(&calendar, &Uuid::new_v4().to_string(), &draft),
         };
         self.store.upsert_event(&event)?;
@@ -171,9 +194,11 @@ impl CoreService {
         let calendar = self.store.get_calendar(&existing.calendar_id)?;
         let event = match self.providers_for(&calendar.account_id).await?.calendar {
             Some(provider) => {
-                provider
+                let event = provider
                     .update_event(&calendar, &existing.remote_id, &draft)
-                    .await?
+                    .await?;
+                self.request_server_reminders(&calendar.account_id);
+                event
             }
             None => local_event(&calendar, &existing.remote_id, &draft),
         };
@@ -315,6 +340,7 @@ impl CoreService {
                     status: TaskStatus::NotStarted,
                     importance: draft.importance.unwrap_or(Importance::Normal),
                     due_date: draft.due_date,
+                    reminder_at: draft.reminder_at,
                     completed_at: None,
                     created_at: now,
                     updated_at: now,

@@ -6,6 +6,7 @@ mod calendar;
 mod contacts;
 mod mail;
 mod push;
+mod reminders;
 mod schema;
 mod settings;
 mod tasks;

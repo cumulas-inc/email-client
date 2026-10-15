@@ -1,6 +1,6 @@
 //! Graph JSON shapes shared by several domains, and their conversions.
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
@@ -80,13 +80,16 @@ impl ItemBody {
     }
 }
 
-/// Graph `dateTimeTimeZone`: a wall-clock time plus the zone it is in. The
-/// zone is not read: calendar reads ask for UTC, and the dates of To Do tasks
-/// are recovered with [`nearest_date`].
+/// Graph `dateTimeTimeZone`: a wall-clock time plus the zone it is in.
+/// Calendar reads ask for UTC, and the dates of To Do tasks are recovered
+/// with [`nearest_date`]; the zone counts for To Do reminders
+/// ([`DateTimeTimeZone::instant`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DateTimeTimeZone {
     pub date_time: String,
+    #[serde(default)]
+    pub time_zone: Option<String>,
 }
 
 impl DateTimeTimeZone {
@@ -99,6 +102,33 @@ impl DateTimeTimeZone {
     /// `Prefer: outlook.timezone="UTC"`.
     pub fn utc(&self) -> Option<DateTime<Utc>> {
         self.naive().map(|n| n.and_utc())
+    }
+
+    /// The instant, reading the time in its zone. To Do keeps a reminder in
+    /// the zone it was set in, UTC when this app set it. Other zones are
+    /// read as the computer's own: the person set it where they are, and
+    /// Windows zone names can't be converted here.
+    pub fn instant(&self) -> Option<DateTime<Utc>> {
+        let naive = self.naive()?;
+        let utc = self.time_zone.as_deref().is_none_or(|zone| {
+            matches!(
+                zone.trim(),
+                "" | "UTC"
+                    | "Etc/UTC"
+                    | "Etc/GMT"
+                    | "GMT"
+                    | "Coordinated Universal Time"
+                    | "tzone://Microsoft/Utc"
+            )
+        });
+        if utc {
+            return Some(naive.and_utc());
+        }
+        chrono::Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .map(|t| t.with_timezone(&Utc))
+            .or(Some(naive.and_utc()))
     }
 }
 
@@ -147,7 +177,26 @@ mod tests {
     fn date_times_parse_with_fractional_seconds() {
         let t = DateTimeTimeZone {
             date_time: "2026-10-14T09:30:00.0000000".into(),
+            time_zone: None,
         };
         assert_eq!(t.utc().unwrap().to_rfc3339(), "2026-10-14T09:30:00+00:00");
+    }
+
+    #[test]
+    fn instants_read_utc_as_utc_and_other_zones_as_local() {
+        let at = |zone: &str| DateTimeTimeZone {
+            date_time: "2026-10-14T09:30:00.0000000".into(),
+            time_zone: Some(zone.into()),
+        };
+        let utc = "2026-10-14T09:30:00+00:00";
+        for zone in ["UTC", "Etc/UTC", " tzone://Microsoft/Utc "] {
+            assert_eq!(at(zone).instant().unwrap().to_rfc3339(), utc, "{zone}");
+        }
+        let local = chrono::Local
+            .with_ymd_and_hms(2026, 10, 14, 9, 30, 0)
+            .earliest()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(at("Pacific Standard Time").instant(), Some(local));
     }
 }

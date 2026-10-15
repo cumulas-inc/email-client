@@ -4,7 +4,11 @@
     {
       "@odata.etag": "W/\"xzyPKP0BiUGgld+lMKXwbQAAgdhkVw==\"",
       "importance": "high",
-      "isReminderOn": false,
+      "isReminderOn": true,
+      "reminderDateTime": {
+        "dateTime": "2026-10-19T16:30:00.0000000",
+        "timeZone": "UTC"
+      },
       "status": "waitingOnOthers",
       "title": "Get the signed contract back",
       "createdDateTime": "2026-10-01T09:12:44.6164567Z",
@@ -25,6 +29,10 @@
       "@odata.etag": "W/\"xzyPKP0BiUGgld+lMKXwbQAAgdhkWA==\"",
       "importance": "normal",
       "isReminderOn": false,
+      "reminderDateTime": {
+        "dateTime": "2026-09-24T09:00:00.0000000",
+        "timeZone": "UTC"
+      },
       "status": "completed",
       "title": "Book flights",
       "createdDateTime": "2026-09-20T08:00:00Z",

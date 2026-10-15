@@ -1,5 +1,6 @@
 //! What runs while the app does: the periodic full sync, push for every
-//! account (see [`crate::push`]) and the resume detector.
+//! account (see [`crate::push`]), the reminder scheduler and the resume
+//! detector.
 
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
@@ -28,8 +29,8 @@ const UNSUBSCRIBE_LIMIT: Duration = Duration::from_secs(5);
 
 impl CoreService {
     /// Starts the background work: the periodic full sync, push for every
-    /// account and the resume detector. Call once, inside a Tokio runtime;
-    /// later calls do nothing.
+    /// account, the reminder scheduler and the resume detector. Call once,
+    /// inside a Tokio runtime; later calls do nothing.
     pub fn start_background(self: &Arc<Self>) {
         let Ok(runtime) = Handle::try_current() else {
             tracing::error!("background work needs a Tokio runtime; not started");
@@ -66,7 +67,11 @@ impl CoreService {
                     }
                 },
             ));
-            state.tasks.extend([periodic, resume]);
+            let reminders = runtime.spawn(super::reminders::reminder_loop(
+                Arc::downgrade(self),
+                self.push.root.child_token(),
+            ));
+            state.tasks.extend([periodic, resume, reminders]);
         }
         for account in accounts {
             self.start_push(&account.id);
@@ -268,6 +273,8 @@ impl CoreService {
         tracing::debug!("waking up push ({reason:?})");
         self.push.wake.send_modify(|n| *n = n.wrapping_add(1));
         self.push.request(&SyncScope::full());
+        // Reminders that came due in the meantime.
+        self.reminders.poke.notify_one();
     }
 
     /// Stops all background work: cancels syncs, closes push connections

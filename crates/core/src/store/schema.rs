@@ -136,6 +136,47 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (account_id, id)
     );
     "#,
+    // 3: reminders. Task reminder times, for finding them; what became of
+    // each reminder (keyed by its item and fire time, so a moved event's
+    // reminder starts afresh); and the reminders Microsoft 365 reports, with
+    // the window each account's report covers.
+    r#"
+    ALTER TABLE tasks ADD COLUMN remind_at INTEGER;
+    CREATE INDEX tasks_remind_at ON tasks(remind_at) WHERE remind_at IS NOT NULL;
+
+    CREATE TABLE reminder_state (
+        key           TEXT PRIMARY KEY,   -- '{event|task}:{local id}:{fire_at}'
+        account_id    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        item_kind     TEXT NOT NULL,      -- event | task
+        item_id       TEXT NOT NULL,
+        fire_at       INTEGER NOT NULL,
+        state         TEXT NOT NULL,      -- shown | missed | snoozed | dismissed
+        snooze_until  INTEGER,
+        -- A dismissal or snooze Microsoft 365 hasn't heard of yet.
+        pending       TEXT,               -- dismiss | snooze
+        updated_at    INTEGER NOT NULL
+    );
+    CREATE INDEX reminder_state_item ON reminder_state(item_id);
+
+    CREATE TABLE server_reminders (
+        account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        event_id     TEXT NOT NULL,       -- the event's remote id
+        fire_at      INTEGER NOT NULL,
+        change_key   TEXT,
+        -- To match occurrences whose ids differ from the calendar's.
+        event_start  INTEGER NOT NULL,
+        event_end    INTEGER NOT NULL,
+        subject      TEXT NOT NULL,
+        PRIMARY KEY (account_id, event_id)
+    );
+
+    CREATE TABLE server_reminder_windows (
+        account_id    TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        window_start  INTEGER NOT NULL,
+        window_end    INTEGER NOT NULL,
+        fetched_at    INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
@@ -162,5 +203,48 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version as usize, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn the_reminders_migration_upgrades_a_database_from_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        {
+            // A database as the previous version left it, with a task.
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..2] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute_batch(
+                "INSERT INTO accounts VALUES ('a', 'imap', 'A', 'a@x', '#000', '{}', 0, NULL, NULL);
+                 INSERT INTO task_lists VALUES ('l', 'a', 'l', 'Tasks', 1);
+                 INSERT INTO tasks VALUES ('t', 'a', 'l', 't', 'notStarted', NULL, 0, '{}');",
+            )
+            .unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        let remind_at: Option<i64> = conn
+            .query_row("SELECT remind_at FROM tasks WHERE id = 't'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(remind_at, None);
+        for table in [
+            "reminder_state",
+            "server_reminders",
+            "server_reminder_windows",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
     }
 }

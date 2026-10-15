@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -289,6 +289,8 @@ pub(crate) struct FakeConnector {
     pub push_consent: Mutex<Vec<bool>>,
     /// What the next Microsoft sign-in returns; it never finishes when unset.
     pub sign_in: Mutex<Option<SignInResult>>,
+    /// The calendar of Microsoft accounts, when set.
+    pub calendar: Mutex<Option<Arc<dyn crate::providers::CalendarProvider>>>,
 }
 
 impl FakeConnector {
@@ -302,6 +304,7 @@ impl FakeConnector {
             subscriptions: Mutex::default(),
             push_consent: Mutex::default(),
             sign_in: Mutex::default(),
+            calendar: Mutex::default(),
         }
     }
 }
@@ -314,7 +317,10 @@ impl Connector for FakeConnector {
                 account_id: account.id.clone(),
                 server: Arc::clone(&self.server),
             }),
-            calendar: None,
+            calendar: match account.kind {
+                AccountKind::Microsoft => self.calendar.lock().unwrap().clone(),
+                AccountKind::Imap => None,
+            },
             contacts: None,
             tasks: None,
             subscriptions: self.subscriptions.lock().unwrap().clone(),
@@ -366,8 +372,18 @@ impl Connector for FakeConnector {
     }
 }
 
+/// One `reminders_changed`: the active keys, the titles of the newly due
+/// and the cleared keys.
+#[derive(Debug, Clone, PartialEq)]
+struct RemindersChanged {
+    active: Vec<ActiveReminder>,
+    newly_due: Vec<String>,
+    cleared: Vec<String>,
+}
+
 #[derive(Default)]
 struct RecordingSink {
+    reminders: Mutex<Vec<RemindersChanged>>,
     new_mail: Mutex<Vec<String>>,
     alerts: Mutex<Vec<MailAlert>>,
     settled: Mutex<Vec<String>>,
@@ -392,6 +408,39 @@ impl EventSink for RecordingSink {
     }
     fn push_status(&self, status: &crate::push::PushStatus) {
         self.push.lock().unwrap().push(status.clone());
+    }
+    fn reminders_changed(
+        &self,
+        active: &[ActiveReminder],
+        newly_due: &[ActiveReminder],
+        cleared: &[String],
+    ) {
+        self.reminders.lock().unwrap().push(RemindersChanged {
+            active: active.to_vec(),
+            newly_due: newly_due.iter().map(|r| r.title.clone()).collect(),
+            cleared: cleared.to_vec(),
+        });
+    }
+}
+
+impl RecordingSink {
+    /// The titles of every reminder shown so far, in order.
+    fn shown_reminders(&self) -> Vec<String> {
+        self.reminders
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c.newly_due.clone())
+            .collect()
+    }
+
+    fn cleared_reminders(&self) -> Vec<String> {
+        self.reminders
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c.cleared.clone())
+            .collect()
     }
 }
 
@@ -841,6 +890,7 @@ async fn local_calendar_and_tasks_for_imap_accounts() {
             notes: None,
             importance: Some(Importance::High),
             due_date: NaiveDate::from_ymd_opt(2026, 11, 1),
+            reminder_at: None,
         })
         .await
         .unwrap();
@@ -2185,4 +2235,583 @@ async fn a_silent_graph_holds_up_removing_an_account_five_seconds_at_most() {
     );
     assert!(h.service.list_accounts().unwrap().is_empty());
     silent.abort();
+}
+
+// --- reminders ------------------------------------------------------------------
+
+use crate::model::{Calendar, Event, ResponseStatus, Snooze};
+use crate::providers::{CalendarProvider, ServerReminder};
+
+/// 2026-10-15 09:00 UTC, when the reminder tests start.
+fn reminder_epoch() -> DateTime<Utc> {
+    use chrono::TimeZone;
+    Utc.with_ymd_and_hms(2026, 10, 15, 9, 0, 0).unwrap()
+}
+
+/// Reminders go by a clock that starts at [`reminder_epoch`] and follows
+/// Tokio's (paused) time, plus whatever is put in the returned jump (time
+/// the computer slept).
+fn virtual_clock(service: &CoreService) -> Arc<Mutex<Duration>> {
+    let origin = tokio::time::Instant::now();
+    let jump = Arc::new(Mutex::new(Duration::zero()));
+    let slept = Arc::clone(&jump);
+    service.reminders.set_clock(Arc::new(move || {
+        reminder_epoch()
+            + Duration::from_std(tokio::time::Instant::now() - origin).unwrap()
+            + *slept.lock().unwrap()
+    }));
+    jump
+}
+
+/// Reminders go by a clock stopped at `at`.
+fn stopped_clock(service: &CoreService, at: DateTime<Utc>) {
+    service.reminders.set_clock(Arc::new(move || at));
+}
+
+fn local_event(
+    calendar: &Calendar,
+    subject: &str,
+    start: DateTime<Utc>,
+    reminder: Option<u32>,
+) -> EventDraft {
+    EventDraft {
+        calendar_id: calendar.id.clone(),
+        subject: subject.into(),
+        location: None,
+        body_html: None,
+        start,
+        end: start + Duration::minutes(30),
+        is_all_day: false,
+        attendees: vec![],
+        reminder_minutes: reminder,
+        show_as: ShowAs::Busy,
+        is_online_meeting: false,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_scheduler_wakes_when_a_reminder_is_due() {
+    let b = background();
+    let account = b.account().await;
+    let jump = virtual_clock(&b.service);
+    let calendar = b.service.list_calendars().unwrap().remove(0);
+    assert_eq!(calendar.account_id, account.id);
+    // Starts in 20 minutes, reminds 15 before.
+    b.service
+        .create_event(local_event(
+            &calendar,
+            "Dentist",
+            reminder_epoch() + Duration::minutes(20),
+            Some(15),
+        ))
+        .await
+        .unwrap();
+    b.service.start_background();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert!(b.h.sink.shown_reminders().is_empty());
+
+    tokio::time::sleep(std::time::Duration::from_secs(4 * 60 + 57)).await;
+    assert!(b.h.sink.shown_reminders().is_empty(), "not yet");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(b.h.sink.shown_reminders(), ["Dentist"]);
+    let active = b.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].fire_at, reminder_epoch() + Duration::minutes(5));
+    assert!(!active[0].overdue);
+
+    // Asleep for two hours: a reminder that came due meanwhile goes off
+    // as soon as the computer wakes up, well before the next minute.
+    b.service
+        .create_event(local_event(
+            &calendar,
+            "Lunch",
+            reminder_epoch() + Duration::minutes(120),
+            Some(15),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    *jump.lock().unwrap() = Duration::hours(2);
+    b.service.wake(WakeReason::Resume);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(b.h.sink.shown_reminders(), ["Dentist", "Lunch"]);
+    // The dentist's appointment is over by now; it stays listed.
+    let titles: Vec<String> = b
+        .service
+        .list_active_reminders()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.title)
+        .collect();
+    assert_eq!(titles, ["Dentist", "Lunch"]);
+    b.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn turning_reminders_off_stops_them() {
+    let b = background();
+    b.account().await;
+    virtual_clock(&b.service);
+    let calendar = b.service.list_calendars().unwrap().remove(0);
+    for (subject, minutes) in [("Soon", 10), ("Later", 30)] {
+        b.service
+            .create_event(local_event(
+                &calendar,
+                subject,
+                reminder_epoch() + Duration::minutes(minutes),
+                Some(15),
+            ))
+            .await
+            .unwrap();
+    }
+    b.service.start_background();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(b.h.sink.shown_reminders(), ["Soon"]);
+    let soon = b.service.list_active_reminders().unwrap()[0].key.clone();
+
+    let settings = b.service.get_settings().unwrap();
+    b.service
+        .update_settings(Settings {
+            reminders_enabled: false,
+            ..settings.clone()
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(b.h.sink.cleared_reminders(), [soon]);
+    assert!(b.service.list_active_reminders().unwrap().is_empty());
+    // "Later" comes due meanwhile: no notification.
+    tokio::time::sleep(std::time::Duration::from_secs(20 * 60)).await;
+    assert_eq!(b.h.sink.shown_reminders(), ["Soon"]);
+    assert_eq!(
+        b.h.sink.reminders.lock().unwrap().last().unwrap().active,
+        []
+    );
+
+    // On again: what's due is listed, what was shown isn't shown again.
+    b.service.update_settings(settings).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let active = b.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 2);
+    assert_eq!(b.h.sink.shown_reminders(), ["Soon", "Later"]);
+    b.service.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_reminders_are_snoozed_and_dismissed() {
+    let h = harness();
+    h.service
+        .add_imap_account(new_imap_account("me@example.com"))
+        .await
+        .unwrap();
+    let now = reminder_epoch();
+    stopped_clock(&h.service, now);
+    let calendar = h.service.list_calendars().unwrap().remove(0);
+    for subject in ["Standup", "Review"] {
+        h.service
+            .create_event(local_event(
+                &calendar,
+                subject,
+                now + Duration::minutes(5),
+                Some(15),
+            ))
+            .await
+            .unwrap();
+    }
+    let list = h.service.list_task_lists().unwrap().remove(0);
+    let task = h
+        .service
+        .create_task(TaskDraft {
+            list_id: list.id.clone(),
+            title: "Call the bank".into(),
+            notes: None,
+            importance: None,
+            due_date: None,
+            reminder_at: Some(now - Duration::minutes(1)),
+        })
+        .await
+        .unwrap();
+    assert_eq!(task.reminder_at, Some(now - Duration::minutes(1)));
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 3);
+    let key = |title: &str| {
+        active
+            .iter()
+            .find(|r| r.title == title)
+            .unwrap()
+            .key
+            .clone()
+    };
+
+    for bad in [
+        Snooze::Minutes(0),
+        Snooze::Until(now - Duration::minutes(1)),
+        Snooze::Until(now + Duration::days(31)),
+    ] {
+        let err = h
+            .service
+            .snooze_reminder(&key("Standup"), bad)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{bad:?}");
+    }
+    let gone = h
+        .service
+        .snooze_reminder("event:nothing:1", Snooze::Minutes(5))
+        .await
+        .unwrap_err();
+    assert_eq!(gone.code, ErrorCode::NotFound);
+
+    let active = h
+        .service
+        .snooze_reminder(&key("Standup"), Snooze::Minutes(10))
+        .await
+        .unwrap();
+    let standup = active.iter().find(|r| r.title == "Standup").unwrap();
+    assert_eq!(standup.snoozed_until, Some(now + Duration::minutes(10)));
+    assert_eq!(
+        h.service
+            .store()
+            .reminder_state(&standup.key)
+            .unwrap()
+            .unwrap()
+            .pending,
+        None,
+        "nothing to tell a local calendar"
+    );
+
+    let active = h
+        .service
+        .dismiss_reminders(&[key("Review"), "event:nothing:1".into()])
+        .await
+        .unwrap();
+    let titles: Vec<&str> = active.iter().map(|r| r.title.as_str()).collect();
+    assert_eq!(titles, ["Call the bank", "Standup"]);
+    assert_eq!(h.sink.cleared_reminders(), [key("Standup"), key("Review")]);
+
+    // Completing the task clears its reminder.
+    h.service
+        .update_task(
+            &task.id,
+            TaskPatch {
+                status: Some(TaskStatus::Completed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 1);
+    assert!(h.sink.cleared_reminders().contains(&key("Call the bank")));
+
+    // A task's reminder changes and clears like its other fields.
+    let changed = h
+        .service
+        .update_task(
+            &task.id,
+            TaskPatch {
+                reminder_at: Some(now + Duration::hours(1)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.reminder_at, Some(now + Duration::hours(1)));
+    let cleared = h
+        .service
+        .update_task(
+            &task.id,
+            TaskPatch {
+                clear_reminder: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.reminder_at, None);
+}
+
+/// A Microsoft 365 calendar: one calendar, its events, and the reminders the
+/// server keeps for them.
+#[derive(Default)]
+struct FakeCalendar {
+    calendar: Mutex<Option<Calendar>>,
+    events: Mutex<Vec<Event>>,
+    reminders: Mutex<Vec<ServerReminder>>,
+    /// Dismissing and snoozing fail while set.
+    offline: std::sync::atomic::AtomicBool,
+    dismissed: Mutex<Vec<String>>,
+    snoozed: Mutex<Vec<(String, DateTime<Utc>)>>,
+}
+
+impl FakeCalendar {
+    fn add(&self, account: &Account, remote: &str, start: DateTime<Utc>, minutes: u32) -> Event {
+        let calendar = self.calendar.lock().unwrap().clone().unwrap();
+        let event = Event {
+            id: local_id(&account.id, EntityKind::Event, remote),
+            account_id: account.id.clone(),
+            calendar_id: calendar.id,
+            remote_id: remote.into(),
+            subject: remote.into(),
+            location: None,
+            body_html: None,
+            body_preview: None,
+            start,
+            end: start + Duration::minutes(30),
+            is_all_day: false,
+            organizer: None,
+            attendees: vec![],
+            show_as: ShowAs::Busy,
+            response_status: ResponseStatus::Organizer,
+            is_online_meeting: true,
+            online_meeting_url: Some("https://teams.example/join/1".into()),
+            reminder_minutes: Some(minutes),
+            is_recurring: false,
+            is_cancelled: false,
+        };
+        self.events.lock().unwrap().push(event.clone());
+        self.reminders.lock().unwrap().push(ServerReminder {
+            event_id: remote.into(),
+            fire_at: start - Duration::minutes(minutes.into()),
+            change_key: None,
+            event_start: event.start,
+            event_end: event.end,
+            subject: event.subject.clone(),
+        });
+        event
+    }
+
+    fn fail(&self) -> Result<()> {
+        if self.offline.load(Ordering::SeqCst) {
+            Err(Error::network("offline"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait]
+impl CalendarProvider for FakeCalendar {
+    async fn list_calendars(&self) -> Result<Vec<Calendar>> {
+        Ok(self.calendar.lock().unwrap().clone().into_iter().collect())
+    }
+
+    async fn list_events(
+        &self,
+        _: &Calendar,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<Event>> {
+        Ok(self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.start < end && e.end > start)
+            .cloned()
+            .collect())
+    }
+
+    async fn create_event(&self, _: &Calendar, _: &EventDraft) -> Result<Event> {
+        unimplemented!()
+    }
+
+    async fn update_event(&self, _: &Calendar, _: &str, _: &EventDraft) -> Result<Event> {
+        unimplemented!()
+    }
+
+    async fn delete_event(&self, _: &Calendar, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn respond_to_event(
+        &self,
+        _: &Calendar,
+        _: &str,
+        _: crate::model::EventResponse,
+        _: Option<&str>,
+        _: bool,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn reminders(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Option<Vec<ServerReminder>>> {
+        Ok(Some(
+            self.reminders
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.event_start >= start && r.event_start < end)
+                .cloned()
+                .collect(),
+        ))
+    }
+
+    async fn dismiss_reminder(&self, remote_id: &str) -> Result<()> {
+        self.fail()?;
+        self.dismissed.lock().unwrap().push(remote_id.into());
+        self.reminders
+            .lock()
+            .unwrap()
+            .retain(|r| r.event_id != remote_id);
+        Ok(())
+    }
+
+    async fn snooze_reminder(&self, remote_id: &str, until: DateTime<Utc>) -> Result<()> {
+        self.fail()?;
+        self.snoozed.lock().unwrap().push((remote_id.into(), until));
+        for r in self.reminders.lock().unwrap().iter_mut() {
+            if r.event_id == remote_id {
+                r.fire_at = until;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A Microsoft account with a calendar on [`FakeCalendar`].
+fn microsoft_calendar(h: &Harness) -> (Account, Arc<FakeCalendar>) {
+    let account = microsoft_account(h, "adele@contoso.com");
+    let fake = Arc::new(FakeCalendar::default());
+    *fake.calendar.lock().unwrap() = Some(Calendar {
+        id: local_id(&account.id, EntityKind::Calendar, "cal"),
+        account_id: account.id.clone(),
+        remote_id: "cal".into(),
+        name: "Calendar".into(),
+        color: "#0b7a75".into(),
+        can_edit: true,
+        is_default: true,
+    });
+    *h.connector.calendar.lock().unwrap() = Some(fake.clone());
+    (account, fake)
+}
+
+#[tokio::test]
+async fn microsoft_365_hears_of_dismissals_and_snoozes_and_keeps_trying() {
+    let h = harness();
+    let (account, fake) = microsoft_calendar(&h);
+    let now = reminder_epoch();
+    stopped_clock(&h.service, now);
+    fake.add(&account, "standup", now + Duration::minutes(10), 15);
+    fake.add(&account, "review", now + Duration::minutes(5), 15);
+    h.service.sync_account(&account.id).await.unwrap();
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 2);
+    let key = |title: &str| {
+        active
+            .iter()
+            .find(|r| r.title == title)
+            .unwrap()
+            .key
+            .clone()
+    };
+
+    // Offline: dismissed here, and Microsoft 365 hears of it later.
+    fake.offline.store(true, Ordering::SeqCst);
+    let left = h
+        .service
+        .dismiss_reminders(&[key("standup")])
+        .await
+        .unwrap();
+    assert_eq!(left.len(), 1);
+    assert!(fake.dismissed.lock().unwrap().is_empty());
+    let pending = h
+        .service
+        .store()
+        .pending_reminder_actions(&account.id)
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].pending,
+        Some(crate::reminders::ServerAction::Dismiss)
+    );
+    // Still dismissed after a sync that couldn't tell the server.
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(h.service.list_active_reminders().unwrap().len(), 1);
+
+    fake.offline.store(false, Ordering::SeqCst);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(*fake.dismissed.lock().unwrap(), ["standup"]);
+    assert!(
+        h.service
+            .store()
+            .pending_reminder_actions(&account.id)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Snoozed: Microsoft 365 hears of it at once, and it stays snoozed
+    // once the server reports the reminder at its new time.
+    let active = h
+        .service
+        .snooze_reminder(&key("review"), Snooze::Minutes(5))
+        .await
+        .unwrap();
+    let until = now + Duration::minutes(5);
+    assert_eq!(
+        *fake.snoozed.lock().unwrap(),
+        [("review".to_owned(), until)]
+    );
+    assert_eq!(active[0].snoozed_until, Some(until));
+    h.service.sync_account(&account.id).await.unwrap();
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].snoozed_until, Some(until));
+    assert_eq!(active[0].fire_at, until, "the server's time");
+
+    // When the snooze is over it goes off again, once.
+    let shown = h.sink.shown_reminders().len();
+    stopped_clock(&h.service, until);
+    let active = h.service.list_active_reminders().unwrap();
+    assert!(active[0].is_due());
+    assert_eq!(h.sink.shown_reminders()[shown..], ["review"]);
+    h.service.list_active_reminders().unwrap();
+    assert_eq!(h.sink.shown_reminders().len(), shown + 1);
+}
+
+#[tokio::test]
+async fn microsoft_365_s_reminders_win_over_the_events() {
+    let h = harness();
+    let (account, fake) = microsoft_calendar(&h);
+    let now = reminder_epoch();
+    stopped_clock(&h.service, now);
+    let standup = fake.add(&account, "standup", now + Duration::minutes(10), 15);
+    fake.add(&account, "review", now + Duration::minutes(10), 15);
+    h.service.sync_account(&account.id).await.unwrap();
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 2);
+    let standup_key = active
+        .iter()
+        .find(|r| r.title == "standup")
+        .unwrap()
+        .key
+        .clone();
+    assert_eq!(
+        active[0].online_meeting_url.as_deref(),
+        Some("https://teams.example/join/1")
+    );
+
+    // Dismissed in Outlook; the review snoozed on a phone.
+    fake.reminders
+        .lock()
+        .unwrap()
+        .retain(|r| r.event_id != "standup");
+    fake.reminders.lock().unwrap()[0].fire_at = now + Duration::minutes(20);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert!(h.service.list_active_reminders().unwrap().is_empty());
+    assert!(h.sink.cleared_reminders().contains(&standup_key));
+
+    // Without a usable report the events' own times count: the account's
+    // report forgotten, the standup reminds again (here, as already shown).
+    h.service
+        .store()
+        .forget_server_reminders(&account.id)
+        .unwrap();
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 2);
+    assert_eq!(active[0].fire_at, standup.start - Duration::minutes(15));
 }

@@ -137,6 +137,7 @@ impl CoreService {
             tracing::warn!("tasks sync for account {} failed: {e}", account.id);
             first_error.get_or_insert(e);
         }
+        self.prune_reminders();
         first_error.map_or(Ok(()), Err)
     }
 
@@ -273,6 +274,7 @@ impl CoreService {
             self.store
                 .replace_events_in_range(&calendar.id, start, end, &events)?;
         }
+        self.refresh_server_reminders(account, provider).await;
         self.notify(&[DataKind::Calendar], Some(&account.id));
         Ok(())
     }

@@ -11,8 +11,8 @@ use crate::model::{
     AttendeeKind, Calendar, EmailAddress, EntityKind, EventDraft, EventResponse, ResponseStatus,
     ShowAs, local_id,
 };
-use crate::providers::CalendarProvider;
 use crate::providers::graph::client::{PREFER_IMMUTABLE_ID, PREFER_UTC};
+use crate::providers::{CalendarProvider, ServerReminder};
 
 fn calendar() -> Calendar {
     Calendar {
@@ -428,4 +428,114 @@ async fn events_must_end_after_they_start() {
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidInput);
+}
+
+#[tokio::test]
+async fn reminders_are_read_from_the_reminder_view_in_utc() {
+    let (server, provider) = setup().await;
+    let view =
+        "/me/reminderView(startDateTime='2026-10-14T09:00:00',endDateTime='2026-10-30T09:00:00')";
+    Mock::given(method("GET"))
+        .and(path(view))
+        .and(query_param("$skip", "3"))
+        .and(prefers(PREFER_UTC))
+        .respond_with(ok_json(json!({
+            "value": [{
+                "eventId": "AAMkEvent-birthday",
+                "eventSubject": "Pat's birthday",
+                "eventStartTime": { "dateTime": "2026-10-20T07:00:00.0000000", "timeZone": "UTC" },
+                "eventEndTime": { "dateTime": "2026-10-21T07:00:00.0000000", "timeZone": "UTC" },
+                "reminderFireTime": { "dateTime": "2026-10-19T16:00:00.0000000", "timeZone": "UTC" }
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(view))
+        .and(prefers(PREFER_UTC))
+        .and(prefers(PREFER_IMMUTABLE_ID))
+        .respond_with(ok_json(fixture("reminder_view.json", &server)))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let start = Utc.with_ymd_and_hms(2026, 10, 14, 9, 0, 0).unwrap();
+    let reminders = provider
+        .reminders(start, start + chrono::Duration::days(16))
+        .await
+        .unwrap()
+        .unwrap();
+    let at = |d, h, m, s| Utc.with_ymd_and_hms(2026, 10, d, h, m, s).unwrap();
+    assert_eq!(
+        reminders,
+        [
+            ServerReminder {
+                event_id: "AAMkEvent-standup".into(),
+                fire_at: at(15, 8, 45, 0),
+                change_key: Some("SuFHwDRP1EeXJUopWbSLlgAAmBvk2g==".into()),
+                event_start: at(15, 9, 0, 0),
+                event_end: at(15, 9, 15, 0),
+                subject: "Team standup".into(),
+            },
+            ServerReminder {
+                event_id: "AAMkEvent-review".into(),
+                fire_at: at(15, 13, 52, 30),
+                change_key: Some("SuFHwDRP1EeXJUopWbSLlgAAmBvk3g==".into()),
+                event_start: at(15, 14, 0, 0),
+                event_end: at(15, 15, 0, 0),
+                subject: "Design review".into(),
+            },
+            ServerReminder {
+                event_id: "AAMkEvent-birthday".into(),
+                fire_at: at(19, 16, 0, 0),
+                change_key: None,
+                event_start: at(20, 7, 0, 0),
+                event_end: at(21, 7, 0, 0),
+                subject: "Pat's birthday".into(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn reminders_are_dismissed_and_snoozed_on_the_event() {
+    let (server, provider) = setup().await;
+    Mock::given(method("POST"))
+        .and(path("/me/events/AAMk%2FEvent==/dismissReminder"))
+        .and(prefers(PREFER_IMMUTABLE_ID))
+        .and(|r: &wiremock::Request| r.body.is_empty())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/me/events/AAMkEvent/snoozeReminder"))
+        .and(body_json(json!({
+            "newReminderTime": { "dateTime": "2026-10-15T09:05:00", "timeZone": "UTC" }
+        })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    provider.dismiss_reminder("AAMk/Event==").await.unwrap();
+    provider
+        .snooze_reminder(
+            "AAMkEvent",
+            Utc.with_ymd_and_hms(2026, 10, 15, 9, 5, 0).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // An event that's gone.
+    Mock::given(method("POST"))
+        .and(path("/me/events/AAMkGone/dismissReminder"))
+        .respond_with(super::graph_error(
+            404,
+            "ErrorItemNotFound",
+            "The specified object was not found in the store.",
+        ))
+        .mount(&server)
+        .await;
+    let gone = provider.dismiss_reminder("AAMkGone").await.unwrap_err();
+    assert_eq!(gone.code, ErrorCode::NotFound);
 }

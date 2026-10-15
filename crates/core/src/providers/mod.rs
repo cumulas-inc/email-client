@@ -195,6 +195,20 @@ pub trait ChangeSubscriptions: Send + Sync {
     async fn delete_subscription(&self, id: &str) -> Result<()>;
 }
 
+/// A reminder as the server reports it (Microsoft 365's `reminderView`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerReminder {
+    /// The event's remote id.
+    pub event_id: String,
+    /// When the reminder goes off: its event's start less the reminder time,
+    /// or later when it was snoozed.
+    pub fire_at: DateTime<Utc>,
+    pub change_key: Option<String>,
+    pub event_start: DateTime<Utc>,
+    pub event_end: DateTime<Utc>,
+    pub subject: String,
+}
+
 #[async_trait]
 pub trait CalendarProvider: Send + Sync {
     async fn list_calendars(&self) -> Result<Vec<Calendar>>;
@@ -227,6 +241,31 @@ pub trait CalendarProvider: Send + Sync {
         comment: Option<&str>,
         send_response: bool,
     ) -> Result<()>;
+
+    /// The reminders of events between `start` and `end` as the server keeps
+    /// them, dismissed and snoozed ones as they are now; `None` when the
+    /// server doesn't keep reminders.
+    async fn reminders(
+        &self,
+        _start: DateTime<Utc>,
+        _end: DateTime<Utc>,
+    ) -> Result<Option<Vec<ServerReminder>>> {
+        Ok(None)
+    }
+
+    /// Dismisses an event's reminder on the server.
+    async fn dismiss_reminder(&self, _remote_id: &str) -> Result<()> {
+        Err(crate::error::Error::unsupported(
+            "This calendar doesn't keep reminders.",
+        ))
+    }
+
+    /// Snoozes an event's reminder on the server until `until`.
+    async fn snooze_reminder(&self, _remote_id: &str, _until: DateTime<Utc>) -> Result<()> {
+        Err(crate::error::Error::unsupported(
+            "This calendar doesn't keep reminders.",
+        ))
+    }
 }
 
 #[async_trait]

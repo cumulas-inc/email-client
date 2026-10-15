@@ -8,7 +8,9 @@ use serde_json::{Map, Value, json};
 
 use super::GraphProvider;
 use super::client::segment;
-use super::types::{DateTimeTimeZone, ItemBody, date_time_json, midnight, nearest_date, non_empty};
+use super::types::{
+    DateTimeTimeZone, ItemBody, date_time_json, midnight, nearest_date, non_empty, null_default,
+};
 use crate::error::Result;
 use crate::html::html_to_text;
 use crate::model::{
@@ -34,6 +36,9 @@ struct GraphTask {
     status: Option<String>,
     importance: Option<String>,
     due_date_time: Option<DateTimeTimeZone>,
+    #[serde(default, deserialize_with = "null_default")]
+    is_reminder_on: bool,
+    reminder_date_time: Option<DateTimeTimeZone>,
     completed_date_time: Option<DateTimeTimeZone>,
     created_date_time: Option<DateTime<Utc>>,
     last_modified_date_time: Option<DateTime<Utc>>,
@@ -69,6 +74,10 @@ impl GraphTask {
             importance: Importance::parse(self.importance.as_deref().unwrap_or("normal")),
             // Due dates are midnight in the zone they were set in.
             due_date: self.due_date_time.and_then(|d| d.naive()).map(nearest_date),
+            reminder_at: self
+                .is_reminder_on
+                .then(|| self.reminder_date_time.as_ref()?.instant())
+                .flatten(),
             completed_at: self.completed_date_time.and_then(|d| d.utc()),
             created_at,
             updated_at: self.last_modified_date_time.unwrap_or(created_at),
@@ -78,6 +87,11 @@ impl GraphTask {
 
 fn body_json(notes: &str) -> Value {
     json!({ "content": notes, "contentType": "text" })
+}
+
+/// A reminder goes out in UTC.
+fn reminder_json(at: DateTime<Utc>) -> Value {
+    date_time_json(at.naive_utc(), "UTC")
 }
 
 impl GraphProvider {
@@ -140,6 +154,10 @@ impl TasksProvider for GraphProvider {
         if let Some(due) = draft.due_date {
             body["dueDateTime"] = self.due_json(due).await;
         }
+        if let Some(at) = draft.reminder_at {
+            body["isReminderOn"] = true.into();
+            body["reminderDateTime"] = reminder_json(at);
+        }
         let created: GraphTask = self
             .client
             .send_json(Method::POST, &self.tasks_url(list), &body, &[])
@@ -172,6 +190,12 @@ impl TasksProvider for GraphProvider {
             body.insert("dueDateTime".into(), Value::Null);
         } else if let Some(due) = patch.due_date {
             body.insert("dueDateTime".into(), self.due_json(due).await);
+        }
+        if patch.clear_reminder {
+            body.insert("isReminderOn".into(), false.into());
+        } else if let Some(at) = patch.reminder_at {
+            body.insert("isReminderOn".into(), true.into());
+            body.insert("reminderDateTime".into(), reminder_json(at));
         }
         if body.is_empty() {
             return Ok(current.clone());

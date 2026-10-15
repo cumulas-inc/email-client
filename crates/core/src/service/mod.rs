@@ -9,6 +9,7 @@ mod background;
 mod connector;
 mod mail;
 mod pim;
+mod reminders;
 mod sync;
 pub(crate) mod targeted;
 
@@ -93,6 +94,7 @@ pub struct CoreService {
     sign_in_seq: std::sync::atomic::AtomicU64,
     /// Push and the other background work, once started.
     push: PushHub,
+    reminders: reminders::ReminderHub,
 }
 
 impl CoreService {
@@ -113,6 +115,7 @@ impl CoreService {
             pending_sign_in: Mutex::new(None),
             sign_in_seq: std::sync::atomic::AtomicU64::new(0),
             push: PushHub::default(),
+            reminders: reminders::ReminderHub::default(),
         }
     }
 
@@ -150,6 +153,12 @@ impl CoreService {
 
     fn notify(&self, kinds: &[DataKind], account_id: Option<&str>) {
         self.sink.data_changed(kinds, account_id);
+        if kinds
+            .iter()
+            .any(|k| matches!(k, DataKind::Calendar | DataKind::Tasks))
+        {
+            self.reminders.poke.notify_one();
+        }
     }
 
     // --- accounts -----------------------------------------------------------
@@ -462,6 +471,9 @@ impl CoreService {
             || previous.use_push_relay != settings.use_push_relay
         {
             self.restart_all_push();
+        }
+        if previous.reminders_enabled != settings.reminders_enabled {
+            self.reminders.poke.notify_one();
         }
         Ok(settings)
     }

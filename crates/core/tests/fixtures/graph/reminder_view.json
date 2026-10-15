@@ -1,0 +1,33 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(microsoft.graph.reminder)",
+  "value": [
+    {
+      "eventId": "AAMkEvent-standup",
+      "changeKey": "SuFHwDRP1EeXJUopWbSLlgAAmBvk2g==",
+      "eventSubject": "Team standup",
+      "eventWebLink": "https://outlook.office365.com/owa/?itemid=AAMkEvent-standup&exvsurl=1&path=/calendar/item",
+      "eventStartTime": { "dateTime": "2026-10-15T09:00:00.0000000", "timeZone": "UTC" },
+      "eventEndTime": { "dateTime": "2026-10-15T09:15:00.0000000", "timeZone": "UTC" },
+      "eventLocation": { "displayName": "Teams" },
+      "reminderFireTime": { "dateTime": "2026-10-15T08:45:00.0000000", "timeZone": "UTC" }
+    },
+    {
+      "eventId": "AAMkEvent-review",
+      "changeKey": "SuFHwDRP1EeXJUopWbSLlgAAmBvk3g==",
+      "eventSubject": "Design review",
+      "eventWebLink": "https://outlook.office365.com/owa/?itemid=AAMkEvent-review&exvsurl=1&path=/calendar/item",
+      "eventStartTime": { "dateTime": "2026-10-15T14:00:00.0000000", "timeZone": "UTC" },
+      "eventEndTime": { "dateTime": "2026-10-15T15:00:00.0000000", "timeZone": "UTC" },
+      "eventLocation": { "displayName": "Conf Room 3" },
+      "reminderFireTime": { "dateTime": "2026-10-15T13:52:30.0000000", "timeZone": "UTC" }
+    },
+    {
+      "eventId": null,
+      "eventSubject": "Unreadable",
+      "eventStartTime": { "dateTime": "2026-10-15T14:00:00.0000000", "timeZone": "UTC" },
+      "eventEndTime": { "dateTime": "2026-10-15T15:00:00.0000000", "timeZone": "UTC" },
+      "reminderFireTime": { "dateTime": "soon", "timeZone": "UTC" }
+    }
+  ],
+  "@odata.nextLink": "{{base}}/me/reminderView(startDateTime='2026-10-14T09:00:00',endDateTime='2026-10-30T09:00:00')?$skip=3"
+}

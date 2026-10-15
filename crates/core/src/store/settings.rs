@@ -50,7 +50,10 @@ impl Store {
     }
 
     pub fn set_app_value(&self, key: &str, value: &str) -> Result<()> {
-        if matches!(key, SETTINGS_KEY | INSTALLATION_ID_KEY) {
+        if matches!(
+            key,
+            SETTINGS_KEY | INSTALLATION_ID_KEY | super::reminders::CHECKED_UNTIL_KEY
+        ) {
             return Err(crate::error::Error::invalid_input(format!(
                 "{key} is not an app value"
             )));

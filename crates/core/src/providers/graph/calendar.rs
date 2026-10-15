@@ -18,7 +18,7 @@ use crate::model::{
     Attendee, AttendeeKind, Calendar, EntityKind, Event, EventDraft, EventResponse, ResponseStatus,
     ShowAs, local_id,
 };
-use crate::providers::CalendarProvider;
+use crate::providers::{CalendarProvider, ServerReminder};
 
 const CALENDAR_FIELDS: &str = "id,name,color,hexColor,canEdit,isDefaultCalendar";
 const EVENT_FIELDS: &str = "id,subject,location,body,bodyPreview,start,end,isAllDay,organizer,\
@@ -104,6 +104,37 @@ struct GraphEvent {
     event_type: Option<String>,
     #[serde(default, deserialize_with = "null_default")]
     is_cancelled: bool,
+}
+
+/// A `reminder` from `reminderView`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphReminder {
+    event_id: Option<String>,
+    change_key: Option<String>,
+    event_subject: Option<String>,
+    event_start_time: Option<DateTimeTimeZone>,
+    event_end_time: Option<DateTimeTimeZone>,
+    reminder_fire_time: Option<DateTimeTimeZone>,
+}
+
+impl GraphReminder {
+    /// `None` without an event id or readable times.
+    fn into_reminder(self) -> Option<ServerReminder> {
+        Some(ServerReminder {
+            fire_at: self.reminder_fire_time?.utc()?,
+            event_start: self.event_start_time?.utc()?,
+            event_end: self.event_end_time?.utc()?,
+            subject: self.event_subject.unwrap_or_default(),
+            change_key: self.change_key,
+            event_id: non_empty(self.event_id)?,
+        })
+    }
+}
+
+/// `2026-10-15T09:00:00` for `reminderView`'s parameters, which are in UTC.
+fn view_time(at: DateTime<Utc>) -> String {
+    at.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +310,12 @@ fn event_json(draft: &EventDraft, time_zone: &str, online_provider: Option<&str>
 }
 
 impl GraphProvider {
+    /// An event by its id alone, wherever it is.
+    fn my_event_url(&self, remote_id: &str, suffix: &str) -> String {
+        self.client
+            .url(&format!("/me/events/{}{suffix}", segment(remote_id)))
+    }
+
     fn event_url(&self, calendar: &Calendar, remote_id: &str, suffix: &str) -> String {
         self.client.url(&format!(
             "/me/calendars/{}/events/{}{suffix}",
@@ -472,6 +509,53 @@ impl CalendarProvider for GraphProvider {
                 &self.event_url(calendar, remote_id, action),
                 Some(&body),
                 PREFER,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn reminders(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Option<Vec<ServerReminder>>> {
+        let url = self.client.url(&format!(
+            "/me/reminderView(startDateTime='{}',endDateTime='{}')",
+            view_time(start),
+            view_time(end)
+        ));
+        let reminders: Vec<GraphReminder> = self
+            .client
+            .get_all(&url, &[PREFER_IMMUTABLE_ID, PREFER_UTC])
+            .await?;
+        Ok(Some(
+            reminders
+                .into_iter()
+                .filter_map(GraphReminder::into_reminder)
+                .collect(),
+        ))
+    }
+
+    async fn dismiss_reminder(&self, remote_id: &str) -> Result<()> {
+        self.client
+            .send_no_content(
+                Method::POST,
+                &self.my_event_url(remote_id, "/dismissReminder"),
+                None,
+                &[PREFER_IMMUTABLE_ID],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn snooze_reminder(&self, remote_id: &str, until: DateTime<Utc>) -> Result<()> {
+        let body = json!({ "newReminderTime": date_time_json(until.naive_utc(), "UTC") });
+        self.client
+            .send_no_content(
+                Method::POST,
+                &self.my_event_url(remote_id, "/snoozeReminder"),
+                Some(&body),
+                &[PREFER_IMMUTABLE_ID],
             )
             .await?;
         Ok(())
