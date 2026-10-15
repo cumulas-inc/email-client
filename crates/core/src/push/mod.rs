@@ -15,6 +15,8 @@
 
 pub mod backoff;
 pub(crate) mod hub;
+pub mod relay;
+pub(crate) mod sse;
 pub mod supervisor;
 pub(crate) mod wake;
 
