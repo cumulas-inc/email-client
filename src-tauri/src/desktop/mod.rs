@@ -15,13 +15,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Local};
-use cumulas_core::model::{Account, FolderRole, Settings};
+use cumulas_core::model::{Account, ActiveReminder, FolderRole, Settings};
 use cumulas_core::service::MailAlert;
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
 
 use self::background::Background;
-use self::notify::{Action, MailToastOptions, Notifications, Toast, ToastKind, mail_toasts};
+use self::notify::{
+    Action, MailToastOptions, Notifications, ReminderToastOptions, Toast, ToastKind, mail_toasts,
+    reminder_toasts,
+};
 use self::router::Router;
 use self::tray::Tray;
 use self::window::WindowState;
@@ -129,9 +132,10 @@ pub fn start(app: &AppHandle, invoked: mpsc::UnboundedReceiver<notify::Invoked>)
     }
 }
 
-/// Carries out clicks as they come. Marking read and archiving wait on the
-/// server, so each runs on its own and no other click waits for them;
-/// opening and showing wait on nothing, and stay in order.
+/// Carries out clicks as they come. Marking read, archiving, snoozing,
+/// dismissing and completing wait on the server, so each runs on its own
+/// and no other click waits for them; opening and showing wait on nothing,
+/// and stay in order.
 async fn serve_clicks<F>(
     mut invoked: mpsc::UnboundedReceiver<notify::Invoked>,
     handle: impl Fn(notify::Invoked) -> F,
@@ -139,7 +143,7 @@ async fn serve_clicks<F>(
     F: Future<Output = ()> + Send + 'static,
 {
     while let Some(click) = invoked.recv().await {
-        if matches!(click.action, Action::MarkRead(_) | Action::Archive(_)) {
+        if click.action.is_slow() {
             tauri::async_runtime::spawn(handle(click));
         } else {
             handle(click).await;
@@ -189,6 +193,39 @@ pub async fn new_mail(app: &AppHandle, account: &Account, alert: MailAlert) {
     for (toast, messages) in mail_toasts(account, &alert, options) {
         if let Err(e) = desktop.notifications.show(&toast, messages).await {
             tracing::warn!("could not show a notification: {e}");
+        }
+    }
+}
+
+/// The reminders changed: the notifications of those no longer due go, and
+/// those that just came due show. Unlike new mail's, they show while the
+/// window is in front too: they're about now, and the window may not be
+/// the one in front for long. (The header's bell lists them as well.)
+pub async fn reminders_changed(
+    app: &AppHandle,
+    newly_due: Vec<ActiveReminder>,
+    cleared: Vec<String>,
+) {
+    let Some(desktop) = app.try_state::<Desktop>() else {
+        return;
+    };
+    if !cleared.is_empty() {
+        desktop.notifications.settle(&cleared).await;
+    }
+    if newly_due.is_empty() {
+        return;
+    }
+    let settings = app
+        .try_state::<AppState>()
+        .and_then(|state| state.service.get_settings().ok())
+        .unwrap_or_default();
+    let options = ReminderToastOptions {
+        snooze_minutes: settings.default_snooze_minutes,
+        sound: settings.notify_sound,
+    };
+    for (toast, keys) in reminder_toasts(&newly_due, options, Local::now()) {
+        if let Err(e) = desktop.notifications.show(&toast, keys).await {
+            tracing::warn!("could not show a reminder: {e}");
         }
     }
 }
@@ -379,6 +416,10 @@ mod tests {
             Action::OpenMessage("c".into()),
             Action::ShowWindow,
         ] {
+            assert_eq!(
+                action.is_slow(),
+                matches!(action, Action::MarkRead(_) | Action::Archive(_))
+            );
             clicks.send(click(action)).unwrap();
         }
         async fn next(done: &mut mpsc::UnboundedReceiver<Action>) -> Action {

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cumulas_core::CoreService;
-use cumulas_core::model::{Account, DataKind, SyncStatus};
+use cumulas_core::model::{Account, ActiveReminder, DataKind, SyncStatus};
 use cumulas_core::push::PushStatus;
 use cumulas_core::secrets::{KeyringSecretStore, MemorySecretStore, SecretStore};
 use cumulas_core::service::{EventSink, LiveConnector, MailAlert};
@@ -88,6 +88,36 @@ impl EventSink for TauriSink {
     fn push_status(&self, status: &PushStatus) {
         let _ = self.app.emit("push-status", status);
     }
+
+    /// For the page's Reminders panel, and the desktop's notifications.
+    fn reminders_changed(
+        &self,
+        active: &[ActiveReminder],
+        newly_due: &[ActiveReminder],
+        cleared: &[String],
+    ) {
+        let _ = self.app.emit(
+            "reminders-changed",
+            RemindersChanged {
+                active,
+                newly_due,
+                cleared,
+            },
+        );
+        let (app, newly_due, cleared) = (self.app.clone(), newly_due.to_vec(), cleared.to_vec());
+        tauri::async_runtime::spawn(async move {
+            desktop::reminders_changed(&app, newly_due, cleared).await;
+        });
+    }
+}
+
+/// The `reminders-changed` event.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemindersChanged<'a> {
+    pub active: &'a [ActiveReminder],
+    pub newly_due: &'a [ActiveReminder],
+    pub cleared: &'a [String],
 }
 
 async fn open_secret_store() -> (Arc<dyn SecretStore>, bool) {
@@ -188,6 +218,10 @@ pub fn run() {
             commands::set_start_at_login,
             commands::send_test_notification,
             commands::take_pending_navigation,
+            // reminders
+            commands::list_active_reminders,
+            commands::snooze_reminder,
+            commands::dismiss_reminders,
             // mail
             commands::list_folders,
             commands::list_messages,

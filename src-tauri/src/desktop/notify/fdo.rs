@@ -361,10 +361,17 @@ impl Notifier for FdoNotifier {
         if toast.kind == ToastKind::Mail {
             hints.insert("category", Value::from("email.arrived"));
         }
-        if toast.sound && toast.kind == ToastKind::Mail {
-            hints.insert("sound-name", Value::from("message-new-email"));
-        } else if !toast.sound {
-            hints.insert("suppress-sound", Value::Bool(true));
+        match (toast.sound, toast.kind) {
+            (true, ToastKind::Mail) => {
+                hints.insert("sound-name", Value::from("message-new-email"));
+            }
+            (true, ToastKind::Reminder) => {
+                hints.insert("sound-name", Value::from("alarm-clock-elapsed"));
+            }
+            (true, ToastKind::App) => {}
+            (false, _) => {
+                hints.insert("suppress-sound", Value::Bool(true));
+            }
         }
         let body = if self.capabilities.body_markup {
             escape_markup(&toast.body)
@@ -824,6 +831,82 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(h.next_click().await.action, Action::Archive("m1".into()));
+    }
+
+    #[tokio::test]
+    async fn reminders_carry_their_buttons_and_route_their_clicks() {
+        let mut h = harness(&["actions", "body"]).await;
+        let key = "event:5f0c-1:1792040700";
+        let reminder = Toast {
+            id: format!("reminder:{key}"),
+            title: "Standup".into(),
+            body: "Today at 10:00 AM · Room 3".into(),
+            kind: ToastKind::Reminder,
+            default_action: Action::OpenEvent("5f0c-1".into()),
+            buttons: vec![
+                (
+                    "Snooze 5 min".into(),
+                    Action::Snooze {
+                        key: key.into(),
+                        minutes: 5,
+                    },
+                ),
+                ("Dismiss".into(), Action::Dismiss(key.into())),
+                (
+                    "Join".into(),
+                    Action::Join("https://teams.example/l/meetup-join/1?a=b".into()),
+                ),
+            ],
+            sound: true,
+        };
+        h.notifier.show(&reminder).await.unwrap();
+        {
+            let recorded = h.recorded.lock().unwrap();
+            let shown = &recorded.notified[0];
+            assert_eq!(
+                shown.actions,
+                [
+                    "default",
+                    "Open",
+                    "snooze:5:event:5f0c-1:1792040700",
+                    "Snooze 5 min",
+                    "dismiss:event:5f0c-1:1792040700",
+                    "Dismiss",
+                    "join:https://teams.example/l/meetup-join/1?a=b",
+                    "Join",
+                ]
+            );
+            assert_eq!(
+                hint_str(&shown.hints, "sound-name").as_deref(),
+                Some("alarm-clock-elapsed")
+            );
+            assert!(!shown.hints.contains_key("category"));
+            // Never critical: that would get past Do Not Disturb.
+            assert_eq!(
+                u8::try_from(shown.hints["urgency"].try_clone().unwrap()).unwrap(),
+                1
+            );
+        }
+        let emitter = h.emit();
+        for (button, action) in [
+            (
+                "snooze:5:event:5f0c-1:1792040700",
+                Action::Snooze {
+                    key: key.into(),
+                    minutes: 5,
+                },
+            ),
+            (
+                "dismiss:event:5f0c-1:1792040700",
+                Action::Dismiss(key.into()),
+            ),
+            ("default", Action::OpenEvent("5f0c-1".into())),
+        ] {
+            FakeServer::action_invoked(&emitter, 41, button)
+                .await
+                .unwrap();
+            assert_eq!(h.next_click().await.action, action);
+        }
     }
 
     #[tokio::test]

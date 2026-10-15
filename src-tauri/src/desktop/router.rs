@@ -1,16 +1,24 @@
-//! Where notification clicks (and the tray's items) lead: opening a message
-//! shows the window and tells the page to go there (the `navigate` event);
-//! marking read and archiving happen without the window (and a new
-//! notification says when they failed).
+//! Where notification clicks (and the tray's items) lead: opening a message,
+//! an event or a task shows the window and tells the page to go there (the
+//! `navigate` event); marking read, archiving, snoozing, dismissing and
+//! completing a task happen without the window (and a new notification
+//! says when they failed); Join opens the meeting in the browser.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use chrono::{DateTime, Utc};
+use cumulas_core::model::{Snooze, TaskPatch, TaskStatus};
 use cumulas_core::store::Store;
+use cumulas_core::{CoreService, ErrorCode};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_opener::OpenerExt;
 
-use super::notify::{Action, Invoked, Notifications, failed_toast, mail_toast_id};
+use super::notify::{
+    Action, Invoked, Notifications, failed_reminder_toast, failed_toast, is_https, mail_toast_id,
+    reminder_toast_id,
+};
 use super::{Desktop, window};
 use crate::AppState;
 
@@ -34,6 +42,20 @@ pub enum Navigate {
     },
     /// A new message.
     Compose,
+    /// An event, in Calendar: the day it starts on (the UTC date of
+    /// `start` for an all-day event, the local one otherwise).
+    #[serde(rename_all = "camelCase")]
+    Event {
+        event_id: String,
+        start: DateTime<Utc>,
+        is_all_day: bool,
+    },
+    /// A task, in its list.
+    #[serde(rename_all = "camelCase")]
+    Task { task_id: String, list_id: String },
+    /// The Reminders panel; `notice` says why, when there's something to say.
+    #[serde(rename_all = "camelCase")]
+    Reminders { notice: Option<String> },
 }
 
 /// Navigation waiting for the page: the window was created for it, and its
@@ -124,6 +146,123 @@ pub async fn handle(app: &AppHandle, click: Invoked) {
         Action::ShowWindow => {
             window::show_main(app, click.activation_token);
         }
+        Action::OpenEvent(id) => {
+            window::show_main(app, click.activation_token);
+            let to = match service.store().get_event(&id) {
+                Ok(event) => Navigate::Event {
+                    event_id: event.id,
+                    start: event.start,
+                    is_all_day: event.is_all_day,
+                },
+                Err(_) => Navigate::Reminders {
+                    notice: Some("That event was moved or deleted.".into()),
+                },
+            };
+            desktop.router.navigate(app, to);
+        }
+        Action::OpenTask(id) => {
+            window::show_main(app, click.activation_token);
+            let to = match service.store().get_task(&id) {
+                Ok(task) => Navigate::Task {
+                    task_id: task.id,
+                    list_id: task.list_id,
+                },
+                Err(_) => Navigate::Reminders {
+                    notice: Some("That task was deleted.".into()),
+                },
+            };
+            desktop.router.navigate(app, to);
+        }
+        Action::OpenReminders => {
+            window::show_main(app, click.activation_token);
+            desktop
+                .router
+                .navigate(app, Navigate::Reminders { notice: None });
+        }
+        action @ (Action::Snooze { .. } | Action::Dismiss(_)) => {
+            reminder_action(&desktop.notifications, service, action).await;
+        }
+        Action::Join(url) => {
+            // Only the meeting's own web address: a Join target from
+            // anywhere else is never opened.
+            if !is_https(&url) {
+                tracing::warn!("not opening a meeting address that isn't https");
+                return;
+            }
+            if let Err(e) = app.opener().open_url(url.trim(), None::<&str>) {
+                tracing::warn!("could not open the meeting: {e}");
+            }
+        }
+        action @ Action::CompleteTask(_) => {
+            reminder_action(&desktop.notifications, service, action).await;
+        }
+    }
+}
+
+/// Carries out a reminder's Snooze, Dismiss or Mark complete button, without
+/// the window.
+pub(crate) async fn reminder_action(
+    notifications: &Notifications,
+    service: &CoreService,
+    action: Action,
+) {
+    match action {
+        Action::Snooze { key, minutes } => {
+            let result = service
+                .snooze_reminder(&key, Snooze::Minutes(minutes))
+                .await;
+            reminder_done(notifications, service, &key, result.map(drop), "snooze").await;
+        }
+        Action::Dismiss(key) => {
+            let result = service.dismiss_reminders(std::slice::from_ref(&key)).await;
+            reminder_done(notifications, service, &key, result.map(drop), "dismiss").await;
+        }
+        Action::CompleteTask(id) => {
+            let patch = TaskPatch {
+                status: Some(TaskStatus::Completed),
+                ..TaskPatch::default()
+            };
+            // Its reminder clears once it's done (see `reminders_changed`).
+            if let Err(e) = service.update_task(&id, patch).await {
+                tracing::warn!("could not complete the task from its notification: {e}");
+                let toast = failed_reminder_toast("Couldn't complete the task", None);
+                if let Err(e) = notifications.show(&toast, Vec::new()).await {
+                    tracing::warn!("could not say a notification's button failed: {e}");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A reminder's Snooze or Dismiss (`what`) button was carried out: its
+/// notification goes, or says that it failed (the desktop closed it on
+/// the click, so the reminder would look handled).
+async fn reminder_done(
+    notifications: &Notifications,
+    service: &CoreService,
+    key: &str,
+    result: cumulas_core::Result<()>,
+    what: &str,
+) {
+    match result {
+        Ok(()) => notifications.withdraw(&reminder_toast_id(key)).await,
+        // No longer due: nothing left to do.
+        Err(e) if e.code == ErrorCode::NotFound => {
+            notifications.withdraw(&reminder_toast_id(key)).await;
+        }
+        Err(e) => {
+            tracing::warn!("could not {what} the reminder from its notification: {e}");
+            let reminder = service
+                .list_active_reminders()
+                .ok()
+                .and_then(|active| active.into_iter().find(|r| r.key == key));
+            let toast =
+                failed_reminder_toast(&format!("Couldn't {what} the reminder"), reminder.as_ref());
+            if let Err(e) = notifications.show(&toast, vec![key.to_owned()]).await {
+                tracing::warn!("could not say a notification's button failed: {e}");
+            }
+        }
     }
 }
 
@@ -186,6 +325,32 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Navigate::Compose).unwrap(),
             serde_json::json!({ "kind": "compose" })
+        );
+        assert_eq!(
+            serde_json::to_value(Navigate::Event {
+                event_id: "e1".into(),
+                start: chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 15, 9, 0, 0).unwrap(),
+                is_all_day: false,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "kind": "event",
+                "eventId": "e1",
+                "start": "2026-10-15T09:00:00Z",
+                "isAllDay": false,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(Navigate::Task {
+                task_id: "t1".into(),
+                list_id: "l1".into(),
+            })
+            .unwrap(),
+            serde_json::json!({ "kind": "task", "taskId": "t1", "listId": "l1" })
+        );
+        assert_eq!(
+            serde_json::to_value(Navigate::Reminders { notice: None }).unwrap(),
+            serde_json::json!({ "kind": "reminders", "notice": null })
         );
     }
 
@@ -250,5 +415,166 @@ mod tests {
         )
         .await;
         assert_eq!(recording.shown.lock().unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod reminder_tests {
+    use std::sync::Arc;
+
+    use chrono::Duration;
+    use cumulas_core::model::{Calendar, EventDraft, ShowAs, TaskDraft, TaskList};
+    use cumulas_core::secrets::{MemorySecretStore, SecretStore, keys};
+    use cumulas_core::service::{LiveConnector, NullSink};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::desktop::notify::tests::{Recording, account};
+    use crate::desktop::notify::{ReminderToastOptions, reminder_toasts};
+
+    /// A service with an IMAP account's local calendar and tasks (which
+    /// need no server): two events whose reminders are due, and a task's.
+    async fn service() -> (CoreService, String) {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
+        store.insert_account(&account()).unwrap();
+        secrets
+            .set(&keys::imap_password("acct"), "secret")
+            .await
+            .unwrap();
+        let calendar = Calendar {
+            id: "cal".into(),
+            account_id: "acct".into(),
+            remote_id: "local:calendar".into(),
+            name: "Calendar".into(),
+            color: "#0b7a75".into(),
+            can_edit: true,
+            is_default: true,
+        };
+        store.upsert_calendar(&calendar).unwrap();
+        store
+            .upsert_task_list(&TaskList {
+                id: "list".into(),
+                account_id: "acct".into(),
+                remote_id: "local:tasks".into(),
+                name: "Tasks".into(),
+                is_default: true,
+            })
+            .unwrap();
+        let connector = Arc::new(LiveConnector::new(Arc::clone(&store), Arc::clone(&secrets)));
+        let service = CoreService::new(store, secrets, connector, Arc::new(NullSink));
+        let soon = Utc::now() + Duration::minutes(5);
+        for subject in ["Standup", "Review"] {
+            service
+                .create_event(EventDraft {
+                    calendar_id: calendar.id.clone(),
+                    subject: subject.into(),
+                    location: None,
+                    body_html: None,
+                    start: soon,
+                    end: soon + Duration::minutes(30),
+                    is_all_day: false,
+                    attendees: vec![],
+                    reminder_minutes: Some(15),
+                    show_as: ShowAs::Busy,
+                    is_online_meeting: false,
+                })
+                .await
+                .unwrap();
+        }
+        let task = service
+            .create_task(TaskDraft {
+                list_id: "list".into(),
+                title: "Pay rent".into(),
+                notes: None,
+                importance: None,
+                due_date: None,
+                reminder_at: Some(Utc::now() - Duration::minutes(1)),
+            })
+            .await
+            .unwrap();
+        (service, task.id)
+    }
+
+    #[tokio::test]
+    async fn snooze_dismiss_and_complete_work_without_the_window() {
+        let (service, task_id) = service().await;
+        let active = service.list_active_reminders().unwrap();
+        assert_eq!(active.len(), 3);
+        let key = |title: &str| {
+            active
+                .iter()
+                .find(|r| r.title == title)
+                .unwrap()
+                .key
+                .clone()
+        };
+        let recording = Arc::new(Recording::default());
+        let (clicks, _) = mpsc::unbounded_channel();
+        let notifications = Notifications::with_notifier(recording.clone(), clicks);
+        let options = ReminderToastOptions {
+            snooze_minutes: 5,
+            sound: true,
+        };
+        for (toast, keys) in reminder_toasts(&active, options, chrono::Local::now()) {
+            notifications.show(&toast, keys).await.unwrap();
+        }
+
+        // What each button carries, decoded as a click delivers it.
+        let toasts = recording.shown.lock().unwrap().clone();
+        let button = |title: &str, label: &str| {
+            let toast = toasts.iter().find(|t| t.title == title).unwrap();
+            let (_, action) = toast
+                .buttons
+                .iter()
+                .find(|(l, _)| l.starts_with(label))
+                .unwrap();
+            Action::decode(&action.encode()).unwrap()
+        };
+
+        reminder_action(&notifications, &service, button("Standup", "Snooze")).await;
+        reminder_action(&notifications, &service, button("Review", "Dismiss")).await;
+        reminder_action(
+            &notifications,
+            &service,
+            button("Pay rent", "Mark complete"),
+        )
+        .await;
+        assert_eq!(
+            *recording.withdrawn.lock().unwrap(),
+            [
+                reminder_toast_id(&key("Standup")),
+                reminder_toast_id(&key("Review"))
+            ]
+        );
+        let active = service.list_active_reminders().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].title, "Standup");
+        assert!(active[0].snoozed_until.is_some());
+        assert_eq!(
+            service.store().get_task(&task_id).unwrap().status,
+            TaskStatus::Completed
+        );
+
+        // A reminder no longer due (its notification went already): no
+        // complaint.
+        let gone = Action::Snooze {
+            key: key("Review"),
+            minutes: 5,
+        };
+        reminder_action(&notifications, &service, gone).await;
+        assert_eq!(recording.withdrawn.lock().unwrap().len(), 2);
+        assert_eq!(recording.shown.lock().unwrap().len(), 3);
+
+        // A button that failed says so.
+        reminder_action(
+            &notifications,
+            &service,
+            Action::CompleteTask("missing".into()),
+        )
+        .await;
+        let shown = recording.shown.lock().unwrap();
+        assert_eq!(shown.last().unwrap().title, "Couldn't complete the task");
+        assert_eq!(shown.last().unwrap().default_action, Action::OpenReminders);
     }
 }

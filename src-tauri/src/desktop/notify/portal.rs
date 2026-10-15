@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use zbus::zvariant::{OwnedValue, Value};
 
-use super::{Action, Invoked, InvokedSender, Notifier, NotifierKind, Toast};
+use super::{Action, Invoked, InvokedSender, Notifier, NotifierKind, Toast, ToastKind};
 
 pub struct PortalNotifier {
     proxy: NotificationProxy,
@@ -95,8 +95,13 @@ fn notification(toast: &Toast, version: u32) -> HashMap<&str, Value<'_>> {
     let mut n: HashMap<&str, Value<'_>> = HashMap::new();
     n.insert("title", Value::from(toast.title.as_str()));
     n.insert("body", Value::from(toast.body.as_str()));
-    // Never "urgent": that gets past Do Not Disturb.
-    n.insert("priority", Value::from("normal"));
+    // Never "urgent": that gets past Do Not Disturb. Reminders are about
+    // now, so they come first.
+    let priority = match toast.kind {
+        ToastKind::Reminder => "high",
+        ToastKind::Mail | ToastKind::App => "normal",
+    };
+    n.insert("priority", Value::from(priority));
     n.insert("default-action", Value::from("open"));
     n.insert(
         "default-action-target",
@@ -128,6 +133,10 @@ fn button_action(action: &Action) -> &'static str {
     match action {
         Action::MarkRead(_) => "mark-read",
         Action::Archive(_) => "archive",
+        Action::Snooze { .. } => "snooze",
+        Action::Dismiss(_) => "dismiss",
+        Action::Join(_) => "join",
+        Action::CompleteTask(_) => "complete",
         _ => "open",
     }
 }
@@ -164,7 +173,6 @@ mod tests {
     use zbus::zvariant::{Dict, Signature};
 
     use super::*;
-    use crate::desktop::notify::ToastKind;
 
     fn toast(sound: bool) -> Toast {
         Toast {
@@ -207,6 +215,63 @@ mod tests {
             &(toast.id.as_str(), n),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn reminders_come_first_but_never_urgent() {
+        let reminder = Toast {
+            id: "reminder:event:e1:1".into(),
+            title: "Standup".into(),
+            body: "Today at 10:00 AM".into(),
+            kind: ToastKind::Reminder,
+            default_action: Action::OpenEvent("e1".into()),
+            buttons: vec![
+                (
+                    "Snooze 5 min".into(),
+                    Action::Snooze {
+                        key: "event:e1:1".into(),
+                        minutes: 5,
+                    },
+                ),
+                ("Dismiss".into(), Action::Dismiss("event:e1:1".into())),
+                (
+                    "Join".into(),
+                    Action::Join("https://teams.example/join/1".into()),
+                ),
+            ],
+            sound: true,
+        };
+        let n = notification(&reminder, 2);
+        assert_eq!(n["priority"], Value::from("high"));
+        assert_eq!(n["default-action-target"], Value::from("open-event:e1"));
+        let Value::Array(buttons) = &n["buttons"] else {
+            panic!("{:?}", n["buttons"]);
+        };
+        let targets: Vec<(Value<'_>, Value<'_>)> = buttons
+            .iter()
+            .map(|b| {
+                let Value::Dict(b) = b else { panic!() };
+                (
+                    b.get::<&str, Value<'_>>(&"action").unwrap().unwrap(),
+                    b.get::<&str, Value<'_>>(&"target").unwrap().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                (Value::from("snooze"), Value::from("snooze:5:event:e1:1")),
+                (Value::from("dismiss"), Value::from("dismiss:event:e1:1")),
+                (
+                    Value::from("join"),
+                    Value::from("join:https://teams.example/join/1")
+                ),
+            ]
+        );
+        assert_eq!(
+            notification(&toast(true), 2)["priority"],
+            Value::from("normal")
+        );
     }
 
     #[test]

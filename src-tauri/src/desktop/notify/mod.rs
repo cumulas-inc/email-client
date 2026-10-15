@@ -11,8 +11,13 @@
 //! Do Not Disturb is left to the desktop: no notification is urgent (which
 //! would get past it), and the app never plays sounds itself.
 //!
-//! Subjects and senders' names say whatever the sender wants, so every
+//! Subjects and senders' names say whatever the sender wants (and so do
+//! the titles and locations of meetings others invite to), so every
 //! toast's text is cleaned on its way out (see `clean`).
+//!
+//! Reminders show the same way, with Snooze and Dismiss (and Join for an
+//! online meeting) buttons, and at a higher priority than mail; unlike
+//! mail, they show while the window is in front too.
 
 #[cfg(target_os = "linux")]
 pub mod fdo;
@@ -25,7 +30,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use cumulas_core::model::{Account, MessageSummary};
+use chrono::{DateTime, Local};
+use cumulas_core::model::{Account, ActiveReminder, MessageSummary, ReminderKind};
+use cumulas_core::reminders::SUMMARY_THRESHOLD as REMINDER_SUMMARY_THRESHOLD;
 use cumulas_core::service::MailAlert;
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -44,6 +51,20 @@ pub enum Action {
     Archive(String),
     /// Bring up the main window.
     ShowWindow,
+    /// Show the event in Calendar.
+    OpenEvent(String),
+    /// Show the task in Tasks.
+    OpenTask(String),
+    /// Show the Reminders panel (a summary of several reminders).
+    OpenReminders,
+    /// Snooze the reminder with this key, without showing the window.
+    Snooze { key: String, minutes: u32 },
+    /// Dismiss the reminder with this key, without showing the window.
+    Dismiss(String),
+    /// Join the online meeting at this (https) address.
+    Join(String),
+    /// Mark the task complete, without showing the window.
+    CompleteTask(String),
 }
 
 impl Action {
@@ -55,13 +76,22 @@ impl Action {
             Action::MarkRead(id) => format!("read:{id}"),
             Action::Archive(id) => format!("archive:{id}"),
             Action::ShowWindow => "show".into(),
+            Action::OpenEvent(id) => format!("open-event:{id}"),
+            Action::OpenTask(id) => format!("open-task:{id}"),
+            Action::OpenReminders => "reminders".into(),
+            Action::Snooze { key, minutes } => format!("snooze:{minutes}:{key}"),
+            Action::Dismiss(key) => format!("dismiss:{key}"),
+            Action::Join(url) => format!("join:{url}"),
+            Action::CompleteTask(id) => format!("complete:{id}"),
         }
     }
 
     /// The action [`Action::encode`] made this string from, if any.
     pub fn decode(encoded: &str) -> Option<Self> {
-        if encoded == "show" {
-            return Some(Action::ShowWindow);
+        match encoded {
+            "show" => return Some(Action::ShowWindow),
+            "reminders" => return Some(Action::OpenReminders),
+            _ => {}
         }
         let (verb, id) = encoded.split_once(':')?;
         if id.is_empty() {
@@ -73,8 +103,37 @@ impl Action {
             "inbox" => Action::OpenInbox(id),
             "read" => Action::MarkRead(id),
             "archive" => Action::Archive(id),
+            "open-event" => Action::OpenEvent(id),
+            "open-task" => Action::OpenTask(id),
+            "snooze" => {
+                let (minutes, key) = id.split_once(':')?;
+                let minutes = minutes.parse().ok().filter(|m| *m > 0)?;
+                if key.is_empty() {
+                    return None;
+                }
+                Action::Snooze {
+                    key: key.to_owned(),
+                    minutes,
+                }
+            }
+            "dismiss" => Action::Dismiss(id),
+            "join" => Action::Join(id),
+            "complete" => Action::CompleteTask(id),
             _ => return None,
         })
+    }
+
+    /// Waits on a server: runs on its own, so that no other click waits
+    /// for it.
+    pub fn is_slow(&self) -> bool {
+        matches!(
+            self,
+            Action::MarkRead(_)
+                | Action::Archive(_)
+                | Action::Snooze { .. }
+                | Action::Dismiss(_)
+                | Action::CompleteTask(_)
+        )
     }
 }
 
@@ -91,6 +150,8 @@ pub struct Invoked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
     Mail,
+    /// An event's or task's reminder: shown at a higher priority.
+    Reminder,
     /// About the app itself (still running, a test, a button that failed).
     App,
 }
@@ -98,8 +159,9 @@ pub enum ToastKind {
 /// A notification to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Toast {
-    /// Chosen by the app: `mail:{message}`, `mail-summary:{account}` or
-    /// `app:{what}`. Showing a toast with the same id replaces it.
+    /// Chosen by the app: `mail:{message}`, `mail-summary:{account}`,
+    /// `reminder:{key}`, `reminder-summary` or `app:{what}`. Showing a toast
+    /// with the same id replaces it.
     pub id: String,
     pub title: String,
     pub body: String,
@@ -139,8 +201,8 @@ pub type InvokedSender = mpsc::UnboundedSender<Invoked>;
 
 /// The app's notifications: connects to the desktop on first use (and again
 /// later if that failed, or the connection was lost), and remembers which
-/// messages each notification shown is about, so that it can go once
-/// they're read, moved or deleted.
+/// messages (or reminders) each notification shown is about, so that it can
+/// go once they're read, moved or deleted (or dismissed, snoozed, done).
 pub struct Notifications {
     backend: tokio::sync::Mutex<Backend>,
     connect: Connect,
@@ -546,6 +608,190 @@ fn summary_senders(messages: &[MessageSummary], account: &Account) -> String {
     }
 }
 
+// --- what reminders show ------------------------------------------------------
+
+/// A toast's id for a reminder.
+pub fn reminder_toast_id(key: &str) -> String {
+    format!("reminder:{key}")
+}
+
+/// What reminders' notifications offer, from the settings.
+#[derive(Debug, Clone, Copy)]
+pub struct ReminderToastOptions {
+    /// For how long the Snooze button snoozes.
+    pub snooze_minutes: u32,
+    pub sound: bool,
+}
+
+/// The notifications for reminders that just came due: one each, with
+/// Snooze and Dismiss (and Join for an online meeting, or Mark complete for
+/// a task: never more than three buttons, which is all GNOME shows), or one
+/// for them all when there are many (after the computer slept, say). Each
+/// comes with the keys of the reminders it's about.
+pub fn reminder_toasts(
+    reminders: &[ActiveReminder],
+    options: ReminderToastOptions,
+    now: DateTime<Local>,
+) -> Vec<(Toast, Vec<String>)> {
+    if reminders.len() > REMINDER_SUMMARY_THRESHOLD {
+        let toast = Toast {
+            id: "reminder-summary".into(),
+            title: format!("{} reminders", reminders.len()),
+            body: summary_titles(reminders),
+            kind: ToastKind::Reminder,
+            default_action: Action::OpenReminders,
+            buttons: Vec::new(),
+            sound: options.sound,
+        };
+        return vec![(toast, reminders.iter().map(|r| r.key.clone()).collect())];
+    }
+    reminders
+        .iter()
+        .map(|r| (reminder_toast(r, options, now), vec![r.key.clone()]))
+        .collect()
+}
+
+fn reminder_toast(
+    r: &ActiveReminder,
+    options: ReminderToastOptions,
+    now: DateTime<Local>,
+) -> Toast {
+    let minutes = options.snooze_minutes.max(1);
+    let mut buttons = vec![
+        (
+            snooze_label(minutes),
+            Action::Snooze {
+                key: r.key.clone(),
+                minutes,
+            },
+        ),
+        ("Dismiss".to_owned(), Action::Dismiss(r.key.clone())),
+    ];
+    let default_action = match r.kind {
+        ReminderKind::Event => {
+            if let Some(url) = r.online_meeting_url.as_deref().filter(|u| is_https(u)) {
+                buttons.push(("Join".into(), Action::Join(url.to_owned())));
+            }
+            Action::OpenEvent(r.item_id.clone())
+        }
+        ReminderKind::Task => {
+            buttons.push((
+                "Mark complete".into(),
+                Action::CompleteTask(r.item_id.clone()),
+            ));
+            Action::OpenTask(r.item_id.clone())
+        }
+    };
+    Toast {
+        id: reminder_toast_id(&r.key),
+        title: reminder_title(r),
+        body: reminder_when(r, now),
+        kind: ToastKind::Reminder,
+        default_action,
+        buttons,
+        sound: options.sound,
+    }
+}
+
+/// The notification that takes a reminder's place when its button failed
+/// (the desktop closed the notification on the click). Clicking it opens
+/// the Reminders panel, to try again there.
+pub fn failed_reminder_toast(title: &str, reminder: Option<&ActiveReminder>) -> Toast {
+    Toast {
+        id: reminder.map_or_else(|| "app:reminder".into(), |r| reminder_toast_id(&r.key)),
+        title: title.to_owned(),
+        body: reminder.map(reminder_title).unwrap_or_default(),
+        kind: ToastKind::App,
+        default_action: Action::OpenReminders,
+        buttons: Vec::new(),
+        sound: false,
+    }
+}
+
+/// An address the Join button can open: a web address over https.
+pub fn is_https(url: &str) -> bool {
+    url::Url::parse(url.trim()).is_ok_and(|u| u.scheme() == "https" && u.host().is_some())
+}
+
+/// "Snooze 5 min", "Snooze 1 hour".
+fn snooze_label(minutes: u32) -> String {
+    match minutes {
+        60 => "Snooze 1 hour".into(),
+        m if m % 60 == 0 => format!("Snooze {} hours", m / 60),
+        m => format!("Snooze {m} min"),
+    }
+}
+
+fn reminder_title(r: &ActiveReminder) -> String {
+    let title = r.title.trim();
+    if !title.is_empty() {
+        return title.to_owned();
+    }
+    match r.kind {
+        ReminderKind::Event => "(no title)".into(),
+        ReminderKind::Task => "(untitled task)".into(),
+    }
+}
+
+/// When the event is, and where: "Today at 10:00 AM · Room 3", "Started
+/// at 9:30 AM", "Tomorrow at 9:00 AM", "Fri, Oct 16 at 2:00 PM", "All day
+/// tomorrow"; "Task" for a task.
+fn reminder_when(r: &ActiveReminder, now: DateTime<Local>) -> String {
+    let Some(start) = r.starts_at.map(|s| s.with_timezone(&Local)) else {
+        return "Task".into();
+    };
+    let days = (start.date_naive() - now.date_naive()).num_days();
+    let all_day = r.ends_at.is_some_and(|end| {
+        let end = end.with_timezone(&Local);
+        start.time() == chrono::NaiveTime::MIN
+            && end.time() == chrono::NaiveTime::MIN
+            && end > start
+    });
+    let when = if all_day {
+        match days {
+            0 => "All day today".to_owned(),
+            1 => "All day tomorrow".to_owned(),
+            _ => format!("All day {}", start.format("%a, %b %-d")),
+        }
+    } else {
+        let time = start.format("%-I:%M %p");
+        match days {
+            0 if start <= now => format!("Started at {time}"),
+            0 => format!("Today at {time}"),
+            1 => format!("Tomorrow at {time}"),
+            -1 => format!("Started yesterday at {time}"),
+            _ => format!("{} at {time}", start.format("%a, %b %-d")),
+        }
+    };
+    match r
+        .location
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+    {
+        Some(location) => format!("{when} · {location}"),
+        None => when,
+    }
+}
+
+/// "Standup, Design review and 3 more", each title isolated (see
+/// `summary_senders`).
+fn summary_titles(reminders: &[ActiveReminder]) -> String {
+    let titles: Vec<String> = reminders
+        .iter()
+        .map(|r| {
+            let t = reminder_title(r).replace(['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'], "");
+            format!("\u{2068}{t}\u{2069}")
+        })
+        .collect();
+    match titles.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [a, b, rest @ ..] => format!("{a}, {b} and {} more", rest.len()),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::sync::atomic::AtomicBool;
@@ -631,12 +877,220 @@ pub(crate) mod tests {
             Action::MarkRead("m1".into()),
             Action::Archive("m1".into()),
             Action::ShowWindow,
+            Action::OpenEvent("e1".into()),
+            Action::OpenTask("t1".into()),
+            Action::OpenReminders,
+            Action::Snooze {
+                key: "event:5f0c-1:1792040700".into(),
+                minutes: 15,
+            },
+            Action::Dismiss("task:7a:1792040700".into()),
+            Action::Join("https://teams.example/l/meetup-join/19%3a?context=%7b%7d".into()),
+            Action::CompleteTask("t1".into()),
         ] {
             assert_eq!(Action::decode(&action.encode()), Some(action));
         }
-        for junk in ["", "default", "open:", "delete:m1", "show:x", "open"] {
+        for junk in [
+            "",
+            "default",
+            "open:",
+            "delete:m1",
+            "show:x",
+            "open",
+            "snooze:5",
+            "snooze:0:event:e:1",
+            "snooze:five:event:e:1",
+            "snooze:5:",
+            "dismiss:",
+            "reminders:x",
+        ] {
             assert_eq!(Action::decode(junk), None, "{junk:?}");
         }
+    }
+
+    fn reminder(
+        kind: ReminderKind,
+        title: &str,
+        starts_at: Option<DateTime<Local>>,
+    ) -> ActiveReminder {
+        let fire_at = starts_at.map_or_else(chrono::Utc::now, |s| {
+            s.with_timezone(&chrono::Utc) - chrono::Duration::minutes(15)
+        });
+        ActiveReminder {
+            key: format!("{}:{title}:{}", kind.as_str(), fire_at.timestamp()),
+            kind,
+            item_id: title.to_lowercase(),
+            account_id: "acct".into(),
+            title: title.into(),
+            starts_at: starts_at.map(|s| s.with_timezone(&chrono::Utc)),
+            ends_at: starts_at
+                .map(|s| s.with_timezone(&chrono::Utc) + chrono::Duration::minutes(30)),
+            location: None,
+            online_meeting_url: None,
+            fire_at,
+            snoozed_until: None,
+            overdue: false,
+            missed: false,
+        }
+    }
+
+    fn local(day: u32, hour: u32, minute: u32) -> DateTime<Local> {
+        use chrono::TimeZone;
+        Local
+            .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_reminder_snoozes_dismisses_and_joins_from_its_notification() {
+        let now = local(15, 9, 45);
+        let mut standup = reminder(ReminderKind::Event, "Standup", Some(local(15, 10, 0)));
+        standup.location = Some("Room 3".into());
+        standup.online_meeting_url = Some("https://teams.example/join/1".into());
+        let options = ReminderToastOptions {
+            snooze_minutes: 10,
+            sound: true,
+        };
+        let toasts = reminder_toasts(std::slice::from_ref(&standup), options, now);
+        let [(toast, keys)] = toasts.as_slice() else {
+            panic!("{toasts:?}");
+        };
+        assert_eq!(keys, std::slice::from_ref(&standup.key));
+        assert_eq!(toast.id, format!("reminder:{}", standup.key));
+        assert_eq!(toast.title, "Standup");
+        assert_eq!(toast.body, "Today at 10:00 AM · Room 3");
+        assert_eq!(toast.kind, ToastKind::Reminder);
+        assert_eq!(toast.default_action, Action::OpenEvent("standup".into()));
+        assert_eq!(
+            toast.buttons,
+            [
+                (
+                    "Snooze 10 min".to_owned(),
+                    Action::Snooze {
+                        key: standup.key.clone(),
+                        minutes: 10
+                    }
+                ),
+                ("Dismiss".to_owned(), Action::Dismiss(standup.key.clone())),
+                (
+                    "Join".to_owned(),
+                    Action::Join("https://teams.example/join/1".into())
+                ),
+            ]
+        );
+        assert!(toast.sound);
+
+        // Only https meetings get a Join button.
+        for url in [
+            "http://meet.example/1",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "https://",
+        ] {
+            standup.online_meeting_url = Some(url.into());
+            let (toast, _) = &reminder_toasts(std::slice::from_ref(&standup), options, now)[0];
+            assert_eq!(toast.buttons.len(), 2, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_task_reminder_can_be_completed_from_its_notification() {
+        let task = reminder(ReminderKind::Task, "Pay rent", None);
+        let options = ReminderToastOptions {
+            snooze_minutes: 60,
+            sound: false,
+        };
+        let (toast, _) = &reminder_toasts(std::slice::from_ref(&task), options, local(15, 9, 0))[0];
+        assert_eq!(toast.body, "Task");
+        assert_eq!(toast.default_action, Action::OpenTask("pay rent".into()));
+        let labels: Vec<&str> = toast.buttons.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["Snooze 1 hour", "Dismiss", "Mark complete"]);
+        assert_eq!(toast.buttons[2].1, Action::CompleteTask("pay rent".into()));
+        assert!(!toast.sound);
+    }
+
+    #[test]
+    fn reminders_say_when() {
+        let now = local(15, 9, 45);
+        let when = |start| reminder_when(&reminder(ReminderKind::Event, "x", Some(start)), now);
+        assert_eq!(when(local(15, 9, 30)), "Started at 9:30 AM");
+        assert_eq!(when(local(15, 14, 0)), "Today at 2:00 PM");
+        assert_eq!(when(local(16, 9, 0)), "Tomorrow at 9:00 AM");
+        assert_eq!(when(local(14, 23, 0)), "Started yesterday at 11:00 PM");
+        assert_eq!(when(local(20, 9, 0)), "Tue, Oct 20 at 9:00 AM");
+        let mut all_day = reminder(ReminderKind::Event, "Trip", Some(local(16, 0, 0)));
+        all_day.ends_at = Some(local(18, 0, 0).with_timezone(&chrono::Utc));
+        assert_eq!(reminder_when(&all_day, now), "All day tomorrow");
+        assert_eq!(snooze_label(5), "Snooze 5 min");
+        assert_eq!(snooze_label(90), "Snooze 90 min");
+        assert_eq!(snooze_label(120), "Snooze 2 hours");
+        let mut untitled = reminder(ReminderKind::Event, " ", None);
+        untitled.title = "  ".into();
+        assert_eq!(reminder_title(&untitled), "(no title)");
+    }
+
+    #[test]
+    fn many_reminders_at_once_give_one_notification() {
+        let reminders: Vec<ActiveReminder> = ["Standup", "Review", "Lunch", "1:1"]
+            .into_iter()
+            .map(|t| reminder(ReminderKind::Event, t, Some(local(15, 10, 0))))
+            .collect();
+        let options = ReminderToastOptions {
+            snooze_minutes: 5,
+            sound: true,
+        };
+        let toasts = reminder_toasts(&reminders, options, local(15, 9, 50));
+        let [(toast, keys)] = toasts.as_slice() else {
+            panic!("{toasts:?}");
+        };
+        assert_eq!(toast.id, "reminder-summary");
+        assert_eq!(toast.title, "4 reminders");
+        assert_eq!(
+            toast.body,
+            "\u{2068}Standup\u{2069}, \u{2068}Review\u{2069} and 2 more"
+        );
+        assert_eq!(toast.default_action, Action::OpenReminders);
+        assert!(toast.buttons.is_empty());
+        assert_eq!(keys.len(), 4);
+        // Three still go one by one.
+        assert_eq!(
+            reminder_toasts(&reminders[..3], options, local(15, 9, 50)).len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reminder_s_notification_goes_once_it_s_no_longer_due() {
+        let recording = Arc::new(Recording::default());
+        let (clicks, _) = mpsc::unbounded_channel();
+        let notifications = Notifications::with_notifier(recording.clone(), clicks);
+        let options = ReminderToastOptions {
+            snooze_minutes: 5,
+            sound: true,
+        };
+        let one = reminder(ReminderKind::Event, "Standup", Some(local(15, 10, 0)));
+        let many: Vec<ActiveReminder> = ["A", "B", "C", "D"]
+            .into_iter()
+            .map(|t| reminder(ReminderKind::Task, t, None))
+            .collect();
+        for reminders in [std::slice::from_ref(&one), many.as_slice()] {
+            for (toast, keys) in reminder_toasts(reminders, options, local(15, 9, 50)) {
+                notifications.show(&toast, keys).await.unwrap();
+            }
+        }
+        // Mail read elsewhere touches no reminder.
+        notifications.settle(&["m1".into()]).await;
+        assert!(recording.withdrawn.lock().unwrap().is_empty());
+        notifications
+            .settle(&[one.key.clone(), many[0].key.clone()])
+            .await;
+        assert_eq!(
+            *recording.withdrawn.lock().unwrap(),
+            [format!("reminder:{}", one.key)]
+        );
+        let rest: Vec<String> = many[1..].iter().map(|r| r.key.clone()).collect();
+        notifications.settle(&rest).await;
+        assert_eq!(recording.withdrawn.lock().unwrap()[1], "reminder-summary");
     }
 
     #[test]

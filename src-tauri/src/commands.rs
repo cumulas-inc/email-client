@@ -5,9 +5,10 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use cumulas_core::model::{
-    Account, Calendar, Contact, ContactDraft, EmailAddress, Event, EventDraft, EventResponse,
-    Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount,
-    OutgoingMessage, Settings, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
+    Account, ActiveReminder, Calendar, Contact, ContactDraft, EmailAddress, Event, EventDraft,
+    EventResponse, Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary,
+    NewImapAccount, OutgoingMessage, Settings, Snooze, SyncStatus, Task, TaskDraft, TaskList,
+    TaskPatch,
 };
 use cumulas_core::push::PushStatus;
 use cumulas_core::service::BUILTIN_MICROSOFT_CLIENT_ID;
@@ -20,7 +21,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::AppState;
 use crate::desktop::background::{self, BackgroundState};
 use crate::desktop::router::Navigate;
-use crate::desktop::{self as desktop_shell, Desktop, tray};
+use crate::desktop::{self as desktop_shell, Desktop, notify, tray};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -262,6 +263,59 @@ pub async fn send_test_notification(app: AppHandle) -> Result<()> {
 #[tauri::command]
 pub fn take_pending_navigation(desktop: State<'_, Desktop>) -> Option<Navigate> {
     desktop.router.take_pending()
+}
+
+// --- reminders --------------------------------------------------------------
+
+/// The reminders due now, or snoozed.
+#[tauri::command]
+pub fn list_active_reminders(state: State<'_, AppState>) -> Result<Vec<ActiveReminder>> {
+    state.service.list_active_reminders()
+}
+
+/// Snoozes a reminder for `minutes`, or until `until`; its notification
+/// goes. Returns the reminders then active.
+#[tauri::command]
+pub async fn snooze_reminder(
+    state: State<'_, AppState>,
+    desktop: State<'_, Desktop>,
+    reminder_key: String,
+    minutes: Option<u32>,
+    until: Option<DateTime<Utc>>,
+) -> Result<Vec<ActiveReminder>> {
+    let snooze = match (minutes, until) {
+        (Some(minutes), None) => Snooze::Minutes(minutes),
+        (None, Some(until)) => Snooze::Until(until),
+        _ => {
+            return Err(Error::invalid_input(
+                "Snooze for some minutes, or until a time.",
+            ));
+        }
+    };
+    let active = state.service.snooze_reminder(&reminder_key, snooze).await?;
+    desktop
+        .notifications
+        .withdraw(&notify::reminder_toast_id(&reminder_key))
+        .await;
+    Ok(active)
+}
+
+/// Dismisses reminders; their notifications go. Returns the reminders then
+/// active.
+#[tauri::command]
+pub async fn dismiss_reminders(
+    state: State<'_, AppState>,
+    desktop: State<'_, Desktop>,
+    reminder_keys: Vec<String>,
+) -> Result<Vec<ActiveReminder>> {
+    let active = state.service.dismiss_reminders(&reminder_keys).await?;
+    for key in &reminder_keys {
+        desktop
+            .notifications
+            .withdraw(&notify::reminder_toast_id(key))
+            .await;
+    }
+    Ok(active)
 }
 
 // --- mail -----------------------------------------------------------------------
