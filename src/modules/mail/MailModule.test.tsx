@@ -440,12 +440,16 @@ describe("Keyboard", () => {
     await user.keyboard("k");
     expect(row(/Scheduled maintenance/)).toHaveAttribute("aria-selected", "true");
 
-    // Insert flags, Ctrl+U marks unread.
+    // Insert flags, Ctrl+U and U mark unread, Q marks read.
     await user.keyboard("{Insert}");
     await waitFor(async () => expect((await backend.getMessage("msg-2")).isFlagged).toBe(true));
     await user.keyboard("{Control>}u{/Control}");
     await waitFor(async () => expect((await backend.getMessage("msg-2")).isRead).toBe(false));
-    await user.keyboard("{Control>}q{/Control}");
+    await user.keyboard("q");
+    await waitFor(async () => expect((await backend.getMessage("msg-2")).isRead).toBe(true));
+    await user.keyboard("u");
+    await waitFor(async () => expect((await backend.getMessage("msg-2")).isRead).toBe(false));
+    await user.keyboard("q");
     await waitFor(async () => expect((await backend.getMessage("msg-2")).isRead).toBe(true));
 
     // Delete removes it and focus moves to the next message.

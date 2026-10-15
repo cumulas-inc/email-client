@@ -1,14 +1,17 @@
-import { Settings } from "lucide-react";
+import { Info, Menu as MenuIcon, Power, Settings } from "lucide-react";
 
 import { useAccounts } from "../api/queries";
 import { Avatar } from "../components/Avatar";
+import { Menu } from "../components/Menu";
 import { LogoMark } from "./LogoMark";
+import { useQuit } from "./useQuit";
 import { useAppStore } from "./store";
 
-/** The quiet strip above the cards: the name on the left, settings and the
-    signed-in person on the right. */
+/** The quiet strip above the cards: the name on the left, the main menu and
+    the signed-in person on the right. */
 export function AppHeader() {
   const openSettings = useAppStore((s) => s.openSettings);
+  const quit = useQuit();
   const { data: accounts = [] } = useAccounts();
   const me = accounts[0];
 
@@ -21,29 +24,53 @@ export function AppHeader() {
         </span>
       </div>
       <div className="app-header__spacer" />
-      {me && (
-        <>
+      <Menu
+        label="Main menu"
+        align="end"
+        trigger={(props) => (
           <button
+            {...props}
             type="button"
             className="icon-btn"
-            title="Settings"
-            aria-label="Settings"
-            onClick={() => openSettings()}
+            title="Main menu"
+            aria-label="Main menu"
           >
-            <Settings size={18} />
+            <MenuIcon size={18} />
           </button>
-          <button
-            type="button"
-            className="app-header__me"
-            title={`Manage accounts (${me.displayName || me.email})`}
-            onClick={() => openSettings("accounts")}
-          >
-            <Avatar name={me.displayName || me.email} color={me.color} size={26} />
-            <span className="app-header__me-name" dir="auto">
-              {me.displayName || me.email}
-            </span>
-          </button>
-        </>
+        )}
+        items={[
+          {
+            label: "Settings",
+            icon: <Settings size={16} />,
+            shortcut: "Ctrl+,",
+            onSelect: () => openSettings(),
+          },
+          {
+            label: "About Cumulas Mail",
+            icon: <Info size={16} />,
+            onSelect: () => openSettings("about"),
+          },
+          {
+            label: "Quit",
+            icon: <Power size={16} />,
+            shortcut: "Ctrl+Q",
+            separator: true,
+            onSelect: quit,
+          },
+        ]}
+      />
+      {me && (
+        <button
+          type="button"
+          className="app-header__me"
+          title={`Manage accounts (${me.displayName || me.email})`}
+          onClick={() => openSettings("accounts")}
+        >
+          <Avatar name={me.displayName || me.email} color={me.color} size={26} />
+          <span className="app-header__me-name" dir="auto">
+            {me.displayName || me.email}
+          </span>
+        </button>
       )}
     </header>
   );

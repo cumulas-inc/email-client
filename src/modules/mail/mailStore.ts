@@ -69,6 +69,12 @@ interface MailState {
   pendingCompose: ComposeDraft | null;
 
   selectFolder: (folderId: string) => void;
+  /**
+   * Shows a message from outside the list (a notification): in its folder,
+   * or in All inboxes when that's open and the message is in an Inbox; with
+   * a filter that shows it, and open even when the reading pane is off.
+   */
+  openMessage: (id: string, folderId: string, inInbox: boolean) => void;
   setFilter: (filter: MailFilter) => void;
   select: (id: string, mode?: SelectMode) => void;
   setSelection: (ids: string[], activeId: string | null) => void;
@@ -114,6 +120,22 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   selectFolder: (folderId) =>
     set({ folderId, selectedIds: [], activeId: null, anchorId: null, readerOpen: false }),
+
+  openMessage: (id, folderId, inInbox) => {
+    const s = get();
+    if (s.folderId !== folderId && !(inInbox && s.folderId === ALL_INBOXES)) {
+      s.selectFolder(folderId);
+    }
+    // New mail is unread and not flagged yet.
+    set((state) => ({
+      filter: state.filter === "flagged" ? "all" : state.filter,
+      selectedIds: [id],
+      activeId: id,
+      anchorId: id,
+      composeVisible: false,
+      readerOpen: true,
+    }));
+  },
 
   setFilter: (filter) => set({ filter, selectedIds: [], activeId: null, anchorId: null }),
 

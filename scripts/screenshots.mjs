@@ -69,7 +69,8 @@ async function openMessage(page, subject) {
 }
 
 async function openSettings(page, tab) {
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Main menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: /^Settings/ }).click();
   await page.getByRole("tab", { name: tab }).click();
 }
 

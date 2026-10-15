@@ -2,10 +2,14 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 import { useBackend } from "../api/context";
-import { qk } from "../api/queries";
+import { applyBackgroundState, qk } from "../api/queries";
 import type { PushStatus, SyncStatus } from "../api/types";
+import { followNavigation } from "./navigation";
 
-/** Keeps React Query caches in step with backend change notifications. */
+/**
+ * Keeps React Query caches in step with backend change notifications, and
+ * follows the desktop's requests to show a message or a folder.
+ */
 export function useBackendEvents(): void {
   const backend = useBackend();
   const client = useQueryClient();
@@ -30,10 +34,21 @@ export function useBackendEvents(): void {
         return [...others, status];
       });
     });
+    const offBackground = backend.onBackgroundState((state) => applyBackgroundState(client, state));
+    const offNavigate = backend.onNavigate((to) => void followNavigation(to, backend, client));
+    // A notification clicked while the app ran without a window opened it
+    // for this. (Followed even if this effect is torn down meanwhile, as in
+    // React's development double run: it was taken, and the stores are
+    // global.)
+    void backend.takePendingNavigation().then((to) => {
+      if (to) void followNavigation(to, backend, client);
+    });
     return () => {
       offData();
       offSync();
       offPush();
+      offBackground();
+      offNavigate();
     };
   }, [backend, client]);
 }

@@ -11,9 +11,12 @@ import { Welcome } from "../modules/onboarding/Welcome";
 import { AddAccountDialog } from "../modules/settings/AddAccountDialog";
 import { SettingsDialog } from "../modules/settings/SettingsDialog";
 import { AppHeader } from "./AppHeader";
+import { QuitConfirmDialog } from "./QuitConfirmDialog";
+import { StartAtLoginOffer } from "./StartAtLoginOffer";
 import { type Module, useAppStore } from "./store";
 import { useAppearance } from "./useAppearance";
 import { useBackendEvents } from "./useBackendEvents";
+import { useQuit } from "./useQuit";
 import { useTheme } from "./useTheme";
 
 // Mail is the start screen; the other modules load on first use.
@@ -36,11 +39,20 @@ const MODULE_KEYS: Record<string, Module> = {
 
 function useGlobalShortcuts() {
   const setModule = useAppStore((s) => s.setModule);
+  const quit = useQuit();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.ctrlKey || e.altKey || e.metaKey) return;
       const module = MODULE_KEYS[e.key];
-      if (module) {
+      if (e.key.toLowerCase() === "q" && !e.shiftKey) {
+        // Quit, from anywhere (GNOME's shortcut; the app may be set to keep
+        // running when its window closes).
+        e.preventDefault();
+        quit();
+      } else if (e.key === "," && !e.shiftKey) {
+        e.preventDefault();
+        useAppStore.getState().openSettings();
+      } else if (module) {
         e.preventDefault();
         setModule(module);
       } else if (e.key === "k" || e.key === "e" || (e.shiftKey && e.key.toLowerCase() === "f")) {
@@ -57,7 +69,7 @@ function useGlobalShortcuts() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [setModule]);
+  }, [setModule, quit]);
 }
 
 function Shell() {
@@ -87,6 +99,8 @@ function Shell() {
       <main className="app__main">{content}</main>
       <SettingsDialog />
       <AddAccountDialog />
+      <QuitConfirmDialog />
+      <StartAtLoginOffer />
       <Toaster />
     </div>
   );

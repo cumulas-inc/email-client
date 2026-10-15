@@ -265,3 +265,82 @@
 .search-field input::-webkit-search-cancel-button {
   display: none;
 }
+
+/* --- Offers ------------------------------------------------------------------ */
+
+/* A one-time question in the corner (start at login): out of the way of the
+   list and the toasts, and gone at a click. */
+.offer-anchor {
+  position: fixed;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 900;
+  width: min(360px, calc(100vw - 2 * var(--space-4)));
+  pointer-events: none;
+}
+
+.offer {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-card);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-lg);
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .offer {
+    transition:
+      opacity var(--duration-normal) var(--ease-out),
+      transform var(--duration-normal) var(--ease-out);
+  }
+
+  @starting-style {
+    .offer {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+  }
+}
+
+.offer__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-lg);
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+}
+
+.offer__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.offer__title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  line-height: 1.35;
+  text-wrap: balance;
+}
+
+.offer__body {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--fg-secondary);
+  text-wrap: pretty;
+}
+
+.offer__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}

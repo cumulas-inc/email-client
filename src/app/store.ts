@@ -35,6 +35,14 @@ interface AppState {
   /** Switches to Mail and opens a new message. */
   requestCompose: (request: ComposeRequest) => void;
   clearComposeRequest: () => void;
+
+  /** Asking whether to quit and lose an unsent message. */
+  quitConfirmOpen: boolean;
+  setQuitConfirmOpen: (open: boolean) => void;
+
+  /** The one-time offer to start at login, after the first account was added. */
+  startAtLoginOffer: boolean;
+  setStartAtLoginOffer: (open: boolean) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -54,4 +62,10 @@ export const useAppStore = create<AppState>((set) => ({
   composeRequest: null,
   requestCompose: (composeRequest) => set({ composeRequest, module: "mail" }),
   clearComposeRequest: () => set({ composeRequest: null }),
+
+  quitConfirmOpen: false,
+  setQuitConfirmOpen: (quitConfirmOpen) => set({ quitConfirmOpen }),
+
+  startAtLoginOffer: false,
+  setStartAtLoginOffer: (startAtLoginOffer) => set({ startAtLoginOffer }),
 }));

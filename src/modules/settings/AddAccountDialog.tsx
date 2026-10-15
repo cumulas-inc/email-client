@@ -1,6 +1,9 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { useBackend } from "../../api/context";
+import { qk } from "../../api/queries";
+import { offerStartAtLoginOnce } from "../../app/offers";
 import { useAppStore } from "../../app/store";
 import { Dialog } from "../../components/Dialog";
 import { toast } from "../../components/toast";
@@ -36,6 +39,7 @@ const TITLES: Record<AddAccountStep, string> = {
 
 function AddAccountFlow() {
   const backend = useBackend();
+  const client = useQueryClient();
   const [request] = useState(() => useAddAccountRequest.getState().request);
   const [step, setStep] = useState<AddAccountStep>(request.step);
   const [email, setEmail] = useState(request.email ?? "");
@@ -64,6 +68,11 @@ function AddAccountFlow() {
 
   const done = (account: Account, kind: "microsoft" | "imap") => {
     closeAddAccount();
+    // After the first account: would they like it to start at login?
+    const accounts = client.getQueryData<Account[]>(qk.accounts());
+    if (!reauth && accounts?.length === 1 && accounts[0]?.id === account.id) {
+      offerStartAtLoginOnce();
+    }
     toast.success(
       reauth
         ? `You're signed in again as ${account.email}.`
