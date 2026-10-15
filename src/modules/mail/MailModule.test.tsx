@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { MockBackend } from "../../api/mock";
 import { useAppStore } from "../../app/store";
+import { messageBridgeUrl } from "./bodyHtml";
 import { useMailStore } from "./mailStore";
 import { deferred, folderTree, renderMail, row, setSearch, toolbarButton } from "./testUtils";
 
@@ -19,6 +20,21 @@ function treeItem(name: RegExp) {
 async function openMessage(user: ReturnType<typeof userEvent.setup>, name: RegExp) {
   await user.click(row(name));
   return screen.findByRole("heading", { level: 1, name });
+}
+
+/** The open message's frame, and the channel its bridge reports on. */
+async function messageFrame(title: RegExp) {
+  const frame = (await screen.findByTitle(title)) as HTMLIFrameElement;
+  const channel = /data-channel="([0-9a-f]+)"/.exec(frame.getAttribute("srcdoc") ?? "")?.[1];
+  expect(channel).toMatch(/^[0-9a-f]{32}$/);
+  return { frame, channel: channel! };
+}
+
+/** A message from the bridge, as if posted by `source` (the frame's own window). */
+function post(data: unknown, source: MessageEventSource | null) {
+  act(() => {
+    window.dispatchEvent(new MessageEvent("message", { data, source }));
+  });
 }
 
 describe("Mail folders", () => {
@@ -140,10 +156,15 @@ describe("Reading pane", () => {
 
     const frame = await screen.findByTitle(/^Message: Atlas launch checklist/);
     expect(frame.tagName).toBe("IFRAME");
-    expect(frame.getAttribute("sandbox")).toBe("allow-same-origin");
+    // An opaque origin: the bridge runs, nothing in the frame reaches the app.
+    expect(frame.getAttribute("sandbox")).toBe("allow-scripts");
     const srcdoc = frame.getAttribute("srcdoc") ?? "";
     expect(srcdoc).toContain('<meta http-equiv="Content-Security-Policy"');
     expect(srcdoc).toContain("default-src 'none'");
+    expect(srcdoc).toContain(`script-src ${messageBridgeUrl()};`);
+    expect(srcdoc).toMatch(
+      new RegExp(`<script src="${messageBridgeUrl()}" data-channel="[0-9a-f]{32}"></script>`),
+    );
     expect(srcdoc).toContain("img-src data: cid:;");
     expect(srcdoc).not.toMatch(/img-src[^;]*https:/);
     expect(srcdoc).toContain("rollback plan");
@@ -240,6 +261,109 @@ describe("Reading pane", () => {
     await user.click(screen.getByRole("link", { name: "sam.okafor@acme.example" }));
     const composer = await screen.findByRole("region", { name: "New message" });
     expect(within(composer).getByText("sam.okafor@acme.example")).toBeInTheDocument();
+  });
+
+  it("follows links, shows where they go, sizes the frame and hears keys through its bridge", async () => {
+    const user = userEvent.setup();
+    const { backend } = await renderMail();
+    const opened: string[] = [];
+    backend.openLink = async (url: string) => {
+      opened.push(url);
+    };
+    await openMessage(user, CHECKLIST);
+    const { frame, channel } = await messageFrame(/^Message: Atlas launch checklist/);
+    const fromFrame = (data: object) => post({ channel, ...data }, frame.contentWindow);
+
+    // A web link opens in the browser; other schemes go nowhere.
+    fromFrame({ type: "link", href: "https://example.org/plan" });
+    fromFrame({ type: "link", href: "javascript:alert(1)" });
+    fromFrame({ type: "link", href: "file:///etc/passwd" });
+    await waitFor(() => expect(opened).toEqual(["https://example.org/plan"]));
+
+    // Only this frame's messages count, on this document's channel, in shape.
+    post({ channel, type: "link", href: "https://example.org/a" }, window);
+    post({ channel, type: "link", href: "https://example.org/b" }, null);
+    post(
+      { channel: "0".repeat(32), type: "link", href: "https://example.org/c" },
+      frame.contentWindow,
+    );
+    post({ type: "link", href: "https://example.org/d" }, frame.contentWindow);
+    fromFrame({ type: "link", href: ["https://example.org/e"] });
+    fromFrame({ type: "open", href: "https://example.org/f" });
+    post("https://example.org/g", frame.contentWindow);
+    fromFrame({ type: "size", height: Number.NaN, wide: false, left: false, right: false });
+    fromFrame({ type: "size", height: 300 });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(opened).toEqual(["https://example.org/plan"]);
+    expect(frame.style.height).toBe("80px");
+
+    // Hovering a link shows where it really goes.
+    fromFrame({ type: "hover", href: "https://evil.example/login" });
+    expect(screen.getByText("https://evil.example/login")).toHaveClass("mail-reader__status");
+    fromFrame({ type: "hover", href: null });
+    expect(screen.queryByText("https://evil.example/login")).not.toBeInTheDocument();
+
+    // The frame is as tall as the mail, with room for a scrollbar when it's
+    // wider than the pane, and a faded edge where there's more.
+    fromFrame({ type: "size", height: 412.3, wide: true, left: false, right: true });
+    expect(frame.style.height).toBe("429px");
+    const wide = frame.closest(".mail-body-wide")!;
+    expect(wide).toHaveAttribute("data-more-right");
+    expect(wide).not.toHaveAttribute("data-more-left");
+    fromFrame({ type: "size", height: 3, wide: false, left: false, right: false });
+    expect(frame.style.height).toBe("24px");
+    expect(wide).not.toHaveAttribute("data-more-right");
+
+    // A link within the message scrolls the reader to its target.
+    const scroller = frame.closest<HTMLElement>(".mail-reader__scroll")!;
+    scroller.style.overflowY = "auto";
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 2000 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 500 });
+    scroller.scrollBy = vi.fn() as typeof scroller.scrollBy;
+    fromFrame({ type: "scroll", top: 640 });
+    expect(scroller.scrollBy).toHaveBeenCalledWith({ top: 640 });
+
+    // A mail address starts a message to it.
+    fromFrame({ type: "link", href: "mailto:sam.okafor@acme.example?subject=Plan" });
+    const composer = await screen.findByRole("region", { name: "New message" });
+    expect(within(composer).getByText("sam.okafor@acme.example")).toBeInTheDocument();
+    expect(opened).toEqual(["https://example.org/plan"]);
+  });
+
+  it("acts on shortcuts pressed in the message's frame", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    await openMessage(user, CHECKLIST);
+    const first = await messageFrame(/^Message: Atlas launch checklist/);
+    const key = (frame: HTMLIFrameElement, channel: string, init: Partial<KeyboardEventInit>) =>
+      post(
+        {
+          channel,
+          type: "key",
+          code: "",
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: false,
+          metaKey: false,
+          ...init,
+        },
+        frame.contentWindow,
+      );
+
+    // J: the next message, in the same frame with a new document.
+    key(first.frame, first.channel, { key: "j", code: "KeyJ" });
+    await screen.findByRole("heading", { level: 1, name: /Scheduled maintenance/ });
+    const next = await messageFrame(/^Message: Scheduled maintenance/);
+    expect(next.channel).not.toBe(first.channel);
+
+    // The last document's messages no longer count.
+    key(next.frame, first.channel, { key: "r", code: "KeyR", ctrlKey: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole("region", { name: "Reply" })).not.toBeInTheDocument();
+
+    key(next.frame, next.channel, { key: "r", code: "KeyR", ctrlKey: true });
+    const composer = await screen.findByRole("region", { name: "Reply" });
+    expect(within(composer).getByDisplayValue(/^Re: Scheduled maintenance/)).toBeInTheDocument();
   });
 
   it("opens and saves attachments", async () => {

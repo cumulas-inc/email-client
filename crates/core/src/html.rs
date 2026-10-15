@@ -1,9 +1,10 @@
 //! Handling of untrusted HTML from email bodies.
 //!
 //! Defense in depth: bodies are sanitized here (no scripts, event handlers,
-//! forms, frames or `javascript:` URLs), then the UI renders them inside a
-//! sandboxed `<iframe>` without `allow-scripts`, with a Content Security
-//! Policy that blocks remote loads unless the user allowed them.
+//! forms, frames or `javascript:` URLs), then the UI renders them inside an
+//! `<iframe>` sandboxed without `allow-same-origin` (an opaque origin, cut off
+//! from the app), with a Content Security Policy that runs no script but the
+//! app's own bridge and blocks remote loads unless the user allowed them.
 
 use std::borrow::Cow;
 use std::collections::HashSet;

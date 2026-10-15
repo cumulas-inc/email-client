@@ -6,18 +6,68 @@ import {
   classifyLink,
   contentSecurityPolicy,
   linkify,
+  messageBridgeUrl,
+  newChannel,
   paintsOwnBackground,
+  readBridgeMessage,
 } from "./bodyHtml";
+
+const BRIDGE = { url: "tauri://localhost/message-bridge.js", channel: "c0ffee".padEnd(32, "0") };
 
 describe("message frame document", () => {
   it("blocks everything but inline styles and embedded images by default", () => {
     const csp = contentSecurityPolicy(false);
     expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("script-src 'none'");
     expect(csp).toContain("style-src 'unsafe-inline'");
     expect(csp).toContain("img-src data: cid:;");
     expect(csp).toContain("font-src data:");
     expect(csp).not.toContain("https:");
     expect(contentSecurityPolicy(true)).toContain("img-src data: cid: https: http:");
+  });
+
+  it("runs the bridge, by its exact URL, and no other script", () => {
+    const csp = contentSecurityPolicy(false, BRIDGE.url);
+    const directives = csp.split("; ");
+    expect(directives).toContain("default-src 'none'");
+    // Exactly one script source: no 'self', 'unsafe-inline', 'unsafe-eval',
+    // hashes, nonces or schemes.
+    expect(directives.filter((d) => d.startsWith("script-src"))).toEqual([
+      "script-src tauri://localhost/message-bridge.js",
+    ]);
+    expect(csp).not.toContain("unsafe-eval");
+    expect(csp).not.toMatch(/script-src[^;]*'unsafe-inline'/);
+    expect(csp).toContain("form-action 'none'");
+    expect(csp).toContain("base-uri 'none'");
+
+    const doc = buildSrcDoc("<p>Hello</p>", {
+      allowRemote: false,
+      appearance: "plain",
+      bridge: BRIDGE,
+    });
+    expect(doc).toContain(`content="${csp}"`);
+    // The one script element, after the policy and before any of the mail.
+    const script = `<script src="${BRIDGE.url}" data-channel="${BRIDGE.channel}"></script>`;
+    expect(doc.match(/<script/g)).toHaveLength(1);
+    expect(doc.indexOf(script)).toBeGreaterThan(doc.indexOf("Content-Security-Policy"));
+    expect(doc.indexOf(script)).toBeLessThan(doc.indexOf("<style>"));
+    expect(doc.indexOf(script)).toBeLessThan(doc.indexOf("<p>Hello</p>"));
+    // Measured by the bridge, the frame doesn't scroll; without it, it does.
+    expect(doc).toContain("html[data-bridge] { overflow-y: hidden; }");
+  });
+
+  it("serves the bridge from the app's own origin", () => {
+    expect(messageBridgeUrl("tauri://localhost/")).toBe("tauri://localhost/message-bridge.js");
+    expect(messageBridgeUrl("http://localhost:1420/index.html?x=1#mail")).toBe(
+      "http://localhost:1420/message-bridge.js",
+    );
+    expect(messageBridgeUrl()).toBe(new URL("/message-bridge.js", window.location.href).href);
+  });
+
+  it("gives each frame document a channel of its own", () => {
+    const a = newChannel();
+    expect(a).toMatch(/^[0-9a-f]{32}$/);
+    expect(newChannel()).not.toBe(a);
   });
 
   it("wraps the body with the CSP meta tag and readable base styles", () => {
@@ -40,6 +90,58 @@ describe("message frame document", () => {
     expect(buildSrcDoc("", { allowRemote: false, appearance: "dark" })).toContain(
       "filter: invert(1) hue-rotate(180deg)",
     );
+  });
+});
+
+describe("bridge messages", () => {
+  const channel = BRIDGE.channel;
+  const read = (data: object) => readBridgeMessage({ channel, ...data }, channel);
+
+  it("reads the messages the bridge sends", () => {
+    expect(read({ type: "link", href: "https://example.org" })).toEqual({
+      type: "link",
+      href: "https://example.org",
+    });
+    expect(read({ type: "hover", href: "mailto:a@example.org" })).toEqual({
+      type: "hover",
+      href: "mailto:a@example.org",
+    });
+    expect(read({ type: "hover", href: null })).toEqual({ type: "hover", href: null });
+    const key = { key: "r", code: "KeyR", ctrlKey: true, shiftKey: false, altKey: false };
+    expect(read({ type: "key", ...key, metaKey: false })).toEqual({
+      type: "key",
+      ...key,
+      metaKey: false,
+    });
+    const size = { height: 640.5, wide: false, left: false, right: true };
+    expect(read({ type: "size", ...size })).toEqual({ type: "size", ...size });
+    expect(read({ type: "scroll", top: 120 })).toEqual({ type: "scroll", top: 120 });
+    // Nothing else comes along.
+    expect(read({ type: "link", href: "https://example.org", extra: 1 })).toEqual({
+      type: "link",
+      href: "https://example.org",
+    });
+  });
+
+  it("ignores anything else", () => {
+    const link = { type: "link", href: "https://example.org" };
+    expect(readBridgeMessage(link, channel)).toBeNull();
+    expect(readBridgeMessage({ ...link, channel: "other" }, channel)).toBeNull();
+    expect(readBridgeMessage({ ...link, channel }, "")).toBeNull();
+    for (const bad of [null, undefined, "link", 1, [link]]) {
+      expect(readBridgeMessage(bad, channel)).toBeNull();
+    }
+    expect(read({ type: "link" })).toBeNull();
+    expect(read({ type: "link", href: 1 })).toBeNull();
+    expect(read({ type: "hover" })).toBeNull();
+    expect(read({ type: "key", key: "r", code: "KeyR", ctrlKey: "yes" })).toBeNull();
+    expect(read({ type: "size", height: -1, wide: false, left: false, right: false })).toBeNull();
+    expect(
+      read({ type: "size", height: Infinity, wide: false, left: false, right: false }),
+    ).toBeNull();
+    expect(read({ type: "size", height: "10", wide: false, left: false, right: false })).toBeNull();
+    expect(read({ type: "scroll", top: Number.NaN })).toBeNull();
+    expect(read({ type: "eval", code: "1" })).toBeNull();
   });
 });
 

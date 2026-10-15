@@ -237,9 +237,19 @@ the letter's block.
 
 - Email HTML is sanitized in Rust (`html.rs`: no scripts, event handlers,
   forms, frames or `javascript:`/`data:` links), then rendered in an
-  `<iframe sandbox>` **without** `allow-scripts`, with a Content Security Policy
-  that blocks remote images and styles unless the user allows them (tracking
-  pixels are blocked by default).
+  `<iframe sandbox="allow-scripts">` **without** `allow-same-origin`: an opaque
+  origin, which can't reach the app or its IPC (Tauri's scripts go into the
+  main frame only). Its Content Security Policy blocks remote images and styles
+  unless the user allows them (tracking pixels are blocked by default) and runs
+  one script, by its exact URL: the app's bridge (`public/message-bridge.js`),
+  first in the document, before any of the mail. WebKitGTK calls no event
+  listener in a frame that may not run scripts, and the app can't reach into
+  an opaque one, so the bridge reports what happens inside by `postMessage`:
+  links clicked (opened through the app, in the browser or a new message) and
+  pointed at (the reader shows where they really go), keys pressed (the mail
+  shortcuts), and the document's size. Only real input is reported, and the
+  app takes a message only from its own frame, carrying the secret channel
+  that frame's document was given.
 - Signatures, which go into messages the person sends, are sanitized more
   strictly: pictures and CSS backgrounds only over HTTPS or as `data:` images,
   links only to `http`, `https`, `mailto` and `tel`, and no CSS that imports,

@@ -1,5 +1,6 @@
 // Pure helpers for displaying message bodies: the sandbox document, its
-// Content Security Policy, link handling and plain-text linkification.
+// Content Security Policy, the messages its bridge sends, link handling and
+// plain-text linkification.
 
 import charis400Italic from "@fontsource/charis-sil/files/charis-sil-latin-400-italic.woff2?inline";
 import charis400 from "@fontsource/charis-sil/files/charis-sil-latin-400-normal.woff2?inline";
@@ -16,10 +17,15 @@ import { cssString, SERIF_STACK } from "../../lib/fonts";
  */
 export type BodyAppearance = "plain" | "paper" | "dark";
 
-export function contentSecurityPolicy(allowRemote: boolean): string {
+/**
+ * The message frame's policy. Its one script is the bridge, by its exact
+ * URL (see messageBridgeUrl); without one, it runs none.
+ */
+export function contentSecurityPolicy(allowRemote: boolean, bridgeUrl?: string): string {
   const remote = allowRemote ? " https: http:" : "";
   return [
     "default-src 'none'",
+    `script-src ${bridgeUrl ?? "'none'"}`,
     "style-src 'unsafe-inline'",
     `img-src data: cid:${remote}`,
     "font-src data:",
@@ -165,7 +171,9 @@ function baseCss(
     ${SERIF_FACES}
     ${font.faces}
     :root { color-scheme: light; }
-    html { background: ${background}; overflow-y: hidden; }
+    html { background: ${background}; overflow-y: auto; }
+    /* The bridge reports the height, and the frame is as tall as the mail. */
+    html[data-bridge] { overflow-y: hidden; }
     html:has(> body:dir(rtl)) { direction: rtl; }
     body {
       margin: 0;
@@ -202,16 +210,27 @@ function baseCss(
   `;
 }
 
+/** The script that reports from a message's frame, and its channel there. */
+export interface FrameBridge {
+  /** Its absolute URL, the only script the frame's policy allows. */
+  url: string;
+  /** A secret the frame's messages carry (see newChannel). */
+  channel: string;
+}
+
 export interface SrcDocOptions {
   allowRemote: boolean;
   appearance: BodyAppearance;
   /** The reading font, for text the mail doesn't set itself (default Charis SIL). */
   font?: BodyFont;
   tone?: BodyTone;
+  /** Without one, nothing in the frame reports (and it scrolls on its own). */
+  bridge?: FrameBridge;
 }
 
 export function buildSrcDoc(html: string, options: SrcDocOptions): string {
-  const csp = contentSecurityPolicy(options.allowRemote);
+  const { bridge } = options;
+  const csp = contentSecurityPolicy(options.allowRemote, bridge?.url);
   const css = baseCss(
     options.appearance,
     options.font ?? DEFAULT_BODY_FONT,
@@ -222,12 +241,91 @@ export function buildSrcDoc(html: string, options: SrcDocOptions): string {
     "<!doctype html><html><head>" +
     '<meta charset="utf-8">' +
     `<meta http-equiv="Content-Security-Policy" content="${csp}">` +
+    // The bridge runs before any of the mail is parsed, under the policy above.
+    (bridge
+      ? `<script src="${attribute(bridge.url)}" data-channel="${attribute(bridge.channel)}"></script>`
+      : "") +
     '<meta name="color-scheme" content="light">' +
     '<meta name="referrer" content="no-referrer">' +
     `<style>${css}</style>` +
     // dir="auto": a letter in Arabic or Hebrew sets itself right to left.
     `</head><body dir="auto">${html}</body></html>`
   );
+}
+
+// --- The frame's bridge ----------------------------------------------------------
+
+/**
+ * Where the bridge is served: public/message-bridge.js, from the app's own
+ * origin (http://localhost:1420 in development, tauri://localhost built).
+ */
+export function messageBridgeUrl(base: string = window.location.href): string {
+  return new URL(`${import.meta.env.BASE_URL}message-bridge.js`, base).href;
+}
+
+/** A fresh secret for one frame document, so its messages can't be forged. */
+export function newChannel(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** What the bridge reports from a message's frame (public/message-bridge.js). */
+export type BridgeMessage =
+  /** A link clicked, or middle-clicked: its href as written. */
+  | { type: "link"; href: string }
+  /** The link under the pointer, or none. */
+  | { type: "hover"; href: string | null }
+  /** A key pressed in the frame. */
+  | {
+      type: "key";
+      key: string;
+      code: string;
+      ctrlKey: boolean;
+      shiftKey: boolean;
+      altKey: boolean;
+      metaKey: boolean;
+    }
+  /**
+   * The document's height; whether it's wider than the frame; whether
+   * there's more of it to the left and to the right.
+   */
+  | { type: "size"; height: number; wide: boolean; left: boolean; right: boolean }
+  /** A link within the message: show the document from `top` down. */
+  | { type: "scroll"; top: number };
+
+/**
+ * The message, if `data` is one the bridge sends on `channel`; otherwise
+ * null. The caller has checked that it came from its own frame.
+ */
+export function readBridgeMessage(data: unknown, channel: string): BridgeMessage | null {
+  if (typeof data !== "object" || data === null) return null;
+  const m = data as Record<string, unknown>;
+  if (m.channel !== channel) return null;
+  const isBool = (v: unknown): v is boolean => typeof v === "boolean";
+  const isNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  switch (m.type) {
+    case "link":
+      return typeof m.href === "string" ? { type: "link", href: m.href } : null;
+    case "hover":
+      return typeof m.href === "string" || m.href === null ? { type: "hover", href: m.href } : null;
+    case "key": {
+      const { key, code, ctrlKey, shiftKey, altKey, metaKey } = m;
+      if (typeof key !== "string" || typeof code !== "string") return null;
+      if (!isBool(ctrlKey) || !isBool(shiftKey) || !isBool(altKey) || !isBool(metaKey)) return null;
+      return { type: "key", key, code, ctrlKey, shiftKey, altKey, metaKey };
+    }
+    case "size": {
+      const { height, wide, left, right } = m;
+      if (!isNumber(height) || height < 0 || !isBool(wide) || !isBool(left) || !isBool(right)) {
+        return null;
+      }
+      return { type: "size", height, wide, left, right };
+    }
+    case "scroll":
+      return isNumber(m.top) ? { type: "scroll", top: m.top } : null;
+    default:
+      return null;
+  }
 }
 
 // --- Editable signatures -------------------------------------------------------
