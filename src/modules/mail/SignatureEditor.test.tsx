@@ -30,11 +30,12 @@ describe("SignatureEditor", () => {
   it("shows the signature exactly as it comes, in a sandboxed editable frame", async () => {
     renderWithBackend(<SignatureEditor html={ACME_SIGNATURE} onChange={() => undefined} />);
     const el = frame();
-    // No scripts, forms or navigation; the app reaches in, nothing else.
-    expect(el.getAttribute("sandbox")).toBe("allow-same-origin");
+    // No forms or navigation. Scripts are "allowed" only so that WebKitGTK
+    // calls the editor's listeners in the frame: its policy allows none.
+    expect(el.getAttribute("sandbox")).toBe("allow-same-origin allow-scripts");
     const srcdoc = el.getAttribute("srcdoc") ?? "";
     expect(srcdoc).toContain(
-      "default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; font-src https: data:",
+      "default-src 'none'; script-src 'none'; img-src https: data:; style-src 'unsafe-inline'; font-src https: data:",
     );
     expect(srcdoc).toMatch(
       /<body contenteditable="true" role="textbox" aria-multiline="true"[^>]* aria-label="Signature"/,
@@ -180,18 +181,30 @@ describe("SignatureEditor", () => {
 
   it("keeps a signature's own colors on a light sheet in the dark theme", async () => {
     document.documentElement.dataset.theme = "dark";
-    const { unmount } = renderWithBackend(
-      <SignatureEditor html={ACME_SIGNATURE} onChange={() => undefined} />,
-    );
-    expect(frame().closest(".signature-editor")).toHaveClass("signature-editor--paper");
-    expect(frame().getAttribute("srcdoc")).toContain("background: #ffffff");
-    unmount();
+    function Harness() {
+      const [html, setHtml] = useState(ACME_SIGNATURE);
+      return <SignatureEditor html={html} onChange={setHtml} />;
+    }
+    renderWithBackend(<Harness />);
+    const wrapper = frame().closest(".signature-editor")!;
+    expect(wrapper).toHaveClass("signature-editor--paper");
+    const srcdoc = frame().getAttribute("srcdoc");
+    expect(srcdoc).toContain('<html data-appearance="paper">');
+    const doc = await loadFrame(frame());
+    expect(doc.documentElement.dataset.appearance).toBe("paper");
 
-    // Plain text takes the dark theme's colors instead.
-    renderWithBackend(<SignatureEditor html="<div>Ada</div>" onChange={() => undefined} />);
-    expect(frame().closest(".signature-editor")).toHaveClass("signature-editor--dark");
+    // Down to plain text, it takes the dark theme's colors, in place: the
+    // frame doesn't reload under the caret.
+    editFrame(doc, "<div>Alex</div>");
+    expect(wrapper).toHaveClass("signature-editor--dark");
     expect(frame().style.colorScheme).toBe("dark");
-    expect(frame().getAttribute("srcdoc")).toContain("color-scheme: dark");
+    expect(doc.documentElement.dataset.appearance).toBe("dark");
+    expect(frame().getAttribute("srcdoc")).toBe(srcdoc);
+
+    // And in the light theme, plain.
+    act(() => void (document.documentElement.dataset.theme = "light"));
+    await waitFor(() => expect(doc.documentElement.dataset.appearance).toBe("plain"));
+    expect(wrapper).toHaveClass("signature-editor--plain");
   });
 });
 

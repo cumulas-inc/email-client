@@ -1,11 +1,17 @@
 // An editable signature, kept exactly as it comes. An organization's
 // signature is laid out with tables, inline styles, its own fonts and
 // pictures, which the message editor's schema would strip, so it is edited
-// where it's shown: in a frame of its own, sandboxed like a message's
-// (allow-same-origin, no scripts), whose body is the editing host. This
-// component reaches into the frame to size it, report edits, keep links
-// from navigating it and pass the app's shortcuts on, since keys pressed
-// inside never reach this document.
+// where it's shown: in a frame of its own whose body is the editing host.
+// This component reaches into the frame to size it, report edits, keep
+// links from navigating it and pass the app's shortcuts on, since keys
+// pressed inside never reach this document.
+//
+// The frame is sandboxed (no forms, popups, navigation of the app or
+// downloads), but unlike a message's it has allow-scripts: WebKitGTK calls
+// no event listener at all in a document that may not run scripts, even
+// this component's, so without it edits, focus and keys would go unheard.
+// No script can run in it all the same: its Content Security Policy allows
+// none, from anywhere, on top of the app's own.
 
 import clsx from "clsx";
 import {
@@ -71,7 +77,7 @@ export function SignatureEditor({
   });
 
   // What the frame holds: the latest `html`, or what it last reported. It
-  // goes in when the frame loads, so a new theme or font (a new document)
+  // goes in when the frame loads, so a new reading font (a new document)
   // keeps the edits, and typing never reloads the frame.
   const content = useRef(html);
   const teardown = useRef<(() => void) | null>(null);
@@ -80,12 +86,20 @@ export function SignatureEditor({
 
   const isDark = useIsDark();
   const font = useBodyFont();
+  // How it's painted follows the signature as it's edited, switched in the
+  // loaded frame; the frame starts as it first was.
   const appearance = signatureAppearance(html, isDark);
+  const [firstAppearance] = useState(appearance);
+  const look = useRef(appearance);
+  useEffect(() => {
+    look.current = appearance;
+    frameRef.current?.contentDocument?.documentElement?.setAttribute("data-appearance", appearance);
+  }, [appearance]);
   const srcDoc = useMemo(
     () =>
       font
         ? buildSignatureSrcDoc({
-            appearance,
+            appearance: firstAppearance,
             font,
             letter,
             placeholder,
@@ -93,7 +107,7 @@ export function SignatureEditor({
             minLines,
           })
         : null,
-    [appearance, font, letter, placeholder, minLines],
+    [firstAppearance, font, letter, placeholder, minLines],
   );
 
   // Another signature: shown in place, unless it's the edit just reported.
@@ -123,6 +137,9 @@ export function SignatureEditor({
     // The document from srcdoc, not the blank one a frame starts with.
     if (!frame || !doc || !body || !body.hasAttribute("contenteditable")) return;
     teardown.current?.();
+    doc.documentElement.setAttribute("data-appearance", look.current);
+    // A new document (the reading font changed) starts without the focus.
+    setFocused(false);
 
     const measure = () => {
       const root = doc.documentElement;
@@ -251,7 +268,7 @@ export function SignatureEditor({
           ref={frameRef}
           className="signature-editor__frame"
           title="Signature"
-          sandbox="allow-same-origin"
+          sandbox="allow-same-origin allow-scripts"
           referrerPolicy="no-referrer"
           srcDoc={srcDoc}
           onLoad={onLoad}

@@ -234,10 +234,12 @@ export function buildSrcDoc(html: string, options: SrcDocOptions): string {
 
 /**
  * What a signature's frame may load: its pictures and web fonts (https: or
- * data:) and inline styles. No scripts, from anywhere.
+ * data:) and inline styles. No scripts, from anywhere: not even the frame's
+ * sandbox stops them (see SignatureEditor), so this does.
  */
 export const SIGNATURE_CSP = [
   "default-src 'none'",
+  "script-src 'none'",
   "img-src https: data:",
   "style-src 'unsafe-inline'",
   "font-src https: data:",
@@ -287,6 +289,7 @@ export function isBlankHtml(html: string): boolean {
 }
 
 export interface SignatureDocOptions {
+  /** How it's painted at first; the editor switches it in place (`data-appearance`). */
   appearance: BodyAppearance;
   font: BodyFont;
   /**
@@ -316,23 +319,26 @@ function attribute(value: string): string {
  */
 export function buildSignatureSrcDoc(options: SignatureDocOptions): string {
   const { appearance, font, letter } = options;
-  const colors = appearance === "dark" ? DARK_INK : PAPER;
-  const paper = appearance === "paper";
-  const lineHeight = letter ? "1.6" : "normal";
+  // Every appearance is in the document, chosen by an attribute on <html>,
+  // so a signature that gains or loses its own colors as it's edited
+  // changes sheet without reloading (and losing the caret).
+  const look = (name: BodyAppearance, colors: Palette, rules: string) => `
+    html[data-appearance="${name}"] { ${rules} }
+    html[data-appearance="${name}"] body { color: ${colors.text}; caret-color: ${colors.text}; }
+    html[data-appearance="${name}"] a { color: ${colors.link}; }
+    html[data-appearance="${name}"] ::selection { background: ${colors.selection}; }
+    html[data-appearance="${name}"] body[data-empty]::before { color: ${colors.muted}; }
+  `;
   const css = `
     ${SERIF_FACES}
     ${font.faces}
-    :root { color-scheme: ${appearance === "dark" ? "dark" : "light"}; }
-    html { background: ${paper ? "#ffffff" : "transparent"}; overflow: hidden; }
+    html { color-scheme: light; background: transparent; overflow: hidden; }
     body {
       margin: 0;
-      padding: ${paper ? "12px 16px" : "0"};
       min-height: calc(${options.minLines} * ${letter ? "1.6em" : "1.25em"});
       font-family: ${font.family};
       font-size: 15.5px;
-      line-height: ${lineHeight};
-      color: ${colors.text};
-      caret-color: ${colors.text};
+      line-height: ${letter ? "1.6" : "normal"};
       overflow-wrap: break-word;
       word-wrap: break-word;
       outline: none;
@@ -340,19 +346,21 @@ export function buildSignatureSrcDoc(options: SignatureDocOptions): string {
       -webkit-text-size-adjust: 100%;
       -webkit-font-smoothing: antialiased;
     }
-    a { color: ${colors.link}; cursor: text; }
+    a { cursor: text; }
     img { max-width: 100%; height: auto; }
-    ::selection { background: ${colors.selection}; }
     body[data-empty]::before {
       content: attr(data-placeholder);
       float: left;
       height: 0;
-      color: ${colors.muted};
       pointer-events: none;
     }
+    ${look("plain", PAPER, "")}
+    ${look("paper", PAPER, "background: #ffffff;")}
+    html[data-appearance="paper"] body { padding: 12px 16px; }
+    ${look("dark", DARK_INK, "color-scheme: dark;")}
   `;
   return (
-    "<!doctype html><html><head>" +
+    `<!doctype html><html data-appearance="${appearance}"><head>` +
     '<meta charset="utf-8">' +
     `<meta http-equiv="Content-Security-Policy" content="${SIGNATURE_CSP}">` +
     '<meta name="referrer" content="no-referrer">' +
