@@ -14,6 +14,7 @@ export const qk = {
   fonts: () => ["accounts", "fonts"] as const,
   appInfo: () => ["accounts", "app-info"] as const,
   syncStatuses: () => ["accounts", "sync-statuses"] as const,
+  pushStatuses: () => ["accounts", "push-statuses"] as const,
 
   folders: (accountId?: string) => ["mail", "folders", accountId ?? "all"] as const,
   messages: (folderId: string, filter: string) => ["mail", "messages", folderId, filter] as const,
@@ -74,4 +75,9 @@ export function useUpdateSettings() {
 export function useSyncStatuses() {
   const backend = useBackend();
   return useQuery({ queryKey: qk.syncStatuses(), queryFn: () => backend.getSyncStatuses() });
+}
+
+export function usePushStatuses() {
+  const backend = useBackend();
+  return useQuery({ queryKey: qk.pushStatuses(), queryFn: () => backend.getPushStatuses() });
 }

@@ -3,7 +3,7 @@ import { useEffect } from "react";
 
 import { useBackend } from "../api/context";
 import { qk } from "../api/queries";
-import type { SyncStatus } from "../api/types";
+import type { PushStatus, SyncStatus } from "../api/types";
 
 /** Keeps React Query caches in step with backend change notifications. */
 export function useBackendEvents(): void {
@@ -22,9 +22,18 @@ export function useBackendEvents(): void {
         return [...others, status];
       });
     });
+    const offPush = backend.onPushStatus((status) => {
+      client.setQueryData<PushStatus[]>(qk.pushStatuses(), (old) => {
+        // Nothing to update until someone asked for the statuses.
+        if (!old) return old;
+        const others = old.filter((s) => s.accountId !== status.accountId);
+        return [...others, status];
+      });
+    });
     return () => {
       offData();
       offSync();
+      offPush();
     };
   }, [backend, client]);
 }

@@ -363,6 +363,32 @@ export interface Settings {
   showTrayIcon: boolean;
 }
 
+/** How an account hears about new mail. */
+export type PushMode =
+  | { kind: "imapIdle" }
+  | { kind: "imapNotify" }
+  | { kind: "graphRelay" }
+  | { kind: "polling"; everySecs: number }
+  | { kind: "off" };
+
+/** Whether the push mode works as intended. */
+export type PushHealth =
+  | { kind: "connecting" }
+  | { kind: "live" }
+  | { kind: "degraded"; reason: string }
+  | { kind: "authRequired" }
+  | { kind: "consentMissing" }
+  | { kind: "unsupported" };
+
+export interface PushStatus {
+  accountId: string;
+  mode: PushMode;
+  health: PushHealth;
+  detail: string | null;
+  /** When the mode or health last changed (ISO 8601). */
+  since: string;
+}
+
 export interface AppInfo {
   version: string;
   persistentSecrets: boolean;

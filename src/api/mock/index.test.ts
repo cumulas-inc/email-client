@@ -41,7 +41,7 @@ describe("the demo's text size", () => {
   });
 });
 
-describe("notification, push and background settings", () => {
+describe("push and background settings", () => {
   it("default like the desktop app", async () => {
     const settings = await new MockBackend().getSettings();
     expect(settings).toMatchObject({
@@ -57,6 +57,28 @@ describe("notification, push and background settings", () => {
       startHidden: true,
       showTrayIcon: true,
     });
+  });
+
+  it("report push per account and follow the instant updates switch", async () => {
+    const backend = new MockBackend();
+    const accounts = await backend.listAccounts();
+    const statuses = await backend.getPushStatuses();
+    expect(statuses.map((s) => s.accountId)).toEqual(accounts.map((a) => a.id));
+    for (const status of statuses) {
+      const account = accounts.find((a) => a.id === status.accountId)!;
+      expect(status.mode).toEqual(
+        account.kind === "imap" ? { kind: "imapIdle" } : { kind: "polling", everySecs: 30 },
+      );
+      expect(status.health).toEqual({ kind: "live" });
+    }
+
+    const seen: string[] = [];
+    backend.onPushStatus((s) => seen.push(s.mode.kind));
+    const settings = await backend.getSettings();
+    await backend.updateSettings({ ...settings, instantPush: false });
+    await new Promise((resolve) => setTimeout(resolve));
+    expect(seen).toEqual(accounts.map(() => "off"));
+    expect((await backend.getPushStatuses()).every((s) => s.mode.kind === "off")).toBe(true);
   });
 
   it("reject a snooze shorter than a minute", async () => {

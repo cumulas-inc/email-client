@@ -17,6 +17,7 @@ import type {
   MessageSummary,
   NewImapAccount,
   OutgoingMessage,
+  PushStatus,
   Settings,
   SyncStatus,
   Task,
@@ -62,6 +63,8 @@ export interface Backend {
   syncAccount(accountId: string): Promise<void>;
   syncAll(): Promise<void>;
   getSyncStatuses(): Promise<SyncStatus[]>;
+  /** How each account hears about new mail (IMAP IDLE, polling, ...). */
+  getPushStatuses(): Promise<PushStatus[]>;
 
   // Mail
   listFolders(accountId?: string): Promise<Folder[]>;
@@ -111,4 +114,5 @@ export interface Backend {
   // Events
   onDataChanged(handler: (event: DataChangedEvent) => void): Unsubscribe;
   onSyncStatus(handler: (status: SyncStatus) => void): Unsubscribe;
+  onPushStatus(handler: (status: PushStatus) => void): Unsubscribe;
 }

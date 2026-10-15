@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import type { Backend, Unsubscribe } from "./backend";
-import type { DataChangedEvent, SyncStatus } from "./types";
+import type { DataChangedEvent, PushStatus, SyncStatus } from "./types";
 
 function subscribe<T>(event: string, handler: (payload: T) => void): Unsubscribe {
   let unlisten: (() => void) | null = null;
@@ -43,6 +43,7 @@ export const tauriBackend: Backend = {
   syncAccount: (accountId) => invoke("sync_account", { accountId }),
   syncAll: () => invoke("sync_all"),
   getSyncStatuses: () => invoke("get_sync_statuses"),
+  getPushStatuses: () => invoke("get_push_statuses"),
 
   listFolders: (accountId) => invoke("list_folders", { accountId: accountId ?? null }),
   listMessages: (folderId, query) => invoke("list_messages", { folderId, query }),
@@ -86,4 +87,5 @@ export const tauriBackend: Backend = {
 
   onDataChanged: (handler) => subscribe<DataChangedEvent>("data-changed", handler),
   onSyncStatus: (handler) => subscribe<SyncStatus>("sync-status", handler),
+  onPushStatus: (handler) => subscribe<PushStatus>("push-status", handler),
 };

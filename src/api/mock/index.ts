@@ -12,6 +12,7 @@ import type {
   ErrorCode,
   Message,
   MessageSummary,
+  PushStatus,
   Settings,
   SyncStatus,
   Task,
@@ -208,6 +209,9 @@ export class MockBackend implements Backend {
   private settings: Settings = { ...DEFAULT_SETTINGS };
   private dataHandlers = new Set<(e: DataChangedEvent) => void>();
   private syncHandlers = new Set<(s: SyncStatus) => void>();
+  private pushHandlers = new Set<(s: PushStatus) => void>();
+  /** When each account's push status last changed. */
+  private pushSince = new Map<string, string>();
   private seq = 1000;
   private latency: number;
   private pendingSignIn: (() => void) | null = null;
@@ -443,7 +447,15 @@ export class MockBackend implements Backend {
     );
     if (!families.every(validFamily))
       fail("invalidInput", "That font name can't be used. Choose a font from the list.");
+    const pushChanged =
+      settings.instantPush !== this.settings.instantPush ||
+      settings.usePushRelay !== this.settings.usePushRelay;
     this.settings = clone(settings);
+    if (pushChanged) {
+      this.pushSince.clear();
+      const statuses = await this.getPushStatuses();
+      queueMicrotask(() => statuses.forEach((s) => this.pushHandlers.forEach((h) => h(s))));
+    }
     return clone(settings);
   }
 
@@ -478,6 +490,28 @@ export class MockBackend implements Backend {
 
   async syncAll() {
     for (const a of this.state.accounts) await this.syncAccount(a.id);
+  }
+
+  /**
+   * Like the desktop app before the push service: IMAP accounts idle,
+   * Microsoft accounts check the Inbox every 30 seconds.
+   */
+  async getPushStatuses(): Promise<PushStatus[]> {
+    const now = new Date().toISOString();
+    return this.state.accounts.map((a) => {
+      if (!this.pushSince.has(a.id)) this.pushSince.set(a.id, now);
+      return {
+        accountId: a.id,
+        mode: !this.settings.instantPush
+          ? { kind: "off" }
+          : a.kind === "imap"
+            ? { kind: "imapIdle" }
+            : { kind: "polling", everySecs: 30 },
+        health: { kind: "live" },
+        detail: null,
+        since: this.pushSince.get(a.id)!,
+      };
+    });
   }
 
   async getSyncStatuses() {
@@ -981,6 +1015,11 @@ export class MockBackend implements Backend {
   onSyncStatus(handler: (status: SyncStatus) => void): Unsubscribe {
     this.syncHandlers.add(handler);
     return () => this.syncHandlers.delete(handler);
+  }
+
+  onPushStatus(handler: (status: PushStatus) => void): Unsubscribe {
+    this.pushHandlers.add(handler);
+    return () => this.pushHandlers.delete(handler);
   }
 }
 
