@@ -7,7 +7,10 @@ inside a private D-Bus session with GNOME Keyring as the Secret Service.
 
 It adds an IMAP account through the UI, reads mail (checking the sandboxed
 body and blocked tracking pixel), sends a message over SMTP and checks its
-delivery and the copy in Sent. Then it closes the window (as a window manager
+delivery and the copy in Sent. It types a signature into Settings →
+Signatures (the signature editor is a sandboxed frame), adds a word to it in
+a new message and checks that the delivered HTML has it, edited, in its
+`cumulas-signature` block under the body. Then it closes the window (as a window manager
 would, with `WM_DELETE_WINDOW`) and, with the app running in the background,
 checks the desktop side against a fake notification server
 (`fake_notifications.py`, on the test's session bus): mail delivered over SMTP

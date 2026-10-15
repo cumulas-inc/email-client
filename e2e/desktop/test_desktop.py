@@ -1,5 +1,6 @@
 """End-to-end test of the real desktop app (Tauri + Rust core) through
-tauri-driver: add an IMAP account, read mail, send mail; then, with the window
+tauri-driver: add an IMAP account, read mail, send mail, set up a signature
+and send it, edited; then, with the window
 closed to the background, get notified of new mail (pushed over IMAP IDLE),
 open a message from its notification, use its buttons, and see notifications
 go once their mail is read elsewhere; get an event's reminder, snooze one and
@@ -9,6 +10,7 @@ dismissed reminder doesn't go off again.
 Run via ./run.sh, which provides the mail server, keyring and display.
 """
 
+import email
 import imaplib
 import os
 import smtplib
@@ -16,7 +18,9 @@ import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from email import policy
 from email.message import EmailMessage
+from html.parser import HTMLParser
 from pathlib import Path
 
 from fake_notifications import FakeNotificationServer
@@ -241,6 +245,138 @@ def first_run(driver) -> None:
             what="sent copy in the Sent folder",
         )
         shot(driver, "05-sent")
+
+        signature(driver)
+
+
+# --- signatures ------------------------------------------------------------------
+
+
+class SignatureText(HTMLParser):
+    """The text inside <div class="cumulas-signature">."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.depth = 0
+        self.text: list[str] = []
+        self.found = False
+
+    def handle_starttag(self, tag, attrs):
+        if self.depth:
+            if tag == "div":
+                self.depth += 1
+            if tag in ("div", "p", "br"):
+                self.text.append("\n")
+        elif tag == "div" and "cumulas-signature" in (dict(attrs).get("class") or "").split():
+            self.depth = 1
+            self.found = True
+
+    def handle_endtag(self, tag):
+        if self.depth and tag == "div":
+            self.depth -= 1
+            if self.depth:
+                self.text.append("\n")
+
+    def handle_data(self, data):
+        if self.depth:
+            self.text.append(data)
+
+
+def bob_newest_html(subject: str) -> str:
+    """The HTML part of the newest message in bob's Inbox with `subject`."""
+    with imaplib.IMAP4("127.0.0.1", IMAP_PORT) as imap:
+        imap.login("bob", "secret")
+        imap.select("INBOX")
+        _, data = imap.search(None, "SUBJECT", f'"{subject}"')
+        _, parts = imap.fetch(data[0].split()[-1], "(RFC822)")
+    message = email.message_from_bytes(parts[0][1], policy=policy.default)
+    return message.get_body(preferencelist=("html",)).get_content()
+
+
+def signature_frame(driver, scope: str) -> WebElement:
+    return wait_for(
+        lambda: next(
+            (
+                e
+                for e in driver.find_elements(By.CSS_SELECTOR, f"{scope} iframe[title='Signature']")
+                if e.is_displayed()
+            ),
+            None,
+        ),
+        what=f"the signature editor in {scope}",
+    )
+
+
+def signature(driver) -> None:
+    """Settings → Signatures: an own signature typed into the signature
+    editor (a sandboxed frame, edited in place) goes under the next message,
+    with a word added to it in the composer."""
+    ctrl(driver, ",")
+    button(driver, "Signatures").click()
+    frame = signature_frame(driver, ".settings")
+    # Scripts "allowed" only so the app's listeners in it are called; its
+    # policy allows none.
+    assert frame.get_attribute("sandbox") == "allow-same-origin allow-scripts", frame.get_attribute(
+        "sandbox"
+    )
+    driver.switch_to.frame(frame)
+    body = wait_for(
+        lambda: driver.find_element(By.CSS_SELECTOR, "body[contenteditable=true]"),
+        what="the editable signature",
+    )
+    body.click()
+    body.send_keys("Alice Example")
+    body.send_keys(Keys.ENTER)
+    body.send_keys("Example Corp")
+    assert "Example Corp" in body.text, body.text
+    driver.switch_to.default_content()
+    # Saved after a pause in typing.
+    accounts = invoke(driver, "list_accounts")
+    account_id = accounts[0]["id"]
+    wait_for(
+        lambda: "Example Corp" in invoke(driver, "get_account_signature", {"accountId": account_id})["ownHtml"],
+        timeout=10,
+        what="the own signature saved",
+    )
+    shot(driver, "07-signature-settings")
+    button(driver, "Close").click()
+
+    button(driver, "New message").click()
+    to = wait_for(lambda: driver.switch_to.active_element, what="focused To field")
+    to.send_keys("bob@example.com", Keys.ENTER)
+    subject = "Signed by the desktop test"
+    driver.find_element(By.CSS_SELECTOR, "input[aria-label='Subject']").send_keys(subject)
+    editor = driver.find_element(By.CSS_SELECTOR, ".mail-editor [contenteditable=true]")
+    editor.click()
+    editor.send_keys("With a signature below.")
+
+    # The signature is under the body; a word goes on its last line.
+    frame = signature_frame(driver, ".mail-compose")
+    assert frame.location["y"] > editor.location["y"], (frame.location, editor.location)
+    driver.switch_to.frame(frame)
+    body = wait_for(
+        lambda: next(
+            (e for e in driver.find_elements(By.TAG_NAME, "body") if "Example Corp" in e.text), None
+        ),
+        what="the signature in the composer",
+    )
+    body.click()
+    body.send_keys(Keys.CONTROL, Keys.END)
+    body.send_keys(" Labs")
+    assert "Example Corp Labs" in body.text, body.text
+    driver.switch_to.default_content()
+    shot(driver, "08-signature-compose")
+    button(driver, "Send").click()
+    wait_for(lambda: bob_has(subject), timeout=30, what="the signed message delivered to bob")
+
+    html = bob_newest_html(subject)
+    parser = SignatureText()
+    parser.feed(html)
+    assert parser.found, html
+    lines = [line.strip() for line in "".join(parser.text).splitlines() if line.strip()]
+    assert lines == ["Alice Example", "Example Corp Labs"], (lines, html)
+    # Under the body, as Outlook puts it.
+    assert html.index("With a signature below.") < html.index("cumulas-signature"), html
 
 
 # --- new mail in the background ------------------------------------------------
