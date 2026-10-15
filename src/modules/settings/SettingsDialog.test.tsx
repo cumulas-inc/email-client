@@ -918,6 +918,39 @@ describe("Signatures", () => {
     expect(within(work).getByTitle("Your organization's signature")).toBeInTheDocument();
   });
 
+  it("says when the organization couldn't be checked yet, and that the own signature is used", async () => {
+    const backend = new MockBackend({ signature: "unreachable" });
+    const check = vi.spyOn(backend, "checkOrganizationSignature");
+    openAt("signatures", backend);
+    const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
+    const caption =
+      "Couldn't check for your organization's signature yet. Until Cumulas Mail can, your own signature below is used.";
+    // Asked again on opening; once that fails too, it says so.
+    expect(await within(work).findByText(caption)).toBeInTheDocument();
+    expect(check).toHaveBeenCalledWith("acct-work");
+    expect(within(work).queryByText(/Checking for your organization/)).not.toBeInTheDocument();
+    expect(within(work).getByTitle("Signature")).toBeInTheDocument();
+  });
+
+  it("asks only organizations that sign, or might, again on opening", async () => {
+    const backend = new MockBackend({ signature: "notUsed" });
+    const check = vi.spyOn(backend, "checkOrganizationSignature");
+    const old = new Date(Date.now() - 60 * 60_000).toISOString();
+    backend.setOrganizationSignature("acct-work", { checkedAt: old, stale: true }, "unreachable");
+    openAt("signatures", backend);
+    const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
+    expect(await within(work).findByTitle("Signature")).toBeInTheDocument();
+    // Not one that doesn't sign the account's mail: that's asked once a day.
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("asks again on opening after a failed check, however recent the answer", async () => {
+    const backend = new MockBackend({ signature: "stale" });
+    const check = vi.spyOn(backend, "checkOrganizationSignature");
+    openAt("signatures", backend);
+    await waitFor(() => expect(check).toHaveBeenCalledWith("acct-work"));
+  });
+
   it("asks organizations again when their answer is old, quietly", async () => {
     const backend = new MockBackend();
     const sam = await backend.addMicrosoftAccount("sam@contoso.example");

@@ -16,7 +16,7 @@ import { SignatureEditor, type SignatureEditorHandle } from "../../mail/Signatur
 import { Callout } from "../Fields";
 import { trackSave } from "../saveStatus";
 
-/** Opening the section asks organizations again after this long. */
+/** Opening the section asks organizations again after this long (or after a failed check). */
 const RECHECK_MS = 10 * 60_000;
 /** Typing saves after this pause (and on leaving the editor). */
 const SAVE_DELAY_MS = 600;
@@ -47,24 +47,26 @@ export function SignaturesSection() {
 function AccountSignatures({ account }: { account: Account }) {
   const titleId = useId();
   const { data: signature, isError } = useAccountSignature(account.id);
-  const { mutate: checkNow } = useCheckOrganizationSignature();
+  const { mutate: checkNow, isPending: checking } = useCheckOrganizationSignature();
 
-  // Ask the organization again when its last answer is getting old.
+  // Ask the organization again when its last answer is getting old, or the
+  // last check failed. Not one that said it doesn't sign the account's mail:
+  // the app asks that once a day, and at sign-in.
   const asked = useRef(false);
   useEffect(() => {
     if (!signature || asked.current) return;
     asked.current = true;
-    const { state, checkedAt } = signature.organization;
-    if (state === "unsupported") return;
+    const { state, checkedAt, stale } = signature.organization;
+    if (state === "unsupported" || state === "notUsed") return;
     const age = checkedAt ? Date.now() - new Date(checkedAt).getTime() : Infinity;
-    if (age > RECHECK_MS) checkNow(account.id);
+    if (stale || age > RECHECK_MS) checkNow(account.id);
   }, [signature, checkNow, account.id]);
 
   let body;
   if (isError) {
     body = <p className="signature-caption">Couldn&apos;t load this account&apos;s signature.</p>;
   } else if (signature) {
-    body = <SignatureSettings signature={signature} />;
+    body = <SignatureSettings signature={signature} checking={checking} />;
   }
 
   return (
@@ -85,7 +87,14 @@ function AccountSignatures({ account }: { account: Account }) {
   );
 }
 
-function SignatureSettings({ signature }: { signature: AccountSignature }) {
+/** What the account's organization said; `checking` while Settings asks it again. */
+function SignatureSettings({
+  signature,
+  checking,
+}: {
+  signature: AccountSignature;
+  checking: boolean;
+}) {
   const organization = signature.organization;
   if (organization.state === "ready" && organization.html) {
     return <OrganizationPreview organization={organization} html={organization.html} />;
@@ -114,10 +123,20 @@ function SignatureSettings({ signature }: { signature: AccountSignature }) {
           </p>
         </Callout>
       )}
-      {organization.state === "unchecked" && (
+      {/* Never asked yet, or asked again here after a failed first check. */}
+      {organization.state === "unchecked" && (!organization.stale || checking) && (
         <p className="signature-checking" role="status">
           <LoaderCircle size={14} className="spin" aria-hidden="true" />
           Checking for your organization&apos;s signature…
+        </p>
+      )}
+      {organization.state === "unchecked" && organization.stale && !checking && (
+        <p className="signature-caption">
+          <Building2 size={16} strokeWidth={1.75} aria-hidden="true" />
+          <span>
+            Couldn&apos;t check for your organization&apos;s signature yet. Until Cumulas Mail can,
+            your own signature below is used.
+          </span>
         </p>
       )}
       <OwnSignature signature={signature} />
