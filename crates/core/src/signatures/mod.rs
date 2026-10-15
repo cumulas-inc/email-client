@@ -3,13 +3,16 @@
 //!
 //! Nothing to set up: for each such account the app asks Microsoft for a
 //! token for the signature service's API (`api://<host>/<client
-//! id>/access_as_user`, see [`config`]). In an organization that doesn't use
-//! Cumulas Signatures, Microsoft refuses (the API isn't in the tenant) and
-//! nothing reaches the service. Otherwise the app asks the service for the
-//! person's signature with that token ([`client`]); the answer is the
-//! signature, that the organization's mail server adds it on send, or that
-//! there's none for them. Personal Microsoft accounts and IMAP accounts
-//! never take part.
+//! id>/access_as_user`, see [`config`]). Microsoft gives one only in
+//! organizations that have added the Cumulas Signatures app in Microsoft
+//! 365: those that use it now, used it before and kept the app, or where
+//! someone signed in to the service. In other organizations it refuses (the
+//! API isn't in the tenant) and nothing reaches the service. With a token,
+//! the app asks the service for the person's signature ([`client`]); the
+//! token names the person and their organization, and nothing else is sent.
+//! The answer is the signature, that the organization's mail server adds it
+//! on send, or that there's none for them. Personal Microsoft accounts and
+//! IMAP accounts never take part.
 //!
 //! [`OrganizationSignatures`] is the check as the service sees it;
 //! `service::signatures` keeps the answers, when to ask again, and what a
@@ -54,10 +57,13 @@ pub enum CheckOutcome {
         on_replies: bool,
         etag: Option<String>,
     },
-    /// The organization doesn't use the service, or has no signature for
-    /// the person; `etag` names the service's answer when it gave one.
+    /// The organization doesn't use the service (Microsoft refused the
+    /// token: it hasn't added the service's app), or the service has no
+    /// signature for the person; `etag` names the service's answer when it
+    /// gave one.
     NotUsed { etag: Option<String> },
-    /// The organization uses the service but hasn't allowed this app.
+    /// The organization has the service's app but hasn't allowed this one
+    /// (Microsoft refused for consent), or the service's operator hasn't.
     NotAllowed,
     /// The answer named by the ETag sent still holds.
     Unchanged,

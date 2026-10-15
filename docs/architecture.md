@@ -186,31 +186,52 @@ accounts can have their organization's, from Cumulas Signatures (see
   and school accounts only): a token for the API from the account's refresh
   token (`auth::microsoft::ApiTokenSource`, whose refusals never become
   account errors), then `GET /apps/signature` (`signatures/client.rs`), once
-  more with a new token after a 401. The outcome is an answer (signature,
-  added on send, not used, not allowed), "unchanged" (304), or a failure to
-  try again later.
+  more with a new token after a 401. Microsoft gives the token only in
+  organizations that have added the service's app; elsewhere its refusal
+  counts as "not used" and nothing reaches the service. The outcome is an
+  answer (signature, added on send, each with whether replies are signed;
+  not used; not allowed), "unchanged" (304), or a failure to try again
+  later: anything else, including a 404 without the service's `not-managed`
+  or `not-set-up` and an answer whose `version` is newer than 1.
 - **State** (`account_signatures`, one row per account): the own signature,
   and the organization's last answer with its ETag, when it came, when the
   app last asked, whether that failed (`stale`) and the service's
   `Retry-After`. Only answers change it; a failure only marks it stale. Each
   answer is kept for the scope it came for, so a build pointed at another
   service starts afresh. Both signatures are sanitized before they're kept
-  (`html::sanitize_signature_html`).
-- **The scheduler** asks about 15 seconds after start, then every 6 hours
-  while the organization signs the mail, every 24 hours while it doesn't, 30
-  minutes after a failure (or at the `Retry-After`), at once after a sign-in
-  and when the network is back, by the wall clock and sleeping a minute at
-  most. One check runs per account at a time, at most one a minute.
+  (`html::sanitize_signature_html`) and again whenever they're read
+  (`sanitize_stored_signature_html`), so a stricter sanitizer applies at
+  once. The kept ETag starts with the sanitizer's version
+  (`html::SIGNATURE_SANITIZER_VERSION`, as `s1:`), and a check sends only
+  one this sanitizer kept: an answer kept by another comes again in full.
+- **The scheduler** asks about 15 seconds after start while the
+  organization signs the mail, before its first answer and after a failure;
+  then every 6 hours while it signs the mail, every 24 hours (by the last
+  answer, also across restarts, never at start) while it doesn't or hasn't
+  allowed the app, 30 minutes after a failure (or at the `Retry-After`), at
+  once after a sign-in whatever was said and when the network is back, by
+  the wall clock and sleeping a minute at most. One check runs per account
+  at a time, at most one a minute. A removed account is remembered, so no
+  check starts for it again, even from a list of accounts taken before.
 - **Compose** (`get_compose_signature`): the organization's signature (on
-  replies and forwards only if it says so), nothing when its server adds it
-  on send, else the account's own (on replies only if the person said so). An
-  account never checked waits up to 4 seconds for its first answer; an
-  answer over an hour old is refreshed in the background.
+  replies and forwards only if it says so); nothing when its server adds it
+  on send, or on a reply or forward that the server leaves unsigned; else
+  the account's own (on replies only if the person said so). An account
+  never checked waits up to 4 seconds for its first answer; while the
+  organization signs the mail, an answer over an hour old is refreshed in
+  the background.
 - Changes reach the UI as `data-changed` with `signatures`.
 
 **In the UI**, the signature goes in the message as ordinary content that can
-be changed, in a `cumulas-signature` block above the quoted original (in
-`cumulas-quote`), as Outlook does.
+be changed, as Outlook does. The sent HTML is up to three blocks side by
+side: the letter, in the letter font; the signature, in a `cumulas-signature`
+block (an organization's in the letter font without its line height, so its
+tables keep their layout); and, in a reply or forward, the original in a
+`cumulas-quote` block. Only an organization's signature block carries
+`data-signature-stamp`, which tells the service's relay the message is signed
+already, so a kept company signature and the relay never make two. A relay
+that signs on send puts its signature just before `cumulas-quote`, outside
+the letter's block.
 
 ## Security
 
@@ -221,8 +242,9 @@ be changed, in a `cumulas-signature` block above the quoted original (in
   pixels are blocked by default).
 - Signatures, which go into messages the person sends, are sanitized more
   strictly: pictures and CSS backgrounds only over HTTPS or as `data:` images,
-  links only to `http`, `https`, `mailto` and `tel`, and no style block that
-  imports or loads from elsewhere.
+  links only to `http`, `https`, `mailto` and `tel`, and no CSS that imports,
+  runs code, or loads from elsewhere (`image-set()` included). Kept
+  signatures are sanitized again whenever they're read.
 - Passwords and refresh tokens are kept in the Secret Service through `oo7`
   (inside Flatpak, in `oo7`'s encrypted keyring file in the app's data folder,
   keyed by the Secret portal), never in SQLite.

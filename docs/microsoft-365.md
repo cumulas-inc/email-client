@@ -216,11 +216,13 @@ Organizations that use Cumulas Signatures get their signature in Cumulas Mail
 with nothing for their people to set up. The app adds it to new messages, and
 to replies and forwards when the organization says so, as ordinary content the
 person can change; when the organization's mail server adds signatures on send
-(the service's relay), the app adds none, so mail never carries two. Only
-Microsoft 365 work and school accounts take part: personal Microsoft accounts
-(tenant `9188040d-6c67-4c5b-b112-36a304b66dad`) and IMAP accounts never do.
-While an organization's signature is in use, the person's own signature for
-that account isn't used.
+(the service's relay), the app adds none, so mail never carries two, and a
+reply or forward that the relay leaves unsigned (the organization's setting)
+starts with no signature. Only Microsoft 365 work and school accounts take
+part: personal Microsoft accounts (tenant
+`9188040d-6c67-4c5b-b112-36a304b66dad`) and IMAP accounts never do. While an
+organization's signature is in use, the person's own signature for that
+account isn't used.
 
 For each work or school account, the app:
 
@@ -230,38 +232,53 @@ For each work or school account, the app:
    `offline_access`). The app makes this scope itself from its build settings,
    never from a server's answer, and names the host's port only when it isn't
    the default.
-2. In an organization without the shared app, Microsoft refuses
-   (AADSTS500011, 650052, 650057 or 700016): the organization doesn't use the
-   service, and nothing reaches it. A refusal for consent (AADSTS65001 or the
-   other admin consent codes, 65004, or `consent_required`) means the
-   organization uses it but hasn't allowed Cumulas Mail. Anything else (no
-   network, MFA or Conditional Access wanting the person, an expired sign-in)
-   is tried again later, and is never an account error: the Graph sync
-   reports sign-in problems on its own.
+2. Microsoft gives Cumulas Mail a token only in organizations that have
+   added the Cumulas Signatures app in Microsoft 365. That includes
+   organizations that use it now, used it before and kept the app, or where
+   someone signed in to the service (its portal, sign-up and `/manage` sign
+   in with the shared app). In other organizations Microsoft refuses
+   (AADSTS500011, 650052, 650057 or 700016), nothing reaches the service, and
+   the app counts the organization as not using it. A refusal for consent
+   (AADSTS65001 or the other admin consent codes, 65004, or
+   `consent_required`) means the organization has the app but hasn't allowed
+   Cumulas Mail. Anything else (no network, MFA or Conditional Access wanting
+   the person, an expired sign-in) is tried again later, and is never an
+   account error: the Graph sync reports sign-in problems on its own.
 3. With a token, calls `GET <service>/apps/signature`, sending the last
-   answer's ETag in `If-None-Match` and following no redirects, and keeps the
-   answer: the signature (`"source": "app"`), added on send (`"relay"`), or
-   none (`"none"`, and 404 `not-managed` or `not-set-up`). 403
+   answer's ETag in `If-None-Match` and following no redirects. The token
+   names the person and their organization; nothing else is sent: no mail,
+   contacts or recipients. The app keeps the answer: the signature
+   (`"source": "app"`), added on send (`"relay"`), or none (`"none"`, and 404
+   `not-managed` or `not-set-up`), with `applyToReplies`, which says for
+   `app` and `relay` alike whether replies and forwards are signed too. 403
    `app-not-allowed` means the service's operator hasn't allowed Cumulas Mail.
+   Any other answer is a failure, including a 403 or 404 without the
+   service's code (a proxy's, say) and an answer whose `version` is newer
+   than 1, the format this app reads (an answer without one is version 1).
 
 Signatures are sanitized before use, like message bodies, but stricter:
-pictures and CSS backgrounds only over HTTPS or as `data:` images, links only
-to the web, email and phone numbers, and relative links resolved against the
-service. A check that fails keeps the last answer, marked stale, so a
-signature keeps working offline.
+pictures and CSS backgrounds only over HTTPS or as `data:` images (no
+`image-set()`), links only to the web, email and phone numbers, and relative
+links resolved against the service. Kept signatures are sanitized again
+whenever they're read, so a stricter sanitizer in an update applies at once.
+The kept ETag starts with the sanitizer's version (`s1:`): an answer kept by
+another sanitizer is asked for without it, so it comes again in full. A check
+that fails keeps the last answer, marked stale, so a signature keeps working
+offline.
 
-| When the app asks                |                                                                                                                              |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| About 15 seconds after it starts | Every work or school account.                                                                                                |
-| Every 6 hours                    | While the organization signs the account's mail (the app adds the signature, or the relay does on send).                     |
-| Every 24 hours                   | While the organization doesn't use the service, has no signature for the person, or hasn't allowed the app.                  |
-| 30 minutes after a failure       | Or when the service's `Retry-After` says (at most 6 hours), or as soon as the network is back.                               |
-| Right after signing in           | Signing in again picks up consent the organization gave meanwhile.                                                           |
-| When starting a message          | Waits up to 4 seconds for an account never checked; checks again in the background when the last answer is over an hour old. |
-| When asked to check now          | At most once a minute, and not before the service's `Retry-After`.                                                           |
+| When the app asks                |                                                                                                                                                                   |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| About 15 seconds after it starts | Each work or school account that was never checked, whose last check failed, or whose organization signs its mail.                                                |
+| Every 6 hours                    | While the organization signs the account's mail (the app adds the signature, or the relay does on send).                                                          |
+| Every 24 hours                   | While the organization doesn't use the service (Microsoft refused), has no signature for the person, or hasn't allowed the app; not at each start.                |
+| 30 minutes after a failure       | Or when the service's `Retry-After` says (at most 6 hours), or as soon as the network is back.                                                                    |
+| Right after signing in           | Whatever the last answer. Signing in again picks up consent the organization gave meanwhile.                                                                      |
+| When starting a message          | Waits up to 4 seconds for an account never checked; checks again in the background while the organization signs the mail and its last answer is over an hour old. |
+| When Settings → Signatures opens | Each account whose last answer is over 10 minutes old, unless it was that the organization doesn't use the service or has no signature for the person.            |
+| When asked to check now          | At most once a minute, and not before the service's `Retry-After`.                                                                                                |
 
 Times go by the wall clock, so a check due while the computer slept comes
-within a minute of waking.
+within a minute of waking, and a day-long wait counts across restarts.
 
 ### Setting it up (signature service operators)
 
@@ -275,7 +292,10 @@ server's public address. For Cumulas Mail:
    client application**. Enter Cumulas Mail's Application (client) ID and tick
    `api://<host>/<client ID>/access_as_user`. Pre-authorized, Cumulas Mail
    gets tokens in every organization that has the shared app, without asking
-   anyone to consent again.
+   anyone to consent again: clients, former clients that kept it, and
+   organizations where someone signed in to the service. Their tokens reach
+   the service, which answers `not-managed` where the organization isn't a
+   client.
 2. On the server, add Cumulas Mail's client ID under **Settings → Desktop mail
    apps**. Until then the service answers 403 `app-not-allowed`.
 

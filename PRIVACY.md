@@ -4,9 +4,9 @@ Cumulas Mail is a desktop app. It keeps your mail on your computer and talks
 to your mail providers directly. This page says what it keeps, what it sends
 where, and what passes through the services Cumulas runs: the push service at
 `sync.cumulas.co`, which tells the app when the Inbox or the calendar of a
-Microsoft account changes, and, for Microsoft 365 work and school accounts
-whose organization uses it, Cumulas Signatures at `signature.cumulas.co`,
-which gives the app your company signature.
+Microsoft account changes, and, for Microsoft 365 work and school accounts,
+Cumulas Signatures at `signature.cumulas.co`, which gives the app your company
+signature when your organization sets one up there.
 
 Cumulas Mail has no telemetry, no analytics, no crash reporting and no
 advertising, and you don't need a Cumulas account.
@@ -22,10 +22,10 @@ _Last updated: October 15, 2026._
   snoozed or dismissed (forgotten after 30 days), and, for Microsoft
   accounts, the reminder times Microsoft reports.
 - **Your signatures**: the one you write for each account and, for a
-  Microsoft 365 work or school account whose organization uses Cumulas
-  Signatures, the last answer about your company signature (the signature
-  itself, or that there's none for you), so that it works offline. They're in
-  the same database.
+  Microsoft 365 work or school account, the last answer about your company
+  signature (the signature itself, that your organization's mail server adds
+  it, or that there's none for you), so that it works offline. They're in the
+  same database.
 - **Attachments you open**, in the app's cache folder,
   `~/.cache/co.cumulas.Mail/`.
 - **Passwords and sign-in tokens**, in your desktop's keyring (GNOME Keyring
@@ -127,29 +127,46 @@ What passes through, and what's kept:
 
 **To Cumulas Signatures, for Microsoft 365 work and school accounts.**
 Organizations that use Cumulas Signatures set up their people's email
-signatures there. The app finds out whether yours does, with nothing to set
-up:
+signatures there. The app finds out whether yours has one for you, with
+nothing to set up:
 
 1. The app asks Microsoft, with your sign-in, for a token for Cumulas
-   Signatures, as it does for Microsoft Graph. If your organization doesn't
-   use Cumulas Signatures, Microsoft refuses and nothing is sent to Cumulas
-   Signatures; the app asks Microsoft again when it next starts, and once a
-   day.
-2. If Microsoft issues the token, the app sends it to `signature.cumulas.co`,
-   and nothing else about you: no address, message, recipient or contact. The
-   token is what tells the service who is asking: Microsoft puts your account
-   and your organization in it (and may add your name and sign-in address),
-   so that your organization's service can find the signature it set up for
-   you. It doesn't let the service read your mail.
-3. The service answers with your signature and whether it goes on replies
-   too, or that your organization's mail server adds it when you send (the
-   app then adds none, so your mail never carries two), or that there's none
-   for you right now.
+   Signatures, as it does for Microsoft Graph. Microsoft gives Cumulas Mail
+   one only in organizations that have added the Cumulas Signatures app in
+   Microsoft 365. That includes organizations that use it now, used it before
+   and kept the app, or where someone signed in to the service. In other
+   organizations Microsoft refuses and nothing is sent to Cumulas Signatures.
+2. If Microsoft gives the token, the app sends it to `signature.cumulas.co`
+   to get your signature. The token names you and your organization:
+   Microsoft puts your account and your organization in it (and may add your
+   name and sign-in address), so that the service can find the signature your
+   organization set up for you. It doesn't let the service read your mail. No
+   mail, contacts or recipients are sent. The service's request log records
+   the IP address and the path of each request, never the token or an
+   address.
+3. The service answers with your signature and whether it goes on replies and
+   forwards too, or that your organization's mail server adds it when you
+   send (the app then adds none, so your mail never carries two), or that
+   there's none for you right now.
 
-The app keeps the answer on your computer. It asks again when it starts, then
-every 6 hours while your organization signs your mail (once a day while it
-doesn't), and when you start a message more than an hour after the last
-answer. Pictures in a company signature, such as a logo, load from where your
+The app keeps the answer on your computer. When it asks again depends on
+that answer:
+
+- **While your organization signs your mail**, and before its first answer:
+  about 15 seconds after the app starts, every 6 hours, and in the
+  background when you start a message more than an hour after the last
+  answer.
+- **While it doesn't** (Microsoft refused, or the service has no signature
+  for you) **or hasn't allowed Cumulas Mail**: once a day, and not each time
+  the app starts or you start a message.
+- **After a check that failed** (no network, say): 30 minutes later (or when
+  the service asks), when the network comes back, and when the app next
+  starts.
+- **Whatever the answer**: right after you sign in; and when you open
+  **Settings → Signatures**, if the last answer is more than 10 minutes old
+  and wasn't that your organization doesn't sign your mail.
+
+Pictures in a company signature, such as a logo, load from where your
 organization keeps them (usually `signature.cumulas.co`) when the app shows
 the signature. Your organization decides what your signature says, and
 whether Cumulas Mail may fetch it. Personal Microsoft accounts (Outlook.com,
