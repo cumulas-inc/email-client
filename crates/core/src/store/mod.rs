@@ -9,6 +9,7 @@ mod push;
 mod reminders;
 mod schema;
 mod settings;
+mod signatures;
 mod tasks;
 
 use std::path::Path;
@@ -23,6 +24,7 @@ use crate::error::Result;
 
 pub use mail::{BatchOutcome, FolderUnreadDelta};
 pub use push::PushSubscription;
+pub use signatures::{StoredOrganizationSignature, StoredSignatures};
 
 pub struct Store {
     conn: Mutex<Connection>,

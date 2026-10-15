@@ -643,6 +643,97 @@ pub struct TaskPatch {
 }
 
 // ---------------------------------------------------------------------------
+// Signatures
+// ---------------------------------------------------------------------------
+
+/// Whether the account's organization signs its mail with Cumulas
+/// Signatures, as of the last check (see [`crate::signatures`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrganizationSignatureState {
+    /// IMAP, a personal Microsoft account, an account without a tenant, or
+    /// an app built without the signature service's client ID.
+    Unsupported,
+    /// Supported, but not checked yet.
+    Unchecked,
+    /// The organization doesn't use Cumulas Signatures, or has no signature
+    /// for this person right now.
+    NotUsed,
+    /// The organization's signature, which the app adds.
+    Ready,
+    /// The organization's mail server adds the signature on send; the app
+    /// adds none.
+    AddedOnSend,
+    /// The organization uses Cumulas Signatures but hasn't allowed Cumulas
+    /// Mail.
+    NotAllowed,
+}
+
+impl OrganizationSignatureState {
+    /// Whether the organization signs the account's mail, so that the
+    /// person's own signature isn't used.
+    pub fn is_managed(self) -> bool {
+        matches!(self, Self::Ready | Self::AddedOnSend)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationSignature {
+    pub state: OrganizationSignatureState,
+    /// Sanitized HTML; only while `Ready`.
+    pub html: Option<String>,
+    /// The signature also goes on replies and forwards.
+    pub on_replies: bool,
+    /// When the organization last answered (whatever it said).
+    pub checked_at: Option<DateTime<Utc>>,
+    /// The last check failed (no network, the service unavailable): `state`
+    /// is what was known before.
+    pub stale: bool,
+}
+
+/// An account's signatures: the person's own and the organization's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSignature {
+    pub account_id: String,
+    /// Sanitized HTML; empty for none.
+    pub own_html: String,
+    /// The own signature also goes on replies and forwards.
+    pub own_on_replies: bool,
+    pub organization: OrganizationSignature,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ComposeSignatureKind {
+    None,
+    Organization,
+    Own,
+    /// The organization's mail server signs the message on send: nothing
+    /// to insert.
+    AddedOnSend,
+}
+
+/// The signature a new message, reply or forward starts with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeSignature {
+    pub kind: ComposeSignatureKind,
+    /// Sanitized HTML for `Organization` and `Own`.
+    pub html: Option<String>,
+}
+
+impl ComposeSignature {
+    pub fn none() -> Self {
+        Self {
+            kind: ComposeSignatureKind::None,
+            html: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sync status & settings
 // ---------------------------------------------------------------------------
 
@@ -741,6 +832,8 @@ pub enum DataKind {
     Calendar,
     Contacts,
     Tasks,
+    /// An account's signatures (its own, or the organization's).
+    Signatures,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1213,5 +1306,72 @@ mod tests {
         assert_eq!(Settings::from_stored_json("not json"), Settings::default());
         assert_eq!(Settings::from_stored_json("[1, 2]"), Settings::default());
         assert_eq!(Settings::from_stored_json("{}"), Settings::default());
+    }
+
+    /// The shape `src/api/types.ts` mirrors.
+    #[test]
+    fn signatures_serialize_as_the_frontend_reads_them() {
+        let signature = AccountSignature {
+            account_id: "a".into(),
+            own_html: "<p>Ada</p>".into(),
+            own_on_replies: true,
+            organization: OrganizationSignature {
+                state: OrganizationSignatureState::AddedOnSend,
+                html: None,
+                on_replies: false,
+                checked_at: None,
+                stale: true,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&signature).unwrap(),
+            serde_json::json!({
+                "accountId": "a",
+                "ownHtml": "<p>Ada</p>",
+                "ownOnReplies": true,
+                "organization": {
+                    "state": "addedOnSend",
+                    "html": null,
+                    "onReplies": false,
+                    "checkedAt": null,
+                    "stale": true,
+                },
+            })
+        );
+        let states = [
+            (OrganizationSignatureState::Unsupported, "unsupported"),
+            (OrganizationSignatureState::Unchecked, "unchecked"),
+            (OrganizationSignatureState::NotUsed, "notUsed"),
+            (OrganizationSignatureState::Ready, "ready"),
+            (OrganizationSignatureState::AddedOnSend, "addedOnSend"),
+            (OrganizationSignatureState::NotAllowed, "notAllowed"),
+        ];
+        for (state, name) in states {
+            assert_eq!(serde_json::to_value(state).unwrap(), name);
+        }
+        assert_eq!(
+            serde_json::to_value(ComposeSignature {
+                kind: ComposeSignatureKind::Organization,
+                html: Some("<p>x</p>".into()),
+            })
+            .unwrap(),
+            serde_json::json!({ "kind": "organization", "html": "<p>x</p>" })
+        );
+        let kinds = [
+            (ComposeSignatureKind::None, "none"),
+            (ComposeSignatureKind::Own, "own"),
+            (ComposeSignatureKind::AddedOnSend, "addedOnSend"),
+        ];
+        for (kind, name) in kinds {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+        }
+        assert_eq!(
+            serde_json::to_value(DataKind::Signatures).unwrap(),
+            "signatures"
+        );
+        assert_eq!(
+            serde_json::from_str::<ReplyKind>(r#""replyAll""#).unwrap(),
+            ReplyKind::ReplyAll
+        );
     }
 }

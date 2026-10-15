@@ -190,6 +190,27 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (account_id, event_id)
     );
     "#,
+    // 4: signatures. The person's own for each account, and what the
+    // account's organization last said about its signature (Cumulas
+    // Signatures), with when the app last asked and when to ask again.
+    r#"
+    CREATE TABLE account_signatures (
+        account_id        TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        own_html          TEXT NOT NULL DEFAULT '',
+        own_on_replies    INTEGER NOT NULL DEFAULT 1,
+        -- The API scope the answer came for (it names the service and its
+        -- app registration): an answer from another isn't used.
+        org_scope         TEXT,
+        org_state         TEXT NOT NULL DEFAULT 'unchecked',  -- unchecked | notUsed | ready | addedOnSend | notAllowed
+        org_html          TEXT,
+        org_on_replies    INTEGER NOT NULL DEFAULT 0,
+        org_etag          TEXT,
+        org_checked_at    INTEGER,            -- the last answer
+        org_attempted_at  INTEGER,            -- the last try, answered or not
+        org_stale         INTEGER NOT NULL DEFAULT 0,  -- the last try failed
+        org_retry_at      INTEGER             -- not before (the service's Retry-After)
+    );
+    "#,
 ];
 
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
@@ -242,7 +263,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version as usize, MIGRATIONS.len());
         let remind_at: Option<i64> = conn
             .query_row("SELECT remind_at FROM tasks WHERE id = 't'", [], |r| {
                 r.get(0)
@@ -271,5 +292,66 @@ mod tests {
             )
             .unwrap();
         assert!(plan.contains("reminder_state_account"), "{plan}");
+    }
+
+    #[test]
+    fn the_signatures_migration_upgrades_a_database_from_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        {
+            // A database as the previous version left it, with an account.
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..3] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 3).unwrap();
+            conn.execute_batch(
+                "INSERT INTO accounts VALUES ('a', 'imap', 'A', 'a@x', '#000', '{}', 0, NULL, NULL);",
+            )
+            .unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM account_signatures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        // A row takes the defaults, and goes with its account.
+        conn.execute(
+            "INSERT INTO account_signatures (account_id) VALUES ('a')",
+            [],
+        )
+        .unwrap();
+        let (own, on_replies, state, stale): (String, bool, String, bool) = conn
+            .query_row(
+                "SELECT own_html, own_on_replies, org_state, org_stale FROM account_signatures",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (own.as_str(), on_replies, state.as_str(), stale),
+            ("", true, "unchecked", false)
+        );
+        conn.execute("DELETE FROM accounts WHERE id = 'a'", [])
+            .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM account_signatures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        // Only for accounts that exist.
+        assert!(
+            conn.execute(
+                "INSERT INTO account_signatures (account_id) VALUES ('gone')",
+                []
+            )
+            .is_err()
+        );
     }
 }
