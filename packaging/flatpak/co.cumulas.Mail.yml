@@ -21,7 +21,8 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
-  # Mail, calendar and sign-in servers, and the push service.
+  # Mail, calendar and sign-in servers, the push service and the signature
+  # service.
   - --share=network
   # The tray icon (StatusNotifierItem), where the desktop shows tray icons.
   - --talk-name=org.kde.StatusNotifierWatcher
@@ -57,6 +58,10 @@ modules:
         # Application (client) ID of the published Entra app registration;
         # leave empty to require users to enter one in Settings.
         CUMULAS_MS_CLIENT_ID: ""
+        # Client ID of the shared Cumulas Signatures app (its Outlook
+        # add-in's), whose API company signatures come from; empty turns
+        # company signatures off.
+        CUMULAS_SIGNATURE_CLIENT_ID: ""
     build-commands:
       - npm ci --offline
       - npm run build
