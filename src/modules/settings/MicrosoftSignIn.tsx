@@ -8,11 +8,13 @@ import {
   Settings,
   ShieldAlert,
   WifiOff,
+  Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import { useBackend } from "../../api/context";
 import { errorMessage, isBackendError } from "../../api/errors";
+import { useAppInfo, useSettings } from "../../api/queries";
 import type { Account } from "../../api/types";
 import { Spinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
@@ -53,6 +55,13 @@ export function MicrosoftSignIn({
   const [phase, setPhase] = useState<Phase>(autoStart ? { kind: "waiting" } : { kind: "form" });
   const backend = useBackend();
   const { mutateAsync } = useAddMicrosoftAccount();
+  const { data: info } = useAppInfo();
+  const { data: settings } = useSettings();
+  // The push service, unless it's turned off.
+  const pushService =
+    info && settings?.instantPush !== false && settings?.usePushRelay !== false
+      ? info.syncServer
+      : null;
   /** Bumped for each sign-in, and on cancel, so stale results are ignored. */
   const attempt = useRef(0);
   const mounted = useRef(true);
@@ -343,6 +352,15 @@ export function MicrosoftSignIn({
           sees your password.
         </p>
       </div>
+      {pushService && (
+        <div className="secure-note">
+          <Zap size={16} aria-hidden="true" />
+          <p>
+            For instant updates, Microsoft tells Cumulas&apos;s push service ({pushService}) when
+            your Inbox changes, but never what&apos;s in it.
+          </p>
+        </div>
+      )}
       <details className="permissions">
         <summary>What Cumulas Mail asks for</summary>
         <PermissionList />

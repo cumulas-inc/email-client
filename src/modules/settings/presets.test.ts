@@ -122,6 +122,20 @@ describe("admin consent request", () => {
     expect(body).toMatch(/Thank you/);
   });
 
+  it("asks for instant updates when that's what needs approving", () => {
+    const signIn = adminConsentEmail({ adminConsentUrl: url });
+    expect(signIn.body).not.toContain("Sync.Receive");
+    const { subject, body } = adminConsentEmail({
+      adminConsentUrl: url,
+      email: "sam@contoso.example",
+      purpose: "push",
+    });
+    expect(subject).toBe("Please approve instant updates for Cumulas Mail");
+    expect(body).toContain("Sync.Receive");
+    expect(body).toContain("never what's in it");
+    expect(body).toContain(url);
+  });
+
   it("encodes the request as a mailto: link", () => {
     const mailto = adminConsentMailto({ adminConsentUrl: url });
     expect(mailto).toMatch(/^mailto:\?subject=[^&]+&body=/);

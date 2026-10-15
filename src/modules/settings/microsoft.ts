@@ -58,21 +58,40 @@ export function organizationName(tenant: string | undefined): string | null {
   return t.includes(".") ? t : null;
 }
 
+/** What an administrator is asked to approve: signing in, or instant updates. */
+export type ApprovalPurpose = "signIn" | "push";
+
 interface AdminConsentRequest {
   adminConsentUrl: string;
   /** The address the user tried to sign in with, if known. */
   email?: string;
   tenant?: string;
+  purpose?: ApprovalPurpose;
 }
 
-export function adminConsentEmail({ adminConsentUrl, email, tenant }: AdminConsentRequest) {
+/** The push service's permission, as IT sees it (Settings → Accounts). */
+const PUSH_PERMISSION =
+  "Receive new-mail alerts through the Cumulas push service (Sync.Receive, on Cumulas Mail's own API)";
+
+export function adminConsentEmail({
+  adminConsentUrl,
+  email,
+  tenant,
+  purpose = "signIn",
+}: AdminConsentRequest) {
   const org = organizationName(tenant);
-  const subject = "Please approve Cumulas Mail for Microsoft 365";
   const account = email ? ` (${email})` : "";
+  const push = purpose === "push";
+  const subject = push
+    ? "Please approve instant updates for Cumulas Mail"
+    : "Please approve Cumulas Mail for Microsoft 365";
+  const situation = push
+    ? `I use Cumulas Mail, an email and calendar app for Linux, with my Microsoft 365 account${account}. To show new mail as it arrives, it needs one more permission, which an administrator needs to approve.`
+    : `I'd like to use Cumulas Mail, an email and calendar app for Linux, with my Microsoft 365 account${account}. When I sign in, Microsoft says an administrator needs to approve the app first.`;
   const lines = [
     "Hello,",
     "",
-    `I'd like to use Cumulas Mail, an email and calendar app for Linux, with my Microsoft 365 account${account}. When I sign in, Microsoft says an administrator needs to approve the app first.`,
+    situation,
     "",
     `Could you please review and approve it${org ? ` for ${org}` : ""}? An administrator can do this by opening this link and signing in:`,
     "",
@@ -80,8 +99,9 @@ export function adminConsentEmail({ adminConsentUrl, email, tenant }: AdminConse
     "",
     "Cumulas Mail only asks for delegated permissions, so it acts as the signed-in person and can only reach their own data:",
     ...MICROSOFT_PERMISSIONS.map((p) => `- ${p.request} (${p.scopes.join(", ")})`),
+    ...(push ? [`- ${PUSH_PERMISSION}`] : []),
     "",
-    "The app runs on my computer and keeps mail there. It connects only to Microsoft 365, has no servers of its own and sends no telemetry. Approving it once makes it available to everyone in the organization, so nobody else will need to ask.",
+    "The app runs on my computer and keeps mail there; it sends no telemetry. Mail goes only between my computer and Microsoft 365. For instant updates, Microsoft tells the Cumulas push service when my mailbox changes, but never what's in it. Approving it once makes it available to everyone in the organization, so nobody else will need to ask.",
     "",
     "Thank you!",
   ];

@@ -43,7 +43,8 @@ export function Welcome() {
 
         <p className="welcome__privacy">
           <LockKeyhole size={14} aria-hidden="true" />
-          Cumulas Mail connects only to your mail provider. No tracking, no telemetry.
+          Your mail goes only between this computer and your mail provider. No tracking, no
+          telemetry.
         </p>
       </div>
     </div>

@@ -1769,3 +1769,98 @@
     transition: none;
   }
 }
+
+/* --- Notifications, background and sync --------------------------------------- */
+
+/* A choice that only applies when the one above is on. */
+.setting-row--nested {
+  padding-left: calc(var(--space-4) + var(--space-6));
+}
+
+/* A second line under a switch's description: a status, or a warning. */
+.setting-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: var(--space-1);
+  color: var(--fg-secondary);
+}
+
+.setting-note--warning {
+  color: var(--fg-primary);
+}
+
+.setting-note svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.setting-note--warning svg {
+  color: var(--warning);
+}
+
+.privacy-note--inline {
+  max-width: 64ch;
+  margin-top: 0;
+}
+
+.privacy-note--inline svg {
+  margin-top: 2px;
+}
+
+/* A link that does something in the app (opens the browser). */
+.link-button {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-link);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  text-decoration-thickness: 2px;
+}
+
+.link-button:focus-visible {
+  border-radius: 2px;
+  outline-offset: 2px;
+}
+
+/* Settings → Accounts: how new mail reaches the account. */
+.push-field__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+}
+
+.push-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.push-status__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+  background: var(--fg-tertiary);
+}
+
+.push-status--ok .push-status__dot {
+  background: var(--success);
+}
+
+.push-status--attention {
+  color: var(--fg-primary);
+}
+
+.push-status--attention .push-status__dot {
+  background: var(--warning);
+}

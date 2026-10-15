@@ -14,3 +14,6 @@ export const ACCOUNT_COLORS: ColorOption[] = [
 
 /** The Accounts section's "Add account" button, focused after a removal. */
 export const ADD_ACCOUNT_BUTTON_ID = "settings-add-account";
+
+/** The privacy policy: what's kept, what goes where, the push service. */
+export const PRIVACY_URL = "https://github.com/cumulas-inc/email-client/blob/main/PRIVACY.md";

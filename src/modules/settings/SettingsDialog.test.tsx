@@ -119,7 +119,7 @@ describe("General", () => {
     await user.click(toggle);
     await waitFor(() => expect(lastSaved()).toMatchObject({ notificationsEnabled: false }));
 
-    await user.selectOptions(screen.getByLabelText("Check for new mail"), "15");
+    await user.selectOptions(screen.getByLabelText("Also check everything else"), "15");
     await waitFor(() =>
       expect(lastSaved()).toMatchObject({ syncIntervalMinutes: 15, notificationsEnabled: false }),
     );

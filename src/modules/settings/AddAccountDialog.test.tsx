@@ -73,6 +73,25 @@ describe("Microsoft sign-in", () => {
     );
   });
 
+  it("says that the push service hears when the Inbox changes", async () => {
+    openFlow({ step: "microsoft" });
+    expect(
+      await screen.findByText(
+        /Microsoft tells Cumulas's push service \(sync\.cumulas\.co\) when your Inbox changes, but never what's in it/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves the push service out when it's turned off", async () => {
+    const backend = new MockBackend();
+    const settings = await backend.getSettings();
+    await backend.updateSettings({ ...settings, usePushRelay: false });
+    openFlow({ step: "microsoft" }, backend);
+    await screen.findByRole("button", { name: "Sign in with Microsoft" });
+    await screen.findByText(/never sees your password/);
+    expect(screen.queryByText(/push service/)).not.toBeInTheDocument();
+  });
+
   it("cancels a pending sign-in and goes back to the form", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend();

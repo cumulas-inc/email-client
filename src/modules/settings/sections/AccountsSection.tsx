@@ -13,8 +13,8 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
-import { useAccounts, useSettings, useSyncStatuses } from "../../../api/queries";
-import type { Account, SyncStatus } from "../../../api/types";
+import { useAccounts, usePushStatuses, useSettings, useSyncStatuses } from "../../../api/queries";
+import type { Account, PushStatus, SyncStatus } from "../../../api/types";
 import { ColorPicker } from "../../../components/ColorPicker";
 import { EmptyState } from "../../../components/EmptyState";
 import { PaneSpinner } from "../../../components/Spinner";
@@ -25,6 +25,8 @@ import { ACCOUNT_COLORS, ADD_ACCOUNT_BUTTON_ID } from "../constants";
 import { Callout, TextField } from "../Fields";
 import { focusLater } from "../focus";
 import { ImapAccountEditor } from "../ImapAccountEditor";
+import { ApprovalLink } from "../AdminConsent";
+import { describePush } from "../pushStatus";
 import { TLS_LABELS } from "../presets";
 import { useSyncAccount, useUpdateAccount } from "../queries";
 import { trackSave } from "../saveStatus";
@@ -52,6 +54,7 @@ interface AccountsSectionProps {
 export function AccountsSection({ onRemove }: AccountsSectionProps) {
   const { data: accounts, isLoading } = useAccounts();
   const { data: statuses = [] } = useSyncStatuses();
+  const { data: pushStatuses = [] } = usePushStatuses();
   const { data: settings } = useSettings();
   const [expanded, setExpanded] = useState<string | null>(null);
   useTick();
@@ -78,6 +81,7 @@ export function AccountsSection({ onRemove }: AccountsSectionProps) {
               key={account.id}
               account={account}
               status={statuses.find((s) => s.accountId === account.id)}
+              push={pushStatuses.find((s) => s.accountId === account.id)}
               intervalMinutes={settings?.syncIntervalMinutes}
               expanded={expanded === account.id || accounts.length === 1}
               canCollapse={accounts.length > 1}
@@ -106,6 +110,7 @@ export function AccountsSection({ onRemove }: AccountsSectionProps) {
 interface AccountItemProps {
   account: Account;
   status: SyncStatus | undefined;
+  push: PushStatus | undefined;
   intervalMinutes: number | undefined;
   expanded: boolean;
   canCollapse: boolean;
@@ -117,6 +122,7 @@ interface AccountItemProps {
 function AccountItem({
   account,
   status,
+  push,
   intervalMinutes,
   expanded,
   canCollapse,
@@ -359,6 +365,8 @@ function AccountItem({
             </button>
           </div>
 
+          {push && <PushField account={account} push={push} onSignIn={signInAgain} />}
+
           {!syncError && servers}
 
           <div className="account-field account-field--row">
@@ -376,6 +384,45 @@ function AccountItem({
         </div>
       )}
     </li>
+  );
+}
+
+interface PushFieldProps {
+  account: Account;
+  push: PushStatus;
+  onSignIn: () => void;
+}
+
+/** How new mail reaches this account: instantly, or by checking. */
+function PushField({ account, push, onSignIn }: PushFieldProps) {
+  const summary = describePush(push, account.kind);
+  return (
+    <div className="account-field">
+      <div className="push-field__head">
+        <div className="account-field__text">
+          <span className="account-field__label">New mail</span>
+          <p className={clsx("account-field__hint", "push-status", `push-status--${summary.tone}`)}>
+            <span className="push-status__dot" aria-hidden="true" />
+            {summary.label}
+          </p>
+        </div>
+        {summary.action === "signIn" && account.kind === "microsoft" && (
+          <button type="button" className="btn btn--sm" onClick={onSignIn}>
+            <LogIn size={14} aria-hidden="true" />
+            Sign in again
+          </button>
+        )}
+      </div>
+      {summary.detail && <p className="account-field__hint selectable">{summary.detail}</p>}
+      {summary.action === "approve" && push.adminConsent && (
+        <ApprovalLink
+          adminConsentUrl={push.adminConsent.url}
+          tenant={push.adminConsent.tenant}
+          email={account.email}
+          purpose="push"
+        />
+      )}
+    </div>
   );
 }
 

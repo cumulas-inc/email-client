@@ -1,10 +1,11 @@
-import { ExternalLink, KeyRound, Scale, ShieldCheck } from "lucide-react";
+import { ExternalLink, KeyRound, Scale, ShieldCheck, Zap } from "lucide-react";
 import { useId } from "react";
 
 import { useBackend } from "../../../api/context";
 import { useAppInfo } from "../../../api/queries";
 import { LogoMark } from "../../../app/LogoMark";
 import { PaneSpinner } from "../../../components/Spinner";
+import { PRIVACY_URL } from "../constants";
 import { Callout } from "../Fields";
 
 const LICENSE_URL = "https://www.gnu.org/licenses/gpl-3.0.html";
@@ -49,6 +50,25 @@ export function AboutSection() {
                 analytics and no Cumulas account.
               </p>
             </div>
+          </div>
+          <div className="about-row">
+            <Zap size={18} aria-hidden="true" className="about-row__icon" />
+            <div className="about-row__text">
+              <p className="about-row__title">Instant updates for Microsoft accounts</p>
+              <p>
+                Microsoft tells Cumulas&apos;s push service ({info.syncServer}) when your Inbox
+                changes, but never what&apos;s in it, and the service passes that on to this
+                computer. You can turn it off in Settings → General.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn btn--sm about-row__action"
+              onClick={() => void backend.openLink(PRIVACY_URL)}
+            >
+              Privacy policy
+              <ExternalLink size={14} aria-hidden="true" />
+            </button>
           </div>
           {info.persistentSecrets && (
             <div className="about-row">
