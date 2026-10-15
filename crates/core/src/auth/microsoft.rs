@@ -508,12 +508,24 @@ impl MicrosoftTokenSource {
 
         // Microsoft may rotate the refresh token; the new one replaces the old.
         // The old one keeps working until it expires, so failing to store the
-        // new one is not fatal.
+        // new one is not fatal. When the old one is gone meanwhile, the
+        // account was removed while this request ran: its sign-in mustn't
+        // come back.
         if let Some(rotated) = tokens.refresh_token.as_deref()
             && rotated != refresh_token
-            && let Err(e) = self.secrets.set(&key, rotated).await
         {
-            tracing::warn!("could not store the rotated refresh token: {e}");
+            match self.secrets.get(&key).await {
+                Ok(Some(_)) => {
+                    if let Err(e) = self.secrets.set(&key, rotated).await {
+                        tracing::warn!("could not store the rotated refresh token: {e}");
+                    }
+                }
+                Ok(None) => tracing::info!(
+                    "not keeping a rotated refresh token: account {} was removed",
+                    self.account_id
+                ),
+                Err(e) => tracing::warn!("could not store the rotated refresh token: {e}"),
+            }
         }
         let token = CachedToken::new(
             &tokens.access_token,
@@ -1874,6 +1886,36 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("refresh-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rotated_refresh_token_is_not_kept_for_a_removed_account() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(token_success().set_delay(Duration::from_millis(300)))
+            .mount(&server)
+            .await;
+        let source = Arc::new(token_source(&server, Some("refresh-0")).await);
+        let refreshing = tokio::spawn({
+            let source = Arc::clone(&source);
+            async move { source.access_token().await }
+        });
+        // Removed while the refresh token is being redeemed.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        source
+            .secrets
+            .delete(&keys::refresh_token("acct"))
+            .await
+            .unwrap();
+        assert_eq!(refreshing.await.unwrap().unwrap(), "access-1");
+        assert_eq!(
+            source
+                .secrets
+                .get(&keys::refresh_token("acct"))
+                .await
+                .unwrap(),
+            None
         );
     }
 
