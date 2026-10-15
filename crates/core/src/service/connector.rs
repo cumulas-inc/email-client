@@ -1,12 +1,14 @@
 //! Builds protocol providers for accounts. Abstracted behind [`Connector`] so
 //! the service can be tested without network access.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::auth::microsoft::{self, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult};
+use crate::auth::microsoft::{
+    self, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult, SyncTokenSource, sync_scope,
+};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Account, AccountKind, AccountSettings, ImapSettings};
 use crate::providers::graph::GraphProvider;
@@ -15,6 +17,8 @@ use crate::providers::{
     CalendarProvider, ChangeSubscriptions, ContactsProvider, MailProvider, TasksProvider,
 };
 use crate::push::MailWatcher;
+use crate::push::graph::RelaySource;
+use crate::push::relay::{self, HttpRelay, Relay};
 use crate::push::supervisor::{MICROSOFT_POLL, UNSUPPORTED_POLL};
 use crate::secrets::{SecretStore, keys};
 use crate::store::Store;
@@ -44,6 +48,9 @@ pub enum PushSource {
     Watch(Arc<dyn MailWatcher>),
     /// The Inbox is checked on a timer.
     Poll(Duration),
+    /// Graph change subscriptions through the Cumulas push service
+    /// (Microsoft accounts, while the service is turned on).
+    Relay(RelaySource),
 }
 
 #[async_trait]
@@ -62,10 +69,12 @@ pub trait Connector: Send + Sync {
     async fn verify_imap(&self, credentials: &ImapCredentials) -> Result<()>;
 
     /// Interactive Microsoft sign-in in the user's browser.
+    /// `push_consent` also asks consent for the push service's scope.
     async fn microsoft_sign_in(
         &self,
         open_browser: &BrowserOpener,
         login_hint: Option<&str>,
+        push_consent: bool,
     ) -> Result<SignInResult>;
 }
 
@@ -73,11 +82,25 @@ pub trait Connector: Send + Sync {
 pub struct LiveConnector {
     store: Arc<Store>,
     secrets: Arc<dyn SecretStore>,
+    /// The push service, made on first use: one connection for every
+    /// account.
+    relay: OnceLock<Arc<dyn Relay>>,
 }
 
 impl LiveConnector {
     pub fn new(store: Arc<Store>, secrets: Arc<dyn SecretStore>) -> Self {
-        Self { store, secrets }
+        Self {
+            store,
+            secrets,
+            relay: OnceLock::new(),
+        }
+    }
+
+    fn relay(&self) -> Arc<dyn Relay> {
+        Arc::clone(
+            self.relay
+                .get_or_init(|| Arc::new(HttpRelay::new(relay::sync_url()))),
+        )
     }
 
     async fn imap_credentials(
@@ -157,9 +180,14 @@ impl Connector for LiveConnector {
 
     async fn push_source(&self, account: &Account) -> Result<PushSource> {
         match &account.settings {
-            // The push service comes in a later version; until then the
-            // Inbox is checked every 30 seconds.
-            AccountSettings::Microsoft(_) => Ok(PushSource::Poll(MICROSOFT_POLL)),
+            AccountSettings::Microsoft(_) => Ok(PushSource::Relay(RelaySource {
+                relay: self.relay(),
+                tokens: Arc::new(SyncTokenSource::new(
+                    self.microsoft_config()?,
+                    account.id.clone(),
+                    Arc::clone(&self.secrets),
+                )),
+            })),
             AccountSettings::Imap(settings) => {
                 let credentials = self.imap_credentials(account, settings).await?;
                 Ok(PushSource::Watch(Arc::new(ImapIdleWatcher::new(
@@ -178,8 +206,12 @@ impl Connector for LiveConnector {
         &self,
         open_browser: &BrowserOpener,
         login_hint: Option<&str>,
+        push_consent: bool,
     ) -> Result<SignInResult> {
-        let config = self.microsoft_config()?;
+        let mut config = self.microsoft_config()?;
+        if push_consent {
+            config.consent_scopes.push(sync_scope(&config.client_id));
+        }
         microsoft::sign_in(&config, open_browser, login_hint, Duration::from_secs(300)).await
     }
 }

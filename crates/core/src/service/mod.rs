@@ -303,8 +303,9 @@ impl CoreService {
         {
             let _ = previous.send(());
         }
+        let push_consent = self.wants_push_consent(login_hint);
         let outcome = tokio::select! {
-            result = self.connector.microsoft_sign_in(open_browser, login_hint) => result,
+            result = self.connector.microsoft_sign_in(open_browser, login_hint, push_consent) => result,
             _ = cancel_rx => Err(Error::new(ErrorCode::SignInCancelled, "Sign-in was canceled.")),
         };
         {
@@ -354,6 +355,27 @@ impl CoreService {
         Ok(account)
     }
 
+    /// Whether signing in again as `login_hint` should also ask consent for
+    /// the push service: only for an account whose push reported the
+    /// consent missing. That proves the app registration offers the scope;
+    /// asking for one it doesn't offer would fail the whole sign-in.
+    fn wants_push_consent(&self, login_hint: Option<&str>) -> bool {
+        let Some(hint) = login_hint.map(str::trim).filter(|h| !h.is_empty()) else {
+            return false;
+        };
+        let Ok(accounts) = self.store.list_accounts() else {
+            return false;
+        };
+        accounts.iter().any(|a| {
+            a.kind == AccountKind::Microsoft
+                && a.email.eq_ignore_ascii_case(hint)
+                && self
+                    .push
+                    .status(&a.id)
+                    .is_some_and(|s| s.health == crate::push::PushHealth::ConsentMissing)
+        })
+    }
+
     /// Abandons a Microsoft sign-in that is waiting for the browser; the
     /// pending `add_microsoft_account` call fails with `SignInCancelled`.
     pub fn cancel_microsoft_sign_in(&self) {
@@ -390,6 +412,8 @@ impl CoreService {
         // Before the data goes, so no sync writes to it meanwhile.
         self.push.stop(Some(&[account_id.to_owned()])).await;
         self.push.forget_status(account_id);
+        // While the sign-in to do it with is still there.
+        self.drop_push_subscriptions(account_id).await;
         self.forget_providers(Some(account_id)).await;
         self.store.delete_account(account_id)?;
         for key in [

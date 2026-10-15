@@ -18,8 +18,11 @@ use crate::model::{
     OutgoingMessage, ShowAs, TaskDraft, TaskPatch, TaskStatus,
 };
 use crate::providers::{
-    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow,
+    ChangeSubscriptions, FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator,
+    SyncWindow,
 };
+use crate::push::graph::{CONSENT_HINT, EVENTS_RESOURCE, INBOX_RESOURCE, RelaySource};
+use crate::push::relay::RelayEvent;
 use crate::push::{EndReason, MailWatcher, PushEvent, PushHealth, PushMode, WakeReason, WatchSink};
 use crate::secrets::MemorySecretStore;
 
@@ -278,6 +281,12 @@ pub(crate) struct FakeConnector {
     pub verified_passwords: Mutex<Vec<String>>,
     /// Push for every account; polling when unset.
     pub watcher: Mutex<Option<Arc<dyn MailWatcher>>>,
+    /// Push for Microsoft accounts through the push service, when set.
+    pub relay: Mutex<Option<RelaySource>>,
+    /// Graph's change subscriptions, for every account.
+    pub subscriptions: Mutex<Option<Arc<dyn ChangeSubscriptions>>>,
+    /// Whether each Microsoft sign-in asked consent for the push service.
+    pub push_consent: Mutex<Vec<bool>>,
 }
 
 impl FakeConnector {
@@ -287,6 +296,9 @@ impl FakeConnector {
             reject_login: reject_login.into(),
             verified_passwords: Mutex::default(),
             watcher: Mutex::default(),
+            relay: Mutex::default(),
+            subscriptions: Mutex::default(),
+            push_consent: Mutex::default(),
         }
     }
 }
@@ -302,7 +314,7 @@ impl Connector for FakeConnector {
             calendar: None,
             contacts: None,
             tasks: None,
-            subscriptions: None,
+            subscriptions: self.subscriptions.lock().unwrap().clone(),
         })
     }
 
@@ -318,12 +330,23 @@ impl Connector for FakeConnector {
         }
     }
 
-    async fn microsoft_sign_in(&self, _: &BrowserOpener, _: Option<&str>) -> Result<SignInResult> {
+    async fn microsoft_sign_in(
+        &self,
+        _: &BrowserOpener,
+        _: Option<&str>,
+        push_consent: bool,
+    ) -> Result<SignInResult> {
+        self.push_consent.lock().unwrap().push(push_consent);
         // Like a user who never finishes signing in in the browser.
         std::future::pending().await
     }
 
     async fn push_source(&self, account: &Account) -> Result<PushSource> {
+        if account.kind == AccountKind::Microsoft
+            && let Some(relay) = self.relay.lock().unwrap().clone()
+        {
+            return Ok(PushSource::Relay(relay));
+        }
         match self.watcher.lock().unwrap().clone() {
             Some(watcher) => Ok(PushSource::Watch(watcher)),
             None => Ok(PushSource::Poll(std::time::Duration::from_secs(
@@ -1777,4 +1800,264 @@ async fn snooze_time_is_validated() {
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidInput);
+}
+
+// --- Microsoft accounts through the push service ------------------------------
+
+use crate::auth::SyncTokenError;
+use crate::push::fakes::{FakeGraph, FakeTokens, ScriptedRelay};
+
+/// A service whose Microsoft accounts get push through a scripted push
+/// service, with Graph's subscriptions in memory.
+struct RelayBackground {
+    b: Background,
+    relay: Arc<ScriptedRelay>,
+    tokens: Arc<FakeTokens>,
+    graph: Arc<FakeGraph>,
+}
+
+fn relay_background() -> RelayBackground {
+    let b = background();
+    let (relay, tokens, graph) = (ScriptedRelay::new(), FakeTokens::new(), FakeGraph::new());
+    *b.h.connector.relay.lock().unwrap() = Some(RelaySource {
+        relay: relay.clone(),
+        tokens: tokens.clone(),
+    });
+    *b.h.connector.subscriptions.lock().unwrap() = Some(graph.clone());
+    RelayBackground {
+        b,
+        relay,
+        tokens,
+        graph,
+    }
+}
+
+/// A Microsoft account (signed in elsewhere: the fakes need no token).
+fn microsoft_account(h: &Harness, email: &str) -> Account {
+    let account = Account {
+        id: Uuid::new_v4().to_string(),
+        kind: AccountKind::Microsoft,
+        display_name: "Adele".into(),
+        email: email.into(),
+        color: "#0b7a75".into(),
+        settings: AccountSettings::Microsoft(MicrosoftSettings {
+            tenant_id: "11111111-2222-3333-4444-555555555555".into(),
+            user_id: "33333333-0000-0000-0000-00000000000a".into(),
+        }),
+        created_at: Utc::now(),
+        last_synced_at: None,
+        sync_error: None,
+    };
+    h.service.store().insert_account(&account).unwrap();
+    add_message(h, &account, "INBOX", "INBOX:1", "Welcome");
+    account
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_change_from_the_push_service_syncs_the_inbox_and_alerts() {
+    let r = relay_background();
+    let account = microsoft_account(&r.b.h, "adele@contoso.com");
+    r.b.service.start_background();
+    r.b.settle().await;
+    assert_eq!(r.b.h.sink.full_syncs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        r.b.health(&account),
+        Some((PushMode::GraphRelay, PushHealth::Live))
+    );
+    let resources: Vec<String> = r
+        .graph
+        .state
+        .lock()
+        .unwrap()
+        .subs
+        .iter()
+        .map(|s| s.resource.clone())
+        .collect();
+    assert_eq!(resources, [INBOX_RESOURCE, EVENTS_RESOURCE]);
+    assert!(r.b.h.sink.new_mail.lock().unwrap().is_empty());
+    let syncs = r.b.h.server.lock().unwrap().inbox_syncs;
+
+    add_message(&r.b.h, &account, "INBOX", "INBOX:2", "Pushed");
+    r.relay.send(RelayEvent::Change {
+        subscription: r.graph.id_of(INBOX_RESOURCE),
+    });
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(*r.b.h.sink.new_mail.lock().unwrap(), ["Pushed"]);
+    // A targeted sync of the Inbox, not a full one.
+    assert_eq!(r.b.h.server.lock().unwrap().inbox_syncs, syncs + 1);
+    assert_eq!(r.b.h.sink.full_syncs.load(Ordering::SeqCst), 1);
+
+    // While live, the Inbox isn't polled.
+    tokio::time::sleep(std::time::Duration::from_secs(4 * 60)).await;
+    assert_eq!(r.b.h.server.lock().unwrap().inbox_syncs, syncs + 1);
+
+    let started = tokio::time::Instant::now();
+    r.b.service.shutdown().await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // Stopping leaves the subscriptions for the next start.
+    assert_eq!(r.graph.state.lock().unwrap().subs.len(), 2);
+    assert_eq!(r.relay.open(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn missing_consent_polls_and_offers_it_at_the_next_sign_in() {
+    let r = relay_background();
+    r.tokens.refuse(SyncTokenError::ConsentMissing);
+    let account = microsoft_account(&r.b.h, "adele@contoso.com");
+    r.b.service.start_background();
+    r.b.settle().await;
+    let status =
+        r.b.service
+            .push_statuses()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.account_id == account.id)
+            .unwrap();
+    assert_eq!(status.mode, PushMode::Polling { every_secs: 30 });
+    assert_eq!(status.health, PushHealth::ConsentMissing);
+    assert_eq!(status.detail.as_deref(), Some(CONSENT_HINT));
+    // Not an account error: syncing goes on.
+    assert!(r.b.service.list_accounts().unwrap()[0].sync_error.is_none());
+    let syncs = r.b.h.server.lock().unwrap().inbox_syncs;
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    assert_eq!(r.b.h.server.lock().unwrap().inbox_syncs, syncs + 2);
+
+    // Signing in again as that account asks consent for the push service
+    // too; as anyone else, not.
+    for hint in [Some("ADELE@contoso.com"), Some("grace@contoso.com"), None] {
+        let service = &r.b.service;
+        let (result, ()) = tokio::join!(service.add_microsoft_account(&|_| Ok(()), hint), async {
+            tokio::task::yield_now().await;
+            service.cancel_microsoft_sign_in();
+        });
+        assert_eq!(result.unwrap_err().code, ErrorCode::SignInCancelled);
+    }
+    assert_eq!(
+        *r.b.h.connector.push_consent.lock().unwrap(),
+        [true, false, false]
+    );
+    r.b.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn turning_the_push_service_off_unsubscribes_and_polls() {
+    let r = relay_background();
+    let account = microsoft_account(&r.b.h, "adele@contoso.com");
+    r.b.service.start_background();
+    r.b.settle().await;
+    let ids: Vec<String> = [INBOX_RESOURCE, EVENTS_RESOURCE]
+        .iter()
+        .map(|r_| r.graph.id_of(r_))
+        .collect();
+    assert_eq!(
+        r.b.service
+            .store()
+            .push_subscriptions(&account.id)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let settings = r.b.service.get_settings().unwrap();
+    r.b.service
+        .update_settings(Settings {
+            use_push_relay: false,
+            ..settings.clone()
+        })
+        .await
+        .unwrap();
+    r.b.settle().await;
+    let mut deleted = r.graph.state.lock().unwrap().deleted.clone();
+    deleted.sort();
+    assert_eq!(deleted, ids);
+    assert!(
+        r.b.service
+            .store()
+            .push_subscriptions(&account.id)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        r.b.health(&account),
+        Some((PushMode::Polling { every_secs: 30 }, PushHealth::Live))
+    );
+    assert_eq!(r.relay.open(), 0);
+
+    // On again: subscribed again, and live.
+    r.b.service
+        .update_settings(Settings {
+            use_push_relay: true,
+            ..settings
+        })
+        .await
+        .unwrap();
+    r.b.settle().await;
+    assert_eq!(
+        r.b.health(&account),
+        Some((PushMode::GraphRelay, PushHealth::Live))
+    );
+    assert_eq!(r.graph.state.lock().unwrap().subs.len(), 2);
+    r.b.service.shutdown().await;
+}
+
+#[tokio::test]
+async fn removing_a_microsoft_account_deletes_its_subscriptions() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::auth::StaticToken;
+    use crate::providers::graph::GraphProvider;
+    use crate::store::PushSubscription;
+
+    let h = harness();
+    let server = MockServer::start().await;
+    *h.connector.subscriptions.lock().unwrap() = Some(Arc::new(GraphProvider::with_base_url(
+        "acct",
+        Arc::new(StaticToken("graph-token".into())),
+        server.uri(),
+    )));
+    Mock::given(method("DELETE"))
+        .and(path("/subscriptions/inbox-sub"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Already gone: still fine.
+    Mock::given(method("DELETE"))
+        .and(path("/subscriptions/events-sub"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": { "code": "ResourceNotFound", "message": "Not found" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let account = microsoft_account(&h, "adele@contoso.com");
+    let sub = |id: &str, resource: &str| PushSubscription {
+        id: id.into(),
+        resource: resource.into(),
+        expires_at: Utc::now(),
+    };
+    h.service
+        .store()
+        .replace_push_subscriptions(
+            &account.id,
+            &[
+                sub("inbox-sub", INBOX_RESOURCE),
+                sub("events-sub", EVENTS_RESOURCE),
+            ],
+        )
+        .unwrap();
+    h.service.remove_account(&account.id).await.unwrap();
+    assert!(h.service.list_accounts().unwrap().is_empty());
+
+    // Unreachable Graph doesn't hold the removal up for long.
+    let account = microsoft_account(&h, "grace@contoso.com");
+    h.service
+        .store()
+        .replace_push_subscriptions(&account.id, &[sub("x", INBOX_RESOURCE)])
+        .unwrap();
+    drop(server);
+    let started = std::time::Instant::now();
+    h.service.remove_account(&account.id).await.unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
 }

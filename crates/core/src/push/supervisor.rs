@@ -322,14 +322,14 @@ impl Supervisor {
     }
 }
 
-fn polling(every: Duration) -> PushMode {
+pub(super) fn polling(every: Duration) -> PushMode {
     PushMode::Polling {
         every_secs: every.as_secs() as u32,
     }
 }
 
 /// Resolves when the wake counter changes; never if its sender is gone.
-async fn woken(wake: &mut watch::Receiver<u64>) {
+pub(super) async fn woken(wake: &mut watch::Receiver<u64>) {
     if wake.changed().await.is_err() {
         pending::<()>().await;
     }
@@ -349,13 +349,13 @@ async fn refused(busy: &mut watch::Receiver<Option<Error>>) -> Error {
 }
 
 /// Resolves while offline; never if the sender is gone.
-async fn went_offline(online: &mut watch::Receiver<bool>) {
+pub(super) async fn went_offline(online: &mut watch::Receiver<bool>) {
     if online.wait_for(|online| !*online).await.is_err() {
         pending::<()>().await;
     }
 }
 
-async fn sleep_until(deadline: Option<Instant>) {
+pub(super) async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => pending().await,

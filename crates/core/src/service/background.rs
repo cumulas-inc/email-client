@@ -13,6 +13,7 @@ use super::{CoreService, PushSource};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::AccountKind;
 use crate::push::backoff::Backoff;
+use crate::push::graph::{GraphPush, ReportFn};
 use crate::push::hub::{AccountPush, STOP_LIMIT, join_within};
 use crate::push::supervisor::{EventFn, MICROSOFT_POLL, StatusFn, Supervisor};
 use crate::push::{PushHealth, PushMode, PushStatus, WakeReason, wake};
@@ -21,6 +22,9 @@ use crate::push::{PushHealth, PushMode, PushStatus, WakeReason, wake};
 const FIRST_SYNC_DELAY: Duration = Duration::from_secs(2);
 /// The most `shutdown` waits for the background work to stop.
 const SHUTDOWN_LIMIT: Duration = Duration::from_secs(2);
+/// The most deleting an account's push subscriptions may take: removing it
+/// (or turning the push service off) doesn't wait on an unreachable Graph.
+const UNSUBSCRIBE_LIMIT: Duration = Duration::from_secs(5);
 
 impl CoreService {
     /// Starts the background work: the periodic full sync, push for every
@@ -188,7 +192,7 @@ impl CoreService {
             .status(account_id)
             .map_or(PushMode::Off, |status| status.mode);
         self.push
-            .set_status(self.sink.as_ref(), account_id, mode, health);
+            .set_status(self.sink.as_ref(), account_id, mode, health, None);
     }
 
     /// A full sync of the account ended with `result`: push parked for a
@@ -294,13 +298,53 @@ impl CoreService {
     }
 
     /// How the account hears about changes; `None` when instant updates
-    /// are off.
+    /// are off. With the push service off, Microsoft accounts poll.
     async fn push_source(&self, account_id: &str) -> Result<Option<PushSource>> {
-        if !self.store.get_settings()?.instant_push {
+        let settings = self.store.get_settings()?;
+        if !settings.instant_push {
             return Ok(None);
         }
         let account = self.store.get_account(account_id)?;
+        if account.kind == AccountKind::Microsoft && !settings.use_push_relay {
+            return Ok(Some(PushSource::Poll(MICROSOFT_POLL)));
+        }
         self.connector.push_source(&account).await.map(Some)
+    }
+
+    /// Deletes the Graph subscriptions an account kept for the push service,
+    /// when it's removed or stops using the service. Best effort and brief:
+    /// what's left expires within three days, and the account's other
+    /// installations make their own again at their next connection.
+    pub(super) async fn drop_push_subscriptions(&self, account_id: &str) {
+        let stored = match self.store.push_subscriptions(account_id) {
+            Ok(stored) if !stored.is_empty() => stored,
+            _ => return,
+        };
+        let unsubscribe = async {
+            let providers = self.providers_for(account_id).await?;
+            let Some(graph) = providers.subscriptions else {
+                return Ok(());
+            };
+            for subscription in stored {
+                graph.delete_subscription(&subscription.id).await?;
+                self.store
+                    .remove_push_subscription(account_id, &subscription.id)?;
+            }
+            Ok::<_, Error>(())
+        };
+        match tokio::time::timeout(UNSUBSCRIBE_LIMIT, unsubscribe).await {
+            Ok(Ok(())) => {
+                tracing::info!("push for account {account_id}: removed its subscriptions");
+            }
+            // Graph's messages can name the subscriptions.
+            Ok(Err(e)) => tracing::info!(
+                "push for account {account_id}: could not remove its subscriptions ({:?})",
+                e.code
+            ),
+            Err(_) => tracing::info!(
+                "push for account {account_id}: removing its subscriptions took too long"
+            ),
+        }
     }
 
     /// Syncs every account in full, each after any sync it has in progress.
@@ -372,11 +416,11 @@ async fn run_account(
     }) else {
         return;
     };
-    let status: StatusFn = {
+    let report: ReportFn = {
         let service = service.clone();
         let account_id = account_id.clone();
         let cancel = cancel.clone();
-        Arc::new(move |mode, health| {
+        Arc::new(move |mode, health, detail| {
             // Once stopped or parked, the status belongs to whoever did it.
             if cancel.is_cancelled() {
                 return;
@@ -384,9 +428,13 @@ async fn run_account(
             if let Some(service) = service.upgrade() {
                 service
                     .push
-                    .set_status(service.sink.as_ref(), &account_id, mode, health);
+                    .set_status(service.sink.as_ref(), &account_id, mode, health, detail);
             }
         })
+    };
+    let status: StatusFn = {
+        let report = Arc::clone(&report);
+        Arc::new(move |mode, health| report(mode, health, None))
     };
     // Shown until the source is known.
     let planned = match kind {
@@ -405,11 +453,7 @@ async fn run_account(
             result = strong.push_source(&account_id) => result,
         };
         match result {
-            Ok(Some(source)) => break source,
-            Ok(None) => {
-                status(PushMode::Off, PushHealth::Live);
-                return;
-            }
+            Ok(source) => break source,
             Err(e) if e.code == ErrorCode::NotFound => return,
             Err(e) if e.code == ErrorCode::AuthRequired => {
                 tracing::info!("push for account {account_id}: credentials are missing");
@@ -443,11 +487,78 @@ async fn run_account(
             }
         }
     };
+    // An account that no longer uses the push service lets go of the
+    // subscriptions it had there.
+    if kind == AccountKind::Microsoft
+        && !matches!(source, Some(PushSource::Relay(_)))
+        && let Some(strong) = service.upgrade()
+    {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = strong.drop_push_subscriptions(&account_id) => {}
+        }
+    }
+    let Some(source) = source else {
+        status(PushMode::Off, PushHealth::Live);
+        return;
+    };
     let events: EventFn = Arc::new(move |event| queue.push(event));
+    let source = match source {
+        PushSource::Relay(relay) => {
+            let Some(strong) = service.upgrade() else {
+                return;
+            };
+            let graph = tokio::select! {
+                _ = cancel.cancelled() => return,
+                providers = strong.providers_for(&account_id) => {
+                    providers.ok().and_then(|p| p.subscriptions)
+                }
+            };
+            match (graph, strong.installation_id()) {
+                (Some(graph), Ok(installation)) => {
+                    let park = {
+                        let service = service.clone();
+                        let account_id = account_id.clone();
+                        Arc::new(move |e: &Error| {
+                            if let Some(service) = service.upgrade() {
+                                service.park_push(&account_id, e);
+                            }
+                        })
+                    };
+                    let push = GraphPush::new(
+                        account_id,
+                        installation,
+                        relay,
+                        graph,
+                        Arc::clone(&strong.store),
+                        events,
+                        report,
+                        cancel,
+                        wake,
+                        online,
+                    )
+                    .with_park(park);
+                    drop(strong);
+                    push.run().await;
+                    return;
+                }
+                _ => {
+                    tracing::warn!(
+                        "push for account {account_id}: the push service can't be used; \
+                         polling the Inbox"
+                    );
+                    PushSource::Poll(MICROSOFT_POLL)
+                }
+            }
+        }
+        other => other,
+    };
     let supervisor =
         Supervisor::new(account_id, events, status, cancel, wake, online).with_busy(busy);
     match source {
         PushSource::Watch(watcher) => supervisor.watch(watcher).await,
         PushSource::Poll(every) => supervisor.poll(every).await,
+        // Only left when it couldn't be used.
+        PushSource::Relay(_) => supervisor.poll(MICROSOFT_POLL).await,
     }
 }

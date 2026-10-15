@@ -86,12 +86,13 @@ impl PushHub {
         account_id: &str,
         mode: PushMode,
         health: PushHealth,
+        detail: Option<String>,
     ) {
         let status = {
             let mut statuses = self.statuses.lock().unwrap();
             if statuses
                 .get(account_id)
-                .is_some_and(|s| s.mode == mode && s.health == health)
+                .is_some_and(|s| s.mode == mode && s.health == health && s.detail == detail)
             {
                 return;
             }
@@ -99,7 +100,7 @@ impl PushHub {
                 account_id: account_id.to_owned(),
                 mode,
                 health,
-                detail: None,
+                detail,
                 since: Utc::now(),
             };
             statuses.insert(account_id.to_owned(), status.clone());
