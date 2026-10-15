@@ -321,7 +321,10 @@ export function buildSignatureSrcDoc(options: SignatureDocOptions): string {
   const { appearance, font, letter } = options;
   // Every appearance is in the document, chosen by an attribute on <html>,
   // so a signature that gains or loses its own colors as it's edited
-  // changes sheet without reloading (and losing the caret).
+  // changes sheet without reloading (and losing the caret). The light sheet
+  // is as wide as the signature, not the page. Its document stays in the
+  // app's (dark) scheme: a frame whose scheme differs from the page around
+  // it gets an opaque background.
   const look = (name: BodyAppearance, colors: Palette, rules: string) => `
     html[data-appearance="${name}"] { ${rules} }
     html[data-appearance="${name}"] body { color: ${colors.text}; caret-color: ${colors.text}; }
@@ -355,8 +358,28 @@ export function buildSignatureSrcDoc(options: SignatureDocOptions): string {
       pointer-events: none;
     }
     ${look("plain", PAPER, "")}
-    ${look("paper", PAPER, "background: #ffffff;")}
-    html[data-appearance="paper"] body { padding: 12px 16px; }
+    ${look("paper", PAPER, "color-scheme: dark;")}
+    html[data-appearance="paper"] body {
+      position: relative;
+      isolation: isolate;
+      box-sizing: border-box;
+      width: -webkit-fit-content;
+      width: fit-content;
+      min-width: min(100%, 240px);
+      max-width: 100%;
+      padding: 12px 16px;
+    }
+    /* The sheet is a layer behind the text: a background on <body> itself
+       would spread to the whole frame. */
+    html[data-appearance="paper"] body::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      border-radius: 10px;
+      background: #ffffff;
+      pointer-events: none;
+    }
     ${look("dark", DARK_INK, "color-scheme: dark;")}
   `;
   return (

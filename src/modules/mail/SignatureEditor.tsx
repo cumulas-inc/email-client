@@ -272,7 +272,7 @@ export function SignatureEditor({
           referrerPolicy="no-referrer"
           srcDoc={srcDoc}
           onLoad={onLoad}
-          style={{ height, colorScheme: appearance === "dark" ? "dark" : "light" }}
+          style={{ height, colorScheme: appearance === "plain" ? "light" : "dark" }}
         />
       )}
     </div>

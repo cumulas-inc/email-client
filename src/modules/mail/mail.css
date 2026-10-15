@@ -2389,7 +2389,8 @@
 /* --- Signature ------------------------------------------------------------------- */
 
 /* An editable signature: a frame as tall as what it holds (SignatureEditor).
-   It draws no box itself; where it sits decides. */
+   It draws no box itself, where it sits decides; the light sheet a signature
+   with its own colors gets in the dark theme is inside the frame. */
 .signature-editor {
   position: relative;
 }
@@ -2399,13 +2400,6 @@
   width: 100%;
   border: 0;
   background: transparent;
-}
-
-/* In the dark theme, a signature with its own colors sits on a light sheet,
-   as the quoted original does. */
-.signature-editor--paper .signature-editor__frame {
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
 }
 
 /* In the composer it's part of the letter: on the text's left edge, between
