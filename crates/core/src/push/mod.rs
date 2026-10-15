@@ -10,11 +10,13 @@
 //!
 //! The supervisor reconnects with [`backoff::Backoff`], falls back to polling
 //! when push is unavailable, pauses while offline and starts over at once
-//! when the computer wakes up. Its progress is published as a
+//! when the computer wakes up ([`wake`]). Its progress is published as a
 //! [`PushStatus`] per account.
 
 pub mod backoff;
+pub(crate) mod hub;
 pub mod supervisor;
+pub(crate) mod wake;
 
 use std::sync::Arc;
 

@@ -1,10 +1,13 @@
 //! Service tests against an in-memory fake server.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{Duration, NaiveDate, Utc};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::auth::microsoft::SignInResult;
@@ -17,6 +20,7 @@ use crate::model::{
 use crate::providers::{
     FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow,
 };
+use crate::push::{EndReason, MailWatcher, PushEvent, PushHealth, PushMode, WakeReason, WatchSink};
 use crate::secrets::MemorySecretStore;
 
 /// A tiny IMAP-like server: folders by remote id, messages by remote id.
@@ -223,6 +227,8 @@ pub(crate) struct FakeConnector {
     pub reject_login: std::sync::atomic::AtomicBool,
     /// Passwords passed to `verify_imap`, in order.
     pub verified_passwords: Mutex<Vec<String>>,
+    /// Push for every account; polling when unset.
+    pub watcher: Mutex<Option<Arc<dyn MailWatcher>>>,
 }
 
 impl FakeConnector {
@@ -231,6 +237,7 @@ impl FakeConnector {
             server,
             reject_login: reject_login.into(),
             verified_passwords: Mutex::default(),
+            watcher: Mutex::default(),
         }
     }
 }
@@ -265,6 +272,18 @@ impl Connector for FakeConnector {
         // Like a user who never finishes signing in in the browser.
         std::future::pending().await
     }
+
+    async fn push_source(&self, account: &Account) -> Result<PushSource> {
+        match self.watcher.lock().unwrap().clone() {
+            Some(watcher) => Ok(PushSource::Watch(watcher)),
+            None => Ok(PushSource::Poll(std::time::Duration::from_secs(
+                match account.kind {
+                    AccountKind::Microsoft => 30,
+                    AccountKind::Imap => 120,
+                },
+            ))),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -272,11 +291,17 @@ struct RecordingSink {
     new_mail: Mutex<Vec<String>>,
     alerts: Mutex<Vec<MailAlert>>,
     settled: Mutex<Vec<String>>,
+    push: Mutex<Vec<crate::push::PushStatus>>,
+    full_syncs: AtomicUsize,
 }
 
 impl EventSink for RecordingSink {
     fn data_changed(&self, _: &[DataKind], _: Option<&str>) {}
-    fn sync_status(&self, _: &SyncStatus) {}
+    fn sync_status(&self, status: &SyncStatus) {
+        if status.state == SyncState::Idle {
+            self.full_syncs.fetch_add(1, Ordering::SeqCst);
+        }
+    }
     fn new_mail(&self, _: &Account, alert: &MailAlert) {
         let mut seen = self.new_mail.lock().unwrap();
         seen.extend(alert.messages().iter().map(|m| m.subject.clone()));
@@ -284,6 +309,65 @@ impl EventSink for RecordingSink {
     }
     fn mail_settled(&self, message_ids: &[String]) {
         self.settled.lock().unwrap().extend_from_slice(message_ids);
+    }
+    fn push_status(&self, status: &crate::push::PushStatus) {
+        self.push.lock().unwrap().push(status.clone());
+    }
+}
+
+/// A watcher whose changes the test sends; counts its connections.
+#[derive(Default)]
+struct ScriptedWatcher {
+    events: Mutex<Option<mpsc::UnboundedReceiver<PushEvent>>>,
+    sender: Mutex<Option<mpsc::UnboundedSender<PushEvent>>>,
+    connections: AtomicUsize,
+    cancelled: AtomicUsize,
+}
+
+impl ScriptedWatcher {
+    fn new() -> Arc<Self> {
+        let watcher = Arc::new(Self::default());
+        watcher.reset_channel();
+        watcher
+    }
+
+    fn reset_channel(&self) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.sender.lock().unwrap() = Some(tx);
+        *self.events.lock().unwrap() = Some(rx);
+    }
+
+    fn send(&self, event: PushEvent) {
+        let sender = self.sender.lock().unwrap();
+        sender.as_ref().unwrap().send(event).unwrap();
+    }
+}
+
+#[async_trait]
+impl MailWatcher for ScriptedWatcher {
+    async fn watch(&self, sink: &WatchSink, cancel: &CancellationToken) -> EndReason {
+        self.connections.fetch_add(1, Ordering::SeqCst);
+        let Some(mut events) = self.events.lock().unwrap().take() else {
+            cancel.cancelled().await;
+            return EndReason::Cancelled;
+        };
+        sink.connected(PushMode::ImapIdle);
+        sink.changed(PushEvent::CatchUp);
+        let end = loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    self.cancelled.fetch_add(1, Ordering::SeqCst);
+                    break EndReason::Cancelled;
+                }
+                event = events.recv() => match event {
+                    Some(event) => sink.changed(event),
+                    None => break EndReason::Failed(Error::network("closed")),
+                },
+            }
+        };
+        // The next connection gets a fresh channel.
+        self.reset_channel();
+        end
     }
 }
 
@@ -861,6 +945,108 @@ async fn appearance_settings_are_validated_and_saved() {
     assert_eq!(h.service.get_settings().unwrap(), chosen);
 }
 
+fn add_message(h: &Harness, account: &Account, folder: &str, remote: &str, subject: &str) {
+    let m = summary(&account.id, folder, remote, subject);
+    h.server
+        .lock()
+        .unwrap()
+        .messages
+        .insert(remote.into(), (folder.into(), m));
+}
+
+#[tokio::test]
+async fn a_targeted_inbox_sync_reports_new_mail_and_refreshes_counts() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    h.service
+        .store()
+        .set_folder_counts(&inbox(&h, &account).id, 0, 0)
+        .unwrap();
+    add_message(&h, &account, "INBOX", "INBOX:3", "Fresh");
+    add_message(&h, &account, "Archive", "Archive:1", "Elsewhere");
+
+    h.service
+        .sync_targets(&account.id, SyncScope::inbox())
+        .await
+        .unwrap();
+    assert_eq!(*h.sink.new_mail.lock().unwrap(), ["Fresh"]);
+    assert!(matches!(
+        h.sink.alerts.lock().unwrap()[0],
+        MailAlert::Each(ref m) if m.len() == 1
+    ));
+    // Only the Inbox was synced, and its counts came from the server.
+    let archive = h
+        .service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Archive)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        h.service
+            .list_messages(&archive.id, &MessageQuery::default())
+            .unwrap()
+            .total,
+        0
+    );
+    let inbox = inbox(&h, &account);
+    assert_eq!((inbox.unread_count, inbox.total_count), (3, 3));
+    assert_eq!(h.server.lock().unwrap().count_requests, 1);
+
+    // Nothing changed: no new counts, no notification.
+    h.service
+        .sync_targets(&account.id, SyncScope::inbox())
+        .await
+        .unwrap();
+    assert_eq!(h.server.lock().unwrap().count_requests, 1);
+    assert_eq!(h.sink.new_mail.lock().unwrap().len(), 1);
+
+    // A folder named by NOTIFY.
+    let mut scope = SyncScope::default();
+    scope.folders.insert("Archive".into());
+    h.service.sync_targets(&account.id, scope).await.unwrap();
+    assert_eq!(
+        h.service
+            .list_messages(&archive.id, &MessageQuery::default())
+            .unwrap()
+            .total,
+        1
+    );
+    // Archive's first sync isn't news, nor outside the Inbox.
+    assert_eq!(h.sink.new_mail.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn mail_read_or_removed_elsewhere_is_settled() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let welcome = local_id(&account.id, EntityKind::Message, "INBOX:1");
+    let invoice = local_id(&account.id, EntityKind::Message, "INBOX:2");
+    h.server
+        .lock()
+        .unwrap()
+        .messages
+        .get_mut("INBOX:1")
+        .unwrap()
+        .1
+        .is_read = true;
+    h.service
+        .sync_targets(&account.id, SyncScope::inbox())
+        .await
+        .unwrap();
+    assert_eq!(
+        *h.sink.settled.lock().unwrap(),
+        std::slice::from_ref(&welcome)
+    );
+    assert_eq!(inbox(&h, &account).unread_count, 1);
+
+    h.server.lock().unwrap().messages.remove("INBOX:2");
+    h.service
+        .sync_targets(&account.id, SyncScope::inbox())
+        .await
+        .unwrap();
+    assert_eq!(*h.sink.settled.lock().unwrap(), [welcome, invoice]);
+}
+
 #[tokio::test]
 async fn reading_moving_and_deleting_here_settle_notifications() {
     let h = harness();
@@ -879,6 +1065,302 @@ async fn reading_moving_and_deleting_here_settle_notifications() {
     assert_eq!(*h.sink.settled.lock().unwrap(), ids[..1]);
     h.service.archive_messages(&ids[1..]).await.unwrap();
     assert_eq!(*h.sink.settled.lock().unwrap(), ids);
+}
+
+#[tokio::test]
+async fn targeted_syncs_wait_for_the_account_lock() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    add_message(&h, &account, "INBOX", "INBOX:3", "Fresh");
+    let lock = h.service.account_lock(&account.id);
+    let guard = lock.lock().await;
+    // The periodic sync skips an account that is busy...
+    h.service.sync_account(&account.id).await.unwrap();
+    assert!(h.sink.new_mail.lock().unwrap().is_empty());
+    // ...but a targeted sync waits for it.
+    let release = async {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(h.sink.new_mail.lock().unwrap().is_empty(), "still waiting");
+        drop(guard);
+    };
+    let (synced, ()) = tokio::join!(
+        h.service.sync_targets(&account.id, SyncScope::inbox()),
+        release
+    );
+    synced.unwrap();
+    assert_eq!(*h.sink.new_mail.lock().unwrap(), ["Fresh"]);
+}
+
+#[tokio::test]
+async fn targeted_syncs_learn_about_new_folders() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    h.server
+        .lock()
+        .unwrap()
+        .folders
+        .push(("Projects".into(), FolderRole::Other));
+    add_message(&h, &account, "Projects", "Projects:1", "Plan");
+    let mut scope = SyncScope::default();
+    scope.folders.insert("Projects".into());
+    h.service.sync_targets(&account.id, scope).await.unwrap();
+    let projects = h
+        .service
+        .store()
+        .find_folder_by_remote_id(&account.id, "Projects")
+        .unwrap()
+        .expect("listed");
+    assert_eq!(
+        h.service
+            .list_messages(&projects.id, &MessageQuery::default())
+            .unwrap()
+            .total,
+        1
+    );
+}
+
+/// A service with background work and a scripted push watcher.
+struct Background {
+    h: Harness,
+    service: Arc<CoreService>,
+    watcher: Arc<ScriptedWatcher>,
+}
+
+fn background() -> Background {
+    let h = harness();
+    let watcher = ScriptedWatcher::new();
+    *h.connector.watcher.lock().unwrap() = Some(watcher.clone());
+    // A second service on the same fakes, shared as background work needs.
+    let service = Arc::new(CoreService::new(
+        Arc::clone(h.service.store()),
+        h.secrets.clone(),
+        h.connector.clone(),
+        h.sink.clone(),
+    ));
+    Background {
+        h,
+        service,
+        watcher,
+    }
+}
+
+impl Background {
+    async fn account(&self) -> Account {
+        let account = self
+            .service
+            .add_imap_account(new_imap_account("me@example.com"))
+            .await
+            .unwrap();
+        add_message(&self.h, &account, "INBOX", "INBOX:1", "Welcome");
+        account
+    }
+
+    fn health(&self, account: &Account) -> Option<(PushMode, PushHealth)> {
+        self.service
+            .push_statuses()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.account_id == account.id)
+            .map(|s| (s.mode, s.health))
+    }
+
+    async fn settle(&self) {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn push_brings_new_mail_between_full_syncs() {
+    let b = background();
+    let account = b.account().await;
+    b.service.start_background();
+    // The first full sync runs after two seconds.
+    b.settle().await;
+    assert_eq!(b.h.sink.full_syncs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        b.health(&account),
+        Some((PushMode::ImapIdle, PushHealth::Live))
+    );
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 1);
+    assert!(b.h.sink.new_mail.lock().unwrap().is_empty());
+
+    add_message(&b.h, &account, "INBOX", "INBOX:2", "Pushed");
+    b.watcher.send(PushEvent::InboxChanged);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(*b.h.sink.new_mail.lock().unwrap(), ["Pushed"]);
+    // No full sync was needed for it.
+    assert_eq!(b.h.sink.full_syncs.load(Ordering::SeqCst), 1);
+    let pushed = b.h.sink.push.lock().unwrap().clone();
+    assert!(pushed.iter().all(|s| s.account_id == account.id));
+    assert_eq!(pushed.last().unwrap().health, PushHealth::Live);
+
+    // Then the periodic sync comes around.
+    tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+    assert_eq!(b.h.sink.full_syncs.load(Ordering::SeqCst), 2);
+
+    let started = tokio::time::Instant::now();
+    b.service.shutdown().await;
+    assert!(started.elapsed() <= std::time::Duration::from_secs(2));
+    assert_eq!(b.watcher.cancelled.load(Ordering::SeqCst), 1);
+    // Nothing runs or starts afterwards.
+    b.service.restart_push(&account.id).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(b.h.sink.full_syncs.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn waking_up_reconnects_and_syncs_everything() {
+    let b = background();
+    let account = b.account().await;
+    b.service.start_background();
+    b.settle().await;
+    let syncs = b.h.sink.full_syncs.load(Ordering::SeqCst);
+
+    b.service.wake(WakeReason::Resume);
+    b.settle().await;
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 2);
+    assert_eq!(b.h.sink.full_syncs.load(Ordering::SeqCst), syncs + 1);
+
+    // Offline: push pauses and the periodic sync skips its turn.
+    b.service.network_changed(false);
+    b.settle().await;
+    assert!(matches!(
+        b.health(&account),
+        Some((_, PushHealth::Degraded { .. }))
+    ));
+    tokio::time::sleep(std::time::Duration::from_secs(10 * 60)).await;
+    assert_eq!(b.h.sink.full_syncs.load(Ordering::SeqCst), syncs + 1);
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 2);
+    // Back online: reconnect and catch up.
+    b.service.network_changed(true);
+    b.settle().await;
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 3);
+    assert_eq!(b.h.sink.full_syncs.load(Ordering::SeqCst), syncs + 2);
+    assert_eq!(
+        b.health(&account),
+        Some((PushMode::ImapIdle, PushHealth::Live))
+    );
+    b.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn settings_and_account_changes_restart_push() {
+    let b = background();
+    let account = b.account().await;
+    b.service.start_background();
+    b.settle().await;
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 1);
+
+    // Unrelated settings leave the connection alone.
+    let settings = b.service.get_settings().unwrap();
+    b.service
+        .update_settings(Settings {
+            notify_sound: false,
+            ..settings.clone()
+        })
+        .await
+        .unwrap();
+    b.settle().await;
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 1);
+
+    // Instant updates off: no connection, the periodic sync alone.
+    b.service
+        .update_settings(Settings {
+            instant_push: false,
+            ..settings.clone()
+        })
+        .await
+        .unwrap();
+    b.settle().await;
+    assert_eq!(b.watcher.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(b.health(&account), Some((PushMode::Off, PushHealth::Live)));
+    b.service
+        .update_settings(Settings {
+            instant_push: true,
+            ..settings
+        })
+        .await
+        .unwrap();
+    b.settle().await;
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 2);
+
+    // New credentials reconnect.
+    b.service
+        .update_imap_account(
+            &account.id,
+            ImapAccountUpdate {
+                password: Some("new".into()),
+                settings: None,
+            },
+        )
+        .await
+        .unwrap();
+    b.settle().await;
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 3);
+
+    // Removing the account stops its push and forgets its status.
+    b.service.remove_account(&account.id).await.unwrap();
+    b.settle().await;
+    assert_eq!(b.watcher.cancelled.load(Ordering::SeqCst), 3);
+    assert!(b.service.push_statuses().unwrap().is_empty());
+    b.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn accounts_without_a_watcher_poll_the_inbox() {
+    let b = background();
+    *b.h.connector.watcher.lock().unwrap() = None;
+    let account = b.account().await;
+    b.service.start_background();
+    b.settle().await;
+    assert_eq!(
+        b.health(&account),
+        Some((PushMode::Polling { every_secs: 120 }, PushHealth::Live))
+    );
+    add_message(&b.h, &account, "INBOX", "INBOX:2", "Polled");
+    tokio::time::sleep(std::time::Duration::from_secs(121)).await;
+    assert_eq!(*b.h.sink.new_mail.lock().unwrap(), ["Polled"]);
+    b.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn rejected_credentials_park_push_until_the_account_is_fixed() {
+    let b = background();
+    *b.h.connector.watcher.lock().unwrap() = None;
+    let account = b.account().await;
+    b.service.start_background();
+    b.settle().await;
+    assert_eq!(b.h.sink.full_syncs.load(Ordering::SeqCst), 1);
+
+    // The server now rejects us: the next poll parks push...
+    b.h.server.lock().unwrap().fail_sync = true;
+    tokio::time::sleep(std::time::Duration::from_secs(121)).await;
+    assert!(matches!(
+        b.health(&account),
+        Some((PushMode::Polling { .. }, PushHealth::AuthRequired))
+    ));
+    // ...so it stops asking: the poll due at four minutes would bring this
+    // in (the next full sync is at five).
+    b.h.server.lock().unwrap().fail_sync = false;
+    add_message(&b.h, &account, "INBOX", "INBOX:2", "Unseen");
+    tokio::time::sleep(std::time::Duration::from_secs(150)).await;
+    assert!(b.h.sink.new_mail.lock().unwrap().is_empty());
+
+    // Fixing the account brings it back.
+    b.service
+        .update_imap_account(&account.id, ImapAccountUpdate::default())
+        .await
+        .unwrap();
+    b.settle().await;
+    assert_eq!(*b.h.sink.new_mail.lock().unwrap(), ["Unseen"]);
+    assert_eq!(
+        b.health(&account),
+        Some((PushMode::Polling { every_secs: 120 }, PushHealth::Live))
+    );
+    b.service.shutdown().await;
 }
 
 #[tokio::test]

@@ -5,10 +5,12 @@
 //! server rejected.
 
 mod alerts;
+mod background;
 mod connector;
 mod mail;
 mod pim;
 mod sync;
+pub(crate) mod targeted;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,9 +20,10 @@ use uuid::Uuid;
 
 pub use alerts::{MAX_AGE_HOURS, MailAlert, SUMMARY_THRESHOLD};
 pub use connector::{
-    BUILTIN_MICROSOFT_CLIENT_ID, BrowserOpener, Connector, LiveConnector, ProviderSet,
+    BUILTIN_MICROSOFT_CLIENT_ID, BrowserOpener, Connector, LiveConnector, ProviderSet, PushSource,
 };
 pub use mail::Attachment;
+pub use targeted::SyncScope;
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
@@ -29,6 +32,8 @@ use crate::model::{
     SyncStatus, TaskList, TlsMode, is_valid_font_family, local_id,
 };
 use crate::providers::imap::ImapCredentials;
+use crate::push::PushStatus;
+use crate::push::hub::PushHub;
 use crate::secrets::{SecretStore, keys};
 use crate::store::Store;
 
@@ -51,6 +56,8 @@ pub trait EventSink: Send + Sync {
         _cleared: &[String],
     ) {
     }
+    /// An account's push status changed.
+    fn push_status(&self, _status: &PushStatus) {}
 }
 
 /// Sink that drops everything; for tests and headless use.
@@ -84,6 +91,8 @@ pub struct CoreService {
     /// Cancels the Microsoft sign-in in progress, tagged with its sequence number.
     pending_sign_in: Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>>,
     sign_in_seq: std::sync::atomic::AtomicU64,
+    /// Push and the other background work, once started.
+    push: PushHub,
 }
 
 impl CoreService {
@@ -103,6 +112,7 @@ impl CoreService {
             sync_locks: Mutex::new(HashMap::new()),
             pending_sign_in: Mutex::new(None),
             sign_in_seq: std::sync::atomic::AtomicU64::new(0),
+            push: PushHub::default(),
         }
     }
 
@@ -201,6 +211,7 @@ impl CoreService {
             .await?;
         self.store.insert_account(&account)?;
         self.create_local_pim_containers(&account)?;
+        self.restart_push(&account.id).await;
         self.notify(&[DataKind::Accounts], Some(&account.id));
         Ok(account)
     }
@@ -245,6 +256,7 @@ impl CoreService {
         self.store.update_account(&account)?;
         self.store.set_account_sync_result(account_id, None, None)?;
         self.forget_providers(Some(account_id)).await;
+        self.restart_push(account_id).await;
         self.notify(&[DataKind::Accounts], Some(account_id));
         Ok(account)
     }
@@ -337,6 +349,7 @@ impl CoreService {
             .set(&keys::refresh_token(&account.id), &result.refresh_token)
             .await?;
         self.forget_providers(Some(&account.id)).await;
+        self.restart_push(&account.id).await;
         self.notify(&[DataKind::Accounts], Some(&account.id));
         Ok(account)
     }
@@ -374,6 +387,9 @@ impl CoreService {
     /// Removes the account, its cached data and its stored credentials.
     pub async fn remove_account(&self, account_id: &str) -> Result<()> {
         self.store.get_account(account_id)?;
+        // Before the data goes, so no sync writes to it meanwhile.
+        self.push.stop(Some(&[account_id.to_owned()])).await;
+        self.push.forget_status(account_id);
         self.forget_providers(Some(account_id)).await;
         self.store.delete_account(account_id)?;
         for key in [
@@ -408,10 +424,16 @@ impl CoreService {
         validate_settings(&settings)?;
         let previous = self.store.get_settings()?;
         self.store.save_settings(&settings)?;
-        if previous.microsoft_client_id != settings.microsoft_client_id
-            || previous.microsoft_tenant != settings.microsoft_tenant
-        {
+        let microsoft_app_changed = previous.microsoft_client_id != settings.microsoft_client_id
+            || previous.microsoft_tenant != settings.microsoft_tenant;
+        if microsoft_app_changed {
             self.forget_providers(None).await;
+        }
+        if microsoft_app_changed
+            || previous.instant_push != settings.instant_push
+            || previous.use_push_relay != settings.use_push_relay
+        {
+            self.restart_all_push().await;
         }
         Ok(settings)
     }

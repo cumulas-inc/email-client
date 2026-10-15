@@ -49,6 +49,13 @@ impl CoreService {
         self.sync_account_locked(account_id).await
     }
 
+    /// Syncs one account, after the sync in progress if there is one.
+    pub(super) async fn sync_account_waiting(&self, account_id: &str) -> Result<()> {
+        let lock = self.account_lock(account_id);
+        let _guard = lock.lock().await;
+        self.sync_account_locked(account_id).await
+    }
+
     /// Syncs one account; the caller holds its lock.
     async fn sync_account_locked(&self, account_id: &str) -> Result<()> {
         let account = self.store.get_account(account_id)?;

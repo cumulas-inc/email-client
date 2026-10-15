@@ -8,10 +8,12 @@ use async_trait::async_trait;
 
 use crate::auth::microsoft::{self, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult};
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{Account, AccountSettings};
+use crate::model::{Account, AccountKind, AccountSettings, ImapSettings};
 use crate::providers::graph::GraphProvider;
-use crate::providers::imap::{self, ImapCredentials, ImapProvider};
+use crate::providers::imap::{self, IdleConfig, ImapCredentials, ImapIdleWatcher, ImapProvider};
 use crate::providers::{CalendarProvider, ContactsProvider, MailProvider, TasksProvider};
+use crate::push::MailWatcher;
+use crate::push::supervisor::{MICROSOFT_POLL, UNSUPPORTED_POLL};
 use crate::secrets::{SecretStore, keys};
 use crate::store::Store;
 
@@ -31,9 +33,26 @@ pub struct ProviderSet {
 
 pub type BrowserOpener = dyn Fn(&str) -> Result<()> + Send + Sync;
 
+/// How an account hears about changes between full syncs.
+#[derive(Clone)]
+pub enum PushSource {
+    /// A watcher keeps a connection open (IMAP IDLE).
+    Watch(Arc<dyn MailWatcher>),
+    /// The Inbox is checked on a timer.
+    Poll(Duration),
+}
+
 #[async_trait]
 pub trait Connector: Send + Sync {
     async fn providers(&self, account: &Account) -> Result<ProviderSet>;
+
+    /// How `account` gets push. By default the Inbox is polled.
+    async fn push_source(&self, account: &Account) -> Result<PushSource> {
+        Ok(PushSource::Poll(match account.kind {
+            AccountKind::Microsoft => MICROSOFT_POLL,
+            AccountKind::Imap => UNSUPPORTED_POLL,
+        }))
+    }
 
     /// Checks IMAP and SMTP settings and credentials.
     async fn verify_imap(&self, credentials: &ImapCredentials) -> Result<()>;
@@ -55,6 +74,29 @@ pub struct LiveConnector {
 impl LiveConnector {
     pub fn new(store: Arc<Store>, secrets: Arc<dyn SecretStore>) -> Self {
         Self { store, secrets }
+    }
+
+    async fn imap_credentials(
+        &self,
+        account: &Account,
+        settings: &ImapSettings,
+    ) -> Result<ImapCredentials> {
+        let password = self
+            .secrets
+            .get(&keys::imap_password(&account.id))
+            .await?
+            .ok_or_else(|| {
+                Error::auth_required(format!(
+                    "The password for {} is missing from the keyring.",
+                    account.email
+                ))
+            })?;
+        Ok(ImapCredentials {
+            settings: settings.clone(),
+            password,
+            display_name: account.display_name.clone(),
+            email: account.email.clone(),
+        })
     }
 
     fn microsoft_config(&self) -> Result<MicrosoftAuthConfig> {
@@ -96,28 +138,28 @@ impl Connector for LiveConnector {
                 })
             }
             AccountSettings::Imap(settings) => {
-                let password = self
-                    .secrets
-                    .get(&keys::imap_password(&account.id))
-                    .await?
-                    .ok_or_else(|| {
-                        Error::auth_required(format!(
-                            "The password for {} is missing from the keyring.",
-                            account.email
-                        ))
-                    })?;
-                let credentials = ImapCredentials {
-                    settings: settings.clone(),
-                    password,
-                    display_name: account.display_name.clone(),
-                    email: account.email.clone(),
-                };
+                let credentials = self.imap_credentials(account, settings).await?;
                 Ok(ProviderSet {
                     mail: Arc::new(ImapProvider::new(account.id.clone(), credentials)),
                     calendar: None,
                     contacts: None,
                     tasks: None,
                 })
+            }
+        }
+    }
+
+    async fn push_source(&self, account: &Account) -> Result<PushSource> {
+        match &account.settings {
+            // The push service comes in a later version; until then the
+            // Inbox is checked every 30 seconds.
+            AccountSettings::Microsoft(_) => Ok(PushSource::Poll(MICROSOFT_POLL)),
+            AccountSettings::Imap(settings) => {
+                let credentials = self.imap_credentials(account, settings).await?;
+                Ok(PushSource::Watch(Arc::new(ImapIdleWatcher::new(
+                    credentials,
+                    IdleConfig::default(),
+                ))))
             }
         }
     }
