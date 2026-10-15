@@ -325,11 +325,15 @@ export type ReadingFont =
 /** Scales the whole window; see TEXT_SCALE in src/lib/fonts.ts. */
 export type TextSize = "smaller" | "default" | "larger" | "largest";
 
+/** Which folders raise new-mail notifications. "allFolders" leaves out Junk, Deleted Items, Sent, Drafts and Outbox. */
+export type NotifyScope = "inbox" | "allFolders";
+
 export interface Settings {
   theme: Theme;
   readingPane: ReadingPane;
   remoteContent: RemoteContentPolicy;
   markReadAfterSeconds: number | null;
+  /** How often everything is synced; new Inbox mail arrives sooner through push. */
   syncIntervalMinutes: number;
   microsoftClientId: string | null;
   microsoftTenant: string | null;
@@ -337,6 +341,26 @@ export interface Settings {
   interfaceFont: InterfaceFont;
   readingFont: ReadingFont;
   textSize: TextSize;
+  notifyScope: NotifyScope;
+  /** Show the sender and subject in notifications. */
+  notifyShowPreview: boolean;
+  notifySound: boolean;
+  /** Accounts whose new mail never raises a notification. */
+  mutedAccountIds: string[];
+  /** No new-mail notifications until then (ISO 8601). */
+  notificationsPausedUntil: string | null;
+  remindersEnabled: boolean;
+  defaultSnoozeMinutes: number;
+  /** Keep a connection open (IMAP IDLE) or use the push service. */
+  instantPush: boolean;
+  /** Microsoft accounts use the Cumulas push service; otherwise they poll every 30 seconds. */
+  usePushRelay: boolean;
+  /** Closing the window keeps the app running for notifications. */
+  runInBackground: boolean;
+  startAtLogin: boolean;
+  /** Started at login, the app opens without a window. */
+  startHidden: boolean;
+  showTrayIcon: boolean;
 }
 
 export interface AppInfo {

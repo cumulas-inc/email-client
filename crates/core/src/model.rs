@@ -654,6 +654,33 @@ pub struct SyncStatus {
     pub last_synced_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReminderKind {
+    Event,
+    Task,
+}
+
+/// A reminder that is due or snoozed. Produced by the reminder scheduler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveReminder {
+    /// `{event|task}:{local id}:{fire time}`; a moved event gets a new key.
+    pub key: String,
+    pub kind: ReminderKind,
+    pub item_id: String,
+    pub account_id: String,
+    pub title: String,
+    pub starts_at: Option<DateTime<Utc>>,
+    pub ends_at: Option<DateTime<Utc>>,
+    pub location: Option<String>,
+    pub online_meeting_url: Option<String>,
+    pub fire_at: DateTime<Utc>,
+    pub snoozed_until: Option<DateTime<Utc>>,
+    /// The event has started or the task is past its reminder time.
+    pub overdue: bool,
+}
+
 /// Which parts of the local store changed; sent to the UI so it can refresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -787,6 +814,17 @@ fn is_disallowed_in_font_family(c: char) -> bool {
         )
 }
 
+/// Which folders raise new-mail notifications.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NotifyScope {
+    /// Only the Inbox.
+    #[default]
+    Inbox,
+    /// Every folder except Junk, Deleted Items, Sent, Drafts and Outbox.
+    AllFolders,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -796,6 +834,8 @@ pub struct Settings {
     /// Mark a message read after it has been open this many seconds;
     /// `None` = only when explicitly marked.
     pub mark_read_after_seconds: Option<u32>,
+    /// How often everything is synced: every folder, the calendar, contacts
+    /// and tasks. New mail in the Inbox arrives sooner through push.
     pub sync_interval_minutes: u32,
     /// Overrides the built-in Microsoft Entra application (client) id.
     pub microsoft_client_id: Option<String>,
@@ -805,6 +845,29 @@ pub struct Settings {
     pub interface_font: InterfaceFont,
     pub reading_font: ReadingFont,
     pub text_size: TextSize,
+    pub notify_scope: NotifyScope,
+    /// Show the sender and subject in notifications.
+    pub notify_show_preview: bool,
+    pub notify_sound: bool,
+    /// Accounts whose new mail never raises a notification.
+    pub muted_account_ids: Vec<String>,
+    /// No new-mail notifications until then ("Pause notifications").
+    pub notifications_paused_until: Option<DateTime<Utc>>,
+    /// Event and task reminders.
+    pub reminders_enabled: bool,
+    pub default_snooze_minutes: u32,
+    /// Keep a connection open (IMAP IDLE) or listen to the push service so
+    /// new mail shows up within seconds.
+    pub instant_push: bool,
+    /// Microsoft accounts get changes through the Cumulas push service;
+    /// when off they check the Inbox about every 30 seconds instead.
+    pub use_push_relay: bool,
+    /// Closing the window keeps the app running for notifications.
+    pub run_in_background: bool,
+    pub start_at_login: bool,
+    /// Started at login, the app opens without a window.
+    pub start_hidden: bool,
+    pub show_tray_icon: bool,
 }
 
 impl Default for Settings {
@@ -821,6 +884,19 @@ impl Default for Settings {
             interface_font: InterfaceFont::default(),
             reading_font: ReadingFont::default(),
             text_size: TextSize::default(),
+            notify_scope: NotifyScope::default(),
+            notify_show_preview: true,
+            notify_sound: true,
+            muted_account_ids: Vec::new(),
+            notifications_paused_until: None,
+            reminders_enabled: true,
+            default_snooze_minutes: 5,
+            instant_push: true,
+            use_push_relay: true,
+            run_in_background: true,
+            start_at_login: false,
+            start_hidden: true,
+            show_tray_icon: true,
         }
     }
 }
@@ -1041,6 +1117,43 @@ mod tests {
         assert_eq!(s.interface_font, InterfaceFont::Default);
         assert_eq!(s.reading_font, ReadingFont::Default);
         assert_eq!(s.text_size, TextSize::Larger);
+    }
+
+    #[test]
+    fn notification_push_and_background_defaults() {
+        let s = Settings::default();
+        assert_eq!(s.notify_scope, NotifyScope::Inbox);
+        assert!(s.notify_show_preview && s.notify_sound && s.reminders_enabled);
+        assert!(s.muted_account_ids.is_empty());
+        assert_eq!(s.notifications_paused_until, None);
+        assert_eq!(s.default_snooze_minutes, 5);
+        assert!(s.instant_push && s.use_push_relay);
+        assert!(s.run_in_background && s.start_hidden && s.show_tray_icon);
+        assert!(!s.start_at_login);
+
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["notifyScope"], "inbox");
+        assert_eq!(json["mutedAccountIds"], serde_json::json!([]));
+        assert_eq!(json["notificationsPausedUntil"], serde_json::Value::Null);
+        assert_eq!(json["usePushRelay"], true);
+        assert_eq!(
+            serde_json::to_value(NotifyScope::AllFolders).unwrap(),
+            "allFolders"
+        );
+    }
+
+    #[test]
+    fn stored_settings_from_before_push_get_the_new_defaults() {
+        let s = Settings::from_stored_json(
+            r#"{"theme":"dark","notificationsEnabled":false,"notifyScope":"everywhere",
+                "mutedAccountIds":["a"],"instantPush":false}"#,
+        );
+        assert_eq!(s.theme, Theme::Dark);
+        assert!(!s.notifications_enabled);
+        assert_eq!(s.notify_scope, NotifyScope::Inbox);
+        assert_eq!(s.muted_account_ids, ["a"]);
+        assert!(!s.instant_push);
+        assert!(s.run_in_background);
     }
 
     #[test]

@@ -32,6 +32,19 @@ const DEFAULT_SETTINGS: Settings = {
   interfaceFont: { kind: "default" },
   readingFont: { kind: "default" },
   textSize: "default",
+  notifyScope: "inbox",
+  notifyShowPreview: true,
+  notifySound: true,
+  mutedAccountIds: [],
+  notificationsPausedUntil: null,
+  remindersEnabled: true,
+  defaultSnoozeMinutes: 5,
+  instantPush: true,
+  usePushRelay: true,
+  runInBackground: true,
+  startAtLogin: false,
+  startHidden: true,
+  showTrayIcon: true,
 };
 
 /** What a GNOME desktop with a few extra fonts reports, sorted as the Rust side sorts. */
@@ -423,6 +436,8 @@ export class MockBackend implements Backend {
     await this.delay();
     if (settings.syncIntervalMinutes < 1)
       fail("invalidInput", "Sync interval must be at least one minute.");
+    if (settings.defaultSnoozeMinutes < 1)
+      fail("invalidInput", "Reminders must snooze for at least one minute.");
     const families = [settings.interfaceFont, settings.readingFont].map((f) =>
       f.kind === "family" ? f.family : undefined,
     );

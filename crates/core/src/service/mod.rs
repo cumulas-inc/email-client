@@ -96,6 +96,11 @@ impl CoreService {
         &self.store
     }
 
+    /// Identifies this installation to the push service.
+    pub fn installation_id(&self) -> Result<String> {
+        self.store.installation_id()
+    }
+
     /// Providers for an account, created on first use and then cached so that
     /// connections and tokens are reused.
     async fn providers_for(&self, account_id: &str) -> Result<ProviderSet> {
@@ -433,6 +438,11 @@ fn validate_settings(s: &Settings) -> Result<()> {
     if s.sync_interval_minutes == 0 {
         return Err(Error::invalid_input(
             "Sync interval must be at least one minute.",
+        ));
+    }
+    if s.default_snooze_minutes == 0 {
+        return Err(Error::invalid_input(
+            "Reminders must snooze for at least one minute.",
         ));
     }
     let families = [s.interface_font.family(), s.reading_font.family()];

@@ -835,3 +835,25 @@ async fn appearance_settings_are_validated_and_saved() {
     // A rejected change leaves the saved settings alone.
     assert_eq!(h.service.get_settings().unwrap(), chosen);
 }
+
+#[tokio::test]
+async fn the_installation_id_is_stable() {
+    let h = harness();
+    let id = h.service.installation_id().unwrap();
+    assert_eq!(id.len(), 22);
+    assert_eq!(h.service.installation_id().unwrap(), id);
+}
+
+#[tokio::test]
+async fn snooze_time_is_validated() {
+    let h = harness();
+    let err = h
+        .service
+        .update_settings(Settings {
+            default_snooze_minutes: 0,
+            ..Settings::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+}

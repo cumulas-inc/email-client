@@ -40,3 +40,32 @@ describe("the demo's text size", () => {
     expect(media.media.mediaText).toBe("(max-width: 990px)");
   });
 });
+
+describe("notification, push and background settings", () => {
+  it("default like the desktop app", async () => {
+    const settings = await new MockBackend().getSettings();
+    expect(settings).toMatchObject({
+      notifyScope: "inbox",
+      notifyShowPreview: true,
+      mutedAccountIds: [],
+      notificationsPausedUntil: null,
+      defaultSnoozeMinutes: 5,
+      instantPush: true,
+      usePushRelay: true,
+      runInBackground: true,
+      startAtLogin: false,
+      startHidden: true,
+      showTrayIcon: true,
+    });
+  });
+
+  it("reject a snooze shorter than a minute", async () => {
+    const backend = new MockBackend();
+    const settings = await backend.getSettings();
+    await expect(
+      backend.updateSettings({ ...settings, defaultSnoozeMinutes: 0 }),
+    ).rejects.toMatchObject({
+      code: "invalidInput",
+    });
+  });
+});

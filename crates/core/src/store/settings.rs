@@ -1,3 +1,6 @@
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::RngCore;
 use rusqlite::{OptionalExtension, params};
 
 use super::Store;
@@ -5,6 +8,8 @@ use crate::error::Result;
 use crate::model::Settings;
 
 const SETTINGS_KEY: &str = "settings";
+/// Identifies this installation to the push service. Random and not a secret.
+const INSTALLATION_ID_KEY: &str = "installation_id";
 
 impl Store {
     pub fn get_settings(&self) -> Result<Settings> {
@@ -28,6 +33,24 @@ impl Store {
             params![SETTINGS_KEY, super::to_json(settings)],
         )?;
         Ok(())
+    }
+
+    /// The id of this installation: 22 URL-safe characters (128 random
+    /// bits), made the first time it is asked for and kept from then on.
+    pub fn installation_id(&self) -> Result<String> {
+        let mut bytes = [0u8; 16];
+        rand::rng().fill_bytes(&mut bytes);
+        let conn = self.conn();
+        // Keeps the stored id when there is one.
+        conn.execute(
+            "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?1, ?2)",
+            params![INSTALLATION_ID_KEY, URL_SAFE_NO_PAD.encode(bytes)],
+        )?;
+        Ok(conn.query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [INSTALLATION_ID_KEY],
+            |r| r.get(0),
+        )?)
     }
 }
 
@@ -70,6 +93,29 @@ mod tests {
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.get_settings().unwrap(), settings);
+    }
+
+    #[test]
+    fn installation_id_is_made_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let id = Store::open(&path).unwrap().installation_id().unwrap();
+        assert_eq!(id.len(), 22);
+        assert!(
+            id.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "{id}"
+        );
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.installation_id().unwrap(), id);
+        assert_eq!(reopened.installation_id().unwrap(), id);
+        // Saving settings leaves it alone.
+        reopened.save_settings(&Settings::default()).unwrap();
+        assert_eq!(reopened.installation_id().unwrap(), id);
+        assert_ne!(
+            Store::open_in_memory().unwrap().installation_id().unwrap(),
+            id
+        );
     }
 
     #[test]
