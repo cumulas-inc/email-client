@@ -118,8 +118,9 @@ impl CoreService {
 
     /// The server keeps the account's reminders, and an event was just
     /// made or changed there: its reminders (and calendars) are read again
-    /// soon, so that the event's reminder isn't taken as dismissed, or at
-    /// its old time.
+    /// soon, so that the server's word covers the event. Until then the
+    /// event's own reminder time counts, and a reminder already due waits
+    /// for that word a minute at most.
     fn request_server_reminders(&self, account_id: &str) {
         self.push.request_for(
             account_id,

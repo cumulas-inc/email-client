@@ -137,26 +137,27 @@ const MIGRATIONS: &[&str] = &[
     );
     "#,
     // 3: reminders. Task reminder times, for finding them; what became of
-    // each reminder (keyed by its item and fire time, so a moved event's
-    // reminder starts afresh); and the reminders Microsoft 365 reports, with
-    // the window each account's report covers.
+    // each reminder (keyed by its item and when it goes off by the item's
+    // own reminder time, so a moved event's, or a changed reminder, starts
+    // afresh); and the reminders Microsoft 365 reports, with the window
+    // each account's report covers and the events it knew of.
     r#"
     ALTER TABLE tasks ADD COLUMN remind_at INTEGER;
     CREATE INDEX tasks_remind_at ON tasks(remind_at) WHERE remind_at IS NOT NULL;
 
     CREATE TABLE reminder_state (
-        key           TEXT PRIMARY KEY,   -- '{event|task}:{local id}:{fire_at}'
+        key           TEXT PRIMARY KEY,   -- '{event|task}:{local id}:{own reminder time}'
         account_id    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         item_kind     TEXT NOT NULL,      -- event | task
         item_id       TEXT NOT NULL,
-        fire_at       INTEGER NOT NULL,
+        fire_at       INTEGER NOT NULL,   -- when it last went off
         state         TEXT NOT NULL,      -- shown | missed | snoozed | dismissed
         snooze_until  INTEGER,
         -- A dismissal or snooze Microsoft 365 hasn't heard of yet.
         pending       TEXT,               -- dismiss | snooze
         updated_at    INTEGER NOT NULL
     );
-    CREATE INDEX reminder_state_item ON reminder_state(item_id);
+    CREATE INDEX reminder_state_account ON reminder_state(account_id);
 
     CREATE TABLE server_reminders (
         account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -175,6 +176,18 @@ const MIGRATIONS: &[&str] = &[
         window_start  INTEGER NOT NULL,
         window_end    INTEGER NOT NULL,
         fetched_at    INTEGER NOT NULL
+    );
+
+    -- The events in the window as the app had them when the report was
+    -- fetched: only these, as they were, can be missing from it for being
+    -- dismissed.
+    CREATE TABLE server_reminder_known (
+        account_id        TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        event_id          TEXT NOT NULL,       -- the event's remote id
+        event_start       INTEGER NOT NULL,
+        event_end         INTEGER NOT NULL,
+        reminder_minutes  INTEGER,
+        PRIMARY KEY (account_id, event_id)
     );
     "#,
 ];
@@ -240,11 +253,23 @@ mod tests {
             "reminder_state",
             "server_reminders",
             "server_reminder_windows",
+            "server_reminder_known",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();
             assert_eq!(count, 0, "{table}");
         }
+        // Reminder states are looked up by key, and by account (an account
+        // removed, its dismissals the server hasn't heard of).
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT key FROM reminder_state
+                 WHERE account_id = 'a' AND pending IS NOT NULL",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("reminder_state_account"), "{plan}");
     }
 }

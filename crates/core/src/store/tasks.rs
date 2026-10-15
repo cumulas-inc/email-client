@@ -131,12 +131,17 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Open tasks with a reminder at or after `since`.
+    /// Open tasks with a reminder at or after `since`, or whose reminder
+    /// was snoozed until then, or came back, since (as reminder states are
+    /// kept: see `prune_reminder_states`).
     pub fn tasks_with_reminders(&self, since: DateTime<Utc>) -> Result<Vec<Task>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT data_json FROM tasks
-             WHERE remind_at IS NOT NULL AND remind_at >= ?1 AND status != 'completed'
+             WHERE remind_at IS NOT NULL AND status != 'completed'
+               AND (remind_at >= ?1 OR id IN (
+                 SELECT item_id FROM reminder_state WHERE item_kind = 'task'
+                   AND (updated_at >= ?1 OR coalesce(snooze_until, 0) >= ?1)))
              ORDER BY remind_at",
         )?;
         let rows = stmt.query_map([ts(&since)], row_to_task)?;
@@ -271,6 +276,23 @@ mod tests {
         assert_eq!(titles(at(8)), ["soon", "later"]);
         assert_eq!(titles(at(0)), ["early", "soon", "later"]);
 
+        // Snoozed until after `since`: found by its snooze.
+        let early = local_id("a", EntityKind::Task, "early");
+        let snoozed = crate::reminders::ReminderState {
+            key: format!("task:{early}:1"),
+            account_id: "a".into(),
+            kind: crate::model::ReminderKind::Task,
+            item_id: early.clone(),
+            fire_at: at(6),
+            status: crate::reminders::ReminderStatus::Snoozed,
+            snooze_until: Some(at(9)),
+            pending: None,
+            updated_at: at(7),
+        };
+        store.put_reminder_states(&[snoozed]).unwrap();
+        assert_eq!(titles(at(8)), ["early", "soon", "later"]);
+        assert_eq!(titles(at(11)), ["later"]);
+
         // Clearing the reminder clears the column too.
         let mut soon = store
             .get_task(&local_id("a", EntityKind::Task, "soon"))
@@ -278,7 +300,7 @@ mod tests {
         assert_eq!(soon.reminder_at, Some(at(10)));
         soon.reminder_at = None;
         store.upsert_task(&soon).unwrap();
-        assert_eq!(titles(at(8)), ["later"]);
+        assert_eq!(titles(at(8)), ["early", "later"]);
     }
 
     #[test]

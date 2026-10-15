@@ -692,7 +692,9 @@ impl ReminderKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveReminder {
-    /// `{event|task}:{local id}:{fire time}`; a moved event gets a new key.
+    /// `{event|task}:{local id}:{own reminder time}`: the same whenever it
+    /// goes off (snoozed, or as the server says); a moved event, or a
+    /// changed reminder, gets a new key.
     pub key: String,
     pub kind: ReminderKind,
     pub item_id: String,
@@ -704,6 +706,7 @@ pub struct ActiveReminder {
     pub ends_at: Option<DateTime<Utc>>,
     pub location: Option<String>,
     pub online_meeting_url: Option<String>,
+    /// When it goes off, snoozes aside.
     pub fire_at: DateTime<Utc>,
     /// Snoozed until then: not due again yet.
     pub snoozed_until: Option<DateTime<Utc>>,
@@ -899,7 +902,8 @@ pub struct Settings {
     pub notify_sound: bool,
     /// Accounts whose new mail never raises a notification.
     pub muted_account_ids: Vec<String>,
-    /// No new-mail notifications until then ("Pause notifications").
+    /// No new-mail notifications until then ("Pause mail notifications");
+    /// reminders still show.
     pub notifications_paused_until: Option<DateTime<Utc>>,
     /// Event and task reminders.
     pub reminders_enabled: bool,

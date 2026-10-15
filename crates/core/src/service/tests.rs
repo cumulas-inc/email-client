@@ -2540,6 +2540,10 @@ struct FakeCalendar {
     reminders: Mutex<Vec<ServerReminder>>,
     /// Dismissing and snoozing fail while set.
     offline: std::sync::atomic::AtomicBool,
+    /// Reading the reminders fails while set.
+    view_fails: std::sync::atomic::AtomicBool,
+    /// How often the reminders were read.
+    views: AtomicUsize,
     dismissed: Mutex<Vec<String>>,
     snoozed: Mutex<Vec<(String, DateTime<Utc>)>>,
 }
@@ -2640,6 +2644,10 @@ impl CalendarProvider for FakeCalendar {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Option<Vec<ServerReminder>>> {
+        self.views.fetch_add(1, Ordering::SeqCst);
+        if self.view_fails.load(Ordering::SeqCst) {
+            return Err(Error::provider("Microsoft Graph returned HTTP 503."));
+        }
         Ok(Some(
             self.reminders
                 .lock()
@@ -2744,8 +2752,8 @@ async fn microsoft_365_hears_of_dismissals_and_snoozes_and_keeps_trying() {
             .is_empty()
     );
 
-    // Snoozed: Microsoft 365 hears of it at once, and it stays snoozed
-    // once the server reports the reminder at its new time.
+    // Snoozed: Microsoft 365 hears of it at once, and it stays snoozed,
+    // the same reminder, once the server reports it at its new time.
     let active = h
         .service
         .snooze_reminder(&key("review"), Snooze::Minutes(5))
@@ -2761,7 +2769,7 @@ async fn microsoft_365_hears_of_dismissals_and_snoozes_and_keeps_trying() {
     let active = h.service.list_active_reminders().unwrap();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].snoozed_until, Some(until));
-    assert_eq!(active[0].fire_at, until, "the server's time");
+    assert_eq!(active[0].key, key("review"));
 
     // When the snooze is over it goes off again, once.
     let shown = h.sink.shown_reminders().len();
@@ -2802,8 +2810,13 @@ async fn microsoft_365_s_reminders_win_over_the_events() {
         .retain(|r| r.event_id != "standup");
     fake.reminders.lock().unwrap()[0].fire_at = now + Duration::minutes(20);
     h.service.sync_account(&account.id).await.unwrap();
-    assert!(h.service.list_active_reminders().unwrap().is_empty());
-    assert!(h.sink.cleared_reminders().contains(&standup_key));
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].title, "review");
+    assert_eq!(active[0].snoozed_until, Some(now + Duration::minutes(20)));
+    let cleared = h.sink.cleared_reminders();
+    assert!(cleared.contains(&standup_key));
+    assert!(cleared.contains(&active[0].key));
 
     // Without a usable report the events' own times count: the account's
     // report forgotten, the standup reminds again (here, as already shown).
@@ -2814,4 +2827,339 @@ async fn microsoft_365_s_reminders_win_over_the_events() {
     let active = h.service.list_active_reminders().unwrap();
     assert_eq!(active.len(), 2);
     assert_eq!(active[0].fire_at, standup.start - Duration::minutes(15));
+    assert_eq!(h.sink.shown_reminders().len(), 2);
+}
+
+/// Snoozed here, and Microsoft 365 heard of it, but the calendar didn't
+/// sync again until the snooze was over (no push, or a long interval).
+#[tokio::test]
+async fn a_snooze_goes_off_once_when_the_report_catches_up_late() {
+    let h = harness();
+    let (account, fake) = microsoft_calendar(&h);
+    let now = reminder_epoch();
+    stopped_clock(&h.service, now);
+    fake.add(&account, "review", now + Duration::minutes(5), 15);
+    h.service.sync_account(&account.id).await.unwrap();
+    let key = h.service.list_active_reminders().unwrap()[0].key.clone();
+    h.service
+        .snooze_reminder(&key, Snooze::Minutes(5))
+        .await
+        .unwrap();
+    let until = now + Duration::minutes(5);
+    assert_eq!(
+        *fake.snoozed.lock().unwrap(),
+        [("review".to_owned(), until)]
+    );
+
+    // The snooze is over: it goes off again.
+    stopped_clock(&h.service, until);
+    h.service.list_active_reminders().unwrap();
+    assert_eq!(h.sink.shown_reminders(), ["review", "review"]);
+    let cleared = h.sink.cleared_reminders();
+
+    // A minute later the report says it went off when the snooze ended:
+    // the same reminder, which stays as it is.
+    stopped_clock(&h.service, until + Duration::minutes(1));
+    h.service.sync_account(&account.id).await.unwrap();
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(h.sink.shown_reminders(), ["review", "review"]);
+    assert_eq!(h.sink.cleared_reminders(), cleared);
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].key, key);
+    assert!(active[0].is_due());
+}
+
+/// reminderView fails at the sync that brings a meeting: the meeting's own
+/// reminder time counts until a report knows of it, while a reminder the
+/// last report found dismissed stays so.
+#[tokio::test]
+async fn a_failed_reminder_view_silences_no_new_meeting() {
+    let h = harness();
+    let (account, fake) = microsoft_calendar(&h);
+    let now = reminder_epoch();
+    stopped_clock(&h.service, now);
+    // Dismissed in Outlook before the app saw it go off.
+    fake.add(&account, "standup", now + Duration::minutes(10), 15);
+    fake.reminders.lock().unwrap().clear();
+    h.service.sync_account(&account.id).await.unwrap();
+    assert!(h.service.list_active_reminders().unwrap().is_empty());
+
+    // An invitation to a meeting in ten minutes, with a fifteen-minute
+    // reminder; Graph doesn't answer reminderView at this sync.
+    fake.add(&account, "urgent", now + Duration::minutes(10), 15);
+    fake.view_fails.store(true, Ordering::SeqCst);
+    h.service.sync_account(&account.id).await.unwrap();
+    h.service.list_active_reminders().unwrap();
+    // Its reminder went off five minutes ago: it waits a minute at most
+    // for the server's word on it, which doesn't come.
+    stopped_clock(&h.service, now + Duration::minutes(1));
+    let active = h.service.list_active_reminders().unwrap();
+    let titles: Vec<&str> = active.iter().map(|r| r.title.as_str()).collect();
+    assert_eq!(titles, ["urgent"]);
+    assert_eq!(h.sink.shown_reminders(), ["urgent"]);
+}
+
+/// Asleep while a reminder went off and was dismissed on a phone: on
+/// waking, the report from before the sleep can't vouch for it, so it
+/// waits for a fresh one rather than going off at once.
+#[tokio::test]
+async fn reminders_dismissed_elsewhere_while_asleep_stay_dismissed() {
+    let h = harness();
+    let (account, fake) = microsoft_calendar(&h);
+    // 09:00 to 09:30, reminding at 08:45; the report is from 08:30.
+    stopped_clock(&h.service, reminder_epoch() - Duration::minutes(30));
+    fake.add(&account, "standup", reminder_epoch(), 15);
+    fake.add(&account, "review", reminder_epoch(), 15);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert!(h.service.list_active_reminders().unwrap().is_empty());
+
+    // Asleep from 08:35 to 09:05; the standup's reminder was dismissed on
+    // the phone meanwhile.
+    fake.reminders
+        .lock()
+        .unwrap()
+        .retain(|r| r.event_id != "standup");
+    let woke = reminder_epoch() + Duration::minutes(5);
+    stopped_clock(&h.service, woke);
+    assert!(h.service.list_active_reminders().unwrap().is_empty());
+    assert!(h.sink.shown_reminders().is_empty());
+    // A fresh report: the review's goes off, the standup's never does.
+    h.service.sync_account(&account.id).await.unwrap();
+    h.service.list_active_reminders().unwrap();
+    assert_eq!(h.sink.shown_reminders(), ["review"]);
+    stopped_clock(&h.service, woke + Duration::minutes(2));
+    h.service.list_active_reminders().unwrap();
+    assert_eq!(h.sink.shown_reminders(), ["review"]);
+}
+
+/// Without a fresh report (here reminderView fails), a reminder that came
+/// due during the sleep goes off a minute later.
+#[tokio::test]
+async fn reminders_missed_while_asleep_wait_a_minute_at_most() {
+    let h = harness();
+    let (account, fake) = microsoft_calendar(&h);
+    stopped_clock(&h.service, reminder_epoch() - Duration::minutes(30));
+    fake.add(&account, "review", reminder_epoch(), 15);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert!(h.service.list_active_reminders().unwrap().is_empty());
+
+    let woke = reminder_epoch() + Duration::minutes(5);
+    stopped_clock(&h.service, woke);
+    fake.view_fails.store(true, Ordering::SeqCst);
+    h.service.sync_account(&account.id).await.unwrap();
+    h.service.list_active_reminders().unwrap();
+    stopped_clock(&h.service, woke + Duration::seconds(30));
+    h.service.list_active_reminders().unwrap();
+    assert!(h.sink.shown_reminders().is_empty(), "not yet");
+    stopped_clock(&h.service, woke + Duration::minutes(1));
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(h.sink.shown_reminders(), ["review"]);
+    // Missed while asleep, not found later: the meeting is on.
+    assert!(!active[0].missed);
+}
+
+/// On waking, the scheduler reads the server's reminders again itself
+/// rather than wait for the full sync, which syncs the mail first.
+#[tokio::test(start_paused = true)]
+async fn on_waking_the_scheduler_asks_the_server_first() {
+    let b = background();
+    let (account, fake) = microsoft_calendar(&b.h);
+    let jump = virtual_clock(&b.service);
+    // 09:30 to 10:00, reminding at 09:15.
+    fake.add(
+        &account,
+        "standup",
+        reminder_epoch() + Duration::minutes(30),
+        15,
+    );
+    b.service.sync_account(&account.id).await.unwrap();
+    b.service.start_background();
+    b.settle().await;
+    assert!(b.h.sink.shown_reminders().is_empty());
+
+    // Asleep until 09:20; dismissed on the phone meanwhile. Once awake,
+    // the network takes a few seconds to come back, and the mail a long
+    // time to sync.
+    b.h.server.lock().unwrap().inbox_delay = Some(std::time::Duration::from_secs(600));
+    fake.reminders.lock().unwrap().clear();
+    fake.view_fails.store(true, Ordering::SeqCst);
+    let views = fake.views.load(Ordering::SeqCst);
+    *jump.lock().unwrap() = Duration::minutes(20);
+    b.service.wake(WakeReason::Resume);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(fake.views.load(Ordering::SeqCst), views + 1);
+    assert!(b.h.sink.shown_reminders().is_empty());
+    fake.view_fails.store(false, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    assert!(fake.views.load(Ordering::SeqCst) > views + 1, "tried again");
+    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+    assert!(b.h.sink.shown_reminders().is_empty());
+    b.service.shutdown().await;
+}
+
+/// Asleep again within the minute that reminders wait for the server's
+/// word after a wake: on the next wake they wait afresh, and a dismissal on
+/// the phone during either sleep counts.
+#[tokio::test(start_paused = true)]
+async fn reminders_wait_afresh_after_each_wake() {
+    let b = background();
+    let (account, fake) = microsoft_calendar(&b.h);
+    let jump = virtual_clock(&b.service);
+    // 09:30 to 10:00 reminding at 09:15; 10:30 to 11:00 reminding at 10:15.
+    fake.add(
+        &account,
+        "standup",
+        reminder_epoch() + Duration::minutes(30),
+        15,
+    );
+    fake.add(
+        &account,
+        "review",
+        reminder_epoch() + Duration::minutes(90),
+        15,
+    );
+    b.service.sync_account(&account.id).await.unwrap();
+    b.service.start_background();
+    b.settle().await;
+    assert!(b.h.sink.shown_reminders().is_empty());
+
+    // Asleep until 09:20. Once awake, the network doesn't come back, and
+    // the mail takes long to sync.
+    b.h.server.lock().unwrap().inbox_delay = Some(std::time::Duration::from_secs(600));
+    fake.view_fails.store(true, Ordering::SeqCst);
+    *jump.lock().unwrap() = Duration::minutes(20);
+    b.service.wake(WakeReason::Resume);
+    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+    assert!(b.h.sink.shown_reminders().is_empty(), "the standup's waits");
+
+    // Asleep again, for an hour; both reminders are dismissed on the phone
+    // meanwhile. Once awake, the network takes a few seconds to come back.
+    fake.reminders.lock().unwrap().clear();
+    *jump.lock().unwrap() = Duration::minutes(80);
+    b.service.wake(WakeReason::Resume);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(b.h.sink.shown_reminders().is_empty(), "both wait afresh");
+    fake.view_fails.store(false, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+    assert!(b.h.sink.shown_reminders().is_empty());
+    assert!(b.service.list_active_reminders().unwrap().is_empty());
+    b.service.shutdown().await;
+}
+
+/// A meeting synced only once it was over, while reminderView fails: it
+/// isn't worth a reminder, so nothing waits on the server for it, and the
+/// scheduler doesn't keep asking.
+#[tokio::test(start_paused = true)]
+async fn an_event_found_after_it_was_over_waits_for_nothing() {
+    let b = background();
+    let (account, fake) = microsoft_calendar(&b.h);
+    virtual_clock(&b.service);
+    fake.add(
+        &account,
+        "standup",
+        reminder_epoch() + Duration::hours(3),
+        15,
+    );
+    b.service.sync_account(&account.id).await.unwrap();
+    b.service.list_active_reminders().unwrap();
+    // A call logged in Outlook, 07:30 to 08:00.
+    fake.view_fails.store(true, Ordering::SeqCst);
+    fake.add(
+        &account,
+        "logged call",
+        reminder_epoch() - Duration::minutes(90),
+        15,
+    );
+    b.service.sync_account(&account.id).await.unwrap();
+    // The periodic sync doesn't get as far as the calendar.
+    b.h.server.lock().unwrap().inbox_delay = Some(std::time::Duration::from_secs(3600));
+    let views = fake.views.load(Ordering::SeqCst);
+    b.service.start_background();
+    tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+    assert_eq!(fake.views.load(Ordering::SeqCst), views);
+    assert!(b.h.sink.shown_reminders().is_empty());
+    assert!(b.service.list_active_reminders().unwrap().is_empty());
+    b.service.shutdown().await;
+}
+
+/// A To Do task's reminder left in the panel for a month, then snoozed:
+/// it comes back when the snooze is over.
+#[tokio::test]
+async fn a_task_reminder_snoozed_a_month_after_its_time_comes_back() {
+    let h = harness();
+    h.service
+        .add_imap_account(new_imap_account("me@example.com"))
+        .await
+        .unwrap();
+    let due = reminder_epoch();
+    stopped_clock(&h.service, due);
+    let list = h.service.list_task_lists().unwrap().remove(0);
+    h.service
+        .create_task(TaskDraft {
+            list_id: list.id.clone(),
+            title: "Renew the passport".into(),
+            notes: None,
+            importance: None,
+            due_date: None,
+            reminder_at: Some(due),
+        })
+        .await
+        .unwrap();
+    let key = h.service.list_active_reminders().unwrap()[0].key.clone();
+    assert_eq!(h.sink.shown_reminders(), ["Renew the passport"]);
+
+    let snoozed_at = due + Duration::days(30) - Duration::hours(1);
+    stopped_clock(&h.service, snoozed_at);
+    h.service
+        .snooze_reminder(&key, Snooze::Minutes(24 * 60))
+        .await
+        .unwrap();
+    // Thirty days after its time it's still snoozed, and kept.
+    stopped_clock(&h.service, due + Duration::days(30) + Duration::hours(1));
+    h.service.prune_reminders();
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 1);
+    assert!(!active[0].is_due());
+
+    stopped_clock(&h.service, snoozed_at + Duration::days(1));
+    h.service.prune_reminders();
+    let active = h.service.list_active_reminders().unwrap();
+    assert_eq!(active.len(), 1);
+    assert!(active[0].is_due());
+    assert_eq!(
+        h.sink.shown_reminders(),
+        ["Renew the passport", "Renew the passport"]
+    );
+}
+
+/// The scheduler sleeps up to a minute; a snooze shorter than that still
+/// ends on time.
+#[tokio::test(start_paused = true)]
+async fn a_short_snooze_ends_on_time() {
+    let b = background();
+    b.account().await;
+    virtual_clock(&b.service);
+    let calendar = b.service.list_calendars().unwrap().remove(0);
+    b.service
+        .create_event(local_event(
+            &calendar,
+            "Standup",
+            reminder_epoch() + Duration::minutes(10),
+            Some(15),
+        ))
+        .await
+        .unwrap();
+    b.service.start_background();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(b.h.sink.shown_reminders(), ["Standup"]);
+
+    let key = b.service.list_active_reminders().unwrap()[0].key.clone();
+    let until = b.service.reminders.now() + Duration::seconds(30);
+    b.service
+        .snooze_reminder(&key, Snooze::Until(until))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    assert_eq!(b.h.sink.shown_reminders(), ["Standup", "Standup"]);
+    b.service.shutdown().await;
 }

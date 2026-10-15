@@ -109,6 +109,11 @@ impl DateTimeTimeZone {
     /// read as the computer's own: the person set it where they are, and
     /// Windows zone names can't be converted here.
     pub fn instant(&self) -> Option<DateTime<Utc>> {
+        self.instant_in(&chrono::Local)
+    }
+
+    /// [`Self::instant`], with `local` as the computer's zone.
+    fn instant_in<Tz: TimeZone>(&self, local: &Tz) -> Option<DateTime<Utc>> {
         let naive = self.naive()?;
         let utc = self.time_zone.as_deref().is_none_or(|zone| {
             matches!(
@@ -124,7 +129,7 @@ impl DateTimeTimeZone {
         if utc {
             return Some(naive.and_utc());
         }
-        chrono::Local
+        local
             .from_local_datetime(&naive)
             .earliest()
             .map(|t| t.with_timezone(&Utc))
@@ -158,6 +163,8 @@ pub(super) fn midnight(date: NaiveDate) -> NaiveDateTime {
 
 #[cfg(test)]
 mod tests {
+    use chrono::FixedOffset;
+
     use super::*;
 
     fn at(s: &str) -> NaiveDateTime {
@@ -188,15 +195,30 @@ mod tests {
             date_time: "2026-10-14T09:30:00.0000000".into(),
             time_zone: Some(zone.into()),
         };
+        // Whatever the zone the tests run in (UTC in CI).
+        let west = FixedOffset::west_opt(7 * 3600).unwrap();
+        let east = FixedOffset::east_opt(10 * 3600).unwrap();
         let utc = "2026-10-14T09:30:00+00:00";
         for zone in ["UTC", "Etc/UTC", " tzone://Microsoft/Utc "] {
-            assert_eq!(at(zone).instant().unwrap().to_rfc3339(), utc, "{zone}");
+            for local in [west, east] {
+                let instant = at(zone).instant_in(&local).unwrap();
+                assert_eq!(instant.to_rfc3339(), utc, "{zone}");
+            }
         }
+        let pacific = at("Pacific Standard Time");
+        assert_eq!(
+            pacific.instant_in(&west).unwrap().to_rfc3339(),
+            "2026-10-14T16:30:00+00:00"
+        );
+        assert_eq!(
+            pacific.instant_in(&east).unwrap().to_rfc3339(),
+            "2026-10-13T23:30:00+00:00"
+        );
         let local = chrono::Local
             .with_ymd_and_hms(2026, 10, 14, 9, 30, 0)
             .earliest()
             .unwrap()
             .with_timezone(&Utc);
-        assert_eq!(at("Pacific Standard Time").instant(), Some(local));
+        assert_eq!(pacific.instant(), Some(local));
     }
 }

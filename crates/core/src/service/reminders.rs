@@ -9,7 +9,11 @@
 //!
 //! Dismissing and snoozing a Microsoft 365 event's reminder also tells
 //! Microsoft 365, so that Outlook and phones stop reminding too. When that
-//! fails, the next sync of the calendar tries again.
+//! fails, the next sync of the calendar tries again. The other way round,
+//! a Microsoft 365 reminder that came due while the app wasn't looking
+//! (asleep, or not running) waits for the scheduler to read Microsoft
+//! 365's reminders afresh, a minute at most after each wake, in case it
+//! was dismissed or snoozed elsewhere meanwhile.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -24,8 +28,8 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Account, AccountKind, ActiveReminder, ReminderKind, Snooze};
 use crate::providers::CalendarProvider;
 use crate::reminders::{
-    self, KEEP_STATES, LOOKAHEAD, LOOKBACK, ReminderState, ReminderStatus, ServerAction,
-    ServerReminders,
+    self, KEEP_STATES, KnownEvent, LOOKAHEAD, LOOKBACK, ReminderState, ReminderStatus,
+    ServerAction, ServerReminders,
 };
 
 /// The longest the scheduler sleeps: its timer stands still while the
@@ -35,11 +39,26 @@ pub(crate) const MAX_SLEEP: StdDuration = StdDuration::from_secs(60);
 /// waits this long after the first.
 pub(crate) const SETTLE: StdDuration = StdDuration::from_millis(250);
 /// The most telling Microsoft 365 about dismissals and snoozes may hold up
-/// the command that made them; what's left is retried at the next sync.
+/// the command that made them, and the most a try at reading its reminders
+/// afresh, for reminders that wait on them, may take; what's left is
+/// retried at the next sync.
 const SERVER_LIMIT: StdDuration = StdDuration::from_secs(10);
-/// A server report on reminders older than this no longer counts: the
-/// events' own reminder times do.
-const REPORT_LIFE: Duration = Duration::days(1);
+/// How far back a server report goes: far enough to cover every event
+/// whose reminder can still go off, all-day ones included (stored from
+/// midnight UTC, up to half a day before they start where the computer
+/// is).
+const REPORT_SINCE: Duration = Duration::days(2);
+/// The longest reminders that came due while the app wasn't looking wait
+/// for a fresh report from the server that keeps them (by the wall clock,
+/// which goes on while the computer sleeps), counted afresh from each wake.
+const HOLD_LIMIT: Duration = Duration::minutes(1);
+/// A longer gap between passes by the wall clock means the computer slept
+/// (or the app was stopped) meanwhile: the scheduler looks at least every
+/// [`MAX_SLEEP`] while it's awake.
+const ASLEEP: Duration = Duration::seconds(MAX_SLEEP.as_secs() as i64 + 30);
+/// How often reading a server's reminders afresh is tried while reminders
+/// wait on it.
+const REFRESH_RETRY: StdDuration = StdDuration::from_secs(5);
 /// The longest snooze.
 const MAX_SNOOZE: Duration = Duration::days(30);
 
@@ -55,9 +74,17 @@ pub(crate) struct ReminderHub {
 
 #[derive(Default)]
 struct LastPass {
+    /// When it ran.
+    at: Option<DateTime<Utc>>,
     active: Vec<ActiveReminder>,
     due: HashSet<String>,
     next_wake: Option<DateTime<Utc>>,
+    /// Until when reminders that came due while the app wasn't looking
+    /// wait for their server's word (see `reminders::Plan::held`); `None`
+    /// while none do.
+    hold_until: Option<DateTime<Utc>>,
+    /// The accounts whose reminders to read afresh for those, once per wait.
+    refresh: Vec<String>,
 }
 
 impl Default for ReminderHub {
@@ -84,6 +111,17 @@ impl ReminderHub {
 
     fn next_wake(&self) -> Option<DateTime<Utc>> {
         self.pass.lock().unwrap().next_wake
+    }
+
+    /// The accounts whose reminders to read afresh, as asked by a pass.
+    fn take_refresh(&self) -> Vec<String> {
+        std::mem::take(&mut self.pass.lock().unwrap().refresh)
+    }
+
+    /// Whether reminders wait for their server's word.
+    fn holding(&self) -> bool {
+        let until = self.pass.lock().unwrap().hold_until;
+        until.is_some_and(|until| self.now() < until)
     }
 }
 
@@ -124,6 +162,8 @@ impl CoreService {
         state.snooze_until = Some(until);
         self.store
             .put_reminder_states(std::slice::from_ref(&state))?;
+        // The scheduler may be asleep for longer than the snooze.
+        self.reminders.poke.notify_one();
         let active = self.reminder_pass()?;
         self.tell_servers(&[state.account_id]).await;
         Ok(active)
@@ -270,15 +310,30 @@ impl CoreService {
     /// After syncing an account's calendars: tells its server about
     /// dismissals and snoozes, then reads its reminders as the server keeps
     /// them. A failure keeps the last report (until it's a day old, when
-    /// the events' own reminder times count).
+    /// the events' own reminder times count), which judges only the events
+    /// it knew of. Returns whether there's a fresh report (or the server
+    /// keeps no reminders).
     pub(super) async fn refresh_server_reminders(
         &self,
         account: &Account,
         calendar: &Arc<dyn CalendarProvider>,
-    ) {
+    ) -> bool {
         self.flush_reminder_actions(&account.id, calendar).await;
         let now = self.reminders.now();
-        let (window_start, window_end) = (now - LOOKBACK, now + LOOKAHEAD);
+        let (window_start, window_end) = (now - REPORT_SINCE, now + LOOKAHEAD);
+        // Before reading: an event stored meanwhile may be missing from
+        // the report for being newer, or moved.
+        let known_events = match self.store.list_events(window_start, window_end, None) {
+            Ok(events) => events
+                .iter()
+                .filter(|e| e.account_id == account.id && e.start >= window_start)
+                .map(|e| (e.remote_id.clone(), KnownEvent::of(e)))
+                .collect(),
+            Err(e) => {
+                tracing::warn!("reading events for the server's reminders failed: {e}");
+                return false;
+            }
+        };
         match calendar.reminders(window_start, window_end).await {
             Ok(Some(reminders)) => {
                 let report = ServerReminders {
@@ -287,17 +342,72 @@ impl CoreService {
                     window_end,
                     fetched_at: now,
                     reminders,
+                    known_events,
                 };
-                if let Err(e) = self.store.replace_server_reminders(&report) {
-                    tracing::warn!("saving the server's reminders failed: {e}");
+                match self.store.replace_server_reminders(&report) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!("saving the server's reminders failed: {e}");
+                        false
+                    }
                 }
             }
-            Ok(None) => {}
-            Err(e) => tracing::info!(
-                "could not read account {}'s reminders ({:?}); keeping the last ones",
-                account.id,
-                e.code
-            ),
+            Ok(None) => true,
+            Err(e) => {
+                tracing::info!(
+                    "could not read account {}'s reminders ({:?}); keeping the last ones",
+                    account.id,
+                    e.code
+                );
+                false
+            }
+        }
+    }
+
+    /// Reads these accounts' reminders afresh for reminders that wait on
+    /// their server's word, looking at the reminders again after each try,
+    /// and trying again while they wait (after a wake the network may take
+    /// a moment to come back).
+    async fn refresh_reports(&self, account_ids: &[String]) {
+        let mut left = account_ids.to_vec();
+        loop {
+            let mut failed = Vec::new();
+            for account_id in left {
+                let refresh = self.refresh_report(&account_id);
+                if !tokio::time::timeout(SERVER_LIMIT, refresh)
+                    .await
+                    .unwrap_or(false)
+                {
+                    failed.push(account_id);
+                }
+            }
+            self.reminders.poke.notify_one();
+            left = failed;
+            if left.is_empty() || !self.reminders.holding() {
+                return;
+            }
+            tokio::time::sleep(REFRESH_RETRY).await;
+        }
+    }
+
+    /// Reads one account's reminders afresh; whether that worked (or there
+    /// is nothing to read).
+    async fn refresh_report(&self, account_id: &str) -> bool {
+        let Ok(account) = self.store.get_account(account_id) else {
+            return true;
+        };
+        match self.providers_for(account_id).await {
+            Ok(providers) => match providers.calendar {
+                Some(calendar) => self.refresh_server_reminders(&account, &calendar).await,
+                None => true,
+            },
+            Err(e) => {
+                tracing::debug!(
+                    "reminders of account {account_id}: no connection ({:?})",
+                    e.code
+                );
+                false
+            }
         }
     }
 
@@ -337,15 +447,12 @@ impl CoreService {
         let events = self
             .store
             .list_events(now - LOOKBACK, now + LOOKAHEAD, None)?;
-        // Snoozed task reminders can come back long after their time.
+        let calendars = self.store.list_calendars()?;
+        // Task reminders snoozed, or shown again, lately can come back long
+        // after their time.
         let tasks = self.store.tasks_with_reminders(now - KEEP_STATES)?;
-        let reports: Vec<ServerReminders> = self
-            .store
-            .server_reminders()?
-            .into_iter()
-            .filter(|r| r.fetched_at > now - REPORT_LIFE)
-            .collect();
-        let mut sources = reminders::event_sources(&events, &reports);
+        let reports = self.store.server_reminders()?;
+        let mut sources = reminders::event_sources(&events, &calendars, &reports, now);
         sources.extend(reminders::task_sources(&tasks));
         let states: HashMap<String, ReminderState> = self.store.reminder_states()?;
         let checked_until = self
@@ -353,6 +460,13 @@ impl CoreService {
             .reminders_checked_until()?
             .unwrap_or(now)
             .min(now);
+        // Asleep again since the last pass: what waits for the server's
+        // word waits afresh, and the server is asked again, once the
+        // network is back again (a report from before this sleep can't
+        // vouch for what came due in it).
+        if last.at.is_some_and(|at| now - at > ASLEEP) {
+            last.hold_until = None;
+        }
         let plan = reminders::plan(
             &sources,
             &states,
@@ -360,19 +474,35 @@ impl CoreService {
             checked_until,
             &chrono::Local,
             &last.due,
+            last.hold_until.is_none_or(|until| now < until),
         );
         if !plan.updates.is_empty() {
             self.store.put_reminder_states(&plan.updates)?;
         }
-        self.store.set_reminders_checked_until(now)?;
+        // What waits was missed meanwhile, not found later.
+        if plan.held.is_empty() {
+            self.store.set_reminders_checked_until(now)?;
+        }
         if plan.active != last.active || !plan.newly_due.is_empty() || !plan.cleared.is_empty() {
             self.sink
                 .reminders_changed(&plan.active, &plan.newly_due, &plan.cleared);
         }
+        let (hold_until, refresh) = match last.hold_until {
+            _ if plan.held.is_empty() => (None, Vec::new()),
+            Some(until) => (Some(until), std::mem::take(&mut last.refresh)),
+            // Ask the server afresh, from the scheduler's loop.
+            None => {
+                self.reminders.poke.notify_one();
+                (Some(now + HOLD_LIMIT), plan.held.clone())
+            }
+        };
         *last = LastPass {
+            at: Some(now),
             due: plan.due_keys(),
             active: plan.active.clone(),
-            next_wake: plan.next_wake,
+            next_wake: plan.next_wake.into_iter().chain(hold_until).min(),
+            hold_until,
+            refresh,
         };
         Ok(plan.active)
     }
@@ -380,6 +510,10 @@ impl CoreService {
 
 /// Runs the reminder passes until `cancel` fires.
 pub(super) async fn reminder_loop(service: Weak<CoreService>, cancel: CancellationToken) {
+    // Reading servers' reminders afresh for the reminders that wait: one
+    // wait at a time (a new one, after the computer slept again, asks
+    // afresh).
+    let mut refreshing: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         let Some(strong) = service.upgrade() else {
             return;
@@ -391,6 +525,22 @@ pub(super) async fn reminder_loop(service: Weak<CoreService>, cancel: Cancellati
                 None
             }
         };
+        let refresh = strong.reminders.take_refresh();
+        if !refresh.is_empty() {
+            let (service, cancel) = (Weak::clone(&service), cancel.clone());
+            let task = tokio::spawn(async move {
+                let Some(service) = service.upgrade() else {
+                    return;
+                };
+                tokio::select! {
+                    _ = cancel.cancelled() => {}
+                    _ = service.refresh_reports(&refresh) => {}
+                }
+            });
+            if let Some(earlier) = refreshing.replace(task) {
+                earlier.abort();
+            }
+        }
         let now = strong.reminders.now();
         let poke = Arc::clone(&strong.reminders.poke);
         drop(strong);

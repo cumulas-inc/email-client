@@ -10,7 +10,7 @@ use super::{Store, from_ts, ts};
 use crate::error::Result;
 use crate::model::ReminderKind;
 use crate::providers::ServerReminder;
-use crate::reminders::{ReminderState, ReminderStatus, ServerAction, ServerReminders};
+use crate::reminders::{KnownEvent, ReminderState, ReminderStatus, ServerAction, ServerReminders};
 
 /// When the reminders were last looked at (see `reminders::plan`).
 pub(super) const CHECKED_UNTIL_KEY: &str = "reminders_checked_until";
@@ -183,6 +183,24 @@ impl Store {
                 ts(&report.fetched_at),
             ],
         )?;
+        tx.execute(
+            "DELETE FROM server_reminder_known WHERE account_id = ?1",
+            [&report.account_id],
+        )?;
+        for (event_id, known) in &report.known_events {
+            tx.execute(
+                "INSERT OR REPLACE INTO server_reminder_known
+                   (account_id, event_id, event_start, event_end, reminder_minutes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    report.account_id,
+                    event_id,
+                    ts(&known.start),
+                    ts(&known.end),
+                    known.reminder_minutes,
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -202,6 +220,7 @@ impl Store {
                     window_end: from_ts(r.get(2)?),
                     fetched_at: from_ts(r.get(3)?),
                     reminders: Vec::new(),
+                    known_events: HashMap::new(),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?
@@ -209,6 +228,10 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT event_id, fire_at, change_key, event_start, event_end, subject
              FROM server_reminders WHERE account_id = ?1 ORDER BY fire_at, event_id",
+        )?;
+        let mut known = conn.prepare(
+            "SELECT event_id, event_start, event_end, reminder_minutes
+             FROM server_reminder_known WHERE account_id = ?1",
         )?;
         for report in &mut reports {
             report.reminders = stmt
@@ -223,6 +246,18 @@ impl Store {
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
+            report.known_events = known
+                .query_map([&report.account_id], |r| {
+                    Ok((
+                        r.get(0)?,
+                        KnownEvent {
+                            start: from_ts(r.get(1)?),
+                            end: from_ts(r.get(2)?),
+                            reminder_minutes: r.get(3)?,
+                        },
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
         }
         Ok(reports)
     }
@@ -231,14 +266,16 @@ impl Store {
     /// reminder times count again.
     pub fn forget_server_reminders(&self, account_id: &str) -> Result<()> {
         let conn = self.conn();
-        conn.execute(
-            "DELETE FROM server_reminders WHERE account_id = ?1",
-            [account_id],
-        )?;
-        conn.execute(
-            "DELETE FROM server_reminder_windows WHERE account_id = ?1",
-            [account_id],
-        )?;
+        for table in [
+            "server_reminders",
+            "server_reminder_windows",
+            "server_reminder_known",
+        ] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE account_id = ?1"),
+                [account_id],
+            )?;
+        }
         Ok(())
     }
 
@@ -407,36 +444,70 @@ mod tests {
             event_end: at(hour) + Duration::minutes(45),
             subject: format!("Meeting {id}"),
         };
-        let report = |account: &str, reminders| ServerReminders {
-            account_id: account.into(),
-            window_start: at(0),
-            window_end: at(23),
-            fetched_at: at(9),
-            reminders,
+        // With the events the app had then, reminded of or not, as they
+        // were.
+        let known_event = |hour, reminder_minutes| KnownEvent {
+            start: at(hour),
+            end: at(hour) + Duration::minutes(30),
+            reminder_minutes,
         };
+        let report =
+            |account: &str, reminders: Vec<ServerReminder>, known: &[&str]| ServerReminders {
+                account_id: account.into(),
+                window_start: at(0),
+                window_end: at(23),
+                fetched_at: at(9),
+                reminders,
+                known_events: known
+                    .iter()
+                    .enumerate()
+                    .map(|(n, id)| {
+                        let reminder = (n > 0).then_some(15 * n as u32);
+                        (id.to_string(), known_event(10 + n as u32, reminder))
+                    })
+                    .collect(),
+            };
         store
-            .replace_server_reminders(&report("a", vec![reminder("r2", 11), reminder("r1", 10)]))
+            .replace_server_reminders(&report(
+                "a",
+                vec![reminder("r2", 11), reminder("r1", 10)],
+                &["r1", "r2", "dismissed"],
+            ))
             .unwrap();
         store
-            .replace_server_reminders(&report("b", vec![reminder("r3", 12)]))
+            .replace_server_reminders(&report("b", vec![reminder("r3", 12)], &["r3"]))
             .unwrap();
         let reports = store.server_reminders().unwrap();
         assert_eq!(
             reports,
             [
-                report("a", vec![reminder("r1", 10), reminder("r2", 11)]),
-                report("b", vec![reminder("r3", 12)]),
+                report(
+                    "a",
+                    vec![reminder("r1", 10), reminder("r2", 11)],
+                    &["r1", "r2", "dismissed"]
+                ),
+                report("b", vec![reminder("r3", 12)], &["r3"]),
             ]
         );
         // An empty report is a report: every reminder was dismissed.
         store
-            .replace_server_reminders(&report("a", vec![]))
+            .replace_server_reminders(&report("a", vec![], &["r1"]))
             .unwrap();
-        assert_eq!(store.server_reminders().unwrap()[0], report("a", vec![]));
+        assert_eq!(
+            store.server_reminders().unwrap()[0],
+            report("a", vec![], &["r1"])
+        );
         store.forget_server_reminders("a").unwrap();
         assert_eq!(store.server_reminders().unwrap().len(), 1);
         store.delete_account("b").unwrap();
         assert!(store.server_reminders().unwrap().is_empty());
+        let known: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM server_reminder_known", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(known, 0);
     }
 
     #[test]
