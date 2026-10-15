@@ -103,6 +103,11 @@ const OVERSCAN = 100;
 const FACE_MARGIN = 8;
 /** How long the list is still before the rows in view take their faces. */
 const SETTLE_MS = 100;
+/**
+ * Rows given their faces per frame, so a scroll that starts again isn't held
+ * up behind a batch of them.
+ */
+const FACE_STEP = 2;
 /** Installed fonts rendered, and shown in their faces, before the list is measured. */
 const FIRST_RANGE: [number, number] = [0, MAX_HEIGHT / ROW + OVERSCAN];
 const FIRST_FACED: [number, number] = [0, MAX_HEIGHT / ROW + FACE_MARGIN];
@@ -199,6 +204,11 @@ export function FontPicker<V>({
   const [range, setRange] = useState(FIRST_RANGE);
   const [faced, setFaced] = useState(FIRST_FACED);
   const settleTimer = useRef<number | undefined>(undefined);
+  const faceFrame = useRef(0);
+  const facedRef = useRef(faced);
+  useEffect(() => {
+    facedRef.current = faced;
+  }, [faced]);
 
   const installed = useMemo(
     () =>
@@ -346,10 +356,34 @@ export function FontPicker<V>({
     const [first, last] = inView(FACE_MARGIN) ?? [0, Infinity];
     setFaced((r) => (r[0] === first && r[1] === last ? r : [first, last]));
   }, [inView]);
+  // The same once a scroll stops, a few rows a frame: those in view first,
+  // then the margin either side. Faces already in place stay.
+  const settleGradually = useCallback(() => {
+    const target = inView(FACE_MARGIN);
+    const view = inView(0);
+    if (!target || !view || typeof requestAnimationFrame !== "function") return settle();
+    let [lo, hi] = facedRef.current;
+    if (hi <= target[0] || lo >= target[1]) [lo, hi] = [view[0], view[0]];
+    else [lo, hi] = [Math.max(lo, target[0]), Math.min(hi, target[1])];
+    const step = () => {
+      if (hi < view[1]) hi = Math.min(hi + FACE_STEP, view[1]);
+      else if (lo > view[0]) lo = Math.max(lo - FACE_STEP, view[0]);
+      else [lo, hi] = [Math.max(lo - FACE_STEP, target[0]), Math.min(hi + FACE_STEP, target[1])];
+      const next: [number, number] = [lo, hi];
+      facedRef.current = next;
+      setFaced(next);
+      if (lo > target[0] || hi < target[1]) faceFrame.current = requestAnimationFrame(step);
+    };
+    step();
+  }, [inView, settle]);
+  const stopSettling = () => {
+    window.clearTimeout(settleTimer.current);
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(faceFrame.current);
+  };
   useEffect(() => {
     if (!open) return;
     settle();
-    return () => window.clearTimeout(settleTimer.current);
+    return stopSettling;
   }, [open, settle]);
 
   // In the top layer where popovers are supported, so the dialog's
@@ -567,8 +601,8 @@ export function FontPicker<V>({
           // after it; the overscan covers what the compositor scrolls ahead.
           onScroll={() => {
             flushSync(measure);
-            window.clearTimeout(settleTimer.current);
-            settleTimer.current = window.setTimeout(settle, SETTLE_MS);
+            stopSettling();
+            settleTimer.current = window.setTimeout(settleGradually, SETTLE_MS);
           }}
         >
           <div
