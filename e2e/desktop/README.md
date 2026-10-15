@@ -18,7 +18,9 @@ restarts the app to check that the account, cache and keyring password persist.
 
 Without a StatusNotifier host on the test's bus, the app shows no tray icon;
 starting without crashing with libayatana-appindicator installed is part of the
-test.
+test. `test_tray.py` then starts the app again and brings up a fake host
+(`org.kde.StatusNotifierWatcher`) after it: the app adds its icon, the test
+reads its menu over dbusmenu and clicks Quit, and the app exits cleanly.
 
 ```sh
 sudo apt install webkit2gtk-driver xvfb gnome-keyring libsecret-tools dbus-x11 openjdk-21-jre-headless

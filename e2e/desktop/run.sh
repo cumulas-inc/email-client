@@ -62,4 +62,5 @@ dbus-run-session -- bash -c '
   tauri-driver >"'"$work"'/tauri-driver.log" 2>&1 &
   until (exec 3<>/dev/tcp/127.0.0.1/4444) 2>/dev/null; do sleep 0.2; done
   python3 e2e/desktop/test_desktop.py
+  python3 e2e/desktop/test_tray.py
 '
