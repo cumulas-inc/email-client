@@ -973,6 +973,9 @@ mod tests {
             "O'Reilly \"Mono\"",
             r"Back\slash",
             "</style><b>x",
+            // U+FEFF isn't White_Space: a font named with one is matched
+            // with it (src/lib/fonts.test.ts keeps it too).
+            "\u{FEFF}Foo",
         ] {
             assert!(is_valid_font_family(ok), "{ok:?} should be valid");
         }
@@ -982,6 +985,7 @@ mod tests {
             " ",
             " Inter",
             "Inter ",
+            "\u{A0}Inter\u{3000}",
             "Inter\nBold",
             "Tab\there",
             "Nul\0",

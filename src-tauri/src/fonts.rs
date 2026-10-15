@@ -7,6 +7,12 @@
 //! fontdb doesn't read, so those directories are added here. If fontdb finds
 //! nothing, `fc-list` is asked instead where it exists.
 //!
+//! On Linux the webview finds fonts through fontconfig, which leaves out
+//! fonts its configuration rejects (`<selectfont><rejectfont>`: fonts
+//! turned off in a font manager, or hidden by the distribution). fontdb
+//! ignores those rules, so where `fc-list` runs, only the families
+//! fontconfig also knows are listed.
+//!
 //! The list is built once per run, off the main thread.
 
 use std::collections::HashSet;
@@ -66,6 +72,10 @@ const SCRIPT_SAMPLES: &[&str] = &[
     "ꦄꦆꦈꦏꦒꦔ",
 ];
 
+/// Whether the webview picks fonts through fontconfig (WebKitGTK does; the
+/// Windows and macOS webviews use the platform's own font lookup).
+const WEBVIEW_USES_FONTCONFIG: bool = cfg!(not(any(windows, target_os = "macos")));
+
 static FAMILIES: OnceCell<Vec<String>> = OnceCell::const_new();
 
 /// The installed font families: sorted, without duplicates, hidden system
@@ -89,6 +99,8 @@ fn scan() -> Vec<String> {
     let mut families = scan_fontdb();
     if families.is_empty() {
         families = scan_fc_list();
+    } else if WEBVIEW_USES_FONTCONFIG && let Some(known) = fontconfig_families() {
+        families = known_to_fontconfig(families, &known);
     }
     tracing::debug!(
         "found {} font families in {:?}",
@@ -174,6 +186,46 @@ fn parse_fc_list(output: &str) -> Vec<String> {
         speaks.then(|| family.to_string())
     });
     tidy(names)
+}
+
+/// Every family name fontconfig will match, lowercased: all the names of
+/// each font it lists (a font can have localized names before its English
+/// one), or None when `fc-list` is missing or lists nothing.
+fn fontconfig_families() -> Option<HashSet<String>> {
+    let output = std::process::Command::new("fc-list")
+        .arg("--format=%{[]family{%{family}\n}}")
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let known = parse_fc_families(&String::from_utf8_lossy(&out.stdout));
+            (!known.is_empty()).then_some(known)
+        }
+        Ok(out) => {
+            tracing::warn!("fc-list failed: {}", out.status);
+            None
+        }
+        Err(e) => {
+            tracing::debug!("fc-list unavailable: {e}");
+            None
+        }
+    }
+}
+
+/// Parses `fc-list --format='%{[]family{%{family}\n}}'`: one family name
+/// per line.
+fn parse_fc_families(output: &str) -> HashSet<String> {
+    output
+        .lines()
+        .filter(|name| !name.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// `families` without those fontconfig doesn't know: the webview can't
+/// find them. Font matching ignores case.
+fn known_to_fontconfig(mut families: Vec<String>, known: &HashSet<String>) -> Vec<String> {
+    families.retain(|family| known.contains(&family.to_lowercase()));
+    families
 }
 
 /// Whether a face mapping these characters can set text in some script.
@@ -285,6 +337,58 @@ mod tests {
         assert_eq!(
             parse_fc_list(output),
             strings(&["DejaVu Sans", "IPAPGothic", "Unifont-JP"])
+        );
+    }
+
+    #[test]
+    fn fontconfig_names_every_family_it_matches() {
+        // Each name of each font on its own line, localized names included.
+        let output = "Inter Display\n\
+                      Inter Display Light\n\
+                      文泉驛點陣正黑\n\
+                      WenQuanYi Zen Hei Sharp\n\
+                      \n\
+                      DejaVu Sans\n\
+                      dejavu sans\n\
+                      \u{FEFF}Bom Serif\n";
+        assert_eq!(
+            parse_fc_families(output),
+            HashSet::from(
+                [
+                    "inter display",
+                    "inter display light",
+                    "文泉驛點陣正黑",
+                    "wenquanyi zen hei sharp",
+                    "dejavu sans",
+                    "\u{FEFF}bom serif",
+                ]
+                .map(String::from)
+            )
+        );
+    }
+
+    #[test]
+    fn families_fontconfig_rejects_are_left_out() {
+        // fontconfig lists every font but Carlito (a <rejectfont> rule).
+        let known = parse_fc_families(
+            "Caladea\nDejaVu Sans\n文泉驛點陣正黑\nWenQuanYi Zen Hei Sharp\n\u{FEFF}Bom Serif\n",
+        );
+        let families = strings(&[
+            "Caladea",
+            "Carlito",
+            "dejavu sans",
+            "WenQuanYi Zen Hei Sharp",
+            "\u{FEFF}Bom Serif",
+            "Bom Serif",
+        ]);
+        assert_eq!(
+            known_to_fontconfig(families, &known),
+            strings(&[
+                "Caladea",
+                "dejavu sans",
+                "WenQuanYi Zen Hei Sharp",
+                "\u{FEFF}Bom Serif",
+            ])
         );
     }
 

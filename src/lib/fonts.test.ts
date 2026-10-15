@@ -82,6 +82,18 @@ describe("family names", () => {
     expect(cleanFamily("x".repeat(200))).toBe("x".repeat(200));
   });
 
+  it("trims the same spaces as the Rust core, which keeps a byte order mark", () => {
+    // The same names as `font_family_names_are_validated` in crates/core/src/model.rs.
+    const bom = String.fromCodePoint(0xfeff);
+    const noBreak = String.fromCodePoint(0xa0);
+    const ideographic = String.fromCodePoint(0x3000);
+    expect(cleanFamily(`${bom}Foo`)).toBe(`${bom}Foo`);
+    expect(cleanFamily(`Foo${bom}`)).toBe(`Foo${bom}`);
+    expect(cleanFamily(`${noBreak}Inter${ideographic}`)).toBe("Inter");
+    expect(cleanFamily(" Foo Bar ")).toBe("Foo Bar");
+    expect(withFamily(`${bom}Foo`, SERIF_STACK)).toBe(`"${bom}Foo", ${SERIF_STACK}`);
+  });
+
   it("puts the chosen family in front of the stack as one quoted item", () => {
     expect(withFamily("Fira Sans", SANS_STACK)).toBe(`"Fira Sans", ${SANS_STACK}`);
     const hostile = withFamily('X", monospace; } body { display: none } /*', SERIF_STACK);

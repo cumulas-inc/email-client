@@ -49,13 +49,28 @@ function stripUnsafe(text: string): string {
   return out;
 }
 
+const SPACE = /^\p{White_Space}$/u;
+
+/**
+ * `text` without Unicode White_Space at either end, like Rust's `str::trim`.
+ * `String.prototype.trim` also drops U+FEFF, but a font whose name starts
+ * with one is listed and saved with it, and only matches with it.
+ */
+function trimSpace(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && SPACE.test(text[start]!)) start++;
+  while (end > start && SPACE.test(text[end - 1]!)) end--;
+  return text.slice(start, end);
+}
+
 /**
  * The family name with control characters and bidirectional controls
  * removed and the ends trimmed, or null when nothing usable is left (or it
  * is absurdly long).
  */
 export function cleanFamily(name: string): string | null {
-  const clean = stripUnsafe(name).trim();
+  const clean = trimSpace(stripUnsafe(name));
   if (!clean || [...clean].length > MAX_FAMILY_CHARS) return null;
   return clean;
 }
