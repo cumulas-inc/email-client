@@ -18,6 +18,7 @@ system webview (WebKitGTK on Linux).
 ┌────────▼──────────────── crates/core ─────────────────────────────┐
 │  service/   CoreService: every UI operation, sync engine           │
 │  push/      IMAP IDLE/NOTIFY watchers, the push service client     │
+│  reminders/ which reminders are due (a pure planner)               │
 │  store/     SQLite cache (+ FTS5 search)                           │
 │  providers/ MailProvider · CalendarProvider · ContactsProvider ·   │
 │             TasksProvider                                          │
@@ -106,6 +107,65 @@ this sends where.
   the `background-state` event tell Settings.
 - `network.rs`: the NetworkMonitor portal tells the core when the network
   comes and goes (push pauses while offline).
+
+## Reminders
+
+Events and tasks remind, also while the window is closed (see above).
+
+**In the core** (`crates/core/src/reminders`, `service/reminders.rs`):
+
+- **Keys.** A reminder is known by `{event|task}:{local id}:{fire time}`.
+  Moving an event (or changing a task's reminder) makes a new key, which goes
+  off afresh. What became of each one (shown, missed, snoozed until a time,
+  dismissed) is kept in `reminder_state`; rows of items that are gone, and
+  rows more than 30 days old, are pruned on each sync.
+- **The planner** (`reminders::plan`) is a pure function of the sources,
+  those states, the time and the time zone:
+  - Sources are events starting from a day ago to 15 days ahead, minus
+    cancelled and declined ones, and open tasks with a reminder.
+  - Timed events go off their reminder time before the start. All-day events
+    go off before local midnight of their first day, worked out on every pass
+    so daylight saving time and a computer in another time zone count.
+  - It says which reminders are active (due, or snoozed), which just came
+    due, which are no longer due (dismissed, snoozed, completed, moved,
+    deleted) and when to look again.
+  - A reminder comes due once. One missed while the app wasn't running or
+    the computer slept goes off when it next looks, for up to 24 hours
+    (`reminders_checked_until`, in `app_settings`, is when it last looked).
+    An event already over is listed as missed rather than shown, and only
+    when its reminder went off since that last look: an event that was over
+    before the app heard of it isn't worth a reminder.
+- **The scheduler** runs it whenever events, tasks or the reminder settings
+  change, on wake, and at the next reminder time, sleeping a minute at most
+  (timers stand still while the computer sleeps). Each pass saves what came
+  due and tells the sink: `reminders_changed(active, newly_due, cleared)`.
+  `reminders_enabled` off clears them all.
+- **Microsoft 365** keeps reminders itself. Each sync of an account's
+  calendars reads `/me/reminderView` for the same window into
+  `server_reminders`; its `reminderFireTime` wins over the event's own
+  reminder time (a reminder snoozed in Outlook goes off when the snooze
+  ends), and an event it leaves out has no reminder (it was dismissed). A
+  report that couldn't be read keeps the last one, for a day; then the
+  events' own times count. Occurrences of a series are matched by id, or by
+  start, end and subject.
+- **Dismiss and snooze** (`dismiss_reminders`, `snooze_reminder`) save the
+  state at once. For a Microsoft 365 event they also post `dismissReminder`
+  or `snoozeReminder` (`newReminderTime` in UTC); what fails stays pending in
+  `reminder_state` and is retried at the next sync of the calendar.
+- **Tasks**: `reminder_at` maps To Do's `isReminderOn` and `reminderDateTime`
+  (written in UTC); IMAP accounts' local tasks keep it with their other data.
+
+**In the shell**: `reminders_changed` withdraws the notifications of
+reminders no longer due and shows the new ones, `reminder:{key}`, at high
+priority on the portal (never urgent), with the reminder sound when sounds
+are on. Unlike mail they show while the window is in front, as they're about
+now. Buttons: Snooze (for `default_snooze_minutes`), Dismiss, and Join for an
+https meeting address (a task's: Mark complete); GNOME shows at most three.
+More than three at once (after sleep, say) show as one notification that
+opens the Reminders panel. A click opens the event in Calendar or the task in
+Tasks (`navigate` with kind `event`, `task` or `reminders`). The page gets
+`reminders-changed` for the bell in the header and its Reminders panel, and
+reads out reminders as they come due (a live region).
 
 ## Security
 

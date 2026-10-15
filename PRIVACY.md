@@ -15,7 +15,10 @@ _Last updated: October 15, 2026._
 
 - **A copy of your mail, calendar, contacts and tasks**, so that lists and
   search work instantly and offline. It's in a database in the app's data
-  folder, `~/.local/share/co.cumulas.Mail/`, along with your settings.
+  folder, `~/.local/share/co.cumulas.Mail/`, along with your settings. For
+  reminders, the same database keeps which ones went off and which you
+  snoozed or dismissed (forgotten after 30 days), and, for Microsoft
+  accounts, the reminder times Microsoft reports.
 - **Attachments you open**, in the app's cache folder,
   `~/.cache/co.cumulas.Mail/`.
 - **Passwords and sign-in tokens**, in your desktop's keyring (GNOME Keyring
@@ -70,8 +73,10 @@ accounts use:
 - **Microsoft accounts** (Microsoft 365, Outlook.com, Hotmail, Live): sign-in
   happens in your web browser on Microsoft's own page, and the app then uses
   Microsoft Graph to read and change your mail, calendar, contacts and tasks,
-  acting as you. Microsoft's privacy statement covers what Microsoft does
-  with this.
+  acting as you. That includes reading your calendar's reminders, and
+  dismissing or snoozing one when you do so in the app, so that Outlook and
+  your phone stop reminding you too. Microsoft's privacy statement covers
+  what Microsoft does with this.
 - **IMAP accounts**: the IMAP and SMTP servers you set up, with the password
   you gave. To show new mail within seconds, the app keeps a second
   connection open to your IMAP server (IMAP IDLE).

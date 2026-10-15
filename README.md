@@ -28,6 +28,12 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   (`sync.cumulas.co`, see [PRIVACY.md](PRIVACY.md)), or check the Inbox every
   30 seconds without it. Desktop notifications with Mark as read and Archive
   buttons; a click opens the message.
+- **Reminders**: events and tasks remind with a notification (Snooze,
+  Dismiss, and Join for online meetings), even while the window is in front,
+  and in the Reminders panel under the bell at the top. Reminders missed
+  while the computer slept go off when it wakes, for up to a day. For
+  Microsoft 365, dismissing or snoozing also does so in Outlook and on your
+  phone, and the reverse.
 - **Runs in the background**: closing the window keeps the app running for
   notifications, with an optional tray icon and start at login. Quit is in the
   main menu and the tray icon's menu.
@@ -36,7 +42,7 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   for Microsoft accounts.
 - **Contacts**: contacts with search, editing and "send email".
 - **Tasks**: Microsoft To Do lists, Starred and Scheduled views, due dates,
-  notes.
+  reminders, notes.
 - **Accounts**: Microsoft 365 and Outlook.com sign-in in the browser (no
   passwords in the app); IMAP/SMTP with presets for Gmail, iCloud, Fastmail,
   Yahoo and Proton Mail Bridge. IMAP accounts get a local calendar, contacts
@@ -103,8 +109,7 @@ CI runs all of these, plus a Flatpak build.
 
 Not built yet: saving drafts to the server, conversation threading, recurring
 event editing (single occurrence vs series), CalDAV/CardDAV for IMAP accounts,
-event and task reminders, `mailto:` handling, and OAuth for Gmail/Yahoo IMAP
-(app passwords work today).
+`mailto:` handling, and OAuth for Gmail/Yahoo IMAP (app passwords work today).
 
 ## License
 

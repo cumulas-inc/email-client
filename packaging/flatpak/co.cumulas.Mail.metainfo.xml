@@ -20,6 +20,7 @@
       <li>Microsoft 365 and Outlook.com mail, calendar, contacts and To Do</li>
       <li>Gmail, Fastmail, iCloud, Yahoo and self-hosted mail over IMAP</li>
       <li>New mail within seconds, with notifications you can act on</li>
+      <li>Reminders for events and tasks, with Snooze, Dismiss and Join</li>
       <li>Quick search across all your mail, even offline</li>
       <li>Meeting invitations: accept, tentatively accept or decline</li>
       <li>Remote images blocked by default to stop email tracking</li>
@@ -35,8 +36,8 @@
       seconds. Cumulas Mail has no telemetry.
     </p>
     <p>
-      Closing the window keeps Cumulas Mail running in the background so that new mail still
-      shows up, and it can start at login; both can be changed in Settings. To quit, choose
+      Closing the window keeps Cumulas Mail running in the background so that new mail and
+      reminders still show up, and it can start at login; both can be changed in Settings. To quit, choose
       Quit in the main menu or the tray icon's menu.
     </p>
     <p>
