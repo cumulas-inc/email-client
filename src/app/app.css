@@ -30,6 +30,11 @@
     --pane-gap: 8px;
     --sidebar-width: 220px;
   }
+
+  /* The shortcut no longer fits beside the label; the tooltip keeps it. */
+  .module-sidebar__action .kbd {
+    display: none;
+  }
 }
 
 /* --- Header ---------------------------------------------------------------- */
