@@ -1,10 +1,10 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MockBackend } from "../../api/mock";
 import { qk } from "../../api/queries";
-import { SERIF_STACK } from "../../lib/fonts";
+import { SANS_STACK, SERIF_STACK } from "../../lib/fonts";
 import type { ImapAccountUpdate, Settings } from "../../api/types";
 import { type SettingsSection, useAppStore } from "../../app/store";
 import { useToasts } from "../../components/toast";
@@ -141,6 +141,8 @@ describe("General", () => {
 
 describe("Appearance", () => {
   const preview = () => screen.getByRole("figure", { name: "Preview" });
+  /** A font picker's status, next to its input. */
+  const statusOf = (input: HTMLElement) => within(input.parentElement!).getByRole("status");
 
   it("chooses an interface font by typing to filter the list", async () => {
     const user = userEvent.setup();
@@ -160,6 +162,7 @@ describe("Appearance", () => {
     expect(within(list).getByRole("option", { name: "System font" })).toBeInTheDocument();
     expect(await within(list).findByRole("option", { name: "Fira Sans" })).toBeInTheDocument();
     expect(within(list).getByRole("group", { name: "Installed fonts" })).toBeInTheDocument();
+    const inter = input.getAttribute("aria-activedescendant");
 
     // Typing replaces the current name and filters, accents and case aside.
     await user.keyboard("FIRA");
@@ -169,6 +172,12 @@ describe("Appearance", () => {
         .getAllByRole("option")
         .map((o) => o.textContent),
     ).toEqual(["Fira Code", "Fira Sans"]);
+    // The first match is highlighted, and screen readers are told it is.
+    const code = within(list).getByRole("option", { name: "Fira Code" });
+    expect(code).toHaveAttribute("aria-selected", "true");
+    expect(input).toHaveAttribute("aria-activedescendant", code.id);
+    expect(code.id).not.toBe(inter);
+    expect(statusOf(input)).toHaveTextContent("2 fonts match.");
     await user.keyboard("{ArrowDown}");
     const fira = within(list).getByRole("option", { name: "Fira Sans" });
     expect(fira).toHaveAttribute("aria-selected", "true");
@@ -187,7 +196,11 @@ describe("Appearance", () => {
   it("matches every word of the search, and says when nothing does", async () => {
     const user = userEvent.setup();
     openAt("general");
-    await user.click(await screen.findByRole("combobox", { name: "Reading font" }));
+    const input = await screen.findByRole("combobox", { name: "Reading font" });
+    // There before it has anything to say, so what it says is announced.
+    const status = statusOf(input);
+    expect(status).toBeEmptyDOMElement();
+    await user.click(input);
     const list = screen.getByRole("listbox", { name: "Reading font" });
     await within(list).findByRole("option", { name: "Noto Serif" });
 
@@ -197,12 +210,12 @@ describe("Appearance", () => {
         .getAllByRole("option")
         .map((o) => o.textContent),
     ).toEqual(["Noto Naskh Arabic", "Noto Sans Arabic"]);
+    expect(status).toHaveTextContent("2 fonts match.");
     await user.keyboard("bic xyz");
     expect(within(list).queryAllByRole("option")).toHaveLength(0);
-    expect(screen.getByText("No font matches “noto arabic xyz”.")).toHaveAttribute(
-      "role",
-      "status",
-    );
+    expect(input).not.toHaveAttribute("aria-activedescendant");
+    expect(status).toHaveTextContent("No font matches “noto arabic xyz”.");
+    expect(statusOf(input)).toBe(status);
   });
 
   it("picks with the pointer; Escape closes the list but not the dialog", async () => {
@@ -236,7 +249,13 @@ describe("Appearance", () => {
     ).toBe(SERIF_STACK);
 
     await user.click(screen.getByRole("combobox", { name: "Reading font" }));
-    await user.hover(await screen.findByRole("option", { name: "Literata" }));
+    const literata = await screen.findByRole("option", { name: "Literata" });
+    // Moving onto an option highlights it; the list scrolling under a still
+    // pointer (a mousemove without movement, in WebKit) doesn't.
+    fireEvent.mouseMove(literata, { movementX: 0, movementY: 0 });
+    expect(literata).toHaveAttribute("aria-selected", "false");
+    fireEvent.mouseMove(literata, { movementX: 2, movementY: 1 });
+    expect(literata).toHaveAttribute("aria-selected", "true");
     expect(preview().style.getPropertyValue("--preview-serif")).toBe(`"Literata", ${SERIF_STACK}`);
     expect(preview()).toHaveTextContent("Atlas launch checklist");
 
@@ -258,7 +277,8 @@ describe("Appearance", () => {
 
     await user.click(screen.getByRole("radio", { name: "Dark" }));
     expect(reset).toBeEnabled();
-    await user.click(reset);
+    reset.focus();
+    await user.keyboard("{Enter}");
     await waitFor(() =>
       expect(lastSaved()).toMatchObject({
         interfaceFont: { kind: "default" },
@@ -270,9 +290,11 @@ describe("Appearance", () => {
     );
     expect(screen.getByRole("radio", { name: "Default" })).toBeChecked();
     expect(reset).toBeDisabled();
+    // Focus moves on to the next control rather than dropping to the page.
+    expect(screen.getByRole("combobox", { name: "Interface font" })).toHaveFocus();
   });
 
-  it("says when a saved font isn't installed, and still shows it as chosen", async () => {
+  it("says when a saved font isn't available, and still shows it as chosen", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend();
     await backend.updateSettings({
@@ -284,12 +306,60 @@ describe("Appearance", () => {
     const input = await screen.findByRole("combobox", { name: "Interface font" });
     expect(input).toHaveValue("Gone Sans");
     expect(input).toHaveAccessibleDescription(
-      "Menus, lists, buttons and labels. Gone Sans isn't installed on this computer, so Inter is used.",
+      "Menus, lists, buttons and labels. Gone Sans isn't available on this computer, so Inter is used.",
     );
     await user.click(input);
     expect(await screen.findByRole("option", { name: "Gone Sans" })).toHaveAttribute(
       "data-current",
     );
+    // It isn't listed as installed.
+    const installed = screen.getByRole("group", { name: "Installed fonts" });
+    expect(within(installed).queryByRole("option", { name: "Gone Sans" })).not.toBeInTheDocument();
+    expect(within(installed).getAllByRole("option")[0]).toHaveTextContent("Adwaita Mono");
+  });
+
+  it("keeps the saved font when its list opens before the installed fonts arrive", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    await backend.updateSettings({
+      ...(await backend.getSettings()),
+      interfaceFont: { kind: "family", family: "Fira Sans" },
+    });
+    const listFonts = backend.listFonts.bind(backend);
+    let release!: () => void;
+    const listed = new Promise<void>((resolve) => (release = resolve));
+    vi.spyOn(backend, "listFonts").mockImplementation(async () => {
+      await listed;
+      return listFonts();
+    });
+    const { updateSettings } = openAt("general", backend);
+    const saved = `"Fira Sans", ${SANS_STACK}`;
+
+    const input = await screen.findByRole("combobox", { name: "Interface font" });
+    expect(input).toHaveValue("Fira Sans");
+    input.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(statusOf(input)).toHaveTextContent("Looking for installed fonts…");
+    // Nothing else is highlighted or previewed in its place, and Enter
+    // doesn't choose anything.
+    expect(screen.getByRole("option", { name: "Inter (default)" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    expect(input).not.toHaveAttribute("aria-activedescendant");
+    expect(preview().style.getPropertyValue("--preview-sans")).toBe(saved);
+    await user.keyboard("{Enter}");
+
+    // Once they arrive, the saved font is highlighted.
+    act(() => release());
+    const fira = await screen.findByRole("option", { name: "Fira Sans" });
+    expect(fira).toHaveAttribute("aria-selected", "true");
+    expect(input).toHaveAttribute("aria-activedescendant", fira.id);
+    expect(preview().style.getPropertyValue("--preview-sans")).toBe(saved);
+    await user.keyboard("{Enter}");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(input).toHaveValue("Fira Sans");
+    expect(updateSettings).not.toHaveBeenCalled();
   });
 
   it("still offers the built-in fonts when the installed ones can't be listed", async () => {
@@ -298,8 +368,11 @@ describe("Appearance", () => {
     vi.spyOn(backend, "listFonts").mockRejectedValue({ code: "internal", message: "No fonts." });
     const { lastSaved } = openAt("general", backend);
 
-    await user.click(await screen.findByRole("combobox", { name: "Interface font" }));
-    expect(await screen.findByText("Couldn't list the installed fonts.")).toBeInTheDocument();
+    const input = await screen.findByRole("combobox", { name: "Interface font" });
+    await user.click(input);
+    await waitFor(() =>
+      expect(statusOf(input)).toHaveTextContent("Couldn't list the installed fonts."),
+    );
     await user.click(screen.getByRole("option", { name: "System font" }));
     await waitFor(() => expect(lastSaved()).toMatchObject({ interfaceFont: { kind: "system" } }));
   });

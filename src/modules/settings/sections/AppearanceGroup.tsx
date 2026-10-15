@@ -12,6 +12,7 @@ import {
   readingStack,
   SANS_STACK,
   SERIF_STACK,
+  withFamily,
 } from "../../../lib/fonts";
 import { type FontOption, FontPicker } from "../FontPicker";
 import { SettingRow, SettingsGroup } from "../SettingsLayout";
@@ -52,16 +53,30 @@ function readingLabel(font: ReadingFont): string {
   return font.kind === "interface" ? "Same as interface font" : "Charis SIL (default)";
 }
 
-/** "Fira Sans isn't installed…", when a saved family is missing from this computer. */
+/** "Fira Sans isn't available…", when a saved family is missing or turned off on this computer. */
 function missingNote(family: string | null, families: string[] | undefined, fallback: string) {
   if (!family || !families || families.includes(family)) return null;
-  return ` ${family} isn't installed on this computer, so ${fallback} is used.`;
+  return ` ${family} isn't available on this computer, so ${fallback} is used.`;
 }
 
-/** The list with a saved family that isn't installed, so it can still show as chosen. */
-function withSaved(families: string[] | undefined, family: string | null): string[] | undefined {
-  if (!families || !family || families.includes(family)) return families;
-  return [family, ...families];
+/**
+ * A saved family that isn't available, as an option after the built-in ones
+ * (not among the installed fonts), so it can still show as chosen.
+ */
+function savedOption<V>(
+  family: string | null,
+  families: string[] | undefined,
+  value: (family: string) => V,
+): FontOption<V>[] {
+  if (!family || !families || families.includes(family)) return [];
+  return [
+    {
+      key: fontKey({ kind: "family", family }),
+      label: family,
+      value: value(family),
+      fontFamily: withFamily(family, SANS_STACK),
+    },
+  ];
 }
 
 type Preview = { interfaceFont?: InterfaceFont; readingFont?: ReadingFont };
@@ -94,6 +109,13 @@ export function AppearanceGroup({ settings, save }: AppearanceGroupProps) {
     readingFont: preview.readingFont ?? readingFont,
   };
 
+  const interfaceSaved = interfaceFont.kind === "family" ? interfaceFont.family : null;
+  const readingSaved = readingFont.kind === "family" ? readingFont.family : null;
+
+  const interfacePresets = useMemo(
+    () => [...INTERFACE_PRESETS, ...savedOption(interfaceSaved, fonts.data, interfaceFamily)],
+    [interfaceSaved, fonts.data],
+  );
   const readingPresets = useMemo<FontOption<ReadingFont>[]>(
     () => [
       {
@@ -108,12 +130,10 @@ export function AppearanceGroup({ settings, save }: AppearanceGroupProps) {
         value: { kind: "interface" },
         fontFamily: interfaceStack(interfaceFont),
       },
+      ...savedOption(readingSaved, fonts.data, readingFamily),
     ],
-    [interfaceFont],
+    [interfaceFont, readingSaved, fonts.data],
   );
-
-  const interfaceSaved = interfaceFont.kind === "family" ? interfaceFont.family : null;
-  const readingSaved = readingFont.kind === "family" ? readingFont.family : null;
 
   return (
     <SettingsGroup title="Appearance">
@@ -156,8 +176,8 @@ export function AppearanceGroup({ settings, save }: AppearanceGroupProps) {
             id={controlId}
             labelledBy={labelId}
             describedBy={descriptionId}
-            presets={INTERFACE_PRESETS}
-            families={withSaved(fonts.data, interfaceSaved)}
+            presets={interfacePresets}
+            families={fonts.data}
             familiesFailed={fonts.isError}
             familyValue={interfaceFamily}
             selectedKey={fontKey(interfaceFont)}
@@ -184,7 +204,7 @@ export function AppearanceGroup({ settings, save }: AppearanceGroupProps) {
             labelledBy={labelId}
             describedBy={descriptionId}
             presets={readingPresets}
-            families={withSaved(fonts.data, readingSaved)}
+            families={fonts.data}
             familiesFailed={fonts.isError}
             familyValue={readingFamily}
             selectedKey={fontKey(readingFont)}
@@ -242,7 +262,17 @@ function TypePreview({ customSans, sans, serif, canReset, onReset }: TypePreview
           type="button"
           className="btn btn--subtle btn--sm type-preview__reset"
           disabled={!canReset}
-          onClick={onReset}
+          onClick={(e) => {
+            // Resetting disables the button. Keep keyboard focus in the form,
+            // on the font control that follows, instead of losing it.
+            if (document.activeElement === e.currentTarget) {
+              e.currentTarget
+                .closest("figure")
+                ?.nextElementSibling?.querySelector<HTMLElement>('[role="combobox"]')
+                ?.focus();
+            }
+            onReset();
+          }}
         >
           <RotateCcw size={14} aria-hidden="true" />
           Reset to defaults
