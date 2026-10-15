@@ -334,7 +334,9 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
           className={clsx(
             "mail-compose__page",
             draft.quoteHtml && "mail-compose__page--quoted",
-            signature.kind === "editor" && "mail-compose__page--signed",
+            // "Add signature" and the added-on-send note sit right under
+            // the text too, where the signature would be.
+            signature.kind !== "none" && "mail-compose__page--signed",
           )}
         >
           <div className="mail-compose__fields">

@@ -2240,8 +2240,10 @@
   font-size: var(--text-sm);
 }
 
-/* With a signature, the editor starts at about five lines and grows with
-   the text, and the signature follows right under it. */
+/* With a signature (or its "Add signature" button, or the note that the
+   organization adds it on send), the editor starts at about five lines and
+   grows with the text, and the signature follows right under it, so
+   removing or adding it doesn't move anything else. */
 .mail-compose__page--signed .mail-editor {
   flex: none;
 }

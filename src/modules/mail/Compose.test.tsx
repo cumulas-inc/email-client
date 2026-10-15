@@ -519,6 +519,8 @@ describe("Signature", () => {
     expect(within(c).queryByTitle("Signature")).not.toBeInTheDocument();
     const add = within(c).getByRole("button", { name: "Add signature" });
     expect(add).toHaveFocus();
+    // It stays right under the text, where the signature was.
+    expect(c.querySelector(".mail-compose__page")).toHaveClass("mail-compose__page--signed");
     await user.click(add);
     expect(await within(c).findByTitle("Signature")).toBeInTheDocument();
     await user.click(within(c).getByRole("button", { name: "Remove signature" }));
@@ -526,6 +528,39 @@ describe("Signature", () => {
     await address(user, c);
     await user.click(within(c).getByRole("button", { name: "Send" }));
     expect(await sent(backend as MockBackend)).not.toContain("cumulas-signature");
+  });
+
+  it("brings an edited signature back as edited after removing it", async () => {
+    const user = userEvent.setup();
+    const { backend } = await renderMail();
+    const c = await newMessage(user);
+    let doc = await loadFrame(await signatureFrame(c));
+    editFrame(doc, "<div>Alex, out of office until Monday</div>");
+    await user.click(within(c).getByRole("button", { name: "Remove signature" }));
+    await user.click(within(c).getByRole("button", { name: "Add signature" }));
+    doc = await loadFrame(await signatureFrame(c));
+    expect(doc.body.innerHTML).toBe("<div>Alex, out of office until Monday</div>");
+    // Still an edit: the account's own comes back with Restore.
+    expect(within(c).getByRole("button", { name: "Restore signature" })).toBeInTheDocument();
+
+    await user.click(within(c).getByRole("button", { name: "Remove signature" }));
+    // Removed, it goes without.
+    await address(user, c);
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    expect(await sent(backend as MockBackend)).not.toContain("out of office");
+  });
+
+  it("drops a removed edit when From changes", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    const c = await newMessage(user);
+    const doc = await loadFrame(await signatureFrame(c));
+    editFrame(doc, "<div>Edited</div>");
+    await user.click(within(c).getByRole("button", { name: "Remove signature" }));
+    await user.selectOptions(within(c).getByRole("combobox", { name: "From" }), "acct-home");
+    expect(useMailStore.getState().compose?.signature).toBe("auto");
+    const home = await loadFrame(await signatureFrame(c));
+    await waitFor(() => expect(home.body.textContent).toBe("Alex Morgan+1 (206) 555-0199"));
   });
 
   it("follows the From account, replacing an edited signature", async () => {
@@ -617,6 +652,8 @@ describe("Signature", () => {
       await within(c).findByText("Your organization adds your signature when you send."),
     ).toBeInTheDocument();
     expect(within(c).queryByTitle("Signature")).not.toBeInTheDocument();
+    // The note sits right under the text, where a signature would be.
+    expect(c.querySelector(".mail-compose__page")).toHaveClass("mail-compose__page--signed");
     await address(user, c);
     await user.click(within(c).getByRole("button", { name: "Send" }));
     expect(await sent(backend)).not.toContain("cumulas-signature");
