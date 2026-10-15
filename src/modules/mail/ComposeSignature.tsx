@@ -51,7 +51,9 @@ export function ComposeSignatureBlock({
         disabled={disabled}
         onClick={() => {
           focusNext.current = "remove";
-          update({ signature: "auto" });
+          // The edit taken out, if there was one; it's "Restore" that
+          // goes back to the account's.
+          update({ signature: view.edit ?? "auto" });
         }}
       >
         Add signature
@@ -76,7 +78,10 @@ export function ComposeSignatureBlock({
           disabled={disabled}
           onClick={() => {
             focusNext.current = "add";
-            update({ signature: "removed" });
+            // An edit is kept, so "Add signature" undoes a stray click.
+            update({
+              signature: view.edited ? { removed: { edited: view.html, own } } : "removed",
+            });
           }}
         >
           <X size={14} />

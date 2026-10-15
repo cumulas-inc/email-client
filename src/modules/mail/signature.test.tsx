@@ -34,6 +34,11 @@ describe("the signature a message goes out with", () => {
       await signatureFor(draft({ signature: { edited: "<div>Ada</div>", own: true } })),
     ).toEqual({ html: "<div>Ada</div>", own: true });
     expect(await signatureFor(draft({ signature: "removed" }))).toBeNull();
+    expect(
+      await signatureFor(
+        draft({ signature: { removed: { edited: "<div>Ada</div>", own: true } } }),
+      ),
+    ).toBeNull();
     expect(await signatureFor(draft({ signature: "off" }))).toBeNull();
     expect(await signatureFor(draft())).toMatchObject({ own: false });
     expect(await signatureFor(draft({ accountId: "acct-home", replyKind: "reply" }))).toEqual({

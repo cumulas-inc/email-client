@@ -9,7 +9,7 @@ import { useBackend } from "../../api/context";
 import { composeSignatureQuery, useComposeSignature } from "../../api/queries";
 import type { ComposeSignature } from "../../api/types";
 import type { SentSignature } from "./draft";
-import type { ComposeDraft } from "./mailStore";
+import type { ComposeDraft, SignatureEdit } from "./mailStore";
 
 /** How long Send waits for an account's signature it doesn't know yet. */
 export const SIGNATURE_WAIT_MS = 4000;
@@ -19,8 +19,8 @@ export type SignatureView =
   | { kind: "none" }
   /** The signature, editable; `own` when it's the person's own. */
   | { kind: "editor"; html: string; own: boolean; edited: boolean }
-  /** Removed: it can be added back. */
-  | { kind: "removed" }
+  /** Removed: it can be added back, as the person's `edit` if they'd edited it. */
+  | { kind: "removed"; edit: SignatureEdit | null }
   /** The organization's mail server adds it on send. */
   | { kind: "addedOnSend" };
 
@@ -42,10 +42,12 @@ export function useSignatureView(draft: ComposeDraft | null): SignatureView {
   );
   if (signature === "off") return { kind: "none" };
   if (typeof signature === "object") {
+    // An edit taken out comes back as it was, whatever the account offers.
+    if ("removed" in signature) return { kind: "removed", edit: signature.removed };
     return { kind: "editor", html: signature.edited, own: signature.own, edited: true };
   }
   const account = offered(data);
-  if (signature === "removed") return account ? { kind: "removed" } : { kind: "none" };
+  if (signature === "removed") return account ? { kind: "removed", edit: null } : { kind: "none" };
   if (data?.kind === "addedOnSend") return { kind: "addedOnSend" };
   return account ? { kind: "editor", ...account, edited: false } : { kind: "none" };
 }
@@ -62,7 +64,9 @@ export function useSentSignature() {
     async (draft: ComposeDraft): Promise<SentSignature | null> => {
       const signature = draft.signature;
       if (signature === "off" || signature === "removed") return null;
-      if (typeof signature === "object") return { html: signature.edited, own: signature.own };
+      if (typeof signature === "object") {
+        return "removed" in signature ? null : { html: signature.edited, own: signature.own };
+      }
       const query = composeSignatureQuery(backend, draft.accountId, draft.replyKind);
       const known = client.getQueryData<ComposeSignature>(query.queryKey);
       if (known) return offered(known);
