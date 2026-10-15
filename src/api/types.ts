@@ -393,6 +393,8 @@ export interface AppInfo {
   version: string;
   persistentSecrets: boolean;
   microsoftClientIdBuiltIn: boolean;
+  /** Host of the push service Microsoft accounts use, for the privacy note. */
+  syncServer: string;
 }
 
 // --- Errors -----------------------------------------------------------------

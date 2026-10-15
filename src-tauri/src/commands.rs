@@ -28,6 +28,9 @@ pub struct AppInfo {
     /// A Microsoft client id was compiled in, so Microsoft sign-in works
     /// without configuration.
     microsoft_client_id_built_in: bool,
+    /// The host of the push service Microsoft accounts use (normally
+    /// `sync.cumulas.co`), for the privacy note.
+    sync_server: String,
 }
 
 #[tauri::command]
@@ -36,6 +39,7 @@ pub fn get_app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
         version: app.package_info().version.to_string(),
         persistent_secrets: state.persistent_secrets,
         microsoft_client_id_built_in: BUILTIN_MICROSOFT_CLIENT_ID.is_some(),
+        sync_server: cumulas_core::push::relay::sync_host(),
     }
 }
 

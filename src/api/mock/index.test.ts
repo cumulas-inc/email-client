@@ -67,14 +67,23 @@ describe("push and background settings", () => {
     for (const status of statuses) {
       const account = accounts.find((a) => a.id === status.accountId)!;
       expect(status.mode).toEqual(
-        account.kind === "imap" ? { kind: "imapIdle" } : { kind: "polling", everySecs: 30 },
+        account.kind === "imap" ? { kind: "imapIdle" } : { kind: "graphRelay" },
       );
       expect(status.health).toEqual({ kind: "live" });
     }
 
+    // Without the push service, Microsoft accounts check every 30 seconds.
+    const settings = await backend.getSettings();
+    await backend.updateSettings({ ...settings, usePushRelay: false });
+    for (const status of await backend.getPushStatuses()) {
+      const account = accounts.find((a) => a.id === status.accountId)!;
+      if (account.kind === "microsoft") {
+        expect(status.mode).toEqual({ kind: "polling", everySecs: 30 });
+      }
+    }
+
     const seen: string[] = [];
     backend.onPushStatus((s) => seen.push(s.mode.kind));
-    const settings = await backend.getSettings();
     await backend.updateSettings({ ...settings, instantPush: false });
     await new Promise((resolve) => setTimeout(resolve));
     expect(seen).toEqual(accounts.map(() => "off"));

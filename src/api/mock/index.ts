@@ -252,7 +252,12 @@ export class MockBackend implements Backend {
   // --- app --------------------------------------------------------------------
 
   async getAppInfo() {
-    return { version: "0.1.0-demo", persistentSecrets: true, microsoftClientIdBuiltIn: true };
+    return {
+      version: "0.1.0-demo",
+      persistentSecrets: true,
+      microsoftClientIdBuiltIn: true,
+      syncServer: "sync.cumulas.co",
+    };
   }
 
   async openLink(url: string) {
@@ -493,8 +498,8 @@ export class MockBackend implements Backend {
   }
 
   /**
-   * Like the desktop app before the push service: IMAP accounts idle,
-   * Microsoft accounts check the Inbox every 30 seconds.
+   * Like the desktop app: IMAP accounts idle, Microsoft accounts use the push
+   * service, or check the Inbox every 30 seconds when it's turned off.
    */
   async getPushStatuses(): Promise<PushStatus[]> {
     const now = new Date().toISOString();
@@ -506,7 +511,9 @@ export class MockBackend implements Backend {
           ? { kind: "off" }
           : a.kind === "imap"
             ? { kind: "imapIdle" }
-            : { kind: "polling", everySecs: 30 },
+            : this.settings.usePushRelay
+              ? { kind: "graphRelay" }
+              : { kind: "polling", everySecs: 30 },
         health: { kind: "live" },
         detail: null,
         since: this.pushSince.get(a.id)!,
