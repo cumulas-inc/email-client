@@ -273,7 +273,7 @@ impl CoreService {
         let tasks = {
             let mut state = self.push.state.lock().unwrap();
             state.shut_down = true;
-            let mut tasks: Vec<_> = state.tasks.drain(..).collect();
+            let mut tasks = std::mem::take(&mut state.tasks);
             for (_, push) in state.accounts.drain() {
                 tasks.extend(push.tasks());
             }
