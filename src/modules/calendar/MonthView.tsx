@@ -11,7 +11,7 @@ import { EventBar } from "./EventBar";
 import { type EventSelectProps, eventClasses, eventStyle, selectHandlers } from "./eventProps";
 import { displayShowAs, eventAriaLabel, eventTitle } from "./eventText";
 import { useElementHeight } from "./hooks";
-import { cellLanes, chunk, hiddenCount, isBar, laneTable, rowItems } from "./layout";
+import { cellLanes, chunk, hiddenItems, isBar, laneTable, rowItems } from "./layout";
 
 /** Lines per day when the grid has not been measured (tests, first paint). */
 export const DEFAULT_MONTH_LINES = 3;
@@ -126,7 +126,8 @@ export function MonthView({
             <div key={week[0]!.getTime()} className="cal-month__week" role="row">
               {week.map((day, col) => {
                 const isToday = isSameDay(day, today);
-                const more = hiddenCount(table, col, maxLines);
+                const hidden = hiddenItems(table, col, maxLines);
+                const more = hidden.length;
                 const dayEvents = (table[col] ?? []).filter(Boolean).length;
                 return (
                   <div
@@ -162,6 +163,8 @@ export function MonthView({
                           type="button"
                           className="cal-more-link cal-month__more"
                           aria-label={`${more} more event${more === 1 ? "" : "s"} on ${formatDate(day, "weekdayLong")}`}
+                          // Where these events are shown (see drawnEvent).
+                          data-event-ids={hidden.map((e) => e.id).join(" ")}
                           onClick={(e) => {
                             e.stopPropagation();
                             onOpenDay(day);

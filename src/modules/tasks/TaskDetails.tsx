@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type FocusEvent,
   type KeyboardEvent,
   type ReactNode,
   type RefObject,
@@ -111,7 +112,10 @@ export function TaskDetailsPane({
 /**
  * When to be reminded: quick picks (later today, tomorrow, next week), a
  * date and a time, and Remove. A complete date commits at once, as the due
- * date does; the time, once it's whole.
+ * date does; the time, once it's whole. But only a reminder still ahead: one
+ * that has passed would go off at once, so it's a step on the way (today's
+ * date before the time, AM/PM before the day), kept while the date or time
+ * has focus.
  */
 function ReminderField({
   task,
@@ -123,8 +127,10 @@ function ReminderField({
   onUpdate: (patch: TaskPatch) => void;
 }) {
   const id = useId();
+  const dateRef = useRef<HTMLInputElement>(null);
+  const timeRef = useRef<HTMLInputElement>(null);
   const current = task.reminderAt ? new Date(task.reminderAt) : null;
-  // Drafts while a field has focus; otherwise the reminder's own values.
+  // Drafts while the date or time has focus; otherwise the reminder's own values.
   const [date, setDate] = useState<string | null>(null);
   const [time, setTime] = useState<string | null>(null);
   const dateValue = date ?? (current ? toDateString(current) : "");
@@ -142,7 +148,15 @@ function ReminderField({
 
   const commitInputs = (nextDate: string, nextTime: string) => {
     const at = reminderFromInputs(nextDate, nextTime, now);
-    if (at) setReminder(at);
+    if (at && at > new Date()) setReminder(at);
+  };
+
+  // Going from the date to the time, or back, keeps both drafts: together
+  // they may make a reminder yet. Leaving them drops what wasn't saved.
+  const onBlur = (e: FocusEvent<HTMLInputElement>) => {
+    if (e.relatedTarget === dateRef.current || e.relatedTarget === timeRef.current) return;
+    setDate(null);
+    setTime(null);
   };
 
   return (
@@ -181,6 +195,7 @@ function ReminderField({
       </div>
       <div className="tasks-details__date-row tasks-details__reminder-row">
         <input
+          ref={dateRef}
           id={`${id}-date`}
           type="date"
           className="input tasks-details__date"
@@ -194,9 +209,10 @@ function ReminderField({
               commitInputs(value, timeValue);
             }
           }}
-          onBlur={() => setDate(null)}
+          onBlur={onBlur}
         />
         <input
+          ref={timeRef}
           type="time"
           className="input tasks-details__time"
           aria-label="Reminder time"
@@ -207,7 +223,7 @@ function ReminderField({
             setTime(value);
             if (/^\d{2}:\d{2}$/.test(value)) commitInputs(dateValue, value);
           }}
-          onBlur={() => setTime(null)}
+          onBlur={onBlur}
         />
         {current && (
           <button

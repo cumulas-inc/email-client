@@ -33,7 +33,7 @@ import {
   type PlacedSegment,
   cellLanes,
   fitColumns,
-  hiddenCount,
+  hiddenItems,
   laneTable,
   layoutDay,
   limitColumns,
@@ -349,7 +349,7 @@ export function TimeGrid({
             )}
           </div>
           {days.map((day, col) => {
-            const hidden = hiddenCount(allDay, col, allDayVisible);
+            const hidden = hiddenItems(allDay, col, allDayVisible);
             return (
               <div
                 key={day.getTime()}
@@ -382,17 +382,19 @@ export function TimeGrid({
                     />
                   );
                 })}
-                {hidden > 0 && (
+                {hidden.length > 0 && (
                   <button
                     type="button"
                     className="cal-more-link cal-tg__allday-more"
-                    aria-label={`${hidden} more all-day event${hidden === 1 ? "" : "s"} on ${formatDate(day, "weekdayLong")}`}
+                    aria-label={`${hidden.length} more all-day event${hidden.length === 1 ? "" : "s"} on ${formatDate(day, "weekdayLong")}`}
+                    // Where these events are shown (see drawnEvent).
+                    data-event-ids={hidden.map((e) => e.id).join(" ")}
                     onClick={(e) => {
                       e.stopPropagation();
                       setAllDayOpen(true);
                     }}
                   >
-                    +{formatCount(hidden)} more
+                    +{formatCount(hidden.length)} more
                   </button>
                 )}
               </div>
@@ -508,6 +510,8 @@ function MoreChip({
         atMinutes(day, group.start),
       )} on ${formatDate(day, "weekdayLong")}`}
       title={group.items.map(eventTitle).join("\n")}
+      // Where these events are shown (see drawnEvent).
+      data-event-ids={group.items.map((e) => e.id).join(" ")}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => {
         e.stopPropagation();

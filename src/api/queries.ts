@@ -138,13 +138,17 @@ export function useActiveReminders() {
   });
 }
 
+// Snoozing and dismissing change the reminders through the reminders-changed
+// event, which the backend sends as the change is made. Their answers, the
+// reminders then active, aren't put in the cache: they come back only after
+// the server has been told, by when a newer event (a reminder that came due
+// meanwhile) may have replaced that list.
+
 export function useSnoozeReminder() {
   const backend = useBackend();
-  const client = useQueryClient();
   return useMutation({
     mutationFn: ({ key, snooze }: { key: string; snooze: SnoozeFor }) =>
       backend.snoozeReminder(key, snooze),
-    onSuccess: (active: ActiveReminder[]) => client.setQueryData(qk.reminders(), active),
   });
 }
 
@@ -154,12 +158,11 @@ export function useDismissReminders() {
   return useMutation({
     mutationFn: (keys: string[]) => backend.dismissReminders(keys),
     onMutate: (keys: string[]) => {
-      // Gone at once; the backend's answer replaces this.
+      // Gone at once; the reminders-changed event replaces this.
       client.setQueryData<ActiveReminder[]>(qk.reminders(), (old) =>
         old?.filter((r) => !keys.includes(r.key)),
       );
     },
-    onSuccess: (active: ActiveReminder[]) => client.setQueryData(qk.reminders(), active),
     onError: () => void client.invalidateQueries({ queryKey: qk.reminders() }),
   });
 }

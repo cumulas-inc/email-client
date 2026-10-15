@@ -88,6 +88,13 @@ describe("reminder times", () => {
     );
     const task = reminder({ kind: "task", startsAt: null, endsAt: null, fireAt: at(14, 10, 12) });
     expect(reminderDetail(task, NOW)).toBe("Task · reminder at 10:12 AM");
+    // A task's reminder stays until dismissed: from another day, it says which.
+    expect(reminderDetail({ ...task, fireAt: at(13, 23) }, NOW)).toBe(
+      "Task · reminder Tue, Oct 13 at 11:00 PM",
+    );
+    expect(reminderDetail({ ...task, fireAt: at(12, 23), snoozedUntil: at(14, 10, 39) }, NOW)).toBe(
+      "Task · reminder Mon, Oct 12 at 11:00 PM",
+    );
   });
 });
 

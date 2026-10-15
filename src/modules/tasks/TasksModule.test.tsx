@@ -706,6 +706,51 @@ describe("Task reminders", () => {
     expect(within(pane).getAllByText("None")).toHaveLength(2);
   });
 
+  it("saves a reminder only once it's ahead, keeping the date or time on the way", async () => {
+    const user = userEvent.setup();
+    const { backend } = renderTasks();
+    const update = vi.spyOn(backend, "updateTask");
+    const list = await screen.findByRole("listbox", { name: "Tasks" });
+    await user.click(within(list).getByRole("option", { name: /^Read load test report/ }));
+    const date = within(details()).getByLabelText("Reminder date");
+    const time = within(details()).getByLabelText("Reminder time");
+
+    // Today, at 10 AM: today's 9 AM has passed, so nothing is saved yet...
+    act(() => date.focus());
+    fireEvent.change(date, { target: { value: "2026-10-14" } });
+    // ...but the date stays for the time.
+    await user.tab();
+    expect(time).toHaveFocus();
+    expect(date).toHaveValue("2026-10-14");
+    fireEvent.change(time, { target: { value: "16:30" } });
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(expect.any(String), {
+        reminderAt: new Date(2026, 9, 14, 16, 30).toISOString(),
+      }),
+    );
+    expect(update).toHaveBeenCalledTimes(1);
+
+    // To 9:30 AM tomorrow, the time first: 9:30 today has passed too.
+    fireEvent.change(time, { target: { value: "09:30" } });
+    await user.tab({ shift: true });
+    expect(date).toHaveFocus();
+    expect(time).toHaveValue("09:30");
+    fireEvent.change(date, { target: { value: "2026-10-15" } });
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(expect.any(String), {
+        reminderAt: new Date(2026, 9, 15, 9, 30).toISOString(),
+      }),
+    );
+    expect(update).toHaveBeenCalledTimes(2);
+
+    // A reminder that has passed, left as it is, is dropped.
+    fireEvent.change(date, { target: { value: "2026-10-14" } });
+    act(() => date.blur());
+    expect(date).toHaveValue("2026-10-15");
+    expect(time).toHaveValue("09:30");
+    expect(update).toHaveBeenCalledTimes(2);
+  });
+
   it("starts a reminder with a date alone at 9 AM", async () => {
     const { backend } = renderTasks();
     const update = vi.spyOn(backend, "updateTask");

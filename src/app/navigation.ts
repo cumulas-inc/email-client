@@ -43,7 +43,7 @@ export async function followNavigation(
     app.setModule("tasks");
     const tasks = useTasksStore.getState();
     tasks.setView({ kind: "list", id: to.listId });
-    tasks.selectTask(to.taskId);
+    tasks.selectTask(to.taskId, { focus: true });
     return;
   }
   if (to.kind === "reminders") {

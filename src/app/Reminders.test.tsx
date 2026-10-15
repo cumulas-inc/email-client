@@ -4,14 +4,14 @@
 // (11:00, an hour before, online) are due.
 
 import { QueryClient } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MockBackend } from "../api/mock";
 import { useToasts } from "../components/toast";
 import { setLocaleForTesting } from "../lib/datetime";
-import { resetMailStore } from "../modules/mail/mailStore";
+import { resetMailStore, useMailStore } from "../modules/mail/mailStore";
 import { useTasksStore } from "../modules/tasks/store";
 import { App } from "./App";
 import { useReminderAnnouncer } from "./reminders";
@@ -179,22 +179,131 @@ describe("the Reminders panel", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "Reminders" })).toBeNull();
     expect(await bell()).toHaveFocus();
+
+    // Back on the bell, with the panel still open, too.
+    await user.keyboard("{Enter}");
+    expect(panel()).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(await bell()).toHaveFocus();
+    expect(panel()).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "Reminders" })).toBeNull();
+    expect(await bell()).toHaveFocus();
   });
 
-  it("opens an event in Calendar and a task in Tasks", async () => {
+  it("closes when the focus leaves the bell and the panel, not the window", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await user.click(await bell());
+    expect(panel()).toHaveFocus();
+    // Another window takes the focus, and gives it back here.
+    fireEvent.focusOut(panel(), { relatedTarget: null });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(panel()).toHaveFocus();
+
+    // Shift+Tab to the bell, and on off it, to nothing.
+    await user.tab({ shift: true });
+    expect(await bell()).toHaveFocus();
+    expect(panel()).toBeInTheDocument();
+    await user.tab({ shift: true });
+    expect(document.body).toHaveFocus();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Reminders" })).toBeNull());
+    expect(await bell()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("keeps the keys pressed in it from Mail and Calendar", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    renderApp(backend);
+    await user.click(
+      await screen.findByRole("option", { name: /Atlas launch checklist — final review today/ }),
+    );
+    const selected = useMailStore.getState().activeId;
+    expect(selected).toBeTruthy();
+    await waitFor(async () => expect((await backend.getMessage(selected!)).isRead).toBe(true));
+    const deleted = vi.spyOn(backend, "deleteMessages");
+    const moved = vi.spyOn(backend, "moveMessages");
+    const read = vi.spyOn(backend, "setRead");
+    await user.click(await bell());
+    expect(panel()).toHaveFocus();
+    // Delete (which dismisses notifications elsewhere), Q, U and J.
+    await user.keyboard("{Delete}qu");
+    within(row("Focus time")).getByRole("button", { name: "Dismiss Focus time" }).focus();
+    await user.keyboard("{Delete}j");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(deleted).not.toHaveBeenCalled();
+    expect(moved).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    expect(useMailStore.getState().activeId).toBe(selected);
+
+    await user.keyboard("{Escape}");
+    act(() => useAppStore.getState().setModule("calendar"));
+    const heading = await screen.findByRole("heading", { level: 1 });
+    expect(heading).toHaveTextContent("October 12 – 16, 2026");
+    await user.click(await bell());
+    expect(panel()).toHaveFocus();
+    await user.keyboard("{PageDown}{Alt>}{ArrowRight}{/Alt}");
+    expect(heading).toHaveTextContent("October 12 – 16, 2026");
+  });
+
+  it("opens an event in Calendar and a task in Tasks, with the keyboard there", async () => {
     const user = userEvent.setup();
     renderApp(new MockBackend({ overdueReminder: true }));
     await user.click(await bell());
     await user.click(within(panel()).getByRole("button", { name: "Security review" }));
     expect(screen.queryByRole("dialog", { name: "Reminders" })).toBeNull();
     expect(useAppStore.getState().module).toBe("calendar");
-    expect(await screen.findByRole("dialog", { name: "Security review" })).toBeInTheDocument();
+    const details = await screen.findByRole("dialog", { name: "Security review" });
+    expect(details).toHaveFocus();
+    // Closed, the details give the keyboard to the event.
+    await user.keyboard("{Escape}");
+    expect(details).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Security review,/ })).toHaveFocus();
 
     await user.click(await bell());
     await user.click(within(panel()).getByRole("button", { name: "Send Q3 metrics to Dana" }));
     await waitFor(() => expect(useAppStore.getState().module).toBe("tasks"));
     expect(useTasksStore.getState().selectedTaskId).toBeTruthy();
-    expect(await screen.findByRole("complementary", { name: "Task details" })).toBeInTheDocument();
+    const pane = await screen.findByRole("complementary", { name: "Task details" });
+    await waitFor(() =>
+      expect(within(pane).getByRole("textbox", { name: "Task title" })).toHaveFocus(),
+    );
+    expect(within(pane).getByRole("textbox", { name: "Task title" })).toHaveValue(
+      "Send Q3 metrics to Dana",
+    );
+  });
+
+  it("keeps a reminder that came due while a dismissal was on its way", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const [task] = await backend.listTasks(null, false);
+    const dismissReminders = backend.dismissReminders.bind(backend);
+    let answered: Promise<unknown> | null = null;
+    vi.spyOn(backend, "dismissReminders").mockImplementation((keys) => {
+      const answer = (async () => {
+        const active = await dismissReminders(keys);
+        // While the server is told, a task's reminder comes due.
+        await backend.updateTask(task!.id, {
+          reminderAt: new Date(NOW.getTime() - 60_000).toISOString(),
+        });
+        await new Promise((r) => setTimeout(r, 20));
+        return active;
+      })();
+      answered = answer;
+      return answer;
+    });
+    renderApp(backend);
+    await user.click(await bell());
+    await user.click(within(row("Focus time")).getByRole("button", { name: "Dismiss Focus time" }));
+    await waitFor(() => expect(answered).not.toBeNull());
+    await act(async () => {
+      await answered;
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    // The answer, from before it came due, doesn't take it away.
+    expect(within(panel()).getByRole("button", { name: task!.title })).toBeInTheDocument();
+    expect(within(panel()).queryByRole("button", { name: "Focus time" })).toBeNull();
+    expect(await bell()).toHaveAccessibleName("Reminders, 2 due");
   });
 
   it("announces reminders as they come due", async () => {

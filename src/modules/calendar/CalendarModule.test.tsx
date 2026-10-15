@@ -1,8 +1,9 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MockBackend } from "../../api/mock";
+import { useAppStore } from "../../app/store";
 import { useToasts } from "../../components/toast";
 import { Toaster } from "../../components/Toaster";
 import { renderWithBackend } from "../../test/render";
@@ -428,6 +429,103 @@ describe("CalendarModule", () => {
     }
   });
 
+  it("points a reminder's event behind +N at the +N, and gives it the keyboard back", async () => {
+    // A 700px grid: Security review (11 AM) waits behind "+1".
+    class FixedSizeObserver {
+      constructor(private callback: ResizeObserverCallback) {}
+      observe() {
+        const entry = { contentRect: { width: 700, height: 600 } } as ResizeObserverEntry;
+        this.callback([entry], this as unknown as ResizeObserver);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", FixedSizeObserver);
+    try {
+      const backend = new MockBackend();
+      const event = (
+        await backend.listEvents(
+          new Date(2026, 9, 14).toISOString(),
+          new Date(2026, 9, 15).toISOString(),
+        )
+      ).find((e) => e.subject === "Security review")!;
+      useAppStore
+        .getState()
+        .requestCalendarEvent({ eventId: event.id, start: event.start, isAllDay: false });
+      const { user } = await setup({ view: "week", backend });
+      expect(await screen.findByRole("dialog", { name: "Security review" })).toBeInTheDocument();
+      expect(queryEvent("Security review")).not.toBeInTheDocument();
+      await user.keyboard("{Escape}");
+      expect(
+        screen.getByRole("button", { name: "1 more event at 11:00 AM on Wednesday, October 14" }),
+      ).toHaveFocus();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does the same in Month view, behind a day's +N more", async () => {
+    // A 450px month: two lines of events a day.
+    class FixedSizeObserver {
+      constructor(private callback: ResizeObserverCallback) {}
+      observe() {
+        const entry = { contentRect: { width: 700, height: 450 } } as ResizeObserverEntry;
+        this.callback([entry], this as unknown as ResizeObserver);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", FixedSizeObserver);
+    try {
+      const backend = new MockBackend();
+      const today = await backend.listEvents(
+        new Date(2026, 9, 14).toISOString(),
+        new Date(2026, 9, 15).toISOString(),
+      );
+      // The day's last event, below its first two.
+      const event = today
+        .filter((e) => !e.isAllDay)
+        .sort((a, b) => Date.parse(b.start) - Date.parse(a.start))[0]!;
+      expect(today.length).toBeGreaterThan(2);
+      useAppStore
+        .getState()
+        .requestCalendarEvent({ eventId: event.id, start: event.start, isAllDay: false });
+      const { user } = await setup({ view: "month", backend });
+      expect(await screen.findByRole("dialog", { name: event.subject })).toHaveFocus();
+      const month = screen.getByRole("grid", { name: "October 2026" });
+      expect(
+        within(month).queryByRole("button", { name: new RegExp(`^${event.subject},`) }),
+      ).toBeNull();
+      await user.keyboard("{Escape}");
+      expect(
+        within(month).getByRole("button", { name: /^\d+ more events on Wednesday, October 14$/ }),
+      ).toHaveFocus();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("gives the keyboard to the calendar's title when the event isn't drawn", async () => {
+    const backend = new MockBackend();
+    const event = (
+      await backend.listEvents(
+        new Date(2026, 9, 14).toISOString(),
+        new Date(2026, 9, 15).toISOString(),
+      )
+    ).find((e) => e.subject === "Security review")!;
+    // Its calendar is hidden.
+    localStorage.setItem(HIDDEN_KEY, JSON.stringify([event.calendarId]));
+    useAppStore
+      .getState()
+      .requestCalendarEvent({ eventId: event.id, start: event.start, isAllDay: false });
+    const { user } = await setup({ backend });
+    const details = await screen.findByRole("dialog", { name: "Security review" });
+    expect(details).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(details).not.toBeInTheDocument();
+    expect(title()).toHaveFocus();
+  });
+
   it("collapses a crowded all-day lane until it is opened", async () => {
     const backend = new MockBackend();
     const calendar = (await backend.listCalendars()).find((c) => c.canEdit)!;
@@ -457,6 +555,37 @@ describe("CalendarModule", () => {
     expect(queryEvent("Board visit")).not.toBeInTheDocument();
   });
 
+  it("gives the keyboard back to the all-day +N a reminder's event is behind", async () => {
+    const backend = new MockBackend();
+    const calendar = (await backend.listCalendars()).find((c) => c.canEdit)!;
+    const created = [];
+    for (const subject of ["Offsite", "Hackathon", "Board visit", "Fire drill"]) {
+      created.push(
+        await backend.createEvent({
+          calendarId: calendar.id,
+          subject,
+          start: toAllDayIso(new Date(2026, 9, 14)),
+          end: toAllDayIso(new Date(2026, 9, 15)),
+          isAllDay: true,
+          attendees: [],
+          showAs: "free",
+          isOnlineMeeting: false,
+        }),
+      );
+    }
+    const event = created.find((e) => e.subject === "Board visit")!;
+    useAppStore
+      .getState()
+      .requestCalendarEvent({ eventId: event.id, start: event.start, isAllDay: true });
+    const { user } = await setup({ backend });
+    expect(await screen.findByRole("dialog", { name: "Board visit" })).toHaveFocus();
+    expect(queryEvent("Board visit")).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(
+      screen.getByRole("button", { name: "2 more all-day events on Wednesday, October 14" }),
+    ).toHaveFocus();
+  });
+
   it("lists what tomorrow holds in the sidebar", async () => {
     const { user } = await setup();
     const agenda = await screen.findByRole("region", { name: "Tomorrow · Thu, Oct 15" });
@@ -481,5 +610,51 @@ describe("CalendarModule", () => {
     await user.click(screen.getByRole("button", { name: "Go to next month" }));
     await user.click(screen.getByRole("button", { name: "Wednesday, November 18, 2026" }));
     expect(title()).toHaveTextContent("November 16 – 20, 2026");
+  });
+
+  it("scrolls the grid to an event a reminder opens, and keeps its details open", async () => {
+    const backend = new MockBackend();
+    const today = await backend.listEvents(
+      new Date(2026, 9, 14).toISOString(),
+      new Date(2026, 9, 15).toISOString(),
+    );
+    const event = today
+      .filter((e) => !e.isAllDay)
+      .sort((a, b) => Date.parse(b.start) - Date.parse(a.start))[0]!;
+    // The grid shows 300px from y=200; the event is drawn 900px down it,
+    // below what shows.
+    const box = (top: number, height: number) =>
+      ({ top, bottom: top + height, height, left: 0, right: 100, width: 100 }) as DOMRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      const grid = this.closest<HTMLElement>(".cal-tg__scroll");
+      if (this === grid) return box(200, 300);
+      if (grid && this.dataset.eventId === event.id) return box(200 + 900 - grid.scrollTop, 40);
+      return box(0, 0);
+    });
+    // Frames come when the test says.
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((frame) => frames.push(frame));
+    try {
+      useAppStore
+        .getState()
+        .requestCalendarEvent({ eventId: event.id, start: event.start, isAllDay: false });
+      await setup({ backend });
+      const details = await screen.findByRole("dialog", { name: event.subject });
+      const grid = document.querySelector<HTMLElement>(".cal-tg__scroll")!;
+      // In the middle of the grid's view.
+      expect(200 + 900 - grid.scrollTop).toBe(200 + (300 - 40) / 2);
+
+      // The grid's scroll to the event arrives before the next frame: the
+      // details stay. The user's scrolling after it closes them.
+      fireEvent.scroll(grid);
+      expect(details).toBeInTheDocument();
+      act(() => frames.splice(0).forEach((frame) => frame(0)));
+      fireEvent.scroll(grid);
+      await waitFor(() => expect(details).not.toBeInTheDocument());
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });

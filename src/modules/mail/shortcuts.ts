@@ -38,8 +38,8 @@ export function useMailShortcuts(actions: MailActions, readingPane: ReadingPane)
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.altKey) return;
       const target = e.target instanceof Element ? e.target : null;
-      // Dialogs and menus handle their own keys.
-      if (target?.closest("dialog, [role=menu]")) return;
+      // Dialogs (the Reminders panel too) and menus handle their own keys.
+      if (target?.closest("dialog, [role=dialog], [role=menu]")) return;
       const editing = isEditable(target);
       const inComposer = !!target?.closest(".mail-compose");
       const ctrl = e.ctrlKey || e.metaKey;

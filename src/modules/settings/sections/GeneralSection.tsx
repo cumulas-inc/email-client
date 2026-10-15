@@ -191,9 +191,9 @@ function NotificationsGroup({
       </div>
       {paused && (
         <SettingRow
-          label="Notifications are paused"
+          label="New message notifications are paused"
           labelFor={false}
-          description={`Until ${untilLabel(paused)}.`}
+          description={`Until ${untilLabel(paused)}. Reminders still show.`}
         >
           {() => (
             <button
@@ -343,7 +343,7 @@ function BackgroundGroup({
           label="Show a tray icon"
           description={
             background.trayAvailable
-              ? "Shows how much mail is unread, with a menu to check mail, pause notifications or quit."
+              ? "Shows how much mail is unread, with a menu to check mail, pause mail notifications or quit."
               : "Your desktop doesn't show tray icons. On GNOME, the AppIndicator extension adds them."
           }
           checked={settings.showTrayIcon && background.trayAvailable}

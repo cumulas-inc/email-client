@@ -56,6 +56,20 @@ export function useDebounced<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
+/** Where an event is drawn inside `container`, if it is: itself, or the "+N" it's behind. */
+export function drawnEvent(
+  container: HTMLElement | null,
+  eventId: string,
+): HTMLElement | undefined {
+  const drawn = Array.from(
+    container?.querySelectorAll<HTMLElement>("[data-event-id], [data-event-ids]") ?? [],
+  );
+  return (
+    drawn.find((el) => el.dataset.eventId === eventId) ??
+    drawn.find((el) => el.dataset.eventIds?.split(" ").includes(eventId))
+  );
+}
+
 /** True when keyboard focus is in a text field (so letter shortcuts must not fire). */
 export function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;

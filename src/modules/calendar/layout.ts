@@ -457,16 +457,13 @@ export function cellLanes<T>(
   return out;
 }
 
-/** Items in a column that do not fit in its visible lanes. */
-export function hiddenCount<T>(
+/** Items in a column that do not fit in its visible lanes: what its "+N more" stands for. */
+export function hiddenItems<T>(
   table: (PlacedSpan<T> | null)[][],
   col: number,
   visible: number,
-): number {
-  const lanes = table[col] ?? [];
-  let n = 0;
-  for (let lane = visible; lane < lanes.length; lane++) if (lanes[lane]) n += 1;
-  return n;
+): T[] {
+  return (table[col] ?? []).slice(visible).flatMap((placed) => (placed ? [placed.item] : []));
 }
 
 /** Bars (all-day and multi-day events) and single-day items for one row of days. */

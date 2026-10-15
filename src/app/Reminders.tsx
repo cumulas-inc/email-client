@@ -72,8 +72,35 @@ export function RemindersButton() {
     if (focusBell) bellRef.current?.focus();
   };
 
+  // Escape closes the panel from the bell too, where Shift+Tab leaves it open.
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key === "Escape" && open && !e.defaultPrevented) {
+      e.preventDefault();
+      close(true);
+    }
+  };
+
+  // Leaving the bell and the panel closes it; going between them doesn't.
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const settling = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(settling.current), []);
+  const onBlur = (e: FocusEvent<HTMLElement>) => {
+    if (!open) return;
+    const next = e.relatedTarget as Node | null;
+    if (next) {
+      if (!e.currentTarget.contains(next)) close(false);
+      return;
+    }
+    // Focus went nowhere (Shift+Tab off the bell), or the window lost it,
+    // which keeps it here for when it's back: so once it has settled.
+    window.clearTimeout(settling.current);
+    settling.current = window.setTimeout(() => {
+      if (!wrapperRef.current?.contains(document.activeElement)) close(false);
+    });
+  };
+
   return (
-    <div className="reminders">
+    <div ref={wrapperRef} className="reminders" onKeyDown={onKeyDown} onBlur={onBlur}>
       <button
         ref={bellRef}
         type="button"
@@ -139,21 +166,6 @@ function RemindersPanel({
     return () => document.removeEventListener("mousedown", onPointer);
   }, [bellRef, onClose]);
 
-  const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
-    if (e.key === "Escape" && !e.defaultPrevented) {
-      e.preventDefault();
-      onClose(true);
-    }
-  };
-
-  // Tabbing out of the panel closes it.
-  const onBlur = (e: FocusEvent<HTMLElement>) => {
-    const next = e.relatedTarget as Node | null;
-    if (next && !panelRef.current?.contains(next) && !bellRef.current?.contains(next)) {
-      onClose(false);
-    }
-  };
-
   /** A row went: the panel keeps the focus, so the keyboard isn't lost. */
   const keepFocus = () => panelRef.current?.focus();
 
@@ -173,8 +185,6 @@ function RemindersPanel({
       role="dialog"
       aria-labelledby={titleId}
       tabIndex={-1}
-      onKeyDown={onKeyDown}
-      onBlur={onBlur}
     >
       <header className="reminders-panel__head">
         <h2 id={titleId} className="reminders-panel__title">
@@ -267,7 +277,8 @@ function ReminderRow({
       useAppStore.getState().setModule("tasks");
       const tasks = useTasksStore.getState();
       tasks.setView({ kind: "smart", id: "all" });
-      tasks.selectTask(reminder.itemId);
+      // The panel had the keyboard: the task's details take it.
+      tasks.selectTask(reminder.itemId, { focus: true });
     }
   };
 

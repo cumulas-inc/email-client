@@ -84,9 +84,11 @@ export function TasksModule() {
     view: storedView,
     selectedTaskId,
     showCompleted,
+    focusDetails,
     setView,
     selectTask,
     setShowCompleted,
+    detailsFocused,
   } = useTasksStore();
   const search = useAppStore((s) => (s.module === "tasks" ? s.search.trim() : ""));
   const now = new Date();
@@ -283,6 +285,15 @@ export function TasksModule() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [canAdd]);
+
+  // A task opened from elsewhere (a reminder) takes the keyboard to its
+  // details once they show, as Enter in the list does.
+  const detailsShown = selectedTask !== null;
+  useEffect(() => {
+    if (!focusDetails || !detailsShown) return;
+    titleRef.current?.focus();
+    detailsFocused();
+  }, [focusDetails, detailsShown, detailsFocused]);
 
   // --- render ------------------------------------------------------------------------
 

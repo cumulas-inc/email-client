@@ -17,7 +17,7 @@ import { CalendarList } from "./CalendarList";
 import { defaultNewEventTimes, eventRange, timesFromRange } from "./dates";
 import { EventDetails } from "./EventDetails";
 import { type EditorRequest, EventEditor } from "./EventEditor";
-import { isTypingTarget, useNow } from "./hooks";
+import { drawnEvent, isTypingTarget, useNow } from "./hooks";
 import { type CalendarView, VIEWS, rangeTitle, shiftAnchor, viewRange, weekLabel } from "./layout";
 import { MiniMonth } from "./MiniMonth";
 import { defaultCalendar } from "./model";
@@ -160,9 +160,15 @@ export function CalendarModule() {
 
   const closeDetails = useCallback(
     (restoreFocus: boolean) => {
-      const element = selection?.anchor;
+      // Opened from a reminder, the details have no anchor: the event as drawn,
+      // or the calendar's title when it isn't (its calendar is hidden).
+      const element = selection?.anchor?.isConnected
+        ? selection.anchor
+        : selection &&
+          (drawnEvent(mainRef.current, selection.event.id) ??
+            mainRef.current?.querySelector<HTMLElement>(".cal-toolbar__title"));
       setSelection(null);
-      if (restoreFocus && element?.isConnected) element.focus();
+      if (restoreFocus) element?.focus();
     },
     [selection],
   );
@@ -178,6 +184,10 @@ export function CalendarModule() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || document.querySelector("dialog[open]")) return;
+      // Dialogs (the details, the Reminders panel) and menus handle their own keys.
+      if (e.target instanceof Element && e.target.closest("dialog, [role=dialog], [role=menu]")) {
+        return;
+      }
       if (e.ctrlKey && e.altKey && !e.metaKey && !e.shiftKey) {
         const digit = /^(?:Digit|Numpad)([1-4])$/.exec(e.code)?.[1] ?? e.key;
         const next = VIEWS[Number(digit) - 1];
@@ -215,11 +225,17 @@ export function CalendarModule() {
 
   const eventsSettled = eventsQuery.isSuccess && !eventsQuery.isPlaceholderData;
   if (pendingEventId && eventsSettled) {
-    setPendingEventId(null);
     const event = allEvents.find((e) => e.id === pendingEventId);
-    // The details find the event on the day drawn (see EventDetails).
-    if (event) setSelection({ event, anchor: null });
-    else setMissingEvents((n) => n + 1);
+    if (event) {
+      setPendingEventId(null);
+      // The details find the event on the day drawn (see EventDetails).
+      setSelection({ event, anchor: null });
+    } else if (!eventsQuery.isFetching) {
+      // Not in events that may be out of date (cached, and refetching since
+      // the event came): only once they're fresh is it really gone.
+      setPendingEventId(null);
+      setMissingEvents((n) => n + 1);
+    }
   }
 
   const selectedEvent = selection

@@ -82,10 +82,17 @@ export function reminderTime(
   return { text: `${durationText(-ms)} overdue`, tone: "overdue" };
 }
 
-/** The rest of the line: "10:30 AM – 12:00 PM · Room 3.01", or a task's "Reminder at 10:12 AM". */
+/**
+ * The rest of the line: "10:30 AM – 12:00 PM · Room 3.01", or a task's
+ * "Task · reminder at 10:12 AM" ("… reminder Tue, Oct 13 at 11:00 PM" from
+ * another day: a task's stays until it's dismissed).
+ */
 export function reminderDetail(reminder: ActiveReminder, now: Date): string {
-  if (reminder.kind === "task")
-    return `Task · reminder at ${formatTime(new Date(reminder.fireAt))}`;
+  if (reminder.kind === "task") {
+    const at = new Date(reminder.fireAt);
+    const day = differenceInCalendarDays(at, now) === 0 ? "" : `${formatDate(at, "weekdayShort")} `;
+    return `Task · reminder ${day}at ${formatTime(at)}`;
+  }
   const parts: string[] = [];
   if (reminder.startsAt && reminder.endsAt && !isAllDay(reminder)) {
     const start = new Date(reminder.startsAt);

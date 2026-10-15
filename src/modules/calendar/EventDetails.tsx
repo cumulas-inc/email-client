@@ -46,6 +46,7 @@ import { toast } from "../../components/toast";
 import { displayName, formatCount } from "../../lib/format";
 import { tintStyle } from "./colors";
 import { eventRange } from "./dates";
+import { drawnEvent } from "./hooks";
 import {
   RESPONSE_LABELS,
   SHOW_AS_LABELS,
@@ -122,6 +123,16 @@ function placementArea(boundary: HTMLElement | null): Area {
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), Math.max(min, max));
+
+/** Scrolls the time grid to show `element` (in the middle, if it fits) when it's out of view. */
+function reveal(element: HTMLElement) {
+  const scroller = element.closest<HTMLElement>(".cal-tg__scroll");
+  if (!scroller) return;
+  const s = scroller.getBoundingClientRect();
+  const r = element.getBoundingClientRect();
+  if (r.top >= s.top && r.bottom <= s.bottom) return;
+  scroller.scrollTop += r.top - s.top - Math.max(0, (s.height - r.height) / 2);
+}
 
 function reminderText(minutes: number | null): string {
   if (minutes === null) return "No reminder";
@@ -242,17 +253,21 @@ export function EventDetails({
     [event.bodyHtml],
   );
 
+  // Opened from a reminder (no anchor), the event may be out of the grid's
+  // view: it's shown first, for the card to be placed beside it.
+  useLayoutEffect(() => {
+    if (anchor) return;
+    const shown = drawnEvent(boundary?.current ?? null, event.id);
+    if (shown) reveal(shown);
+  }, [anchor, boundary, event.id]);
+
   // Position next to the anchor, inside the calendar's card: right of the
   // event if there is room, else left, else on the side with more room.
   useLayoutEffect(() => {
     const card = ref.current;
     if (!card) return;
     // Without an anchor (opened from a reminder), the event where it's drawn.
-    const shown = anchor?.isConnected
-      ? anchor
-      : Array.from(boundary?.current?.querySelectorAll<HTMLElement>("[data-event-id]") ?? []).find(
-          (el) => el.dataset.eventId === event.id,
-        );
+    const shown = anchor?.isConnected ? anchor : drawnEvent(boundary?.current ?? null, event.id);
     const rect = shown ? shown.getBoundingClientRect() : null;
     const area = placementArea(boundary?.current ?? null);
     // Taller details scroll inside the card.
@@ -329,7 +344,9 @@ export function EventDetails({
       if (target instanceof Element && target.closest("dialog")) return;
       onClose(false);
     };
-    // The card belongs to a spot in the grid, so it closes when that moves.
+    // The card belongs to a spot in the grid, so it closes when that moves;
+    // from the next frame, as the grid's own scrolling while the card opens
+    // (to show the event, or as the grid mounts) arrives before it.
     const onScroll = (e: Event) => {
       if (e.target instanceof Node && ref.current?.contains(e.target)) return;
       if (e.target instanceof Element && e.target.closest("dialog")) return;
@@ -337,10 +354,11 @@ export function EventDetails({
     };
     const onResize = () => onClose(false);
     document.addEventListener("pointerdown", onPointer);
-    document.addEventListener("scroll", onScroll, true);
+    const frame = requestAnimationFrame(() => document.addEventListener("scroll", onScroll, true));
     window.addEventListener("resize", onResize);
     return () => {
       document.removeEventListener("pointerdown", onPointer);
+      cancelAnimationFrame(frame);
       document.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onResize);
     };

@@ -207,10 +207,14 @@ describe("Notifications", () => {
     await backend.updateSettings({ ...settings, notificationsPausedUntil: inAnHour });
     const { lastSaved } = openAt("general", backend);
 
-    expect(await screen.findByText("Notifications are paused")).toBeInTheDocument();
+    // Mail only: reminders still show.
+    expect(await screen.findByText("New message notifications are paused")).toBeInTheDocument();
+    expect(
+      screen.getByText(/^Until (tomorrow at )?\d{1,2}:\d{2} [AP]M\. Reminders still show\.$/),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Resume" }));
     await waitFor(() => expect(lastSaved()).toMatchObject({ notificationsPausedUntil: null }));
-    expect(screen.queryByText("Notifications are paused")).not.toBeInTheDocument();
+    expect(screen.queryByText("New message notifications are paused")).not.toBeInTheDocument();
   });
 });
 

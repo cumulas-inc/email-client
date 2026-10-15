@@ -84,6 +84,48 @@ describe("following the desktop", () => {
     ).toBeInTheDocument();
   });
 
+  it("opens an event that came after Calendar was last shown", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 9, 14, 10, 24));
+    try {
+      const backend = new MockBackend();
+      // As the app caches: the week's events stay, out of date, once Calendar closes.
+      const client = new QueryClient({
+        defaultOptions: {
+          queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: false },
+        },
+      });
+      render(<App backend={backend} queryClient={client} />);
+      await screen.findByRole("navigation", { name: "Apps" });
+      act(() => useAppStore.getState().setModule("calendar"));
+      await screen.findByRole("button", { name: /^Focus time,/ });
+      act(() => useAppStore.getState().setModule("mail"));
+
+      // A meeting arrives in that week, and its reminder is clicked.
+      const calendar = (await backend.listCalendars()).find((c) => c.canEdit)!;
+      const start = new Date(2026, 9, 14, 10, 35);
+      const event = await backend.createEvent({
+        calendarId: calendar.id,
+        subject: "Quick sync",
+        start: start.toISOString(),
+        end: new Date(start.getTime() + 30 * 60_000).toISOString(),
+        isAllDay: false,
+        attendees: [],
+        reminderMinutes: 15,
+        showAs: "busy",
+        isOnlineMeeting: false,
+      });
+      await act(() => new Promise((r) => setTimeout(r, 10)));
+      act(() =>
+        backend.navigate({ kind: "event", eventId: event.id, start: event.start, isAllDay: false }),
+      );
+      expect(await screen.findByRole("dialog", { name: "Quick sync" })).toBeInTheDocument();
+      expect(screen.queryByText("That event isn't in the calendar anymore.")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("opens the task a reminder was clicked for, in its list", async () => {
     const backend = new MockBackend();
     renderApp(backend);
@@ -95,6 +137,9 @@ describe("following the desktop", () => {
     const pane = await screen.findByRole("complementary", { name: "Task details" });
     expect(within(pane).getByRole("textbox", { name: "Task title" })).toHaveValue(
       "Book car service",
+    );
+    await waitFor(() =>
+      expect(within(pane).getByRole("textbox", { name: "Task title" })).toHaveFocus(),
     );
     expect(useTasksStore.getState()).toMatchObject({
       view: { kind: "list", id: task.listId },

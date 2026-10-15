@@ -9,7 +9,7 @@ import {
   type TimedSegment,
   cellLanes,
   fitColumns,
-  hiddenCount,
+  hiddenItems,
   laneTable,
   layoutDay,
   layoutLanes,
@@ -394,8 +394,8 @@ describe("lanes for multi-day bars", () => {
     // Wednesday has 4 items; with 3 lines, 3 show and "+1 more" counts the last.
     const visible = () => 3;
     expect(cellLanes(table, 2, visible)).toHaveLength(3);
-    expect(hiddenCount(table, 2, 3)).toBe(1);
-    expect(hiddenCount(table, 1, 3)).toBe(0);
+    expect(hiddenItems(table, 2, 3).map((e) => e.id)).toEqual(["t3"]);
+    expect(hiddenItems(table, 1, 3)).toEqual([]);
 
     // The bar is drawn once, from Tuesday, over three columns.
     const tuesday = cellLanes(table, 1, visible);
@@ -417,10 +417,10 @@ describe("lanes for multi-day bars", () => {
     expect(placed.summit).toMatchObject({ lane: 1, startCol: 4, endCol: 6 });
     const table = laneTable(Object.values(placed), 7);
     expect(cellLanes(table, 4, () => 2)[1]!.piece).toMatchObject({ span: 3 });
-    expect(hiddenCount(table, 4, 2)).toBe(3);
-    expect(hiddenCount(table, 5, 2)).toBe(0);
+    expect(hiddenItems(table, 4, 2).map((e) => e.id)).toEqual(["fri", "t1", "t2"]);
+    expect(hiddenItems(table, 5, 2)).toEqual([]);
     // With one line, the summit is counted on all three days instead.
     expect(cellLanes(table, 4, () => 1)).toHaveLength(1);
-    expect([4, 5, 6].map((col) => hiddenCount(table, col, 1))).toEqual([4, 1, 1]);
+    expect([4, 5, 6].map((col) => hiddenItems(table, col, 1).length)).toEqual([4, 1, 1]);
   });
 });

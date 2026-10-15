@@ -62,6 +62,9 @@ export function Toolbar({
       </div>
       <h1
         className="cal-toolbar__title"
+        // Where the keyboard goes back to when nothing nearer can take it (see
+        // CalendarModule's closeDetails).
+        tabIndex={-1}
         aria-live="polite"
         data-shorten={shortenEarly ? "early" : undefined}
       >
