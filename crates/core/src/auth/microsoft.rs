@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -158,11 +158,19 @@ pub struct SignInResult {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: Duration,
+    /// Set when consent to the config's `consent_scopes` (the push
+    /// service's) was refused, and the sign-in went ahead with Graph's
+    /// scopes alone: `AdminConsentRequired`, whose approval link covers
+    /// them, or `ConsentDeclined`.
+    pub consent_refused: Option<Error>,
 }
 
 /// Runs the interactive sign-in: starts a loopback listener on 127.0.0.1
 /// (and ::1 when available), calls `open_browser` with the authorization
 /// URL, waits for the redirect (up to `timeout`) and redeems the code.
+///
+/// Consent to `config.consent_scopes` never costs the sign-in: when it is
+/// refused, the browser is opened again for Graph's scopes alone.
 ///
 /// Errors: `AdminConsentRequired` (with `details.adminConsentUrl`) when the
 /// tenant blocks user consent, `ConsentDeclined`, `SignInCancelled`.
@@ -172,51 +180,55 @@ pub async fn sign_in(
     login_hint: Option<&str>,
     timeout: Duration,
 ) -> Result<SignInResult> {
+    let (scope, graph) = (authorize_scope(config), SCOPES.join(" "));
+    let continues_if_refused = !config.consent_scopes.is_empty();
     let listener = LoopbackListener::bind().await?;
-    let redirect_uri = format!("http://localhost:{}", listener.port);
-    let pkce = Pkce::generate();
-    let state = random_token(16);
-    let url = authorize_url(config, &redirect_uri, &state, &pkce.challenge, login_hint)?;
-    open_browser(&url)?;
-
-    let response = tokio::time::timeout(timeout, listener.wait_for_response(&state))
-        .await
-        .map_err(|_| {
-            Error::new(
-                ErrorCode::SignInCancelled,
-                "Sign-in was not completed in time. Try again.",
-            )
-        })?;
-    let code = match response.code {
-        Some(code) if response.error.is_none() => code,
-        _ => {
-            let error = response.error.unwrap_or_else(|| "invalid_request".into());
-            let description = response.error_description.unwrap_or_default();
-            return Err(sign_in_error(
+    let first = authorize(
+        config,
+        &scope,
+        &listener,
+        continues_if_refused,
+        open_browser,
+        login_hint,
+        timeout,
+    )
+    .await;
+    let (authorization, consent_refused) = match first {
+        Err(e) if continues_if_refused && is_consent_refusal(e.code) => {
+            // Asked again on a listener of its own, on another port. The
+            // browser may keep connections it opened to the first one, and
+            // whatever arrives over them is checked against the first
+            // authorization's state; on the same port it could send this
+            // one's redirect over them. Binding the new listener while the
+            // first is still bound guarantees the ports differ.
+            let fresh = LoopbackListener::bind().await?;
+            drop(listener);
+            let authorization = authorize(
                 config,
+                &graph,
+                &fresh,
+                false,
+                open_browser,
                 login_hint,
-                &OAuthError {
-                    error,
-                    error_description: description,
-                    error_codes: Vec::new(),
-                    error_subcode: response.error_subcode,
-                },
-            ));
+                timeout,
+            )
+            .await?;
+            (authorization, Some(push_consent_refused(e)))
         }
+        first => (first?, None),
     };
 
     let http = http_client();
-    let scope = SCOPES.join(" ");
     let tokens = request_token(
         &http,
         config,
         &[
             ("client_id", config.client_id.as_str()),
             ("grant_type", "authorization_code"),
-            ("code", code.as_str()),
-            ("redirect_uri", redirect_uri.as_str()),
-            ("code_verifier", pkce.verifier.as_str()),
-            ("scope", scope.as_str()),
+            ("code", authorization.code.as_str()),
+            ("redirect_uri", authorization.redirect_uri.as_str()),
+            ("code_verifier", authorization.code_verifier.as_str()),
+            ("scope", graph.as_str()),
         ],
     )
     .await
@@ -256,10 +268,63 @@ pub async fn sign_in(
         access_token: tokens.access_token,
         refresh_token,
         expires_in: Duration::from_secs(tokens.expires_in),
+        consent_refused,
     })
 }
 
-/// URL an administrator can open to grant tenant-wide consent.
+/// An authorization code and what redeeming it takes.
+struct Authorization {
+    code: String,
+    /// The PKCE verifier of the request the code was issued for.
+    code_verifier: String,
+    /// The redirect URI of that request, which the redemption repeats.
+    redirect_uri: String,
+}
+
+/// Opens the authorization request for `scope` in the browser and waits for
+/// its code on `listener`. `continues_if_refused` tells the browser page
+/// that the sign-in goes on if consent is refused.
+async fn authorize(
+    config: &MicrosoftAuthConfig,
+    scope: &str,
+    listener: &LoopbackListener,
+    continues_if_refused: bool,
+    open_browser: &(dyn Fn(&str) -> Result<()> + Send + Sync),
+    login_hint: Option<&str>,
+    timeout: Duration,
+) -> Result<Authorization> {
+    let redirect_uri = listener.redirect_uri();
+    let pkce = Pkce::generate();
+    let state = random_token(16);
+    let url = authorize_url(
+        config,
+        scope,
+        &redirect_uri,
+        &state,
+        &pkce.challenge,
+        login_hint,
+    )?;
+    open_browser(&url)?;
+
+    let response = listener.wait_for_response(&state, continues_if_refused);
+    let response = tokio::time::timeout(timeout, response).await.map_err(|_| {
+        Error::new(
+            ErrorCode::SignInCancelled,
+            "Sign-in was not completed in time. Try again.",
+        )
+    })?;
+    match response.outcome() {
+        Ok(code) => Ok(Authorization {
+            code: code.to_owned(),
+            code_verifier: pkce.verifier,
+            redirect_uri,
+        }),
+        Err(error) => Err(sign_in_error(config, login_hint, &error)),
+    }
+}
+
+/// URL an administrator can open to grant tenant-wide consent: to the Graph
+/// scopes, and to the other resources' the sign-in asks consent for.
 ///
 /// `tenant_hint` is a tenant id or domain (e.g. the domain of the user's email
 /// address); without one the configured tenant is used when it is specific,
@@ -270,6 +335,7 @@ pub fn admin_consent_url(config: &MicrosoftAuthConfig, tenant_hint: Option<&str>
     // grant also covers the ID and refresh tokens the app always asks for
     // (learn.microsoft.com/entra/identity-platform/v2-admin-consent and
     // learn.microsoft.com/office/dev/add-ins/publish/publish-nested-app-auth-add-in).
+    // The other resources' scopes are fully qualified already.
     let scope = SCOPES
         .iter()
         .map(|s| {
@@ -279,6 +345,7 @@ pub fn admin_consent_url(config: &MicrosoftAuthConfig, tenant_hint: Option<&str>
                 format!("{GRAPH_RESOURCE}/{s}")
             }
         })
+        .chain(config.consent_scopes.iter().cloned())
         .collect::<Vec<_>>()
         .join(" ");
     let query = url::form_urlencoded::Serializer::new(String::new())
@@ -320,27 +387,42 @@ pub struct MicrosoftTokenSource {
     /// Held across the refresh so concurrent callers wait for one refresh
     /// instead of each redeeming the refresh token.
     cache: Mutex<Option<CachedToken>>,
+    wall_clock: WallClock,
 }
 
+/// Reads the wall clock, which (unlike `Instant`) counts the time the
+/// computer spends suspended. Tests move it.
+type WallClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
+
+/// An access token and when it expires by each clock. `Instant` stops while
+/// the computer is suspended, so after a resume only the wall clock knows a
+/// token has expired; the wall clock can be set back, which `Instant`
+/// ignores. A token lasts only as long as both say.
 struct CachedToken {
     access_token: String,
     expires_at: Instant,
+    expires_wall: SystemTime,
 }
 
 impl CachedToken {
-    fn new(access_token: &str, expires_in: Duration) -> Self {
+    fn new(access_token: &str, expires_in: Duration, wall_now: SystemTime) -> Self {
         let now = Instant::now();
         Self {
             access_token: access_token.to_owned(),
             expires_at: now.checked_add(expires_in).unwrap_or(now),
+            expires_wall: wall_now.checked_add(expires_in).unwrap_or(wall_now),
         }
     }
 
-    /// Whether it has more than `margin` left.
-    fn lasts(&self, margin: Duration) -> bool {
+    /// Whether it has more than `margin` left by both clocks.
+    fn lasts(&self, margin: Duration, wall_now: SystemTime) -> bool {
         self.expires_at
             .checked_duration_since(Instant::now())
             .is_some_and(|left| left > margin)
+            && self
+                .expires_wall
+                .duration_since(wall_now)
+                .is_ok_and(|left| left > margin)
     }
 }
 
@@ -368,12 +450,14 @@ impl MicrosoftTokenSource {
             http: http_client(),
             scope,
             cache: Mutex::new(None),
+            wall_clock: Arc::new(SystemTime::now),
         }
     }
 
     /// Seeds the in-memory cache right after sign-in.
     pub async fn prime(&self, access_token: &str, expires_in: Duration) {
-        *self.cache.lock().await = Some(CachedToken::new(access_token, expires_in));
+        let token = CachedToken::new(access_token, expires_in, (self.wall_clock)());
+        *self.cache.lock().await = Some(token);
     }
 
     /// The cached token if it has more than `margin` left (and `fresh`
@@ -386,7 +470,7 @@ impl MicrosoftTokenSource {
         let mut cache = self.cache.lock().await;
         if !fresh
             && let Some(token) = cache.as_ref()
-            && token.lasts(margin)
+            && token.lasts(margin, (self.wall_clock)())
         {
             return Ok(token.access_token.clone());
         }
@@ -423,7 +507,11 @@ impl MicrosoftTokenSource {
         {
             tracing::warn!("could not store the rotated refresh token: {e}");
         }
-        let token = CachedToken::new(&tokens.access_token, Duration::from_secs(tokens.expires_in));
+        let token = CachedToken::new(
+            &tokens.access_token,
+            Duration::from_secs(tokens.expires_in),
+            (self.wall_clock)(),
+        );
         let access_token = token.access_token.clone();
         *cache = Some(token);
         Ok(access_token)
@@ -538,6 +626,7 @@ fn authorize_scope(config: &MicrosoftAuthConfig) -> String {
 
 fn authorize_url(
     config: &MicrosoftAuthConfig,
+    scope: &str,
     redirect_uri: &str,
     state: &str,
     code_challenge: &str,
@@ -556,7 +645,7 @@ fn authorize_url(
             .append_pair("response_type", "code")
             .append_pair("redirect_uri", redirect_uri)
             .append_pair("response_mode", "query")
-            .append_pair("scope", &authorize_scope(config))
+            .append_pair("scope", scope)
             .append_pair("state", state)
             .append_pair("code_challenge", code_challenge)
             .append_pair("code_challenge_method", "S256")
@@ -579,6 +668,21 @@ struct AuthorizationResponse {
     error: Option<String>,
     error_description: Option<String>,
     error_subcode: Option<String>,
+}
+
+impl AuthorizationResponse {
+    /// The code, or the error the redirect carried instead.
+    fn outcome(&self) -> std::result::Result<&str, OAuthError> {
+        match (&self.code, &self.error) {
+            (Some(code), None) => Ok(code),
+            (_, error) => Err(OAuthError {
+                error: error.clone().unwrap_or_else(|| "invalid_request".into()),
+                error_description: self.error_description.clone().unwrap_or_default(),
+                error_codes: Vec::new(),
+                error_subcode: self.error_subcode.clone(),
+            }),
+        }
+    }
 }
 
 /// What a request to the loopback listener turned out to be.
@@ -609,6 +713,10 @@ impl LoopbackListener {
         Ok(Self { v4, v6, port })
     }
 
+    fn redirect_uri(&self) -> String {
+        format!("http://localhost:{}", self.port)
+    }
+
     async fn accept(&self) -> std::io::Result<TcpStream> {
         let (stream, _) = match &self.v6 {
             Some(v6) => tokio::select! {
@@ -623,7 +731,13 @@ impl LoopbackListener {
     /// Serves browser connections until one carries the authorization
     /// response for `state`. Connections are handled concurrently because
     /// browsers open speculative connections that never send a request.
-    async fn wait_for_response(&self, state: &str) -> AuthorizationResponse {
+    /// Each is checked against `state` for as long as it stays open, so a
+    /// listener serves one authorization only.
+    async fn wait_for_response(
+        &self,
+        state: &str,
+        continues_if_refused: bool,
+    ) -> AuthorizationResponse {
         let (tx, mut rx) = mpsc::channel(1);
         loop {
             tokio::select! {
@@ -632,7 +746,9 @@ impl LoopbackListener {
                         let tx = tx.clone();
                         let state = state.to_owned();
                         tokio::spawn(async move {
-                            if let Some(response) = handle_connection(stream, &state).await {
+                            let response =
+                                handle_connection(stream, &state, continues_if_refused).await;
+                            if let Some(response) = response {
                                 let _ = tx.send(response).await;
                             }
                         });
@@ -649,7 +765,11 @@ impl LoopbackListener {
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, state: &str) -> Option<AuthorizationResponse> {
+async fn handle_connection(
+    mut stream: TcpStream,
+    state: &str,
+    continues_if_refused: bool,
+) -> Option<AuthorizationResponse> {
     let target = tokio::time::timeout(CONNECTION_READ_TIMEOUT, read_request_target(&mut stream))
         .await
         .ok()
@@ -673,28 +793,47 @@ async fn handle_connection(mut stream: TcpStream, state: &str) -> Option<Authori
             None
         }
         Incoming::Response(response) => {
-            let page = match &response.error {
-                None => result_page(
-                    "You're signed in",
-                    "You can close this tab and return to Cumulas Mail.",
-                ),
-                Some(error) => result_page(
-                    "Sign-in did not complete",
-                    &format!(
-                        "{} You can close this tab and return to Cumulas Mail.",
-                        response
-                            .error_description
-                            .as_deref()
-                            .map(first_line)
-                            .filter(|d| !d.is_empty())
-                            .unwrap_or(error)
-                    ),
-                ),
-            };
+            let page = response_page(&response, continues_if_refused);
             let _ = respond(&mut stream, "200 OK", &page).await;
             Some(response)
         }
     }
+}
+
+/// The page for an authorization response. When the sign-in goes on after
+/// a refused consent, it says so: the browser is about to open again.
+fn response_page(response: &AuthorizationResponse, continues_if_refused: bool) -> String {
+    let error = match response.outcome() {
+        Ok(_) => {
+            return result_page(
+                "You're signed in",
+                "You can close this tab and return to Cumulas Mail.",
+            );
+        }
+        Err(error) => error,
+    };
+    let code = sign_in_error_code(&error);
+    if continues_if_refused && is_consent_refusal(code) {
+        let why = if code == ErrorCode::AdminConsentRequired {
+            "Your organization requires an administrator to approve instant updates."
+        } else {
+            "Instant updates weren't allowed."
+        };
+        return result_page(
+            "Signing in without instant updates",
+            &format!(
+                "{why} Cumulas Mail is opening the sign-in again without them. Continue in \
+                 the new tab."
+            ),
+        );
+    }
+    result_page(
+        "Sign-in did not complete",
+        &format!(
+            "{} You can close this tab and return to Cumulas Mail.",
+            error.summary()
+        ),
+    )
 }
 
 /// Reads the request head and returns the target of a `GET` request.
@@ -894,55 +1033,81 @@ async fn request_token(
 // Errors
 // ---------------------------------------------------------------------------
 
+/// What an error from the authorization redirect or the code redemption
+/// means: `AdminConsentRequired`, `ConsentDeclined`, `SignInCancelled` or
+/// `Provider`.
+fn sign_in_error_code(error: &OAuthError) -> ErrorCode {
+    if ADMIN_CONSENT_CODES.iter().any(|c| error.has_code(*c))
+        || (error.error == "consent_required" && !error.has_code(USER_DECLINED_CODE))
+    {
+        return ErrorCode::AdminConsentRequired;
+    }
+    if error.has_code(USER_DECLINED_CODE) {
+        return ErrorCode::ConsentDeclined;
+    }
+    if error.error == "access_denied" {
+        // Microsoft's own example of a canceled sign-in carries no subcode
+        // but says so in the description.
+        let canceled = error
+            .error_subcode
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("cancel"))
+            || error
+                .error_description
+                .to_ascii_lowercase()
+                .contains("cancel");
+        return if canceled {
+            ErrorCode::SignInCancelled
+        } else {
+            ErrorCode::ConsentDeclined
+        };
+    }
+    ErrorCode::Provider
+}
+
+/// Whether consent was refused, rather than the sign-in canceled or failed.
+/// A sign-in that also asked consent for other resources' scopes goes on
+/// with Graph's alone then.
+fn is_consent_refusal(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::AdminConsentRequired | ErrorCode::ConsentDeclined
+    )
+}
+
 /// Maps an error from the authorization redirect or the code redemption.
 fn sign_in_error(
     config: &MicrosoftAuthConfig,
     login_hint: Option<&str>,
     error: &OAuthError,
 ) -> Error {
-    let canceled = error
-        .error_subcode
-        .as_deref()
-        .is_some_and(|s| s.eq_ignore_ascii_case("cancel"));
-    if ADMIN_CONSENT_CODES.iter().any(|c| error.has_code(*c))
-        || (error.error == "consent_required" && !error.has_code(USER_DECLINED_CODE))
-    {
-        let hint = login_hint.and_then(|h| h.rsplit_once('@')).map(|(_, d)| d);
-        let tenant = admin_consent_tenant(config, hint);
-        // With the admin consent workflow enabled, Microsoft's page lets the
-        // user send an approval request themselves.
-        let can_request_approval = error.has_code(ADMIN_CONSENT_WORKFLOW_CODE);
-        let message = if can_request_approval {
-            "Your organization requires an administrator to approve Cumulas Mail before \
-             you can sign in. You can request approval on Microsoft's sign-in page, or send \
-             the approval link to your IT department."
-        } else {
-            "Your organization requires an administrator to approve Cumulas Mail before \
-             you can sign in. Send the approval link to your IT department."
-        };
-        return Error::new(ErrorCode::AdminConsentRequired, message).with_details(json!({
-            "adminConsentUrl": admin_consent_url(config, Some(&tenant)),
-            "tenant": tenant,
-            "canRequestApproval": can_request_approval,
-        }));
-    }
-    if error.has_code(USER_DECLINED_CODE) {
-        return consent_declined();
-    }
-    if error.error == "access_denied" {
-        // Microsoft's own example of a canceled sign-in carries no subcode
-        // but says so in the description.
-        if canceled
-            || error
-                .error_description
-                .to_ascii_lowercase()
-                .contains("cancel")
-        {
-            return Error::new(ErrorCode::SignInCancelled, "Sign-in was canceled.");
+    match sign_in_error_code(error) {
+        ErrorCode::AdminConsentRequired => {
+            let hint = login_hint.and_then(|h| h.rsplit_once('@')).map(|(_, d)| d);
+            let tenant = admin_consent_tenant(config, hint);
+            // With the admin consent workflow enabled, Microsoft's page lets
+            // the user send an approval request themselves.
+            let can_request_approval = error.has_code(ADMIN_CONSENT_WORKFLOW_CODE);
+            let message = if can_request_approval {
+                "Your organization requires an administrator to approve Cumulas Mail before \
+                 you can sign in. You can request approval on Microsoft's sign-in page, or \
+                 send the approval link to your IT department."
+            } else {
+                "Your organization requires an administrator to approve Cumulas Mail before \
+                 you can sign in. Send the approval link to your IT department."
+            };
+            Error::new(ErrorCode::AdminConsentRequired, message).with_details(json!({
+                "adminConsentUrl": admin_consent_url(config, Some(&tenant)),
+                "tenant": tenant,
+                "canRequestApproval": can_request_approval,
+            }))
         }
-        return consent_declined();
+        ErrorCode::ConsentDeclined => consent_declined(),
+        ErrorCode::SignInCancelled => {
+            Error::new(ErrorCode::SignInCancelled, "Sign-in was canceled.")
+        }
+        _ => Error::provider(error.summary()).with_details(json!({ "error": error.error })),
     }
-    Error::provider(error.summary()).with_details(json!({ "error": error.error }))
 }
 
 fn consent_declined() -> Error {
@@ -952,6 +1117,22 @@ fn consent_declined() -> Error {
          and tasks. If you asked your administrator for approval, sign in again once it has \
          been granted.",
     )
+}
+
+/// Why the push service's scope wasn't granted, for its status: the account
+/// itself signed in.
+fn push_consent_refused(error: Error) -> Error {
+    let message = if error.code == ErrorCode::AdminConsentRequired {
+        "Your organization requires an administrator to approve instant updates. Send the \
+         approval link to your IT department; until then, the Inbox is checked every 30 seconds."
+    } else {
+        "Instant updates weren't allowed, so the Inbox is checked every 30 seconds. If you \
+         asked your administrator for approval, they turn on once it has been granted."
+    };
+    Error {
+        message: message.into(),
+        ..error
+    }
 }
 
 /// Maps a failed refresh. `invalid_grant` covers expired, revoked or
@@ -1187,6 +1368,7 @@ mod tests {
         let config = MicrosoftAuthConfig::new(CLIENT_ID, None);
         let url = authorize_url(
             &config,
+            &authorize_scope(&config),
             "http://localhost:4242",
             "st",
             "ch",
@@ -1208,7 +1390,8 @@ mod tests {
         assert_eq!(params["prompt"], "select_account");
         assert_eq!(params["login_hint"], "adele@contoso.com");
 
-        let without_hint = authorize_url(&config, "http://localhost:1", "s", "c", None).unwrap();
+        let without_hint =
+            authorize_url(&config, "openid", "http://localhost:1", "s", "c", None).unwrap();
         assert!(!without_hint.contains("login_hint"));
     }
 
@@ -1235,6 +1418,43 @@ mod tests {
         assert!(admin_consent_url(&config, Some("bad/tenant")).contains("/organizations/"));
         let specific = MicrosoftAuthConfig::new(CLIENT_ID, Some("fabrikam.onmicrosoft.com".into()));
         assert!(admin_consent_url(&specific, None).contains("/fabrikam.onmicrosoft.com/v2.0/"));
+
+        // A sign-in that asks consent for the push service too gets a link
+        // that covers it.
+        let push = MicrosoftAuthConfig {
+            consent_scopes: vec![sync_scope(CLIENT_ID)],
+            ..config
+        };
+        let url = Url::parse(&admin_consent_url(&push, Some("contoso.com"))).unwrap();
+        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        let scopes: Vec<&str> = params["scope"].split(' ').collect();
+        assert_eq!(scopes.len(), SCOPES.len() + 1);
+        assert_eq!(scopes.last(), Some(&"api://test-client-id/Sync.Receive"));
+    }
+
+    #[test]
+    fn refusal_pages_say_whether_the_sign_in_goes_on() {
+        let page = |query: &str, continues_if_refused: bool| {
+            let Incoming::Response(response) = classify_request(&format!("/?{query}&state=s"), "s")
+            else {
+                panic!("not a response: {query}");
+            };
+            let page = response_page(&response, continues_if_refused);
+            let title = page.split("<h1>").nth(1).unwrap().split("</h1>").next();
+            title.unwrap().to_owned()
+        };
+        let admin = "error=access_denied&error_description=AADSTS90094%3a+Admin+consent+required";
+        let declined = "error=access_denied&error_subcode=cancel&error_description=AADSTS65004";
+        let canceled = "error=access_denied&error_subcode=cancel&error_description=AADSTS50058";
+        let continues = "Signing in without instant updates";
+        let failed = "Sign-in did not complete";
+        assert_eq!(page(admin, true), continues);
+        assert_eq!(page(declined, true), continues);
+        assert_eq!(page(canceled, true), failed);
+        assert_eq!(page("error=server_error", true), failed);
+        assert_eq!(page(admin, false), failed);
+        assert_eq!(page(declined, false), failed);
+        assert_eq!(page("code=c", true), "You&#39;re signed in");
     }
 
     #[test]
@@ -1669,6 +1889,199 @@ mod tests {
         assert_eq!(form["scope"], SCOPES.join(" "));
     }
 
+    /// Plays a browser that answers each authorization request in turn with
+    /// the next of `answers`; returns the requests' scopes too.
+    fn answering_browser(answers: &[&'static str]) -> (Opener, Arc<StdMutex<Vec<String>>>) {
+        let scopes = Arc::new(StdMutex::new(Vec::new()));
+        let (answers, seen) = (answers.to_vec(), scopes.clone());
+        let open = Box::new(move |url: &str| -> Result<()> {
+            let url = Url::parse(url).expect("authorize URL parses");
+            let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+            let mut seen = seen.lock().unwrap();
+            let visit = format!(
+                "{}/?{}&state={}",
+                params["redirect_uri"],
+                answers[seen.len()],
+                params["state"]
+            );
+            seen.push(params["scope"].clone());
+            tokio::spawn(async move {
+                let client = reqwest::Client::builder().no_proxy().build().unwrap();
+                client.get(visit).send().await.unwrap();
+            });
+            Ok(())
+        });
+        (open, scopes)
+    }
+
+    /// The scopes of the admin consent link in `error`.
+    fn approval_scopes(error: &Error) -> Vec<String> {
+        let details = error.details.as_ref().expect("admin consent details");
+        let url = Url::parse(details["adminConsentUrl"].as_str().unwrap()).unwrap();
+        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        params["scope"].split(' ').map(str::to_owned).collect()
+    }
+
+    #[tokio::test]
+    async fn refused_push_consent_never_costs_the_sign_in() {
+        const ADMIN: &str =
+            "error=access_denied&error_description=AADSTS90094%3a+Admin+consent+required";
+        const DECLINED: &str = "error=access_denied&error_subcode=cancel&error_description=AADSTS65004%3a+User+declined+to+consent";
+        const CANCELED: &str =
+            "error=access_denied&error_subcode=cancel&error_description=AADSTS50058";
+        let sync_receive = sync_scope(CLIENT_ID);
+        let sign_in_with_push = async |server: &MockServer, answers: &[&'static str]| {
+            let config = MicrosoftAuthConfig {
+                consent_scopes: vec![sync_receive.clone()],
+                ..config(server)
+            };
+            let (open, scopes) = answering_browser(answers);
+            let result = sign_in(
+                &config,
+                &*open,
+                Some("adele@contoso.com"),
+                Duration::from_secs(10),
+            )
+            .await;
+            let scopes = scopes.lock().unwrap().clone();
+            (result, scopes)
+        };
+
+        // The push service's scope needs an administrator, or was declined:
+        // the user signs in with Graph's scopes alone.
+        for (refusal, code) in [
+            (ADMIN, ErrorCode::AdminConsentRequired),
+            (DECLINED, ErrorCode::ConsentDeclined),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(body_string_contains("grant_type=authorization_code"))
+                .respond_with(token_success())
+                .expect(1)
+                .mount(&server)
+                .await;
+            let (result, scopes) = sign_in_with_push(&server, &[refusal, "code=the-code"]).await;
+            let result = result.unwrap();
+            assert_eq!(result.access_token, "access-1");
+            assert_eq!(
+                scopes,
+                [
+                    format!("{} {sync_receive}", SCOPES.join(" ")),
+                    SCOPES.join(" ")
+                ]
+            );
+            let refused = result.consent_refused.expect("the refusal");
+            assert_eq!(refused.code, code);
+            assert!(refused.message.contains("Inbox is checked"), "{refused:?}");
+            if code == ErrorCode::AdminConsentRequired {
+                assert!(approval_scopes(&refused).contains(&sync_receive));
+            }
+        }
+
+        // Graph's scopes need an administrator too: that fails the sign-in,
+        // with a link that covers both.
+        let server = MockServer::start().await;
+        let (result, scopes) = sign_in_with_push(&server, &[ADMIN, ADMIN]).await;
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::AdminConsentRequired);
+        assert!(approval_scopes(&error).contains(&sync_receive));
+        assert_eq!(scopes.len(), 2);
+
+        // A sign-in the user canceled isn't started again.
+        let (result, scopes) = sign_in_with_push(&server, &[CANCELED]).await;
+        assert_eq!(result.unwrap_err().code, ErrorCode::SignInCancelled);
+        assert_eq!(scopes.len(), 1);
+    }
+
+    /// Sends `GET target` over `stream`; returns the response.
+    async fn http_get(stream: &mut TcpStream, target: &str) -> String {
+        let request = format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response).await;
+        response
+    }
+
+    #[tokio::test]
+    async fn connections_from_the_first_authorization_never_carry_the_second() {
+        const ADMIN: &str =
+            "error=access_denied&error_description=AADSTS90094%3a+Admin+consent+required";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("grant_type=authorization_code"))
+            .and(body_string_contains("code=the-code"))
+            .respond_with(token_success())
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Plays a browser that, like real ones, keeps idle connections for
+        // reuse by origin: during the first authorization it opens one to
+        // the redirect URI that it doesn't use (a speculative connection),
+        // and it sends a later request to that origin over it.
+        let idle: Arc<Mutex<HashMap<String, TcpStream>>> = Arc::default();
+        let redirects = Arc::new(StdMutex::new(Vec::new()));
+        let pages = Arc::new(StdMutex::new(Vec::new()));
+        let open = {
+            let (redirects, pages) = (redirects.clone(), pages.clone());
+            move |url: &str| -> Result<()> {
+                let url = Url::parse(url).expect("authorize URL parses");
+                let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+                let (redirect, state) = (params["redirect_uri"].clone(), params["state"].clone());
+                let first = {
+                    let mut redirects = redirects.lock().unwrap();
+                    redirects.push(redirect.clone());
+                    redirects.len() == 1
+                };
+                let (idle, pages) = (idle.clone(), pages.clone());
+                tokio::spawn(async move {
+                    let port = Url::parse(&redirect).unwrap().port().unwrap();
+                    let connect = async || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await;
+                    let (answer, stream) = if first {
+                        let spare = connect().await.unwrap();
+                        idle.lock().await.insert(redirect, spare);
+                        // The listener takes it in meanwhile.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        (ADMIN, connect().await.unwrap())
+                    } else {
+                        let pooled = idle.lock().await.remove(&redirect);
+                        let stream = match pooled {
+                            Some(stream) => stream,
+                            None => connect().await.unwrap(),
+                        };
+                        ("code=the-code", stream)
+                    };
+                    let mut stream = stream;
+                    let page = http_get(&mut stream, &format!("/?{answer}&state={state}")).await;
+                    pages.lock().unwrap().push(page);
+                });
+                Ok(())
+            }
+        };
+        let config = MicrosoftAuthConfig {
+            consent_scopes: vec![sync_scope(CLIENT_ID)],
+            ..config(&server)
+        };
+
+        let result = sign_in(&config, &open, None, Duration::from_secs(5))
+            .await
+            .expect("signed in");
+        let refused = result.consent_refused.expect("the refusal");
+        assert_eq!(refused.code, ErrorCode::AdminConsentRequired);
+        let pages = pages.lock().unwrap().clone();
+        assert!(pages[0].starts_with("HTTP/1.1 200 "), "{}", pages[0]);
+        assert!(pages[0].contains("<h1>Signing in without instant updates</h1>"));
+        assert!(pages[1].starts_with("HTTP/1.1 200 "), "{}", pages[1]);
+        assert!(pages[1].contains("You&#39;re signed in"), "{}", pages[1]);
+        // The code is redeemed with the redirect URI it was issued for.
+        let redirects = redirects.lock().unwrap().clone();
+        assert_ne!(redirects[0], redirects[1]);
+        let requests = server.received_requests().await.unwrap();
+        let form: HashMap<String, String> = url::form_urlencoded::parse(&requests[0].body)
+            .into_owned()
+            .collect();
+        assert_eq!(form["redirect_uri"], redirects[1]);
+    }
+
     async fn sync_tokens(server: &MockServer) -> SyncTokenSource {
         let secrets = Arc::new(MemorySecretStore::default());
         secrets
@@ -1801,6 +2214,66 @@ mod tests {
             "access-1"
         );
         assert_eq!(source.access_token().await.unwrap(), "access-1");
+    }
+
+    /// A wall clock the test moves, as a suspend does; `Instant` stands
+    /// still meanwhile.
+    fn wall_clock() -> (Arc<StdMutex<SystemTime>>, WallClock) {
+        let now = Arc::new(StdMutex::new(SystemTime::now()));
+        let read = now.clone();
+        (now, Arc::new(move || *read.lock().unwrap()))
+    }
+
+    #[tokio::test]
+    async fn cached_tokens_expire_while_the_computer_sleeps() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .respond_with(token_success())
+            .mount(&server)
+            .await;
+        let (wall, clock) = wall_clock();
+        let sleep = |time: Duration| *wall.lock().unwrap() += time;
+        let tokens = SyncTokenSource(MicrosoftTokenSource {
+            wall_clock: clock.clone(),
+            ..sync_tokens(&server).await.0
+        });
+        let ten_minutes = Duration::from_secs(600);
+        tokens.sync_token(ten_minutes, false).await.unwrap();
+        tokens.sync_token(ten_minutes, false).await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        // 50 minutes asleep: the token (an hour's) has less than the ten
+        // minutes a stream needs, however little `Instant` has moved.
+        sleep(Duration::from_secs(50 * 60));
+        tokens.sync_token(ten_minutes, false).await.unwrap();
+        // A night asleep: it has expired.
+        sleep(Duration::from_secs(8 * 3600));
+        tokens.sync_token(ten_minutes, false).await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+        // Graph's tokens likewise.
+        let source = MicrosoftTokenSource {
+            wall_clock: clock,
+            ..token_source(&server, Some("refresh-0")).await
+        };
+        source
+            .prime("before-the-night", Duration::from_secs(3600))
+            .await;
+        sleep(Duration::from_secs(8 * 3600));
+        assert_eq!(source.access_token().await.unwrap(), "access-1");
+
+        // Setting the wall clock back doesn't make a token last longer.
+        source
+            .prime("twenty-minutes", Duration::from_secs(20 * 60))
+            .await;
+        *wall.lock().unwrap() -= Duration::from_secs(2 * 3600);
+        assert_eq!(
+            source
+                .access_token_lasting(Duration::from_secs(45 * 60))
+                .await
+                .unwrap(),
+            "access-1"
+        );
     }
 
     #[test]
