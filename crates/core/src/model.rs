@@ -656,16 +656,18 @@ pub enum OrganizationSignatureState {
     Unsupported,
     /// Supported, but not checked yet.
     Unchecked,
-    /// The organization doesn't use Cumulas Signatures, or has no signature
-    /// for this person right now.
+    /// The organization doesn't use Cumulas Signatures (Microsoft refused
+    /// the token: its tenant hasn't added the service's app), or the service
+    /// has no signature for this person right now. Asked again once a day.
     NotUsed,
     /// The organization's signature, which the app adds.
     Ready,
     /// The organization's mail server adds the signature on send (to
     /// replies and forwards only with `on_replies`); the app adds none.
     AddedOnSend,
-    /// The organization uses Cumulas Signatures but hasn't allowed Cumulas
-    /// Mail.
+    /// The organization has Cumulas Signatures' app, but Cumulas Mail isn't
+    /// allowed: by the organization (Microsoft refused for consent) or by
+    /// the service's operator (`app-not-allowed`). Asked again once a day.
     NotAllowed,
 }
 
