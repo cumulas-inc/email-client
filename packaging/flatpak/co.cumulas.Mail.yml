@@ -34,6 +34,10 @@ finish-args:
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
+  # CMake modules (the tray library's) install to lib, where pkg-config
+  # looks, also with flatpak-builder releases that don't say so themselves
+  # (Ubuntu 24.04's, which CI uses): CMake 4 picks lib64 otherwise.
+  libdir: /app/lib
 
 modules:
   # The tray icon's library, which the app loads when the desktop shows tray
