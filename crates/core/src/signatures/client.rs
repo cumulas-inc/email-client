@@ -411,11 +411,6 @@ mod tests {
                 ResponseTemplate::new(403).set_body_string("Forbidden"),
                 None,
             ),
-            // Redirects aren't followed: the token stays with the service.
-            (
-                ResponseTemplate::new(302).insert_header("location", "https://example.com/"),
-                None,
-            ),
             (
                 ResponseTemplate::new(200).set_body_string("<html>not json</html>"),
                 None,
@@ -456,6 +451,27 @@ mod tests {
                 retry_after: None,
                 ..
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        // The token goes to the service's own address only.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/apps/signature"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/elsewhere"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/elsewhere"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(signature_answer()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            client(&server).fetch("t", None).await,
+            Fetched::Failed { .. }
         ));
     }
 
