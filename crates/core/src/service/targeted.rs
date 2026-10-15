@@ -4,7 +4,8 @@
 //! Requests are merged into a [`SyncScope`] while they wait, so a burst of
 //! notifications (Graph sends created+updated pairs, IMAP sends EXISTS and
 //! FETCH) becomes one sync, and a change arriving during a sync gives exactly
-//! one follow-up. Syncs are spaced out, more so when changes never stop.
+//! one follow-up. Syncs are spaced out, more so when changes never stop, and
+//! targeted ones back off while they keep failing.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -18,7 +19,9 @@ use tokio_util::sync::CancellationToken;
 use super::CoreService;
 use crate::error::{ErrorCode, Result};
 use crate::model::{DataKind, Folder, FolderRole};
+use crate::providers::imap::is_server_busy;
 use crate::push::PushEvent;
+use crate::push::backoff::Backoff;
 
 /// Requests arriving this soon after the first one join its sync.
 pub(crate) const DEBOUNCE: Duration = Duration::from_millis(750);
@@ -92,10 +95,20 @@ impl From<PushEvent> for SyncScope {
     }
 }
 
+/// How a sync went, as far as the syncs after it are concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// Synced, or failed in a way the next request may well not.
+    Done,
+    /// Failed in a way that asking again soon won't fix: targeted syncs
+    /// back off.
+    Failed,
+}
+
 /// Runs the syncs a [`SyncQueue`] asks for.
 #[async_trait]
 pub(crate) trait SyncRunner: Send + Sync {
-    async fn run(&self, scope: SyncScope);
+    async fn run(&self, scope: SyncScope) -> Outcome;
 }
 
 /// Hands sync requests to one account's worker. Cheap to clone; requesting
@@ -122,18 +135,25 @@ impl SyncQueue {
         !self.shared.pending.lock().unwrap().is_empty()
     }
 
+    fn wants_full(&self) -> bool {
+        self.shared.pending.lock().unwrap().full
+    }
+
     /// The worker: runs requested syncs one at a time until `cancel` fires,
-    /// which also abandons a sync in progress. `label` names the account in
-    /// logs.
+    /// which also abandons a sync in progress. After failures, targeted
+    /// syncs wait out `backoff`; a full one doesn't. `label` names the
+    /// account in logs.
     pub(crate) async fn run(
         self,
         label: String,
         runner: Arc<dyn SyncRunner>,
+        mut backoff: Backoff,
         cancel: CancellationToken,
     ) {
         let mut last_start: Option<Instant> = None;
         let mut recent: VecDeque<Instant> = VecDeque::new();
         let mut calm_until: Option<Instant> = None;
+        let mut held_until: Option<Instant> = None;
         loop {
             while !self.has_work() {
                 tokio::select! {
@@ -147,9 +167,17 @@ impl SyncQueue {
             if let Some(last) = last_start {
                 start = start.max(last + spacing);
             }
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep_until(start) => {}
+            loop {
+                let wait = match held_until {
+                    Some(until) if !self.wants_full() => start.max(until),
+                    _ => start,
+                };
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep_until(wait) => break,
+                    // A full sync asked for meanwhile doesn't wait.
+                    _ = self.shared.notify.notified(), if wait > start => {}
+                }
             }
             let scope = std::mem::take(&mut *self.shared.pending.lock().unwrap());
 
@@ -168,10 +196,17 @@ impl SyncQueue {
                 calm_until = Some(now + STORM_DURATION);
                 recent.clear();
             }
-            tokio::select! {
+            let outcome = tokio::select! {
                 _ = cancel.cancelled() => return,
-                _ = runner.run(scope) => {}
-            }
+                outcome = runner.run(scope) => outcome,
+            };
+            held_until = match outcome {
+                Outcome::Done => {
+                    backoff.reset();
+                    None
+                }
+                Outcome::Failed => Some(Instant::now() + backoff.next_delay()),
+            };
         }
     }
 }
@@ -184,30 +219,41 @@ pub(crate) struct ServiceRunner {
 
 #[async_trait]
 impl SyncRunner for ServiceRunner {
-    async fn run(&self, scope: SyncScope) {
+    async fn run(&self, scope: SyncScope) -> Outcome {
         let Some(service) = self.service.upgrade() else {
-            return;
+            return Outcome::Done;
         };
-        if let Err(e) = service.sync_targets(&self.account_id, scope).await {
-            match e.code {
-                // Removed meanwhile.
-                ErrorCode::NotFound => {}
-                // The periodic sync reports it to the user.
-                ErrorCode::AuthRequired => service.park_push(&self.account_id),
-                // Push reconnects and catches up by itself.
-                ErrorCode::Network => {
-                    tracing::debug!("targeted sync of account {} failed: {e}", self.account_id);
+        let Err(e) = service.sync_targets(&self.account_id, scope.clone()).await else {
+            return Outcome::Done;
+        };
+        match e.code {
+            // Removed meanwhile.
+            ErrorCode::NotFound => {}
+            // The periodic sync reports it to the user, and resumes push
+            // once it gets past it. Asking sooner would only have the
+            // server reject the credentials, or the keyring prompt, again.
+            ErrorCode::AuthRequired | ErrorCode::Storage => service.park_push(&self.account_id, &e),
+            ErrorCode::Network => {
+                // A full sync gave way already (see `sync_account_locked`).
+                if !scope.full && is_server_busy(&e) {
+                    service.yield_push(&self.account_id, &e, scope);
                 }
-                _ => tracing::warn!("targeted sync of account {} failed: {e}", self.account_id),
+                // Push reconnects and catches up by itself.
+                tracing::debug!("targeted sync of account {} failed: {e}", self.account_id);
+            }
+            _ => {
+                tracing::warn!("targeted sync of account {} failed: {e}", self.account_id);
+                return Outcome::Failed;
             }
         }
+        Outcome::Done
     }
 }
 
 impl CoreService {
-    /// Syncs what push reported as changed. Unlike [`Self::sync_account`] it
-    /// waits for a sync of the account in progress instead of skipping, so a
-    /// change is never lost. Never lists all folders unless asked to.
+    /// Syncs what push reported as changed. It waits for a sync of the
+    /// account in progress, so a change is never lost. Never lists all
+    /// folders unless asked to.
     pub(crate) async fn sync_targets(&self, account_id: &str, scope: SyncScope) -> Result<()> {
         if scope.full {
             return self.sync_account_waiting(account_id).await;
@@ -261,7 +307,7 @@ impl CoreService {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
 
@@ -270,6 +316,8 @@ mod tests {
         runs: Mutex<Vec<(Instant, SyncScope)>>,
         duration: Duration,
         running: AtomicUsize,
+        /// Every sync fails while set.
+        failing: AtomicBool,
     }
 
     impl Recorder {
@@ -278,6 +326,7 @@ mod tests {
                 runs: Mutex::default(),
                 duration,
                 running: AtomicUsize::new(0),
+                failing: AtomicBool::new(false),
             })
         }
 
@@ -297,7 +346,7 @@ mod tests {
 
     #[async_trait]
     impl SyncRunner for Recorder {
-        async fn run(&self, scope: SyncScope) {
+        async fn run(&self, scope: SyncScope) -> Outcome {
             assert_eq!(
                 self.running.fetch_add(1, Ordering::SeqCst),
                 0,
@@ -306,6 +355,11 @@ mod tests {
             self.runs.lock().unwrap().push((Instant::now(), scope));
             tokio::time::sleep(self.duration).await;
             self.running.fetch_sub(1, Ordering::SeqCst);
+            if self.failing.load(Ordering::SeqCst) {
+                Outcome::Failed
+            } else {
+                Outcome::Done
+            }
         }
     }
 
@@ -317,6 +371,7 @@ mod tests {
         let task = tokio::spawn(queue.clone().run(
             "test".into(),
             Arc::clone(recorder) as Arc<dyn SyncRunner>,
+            Backoff::seeded(7),
             cancel.clone(),
         ));
         (queue, cancel, task)
@@ -450,6 +505,54 @@ mod tests {
         queue.push(folder("Archive"));
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(recorder.scopes(), [SyncScope::full()]);
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failing_syncs_back_off_except_full_ones() {
+        let recorder = Recorder::new(Duration::from_millis(100));
+        recorder.failing.store(true, Ordering::SeqCst);
+        let (queue, cancel, task) = start(&recorder);
+        // Polled every 30 seconds for an hour, failing every time.
+        let poller = tokio::spawn({
+            let queue = queue.clone();
+            async move {
+                for _ in 0..120 {
+                    queue.push(PushEvent::InboxChanged);
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+        // Each sync waited out its delay after the one before failed.
+        let mut replica = Backoff::seeded(7);
+        let starts = recorder.starts();
+        for gap in starts.windows(2).map(|w| w[1] - w[0]) {
+            let delay = replica.next_delay() + Duration::from_millis(100);
+            assert!(gap >= delay.max(SPACING), "{gap:?} {delay:?}");
+        }
+        assert!(starts.len() < 20, "{}", starts.len());
+
+        // A full sync doesn't wait.
+        let before = starts.len();
+        let asked = Instant::now();
+        let held_until = starts[before - 1] + Duration::from_millis(100) + replica.next_delay();
+        assert!(held_until > asked + SPACING, "{:?}", held_until - asked);
+        queue.push(SyncScope::full());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let scopes = recorder.scopes();
+        assert_eq!(scopes.len(), before + 1);
+        assert!(scopes[before].full);
+        assert!(recorder.starts()[before] - asked < SPACING);
+
+        // Once syncs work again, polls are served as they come.
+        recorder.failing.store(false, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+        let before = recorder.starts().len();
+        tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+        assert_eq!(recorder.starts().len() - before, 20);
+        poller.abort();
         cancel.cancel();
         task.await.unwrap();
     }

@@ -38,15 +38,20 @@ pub struct BatchOutcome {
     pub became_unread: Vec<String>,
     /// Local ids of stored messages that were removed from the folder.
     pub removed: Vec<String>,
+    /// Ids of the folders that stored messages moved in from. Graph keeps a
+    /// message's id when it moves, so the move shows as an update.
+    pub moved_from: Vec<String>,
 }
 
 impl BatchOutcome {
-    /// Whether the folder's unread or total count may have changed.
+    /// Whether the folder's unread or total count may have changed (and
+    /// those of `moved_from`).
     pub fn changes_counts(&self) -> bool {
         !(self.inserted.is_empty()
             && self.became_read.is_empty()
             && self.became_unread.is_empty()
-            && self.removed.is_empty())
+            && self.removed.is_empty()
+            && self.moved_from.is_empty())
     }
 }
 
@@ -128,10 +133,19 @@ fn index_message(tx: &Transaction<'_>, m: &MessageSummary, body: &str) -> rusqli
 }
 
 /// Inserts or updates the summary columns of a message, leaving any fetched
-/// body untouched. Returns the read state stored before, `None` for a new
-/// message.
-fn upsert_summary(tx: &Transaction<'_>, m: &MessageSummary) -> rusqlite::Result<Option<bool>> {
-    let previous = stored_read_state(tx, &m.id)?;
+/// body untouched. Returns the read state and folder stored before, `None`
+/// for a new message.
+fn upsert_summary(
+    tx: &Transaction<'_>,
+    m: &MessageSummary,
+) -> rusqlite::Result<Option<(bool, String)>> {
+    let previous = tx
+        .query_row(
+            "SELECT is_read, folder_id FROM messages WHERE id = ?1",
+            [&m.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
     tx.execute(
         &format!(
             "INSERT INTO messages ({SUMMARY_COLUMNS})
@@ -388,11 +402,17 @@ impl Store {
         removed.dedup();
         outcome.removed.extend(delete_message_rows(&tx, &removed)?);
         for m in &batch.upserts {
-            match upsert_summary(&tx, m)? {
-                None => outcome.inserted.push(m.clone()),
-                Some(false) if m.is_read => outcome.became_read.push(m.id.clone()),
-                Some(true) if !m.is_read => outcome.became_unread.push(m.id.clone()),
-                Some(_) => {}
+            let Some((was_read, was_in)) = upsert_summary(&tx, m)? else {
+                outcome.inserted.push(m.clone());
+                continue;
+            };
+            if was_in != m.folder_id && !outcome.moved_from.contains(&was_in) {
+                outcome.moved_from.push(was_in);
+            }
+            match (was_read, m.is_read) {
+                (false, true) => outcome.became_read.push(m.id.clone()),
+                (true, false) => outcome.became_unread.push(m.id.clone()),
+                _ => {}
             }
         }
         for update in &batch.flag_updates {
@@ -952,6 +972,34 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.removed, [id("1")]);
         assert_eq!(outcome.inserted.len(), 1);
+    }
+
+    #[test]
+    fn messages_moved_in_report_the_folder_they_left() {
+        let (store, inbox, archive) = setup();
+        let archived = message(&archive, "1", "One", false);
+        let batch = MessageBatch {
+            upserts: vec![archived.clone()],
+            ..Default::default()
+        };
+        store.apply_message_batch(&archive, &batch).unwrap();
+
+        // Graph keeps the id when a message moves to the Inbox.
+        let moved = MessageSummary {
+            folder_id: inbox.id.clone(),
+            ..archived
+        };
+        let batch = MessageBatch {
+            upserts: vec![moved],
+            ..Default::default()
+        };
+        let outcome = store.apply_message_batch(&inbox, &batch).unwrap();
+        assert!(outcome.inserted.is_empty(), "not new");
+        assert_eq!(outcome.moved_from, std::slice::from_ref(&archive.id));
+        assert!(outcome.changes_counts());
+        // Applied again, it stays put.
+        let again = store.apply_message_batch(&inbox, &batch).unwrap();
+        assert_eq!(again, BatchOutcome::default());
     }
 
     #[test]

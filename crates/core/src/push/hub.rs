@@ -13,8 +13,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{PushHealth, PushMode, PushStatus};
+use crate::error::{Error, ErrorCode};
 use crate::service::targeted::SyncQueue;
-use crate::service::{CoreService, EventSink};
+use crate::service::{CoreService, EventSink, SyncScope};
 
 /// How long stopping an account's push may take before its tasks are left
 /// to finish on their own.
@@ -44,11 +45,24 @@ pub(crate) struct HubState {
 /// One account's push.
 pub(crate) struct AccountPush {
     pub(crate) cancel: CancellationToken,
-    /// The supervisor's token, a child of `cancel`: parking it stops
-    /// listening while the queue keeps serving full syncs.
+    /// The supervisor's token, a child of `cancel`: parking or restarting
+    /// it stops listening while the queue keeps serving syncs.
     pub(crate) listener: CancellationToken,
+    /// Tells the supervisor that the server refused a sync's connection,
+    /// so that it gives up its own.
+    pub(crate) busy: watch::Sender<Option<Error>>,
+    /// Why push is parked, until a full sync gets past that.
+    pub(crate) parked: Option<ErrorCode>,
     pub(crate) queue: SyncQueue,
-    pub(crate) tasks: Vec<JoinHandle<()>>,
+    pub(crate) worker: JoinHandle<()>,
+    pub(crate) supervisor: Option<JoinHandle<()>>,
+}
+
+impl AccountPush {
+    /// Its tasks, to wait for once cancelled.
+    pub(crate) fn tasks(self) -> impl Iterator<Item = JoinHandle<()>> {
+        std::iter::once(self.worker).chain(self.supervisor)
+    }
 }
 
 impl Default for PushHub {
@@ -118,16 +132,27 @@ impl PushHub {
         for push in &stopped {
             push.cancel.cancel();
         }
-        let tasks = stopped.into_iter().flat_map(|push| push.tasks);
+        let tasks = stopped.into_iter().flat_map(AccountPush::tasks);
         join_within(tasks, STOP_LIMIT).await;
     }
 
     /// Asks every account's queue for `scope`.
-    pub(crate) fn request(&self, scope: &crate::service::SyncScope) {
+    pub(crate) fn request(&self, scope: &SyncScope) {
         let state = self.state.lock().unwrap();
         for push in state.accounts.values() {
             push.queue.push(scope.clone());
         }
+    }
+
+    /// Asks one account's queue for `scope`; false when it has none (the
+    /// background work hasn't started).
+    pub(crate) fn request_for(&self, account_id: &str, scope: SyncScope) -> bool {
+        let state = self.state.lock().unwrap();
+        let Some(push) = state.accounts.get(account_id) else {
+            return false;
+        };
+        push.queue.push(scope);
+        true
     }
 }
 

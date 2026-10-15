@@ -80,6 +80,7 @@ struct Run {
     cancel: CancellationToken,
     wake: watch::Sender<u64>,
     online: watch::Sender<bool>,
+    busy: watch::Sender<Option<Error>>,
     statuses: Arc<Mutex<Vec<(PushMode, PushHealth)>>>,
     /// When each event arrived.
     events: Arc<Mutex<Vec<(Instant, PushEvent)>>>,
@@ -95,6 +96,7 @@ impl Run {
         let cancel = CancellationToken::new();
         let (wake, wake_rx) = watch::channel(0);
         let (online, online_rx) = watch::channel(online);
+        let (busy, busy_rx) = watch::channel(None);
         let statuses = Arc::new(Mutex::new(Vec::new()));
         let events = Arc::new(Mutex::new(Vec::new()));
         let supervisor = Supervisor::new(
@@ -111,12 +113,14 @@ impl Run {
             wake_rx,
             online_rx,
         )
+        .with_busy(busy_rx)
         .with_backoff(backoff);
         let task = tokio::spawn(run(supervisor));
         Self {
             cancel,
             wake,
             online,
+            busy,
             statuses,
             events,
             task,
@@ -278,6 +282,42 @@ async fn a_busy_server_gets_a_long_wait_with_polling() {
                     && matches!(health, PushHealth::Degraded { .. })
             )
     );
+    run.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_sync_connection_makes_push_give_way() {
+    let watcher = FakeWatcher::new([]);
+    let run = Run::watching(&watcher, true, Backoff::seeded(1));
+    // A refusal from before the connection is moot.
+    run.busy
+        .send_replace(Some(Error::network("Too many connections.")));
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(watcher.attempts(), 1);
+    assert_eq!(run.last_status(), (PushMode::ImapIdle, PushHealth::Live));
+
+    // A sync's connection is refused: the watcher's goes, the Inbox is
+    // polled every minute instead, and push tries again much later.
+    let origin = Instant::now();
+    run.busy
+        .send_replace(Some(Error::network("Too many connections.")));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(watcher.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        run.last_status(),
+        (
+            PushMode::Polling { every_secs: 60 },
+            PushHealth::Degraded {
+                reason: "Too many connections.".into()
+            }
+        )
+    );
+    tokio::time::sleep(BUSY_WAIT - Duration::from_secs(2)).await;
+    assert_eq!(watcher.attempts(), 1);
+    assert_eq!(run.polls_since(origin), [0, 60, 120, 180, 240]);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(watcher.attempts(), 2);
+    assert_eq!(run.last_status(), (PushMode::ImapIdle, PushHealth::Live));
     run.stop().await;
 }
 

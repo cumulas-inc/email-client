@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 
-use super::{CoreService, ProviderSet, alerts};
+use super::{CoreService, ProviderSet, SyncScope, alerts};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Account, DataKind, Folder, SyncState, SyncStatus};
 use crate::providers::SyncWindow;
+use crate::providers::imap::is_server_busy;
 use crate::store::BatchOutcome;
 
 /// How far back the first sync of a folder reaches.
@@ -40,11 +41,17 @@ impl CoreService {
         Arc::clone(locks.entry(account_id.to_owned()).or_default())
     }
 
-    /// Syncs one account. Returns immediately if it is already syncing.
+    /// Syncs one account. If a sync of it is running already, perhaps of
+    /// just what push reported, a full sync follows that one: queued,
+    /// returning at once, while the background work runs, and waited for
+    /// otherwise.
     pub async fn sync_account(&self, account_id: &str) -> Result<()> {
         let lock = self.account_lock(account_id);
         let Ok(_guard) = lock.try_lock() else {
-            return Ok(());
+            if self.push.request_for(account_id, SyncScope::full()) {
+                return Ok(());
+            }
+            return self.sync_account_waiting(account_id).await;
         };
         self.sync_account_locked(account_id).await
     }
@@ -61,6 +68,12 @@ impl CoreService {
         let account = self.store.get_account(account_id)?;
 
         let result = self.run_sync(&account).await;
+        if let Err(e) = &result
+            && is_server_busy(e)
+        {
+            self.yield_push(account_id, e, SyncScope::full());
+        }
+        self.resume_push(account_id, &result);
         let now = Utc::now();
         match &result {
             Ok(()) => {
@@ -157,7 +170,8 @@ impl CoreService {
     /// Syncs one folder's messages into the store, raises notifications for
     /// new mail and withdraws those for mail read or removed elsewhere.
     /// A `targeted` sync also refreshes the folder's counts when messages
-    /// changed, since it doesn't list the folders.
+    /// changed, and those of folders messages moved in from, since it
+    /// doesn't list the folders.
     pub(super) async fn sync_one_folder(
         &self,
         account: &Account,
@@ -176,13 +190,19 @@ impl CoreService {
             .await?;
         let outcome = self.store.apply_message_batch(folder, &batch)?;
         if targeted && outcome.changes_counts() {
-            match providers.mail.folder_counts(folder).await {
-                Ok(Some(counts)) => {
-                    self.store
-                        .set_folder_counts(&folder.id, counts.unread, counts.total)?;
+            let mut folders = vec![folder.clone()];
+            for id in &outcome.moved_from {
+                folders.push(self.store.get_folder(id)?);
+            }
+            for folder in &folders {
+                match providers.mail.folder_counts(folder).await {
+                    Ok(Some(counts)) => {
+                        self.store
+                            .set_folder_counts(&folder.id, counts.unread, counts.total)?;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!("reading folder counts failed ({:?})", e.code),
                 }
-                Ok(None) => {}
-                Err(e) => tracing::debug!("reading folder counts failed ({:?})", e.code),
             }
         }
 

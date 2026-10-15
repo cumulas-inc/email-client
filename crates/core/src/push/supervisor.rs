@@ -8,6 +8,9 @@
 //! | `TooManyConnections` | Wait at least 5 minutes, polling every minute         |
 //! | `Failed`             | Back off; poll every minute while waits exceed 30 s   |
 //!
+//! When the server refuses the connection a sync needs instead, the watcher
+//! gives up its own and the supervisor carries on as for
+//! `TooManyConnections`: syncing matters more than hearing of changes early.
 //! Waking up (resume, network back) reconnects at once with the backoff
 //! reset; going offline pauses everything until the network returns.
 
@@ -21,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::backoff::Backoff;
 use super::{EndReason, MailWatcher, PushEvent, PushHealth, PushMode, WatchSignal, WatchSink};
+use crate::error::Error;
 
 /// How often Microsoft accounts check the Inbox without the push service.
 pub const MICROSOFT_POLL: Duration = Duration::from_secs(30);
@@ -47,6 +51,8 @@ pub struct Supervisor {
     /// Bumped to reconnect at once (resume, network change).
     wake: watch::Receiver<u64>,
     online: watch::Receiver<bool>,
+    /// Set when the server refused a sync's connection.
+    busy: watch::Receiver<Option<Error>>,
     backoff: Backoff,
 }
 
@@ -60,10 +66,12 @@ enum Pause {
 }
 
 /// Why the supervisor ended a watcher's connection itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum Interrupt {
     Woken,
     Offline,
+    /// The server refused a sync's connection, with this error.
+    Busy(Error),
 }
 
 /// What the watcher said about its connection.
@@ -89,8 +97,17 @@ impl Supervisor {
             cancel,
             wake,
             online,
+            // Never set.
+            busy: watch::channel(None).1,
             backoff: Backoff::new(),
         }
+    }
+
+    /// Gives up the watcher's connection whenever `busy` says the server
+    /// refused one a sync needed.
+    pub fn with_busy(mut self, busy: watch::Receiver<Option<Error>>) -> Self {
+        self.busy = busy;
+        self
     }
 
     /// Uses `backoff` instead of a randomly seeded one.
@@ -110,8 +127,10 @@ impl Supervisor {
             if !self.wait_online(&mode).await {
                 return;
             }
-            // Wakes from before this attempt are moot: it starts afresh.
+            // Wakes and refusals from before this attempt are moot: it
+            // starts afresh.
             self.wake.borrow_and_update();
+            self.busy.borrow_and_update();
             self.report(mode.clone(), PushHealth::Connecting);
             let attempt = self.cancel.child_token();
             let connection = Arc::new(Mutex::new(Connection::default()));
@@ -146,6 +165,10 @@ impl Supervisor {
                             interrupt = Some(Interrupt::Offline);
                             attempt.cancel();
                         }
+                        e = refused(&mut self.busy), if interrupt.is_none() => {
+                            interrupt = Some(Interrupt::Busy(e));
+                            attempt.cancel();
+                        }
                     }
                 }
             };
@@ -158,7 +181,7 @@ impl Supervisor {
             if self.cancel.is_cancelled() {
                 return;
             }
-            match interrupt {
+            let end = match interrupt {
                 Some(Interrupt::Woken) => {
                     tracing::debug!("push for account {}: reconnecting", self.account_id);
                     self.backoff.reset();
@@ -166,8 +189,10 @@ impl Supervisor {
                 }
                 // `wait_online` reports it.
                 Some(Interrupt::Offline) => continue,
-                None => {}
-            }
+                // No room for both connections: as if this one was refused.
+                Some(Interrupt::Busy(e)) => EndReason::TooManyConnections(e),
+                None => end,
+            };
 
             let pause = match end {
                 EndReason::AuthRequired => {
@@ -307,6 +332,19 @@ fn polling(every: Duration) -> PushMode {
 async fn woken(wake: &mut watch::Receiver<u64>) {
     if wake.changed().await.is_err() {
         pending::<()>().await;
+    }
+}
+
+/// Resolves with the error when a sync's connection is refused; never if
+/// the sender is gone.
+async fn refused(busy: &mut watch::Receiver<Option<Error>>) -> Error {
+    loop {
+        if busy.changed().await.is_err() {
+            return pending().await;
+        }
+        if let Some(e) = busy.borrow_and_update().clone() {
+            return e;
+        }
     }
 }
 

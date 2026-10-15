@@ -10,10 +10,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::targeted::{ServiceRunner, SyncQueue, SyncRunner, SyncScope};
 use super::{CoreService, PushSource};
-use crate::error::{ErrorCode, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::model::AccountKind;
 use crate::push::backoff::Backoff;
-use crate::push::hub::{AccountPush, join_within};
+use crate::push::hub::{AccountPush, STOP_LIMIT, join_within};
 use crate::push::supervisor::{EventFn, MICROSOFT_POLL, StatusFn, Supervisor};
 use crate::push::{PushHealth, PushMode, PushStatus, WakeReason, wake};
 
@@ -72,13 +72,16 @@ impl CoreService {
     /// Restarts an account's push, e.g. after its credentials or settings
     /// changed. Stops it when the account is gone.
     pub async fn restart_push(&self, account_id: &str) {
-        self.push.stop(Some(&[account_id.to_owned()])).await;
-        self.start_push(account_id);
+        if self.store.get_account(account_id).is_ok() {
+            self.start_push(account_id);
+        } else {
+            self.push.stop(Some(&[account_id.to_owned()])).await;
+            self.push.forget_status(account_id);
+        }
     }
 
     /// Restarts every account's push.
-    pub(super) async fn restart_all_push(&self) {
-        self.push.stop(None).await;
+    pub(super) fn restart_all_push(&self) {
         let Ok(accounts) = self.store.list_accounts() else {
             return;
         };
@@ -87,6 +90,9 @@ impl CoreService {
         }
     }
 
+    /// Starts the account's push, or its supervisor afresh. The account's
+    /// sync queue carries on, with any sync it is running, so a restart
+    /// never abandons a sync halfway.
     fn start_push(&self, account_id: &str) {
         let mut state = self.push.state.lock().unwrap();
         let (Some(runtime), false) = (state.runtime.clone(), state.shut_down) else {
@@ -99,72 +105,142 @@ impl CoreService {
             self.push.forget_status(account_id);
             return;
         };
-        let cancel = self.push.root.child_token();
-        let listener = cancel.child_token();
-        let queue = SyncQueue::default();
-        let runner: Arc<dyn SyncRunner> = Arc::new(ServiceRunner {
-            service: weak.clone(),
-            account_id: account.id.clone(),
-        });
-        let worker = runtime.spawn(
-            queue
-                .clone()
-                .run(account.id.clone(), runner, cancel.clone()),
-        );
-        let supervisor = runtime.spawn(run_account(
-            weak,
-            account.id.clone(),
-            account.kind,
-            queue.clone(),
-            listener.clone(),
-            self.push.wake.subscribe(),
-            self.push.online.subscribe(),
-        ));
-        let previous = state.accounts.insert(
-            account.id.clone(),
+        let push = state.accounts.entry(account.id.clone()).or_insert_with(|| {
+            let cancel = self.push.root.child_token();
+            let queue = SyncQueue::default();
+            let runner: Arc<dyn SyncRunner> = Arc::new(ServiceRunner {
+                service: weak.clone(),
+                account_id: account.id.clone(),
+            });
+            let worker = runtime.spawn(queue.clone().run(
+                account.id.clone(),
+                runner,
+                Backoff::new(),
+                cancel.clone(),
+            ));
             AccountPush {
+                listener: cancel.child_token(),
                 cancel,
-                listener,
+                busy: watch::Sender::new(None),
+                parked: None,
                 queue,
-                tasks: vec![worker, supervisor],
-            },
+                worker,
+                supervisor: None,
+            }
+        });
+        // Ends the supervisor running, if any.
+        push.listener.cancel();
+        push.listener = push.cancel.child_token();
+        push.parked = None;
+        let previous = push.supervisor.take();
+        let supervise = run_account(
+            weak,
+            account.id,
+            account.kind,
+            push.queue.clone(),
+            push.listener.clone(),
+            push.busy.subscribe(),
         );
-        // Two restarts raced; the newer one wins.
-        if let Some(previous) = previous {
-            previous.cancel.cancel();
-        }
+        push.supervisor = Some(runtime.spawn(async move {
+            // The account never has two push connections at once.
+            if let Some(previous) = previous {
+                join_within([previous], STOP_LIMIT).await;
+            }
+            supervise.await;
+        }));
     }
 
-    /// A sync found the account's credentials rejected: stop listening and
-    /// polling until it is signed in again ([`Self::restart_push`]), rather
-    /// than asking the server over and over. Full syncs still run.
-    pub(super) fn park_push(&self, account_id: &str) {
+    /// A sync failed with `cause`, the credentials rejected or the keyring
+    /// locked: stop listening and polling until a full sync gets past it
+    /// ([`Self::resume_push`]) or the account is signed in again
+    /// ([`Self::restart_push`]), rather than asking the server, or the
+    /// user to unlock the keyring, over and over.
+    pub(super) fn park_push(&self, account_id: &str, cause: &Error) {
         let parked = {
-            let state = self.push.state.lock().unwrap();
+            let mut state = self.push.state.lock().unwrap();
             state
                 .accounts
-                .get(account_id)
+                .get_mut(account_id)
                 .filter(|push| !push.listener.is_cancelled())
-                .map(|push| push.listener.cancel())
+                .map(|push| {
+                    push.listener.cancel();
+                    push.parked = Some(cause.code);
+                })
                 .is_some()
         };
         if !parked {
             return;
         }
-        tracing::info!(
-            "push for account {account_id}: the server rejected the credentials; \
-             waiting for the account to be signed in again"
-        );
+        let health = if cause.code == ErrorCode::AuthRequired {
+            tracing::info!(
+                "push for account {account_id}: the server rejected the credentials; \
+                 waiting for the next sync, or for the account to be signed in again"
+            );
+            PushHealth::AuthRequired
+        } else {
+            tracing::info!("push for account {account_id}: {cause}; waiting for the next sync");
+            PushHealth::Degraded {
+                reason: cause.message.clone(),
+            }
+        };
         let mode = self
             .push
             .status(account_id)
             .map_or(PushMode::Off, |status| status.mode);
-        self.push.set_status(
-            self.sink.as_ref(),
-            account_id,
-            mode,
-            PushHealth::AuthRequired,
+        self.push
+            .set_status(self.sink.as_ref(), account_id, mode, health);
+    }
+
+    /// A full sync of the account ended with `result`: push parked for a
+    /// reason the sync got past (the server accepted the credentials, the
+    /// keyring opened) starts again.
+    pub(super) fn resume_push(&self, account_id: &str, result: &Result<()>) {
+        let cause = {
+            let state = self.push.state.lock().unwrap();
+            let Some(push) = state.accounts.get(account_id) else {
+                return;
+            };
+            // The supervisor also parks itself when its own login is
+            // rejected.
+            push.parked.or_else(|| {
+                self.push
+                    .status(account_id)
+                    .filter(|status| status.health == PushHealth::AuthRequired)
+                    .map(|_| ErrorCode::AuthRequired)
+            })
+        };
+        let Some(cause) = cause else {
+            return;
+        };
+        if matches!(result, Err(e) if e.code == cause) {
+            return;
+        }
+        tracing::info!("push for account {account_id}: resuming after a sync");
+        self.start_push(account_id);
+    }
+
+    /// The server refused a sync's connection because the account has too
+    /// many: push gives up its own and polls the Inbox for a while instead
+    /// (see [`crate::push::supervisor`]), and `retry` runs once it has.
+    pub(super) fn yield_push(&self, account_id: &str, refused: &Error, retry: SyncScope) {
+        // Only a push connection that is up, or coming up, can make room.
+        let watching = self.push.status(account_id).is_some_and(|status| {
+            matches!(status.mode, PushMode::ImapIdle | PushMode::ImapNotify)
+                && matches!(status.health, PushHealth::Live | PushHealth::Connecting)
+        });
+        if !watching {
+            return;
+        }
+        let state = self.push.state.lock().unwrap();
+        let Some(push) = state.accounts.get(account_id) else {
+            return;
+        };
+        tracing::info!(
+            "push for account {account_id}: the server refused another connection; \
+             closing push's so that syncing works"
         );
+        push.busy.send_replace(Some(refused.clone()));
+        push.queue.push(retry);
     }
 
     /// The network came or went (from the desktop's network monitor). While
@@ -199,7 +275,7 @@ impl CoreService {
             state.shut_down = true;
             let mut tasks: Vec<_> = state.tasks.drain(..).collect();
             for (_, push) in state.accounts.drain() {
-                tasks.extend(push.tasks);
+                tasks.extend(push.tasks());
             }
             tasks
         };
@@ -286,9 +362,16 @@ async fn run_account(
     kind: AccountKind,
     queue: SyncQueue,
     cancel: CancellationToken,
-    wake: watch::Receiver<u64>,
-    online: watch::Receiver<bool>,
+    busy: watch::Receiver<Option<Error>>,
 ) {
+    let Some((wake, online)) = service.upgrade().map(|service| {
+        (
+            service.push.wake.subscribe(),
+            service.push.online.subscribe(),
+        )
+    }) else {
+        return;
+    };
     let status: StatusFn = {
         let service = service.clone();
         let account_id = account_id.clone();
@@ -321,7 +404,6 @@ async fn run_account(
             _ = cancel.cancelled() => return,
             result = strong.push_source(&account_id) => result,
         };
-        drop(strong);
         match result {
             Ok(Some(source)) => break source,
             Ok(None) => {
@@ -334,6 +416,18 @@ async fn run_account(
                 status(planned, PushHealth::AuthRequired);
                 return;
             }
+            // Retrying soon would only bring the keyring's prompt back; the
+            // periodic sync tries it again.
+            Err(e) if e.code == ErrorCode::Storage => {
+                status(
+                    planned,
+                    PushHealth::Degraded {
+                        reason: e.message.clone(),
+                    },
+                );
+                strong.park_push(&account_id, &e);
+                return;
+            }
             Err(e) => {
                 let delay = backoff.next_delay();
                 tracing::warn!(
@@ -341,6 +435,7 @@ async fn run_account(
                     delay.as_secs()
                 );
                 status(planned.clone(), PushHealth::Degraded { reason: e.message });
+                drop(strong);
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = tokio::time::sleep(delay) => {}
@@ -349,7 +444,8 @@ async fn run_account(
         }
     };
     let events: EventFn = Arc::new(move |event| queue.push(event));
-    let supervisor = Supervisor::new(account_id, events, status, cancel, wake, online);
+    let supervisor =
+        Supervisor::new(account_id, events, status, cancel, wake, online).with_busy(busy);
     match source {
         PushSource::Watch(watcher) => supervisor.watch(watcher).await,
         PushSource::Poll(every) => supervisor.poll(every).await,

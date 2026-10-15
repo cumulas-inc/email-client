@@ -433,7 +433,7 @@ impl CoreService {
             || previous.instant_push != settings.instant_push
             || previous.use_push_relay != settings.use_push_relay
         {
-            self.restart_all_push().await;
+            self.restart_all_push();
         }
         Ok(settings)
     }
