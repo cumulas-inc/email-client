@@ -2375,6 +2375,28 @@
   gap: var(--space-3);
 }
 
+/* --- Signature ------------------------------------------------------------------- */
+
+/* An editable signature: a frame as tall as what it holds (SignatureEditor).
+   It draws no box itself; where it sits decides. */
+.signature-editor {
+  position: relative;
+}
+
+.signature-editor__frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+}
+
+/* In the dark theme, a signature with its own colors sits on a light sheet,
+   as the quoted original does. */
+.signature-editor--paper .signature-editor__frame {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
 /* --- Draft tab --------------------------------------------------------------------- */
 
 /* Appears without motion: it remounts when the pane switches (Enter, Esc,

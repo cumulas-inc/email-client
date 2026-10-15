@@ -230,6 +230,140 @@ export function buildSrcDoc(html: string, options: SrcDocOptions): string {
   );
 }
 
+// --- Editable signatures -------------------------------------------------------
+
+/**
+ * What a signature's frame may load: its pictures and web fonts (https: or
+ * data:) and inline styles. No scripts, from anywhere.
+ */
+export const SIGNATURE_CSP = [
+  "default-src 'none'",
+  "img-src https: data:",
+  "style-src 'unsafe-inline'",
+  "font-src https: data:",
+  "form-action 'none'",
+  "base-uri 'none'",
+].join("; ");
+
+/**
+ * Whether a signature chooses its own colors (text or background) or
+ * brings a style sheet. Those colors were picked for a light page.
+ */
+export function setsOwnColors(html: string): boolean {
+  return paintsOwnBackground(html) || /(?:^|[^-\w])color\s*:|<font\b[^>]*\scolor\s*=/i.test(html);
+}
+
+/**
+ * How to paint an editable signature. Light theme: plain. Dark theme: one
+ * with its own colors on a light sheet, as the quoted original is; one
+ * without in the dark theme's own colors ("dark", not inverted: the frame
+ * is set in light ink, so the caret and selection follow).
+ */
+export function signatureAppearance(html: string, isDark: boolean): BodyAppearance {
+  if (!isDark) return "plain";
+  return setsOwnColors(html) ? "paper" : "dark";
+}
+
+// The dark theme's ink, tertiary text, teal and selection.
+const DARK_INK: Palette = {
+  text: "#edebe6",
+  muted: "#9a948a",
+  link: "#5cc6bb",
+  rule: "#3a3732",
+  selection: "#1a3532",
+  background: "transparent",
+};
+
+/** Whether HTML shows nothing: no text and no picture. */
+export function isBlankHtml(html: string): boolean {
+  if (/<img[\s>]/i.test(html)) return false;
+  return (
+    html
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]*>/g, "")
+      .replace(/&nbsp;|&#160;|\u00a0/gi, "")
+      .trim() === ""
+  );
+}
+
+export interface SignatureDocOptions {
+  appearance: BodyAppearance;
+  font: BodyFont;
+  /**
+   * Text the signature doesn't style is set like the letter, in the reading
+   * font's size and leading (the person's own signature, which goes out in
+   * the letter's style). Otherwise the frame stays neutral (an
+   * organization's, which keeps its own).
+   */
+  letter: boolean;
+  /** Shown while it's empty. */
+  placeholder: string;
+  /** The body's accessible name. */
+  label: string;
+  /** Lines it's tall at least, so a click anywhere in it lands in it. */
+  minLines: number;
+}
+
+function attribute(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+/**
+ * The document an editable signature is shown in: neutral, without the
+ * reader's measure or paragraph spacing, so the signature looks as it will
+ * be sent; its body is the editing host. The signature itself goes in once
+ * the frame has loaded (see SignatureEditor).
+ */
+export function buildSignatureSrcDoc(options: SignatureDocOptions): string {
+  const { appearance, font, letter } = options;
+  const colors = appearance === "dark" ? DARK_INK : PAPER;
+  const paper = appearance === "paper";
+  const lineHeight = letter ? "1.6" : "normal";
+  const css = `
+    ${SERIF_FACES}
+    ${font.faces}
+    :root { color-scheme: ${appearance === "dark" ? "dark" : "light"}; }
+    html { background: ${paper ? "#ffffff" : "transparent"}; overflow: hidden; }
+    body {
+      margin: 0;
+      padding: ${paper ? "12px 16px" : "0"};
+      min-height: calc(${options.minLines} * ${letter ? "1.6em" : "1.25em"});
+      font-family: ${font.family};
+      font-size: 15.5px;
+      line-height: ${lineHeight};
+      color: ${colors.text};
+      caret-color: ${colors.text};
+      overflow-wrap: break-word;
+      word-wrap: break-word;
+      outline: none;
+      cursor: text;
+      -webkit-text-size-adjust: 100%;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: ${colors.link}; cursor: text; }
+    img { max-width: 100%; height: auto; }
+    ::selection { background: ${colors.selection}; }
+    body[data-empty]::before {
+      content: attr(data-placeholder);
+      float: left;
+      height: 0;
+      color: ${colors.muted};
+      pointer-events: none;
+    }
+  `;
+  return (
+    "<!doctype html><html><head>" +
+    '<meta charset="utf-8">' +
+    `<meta http-equiv="Content-Security-Policy" content="${SIGNATURE_CSP}">` +
+    '<meta name="referrer" content="no-referrer">' +
+    `<style>${css}</style>` +
+    "</head>" +
+    '<body contenteditable="true" role="textbox" aria-multiline="true" spellcheck="true" dir="auto"' +
+    ` aria-label="${attribute(options.label)}" data-placeholder="${attribute(options.placeholder)}"` +
+    " data-empty></body></html>"
+  );
+}
+
 export type LinkAction =
   { kind: "open"; url: string } | { kind: "mailto"; url: string } | { kind: "ignore" };
 

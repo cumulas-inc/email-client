@@ -1,6 +1,6 @@
 // Test helpers for the Mail module.
 
-import { act, screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 
 import type { Backend } from "../../api/backend";
 import { MockBackend } from "../../api/mock";
@@ -103,4 +103,27 @@ export function deferred<T = void>() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+/**
+ * Loads a frame's srcdoc, which jsdom leaves blank: writes it into the
+ * frame, which then fires load, and waits for an editable signature to fill.
+ */
+export async function loadFrame(frame: HTMLIFrameElement): Promise<Document> {
+  const doc = frame.contentDocument!;
+  doc.open();
+  doc.write(frame.getAttribute("srcdoc") ?? "");
+  doc.close();
+  await waitFor(() => {
+    if (!doc.body?.hasAttribute("contenteditable")) throw new Error("not loaded");
+  });
+  return doc;
+}
+
+/** Types into an editable signature's frame: sets its body and reports the edit. */
+export function editFrame(doc: Document, html: string): void {
+  act(() => {
+    doc.body.innerHTML = html;
+    doc.body.dispatchEvent(new doc.defaultView!.Event("input", { bubbles: true }));
+  });
 }
