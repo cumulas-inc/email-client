@@ -1,4 +1,4 @@
-import { ExternalLink, KeyRound, Scale, ShieldCheck, Zap } from "lucide-react";
+import { ExternalLink, KeyRound, Scale, ShieldCheck, Signature, Zap } from "lucide-react";
 import { useId } from "react";
 
 import { useBackend } from "../../../api/context";
@@ -70,6 +70,19 @@ export function AboutSection() {
               <ExternalLink size={14} aria-hidden="true" />
             </button>
           </div>
+          {info.signatureServer && (
+            <div className="about-row">
+              <Signature size={18} aria-hidden="true" className="about-row__icon" />
+              <div className="about-row__text">
+                <p className="about-row__title">Company signatures</p>
+                <p>
+                  For Microsoft 365 work accounts, Cumulas Mail asks Microsoft whether your
+                  organization uses Cumulas Signatures. Only if it does, the app fetches your
+                  signature from {info.signatureServer}; nothing else is sent.
+                </p>
+              </div>
+            </div>
+          )}
           {info.persistentSecrets && (
             <div className="about-row">
               <KeyRound size={18} aria-hidden="true" className="about-row__icon" />

@@ -771,6 +771,13 @@ describe("About", () => {
     expect(await screen.findByText("Version 0.1.0-demo")).toBeInTheDocument();
     expect(screen.getByText(/no telemetry/)).toBeInTheDocument();
     expect(screen.queryByText(/No keyring service was found/)).not.toBeInTheDocument();
+    // What company signatures send, and where.
+    expect(screen.getByText("Company signatures")).toBeInTheDocument();
+    expect(
+      screen.getByText(/asks Microsoft whether your organization uses Cumulas Signatures/),
+    ).toHaveTextContent(
+      "Only if it does, the app fetches your signature from signature.cumulas.co; nothing else is sent.",
+    );
   });
 
   it("warns when sign-ins can't be stored", async () => {
@@ -786,6 +793,8 @@ describe("About", () => {
     expect(await screen.findByText(/No keyring service was found/)).toHaveTextContent(
       "Install GNOME Keyring or KWallet.",
     );
+    // A build without the signature service says nothing about it.
+    expect(screen.queryByText("Company signatures")).not.toBeInTheDocument();
   });
 });
 
