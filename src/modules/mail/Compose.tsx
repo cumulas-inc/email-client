@@ -20,10 +20,15 @@ import { formatBytes } from "../../lib/format";
 import { FileBadge, FileName } from "./Attachments";
 import { bodyAppearance } from "./bodyHtml";
 import { ComposeSignatureBlock } from "./ComposeSignature";
-import { ATTACHMENT_WARN_BYTES, composeBodyHtml, readFileBase64 } from "./draft";
+import {
+  ATTACHMENT_WARN_BYTES,
+  composeBodyHtml,
+  readFileBase64,
+  type SentSignature,
+} from "./draft";
 import type { EditorHandle } from "./Editor";
 import { useIsDark } from "./hooks";
-import { type DraftAttachment, useMailStore } from "./mailStore";
+import { type ComposeDraft, type DraftAttachment, useMailStore } from "./mailStore";
 import { MessageBody } from "./MessageBody";
 import { RecipientField, type RecipientFieldHandle } from "./RecipientField";
 import { useSendMessage } from "./queries";
@@ -122,12 +127,27 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
       setConfirmNoSubject(true);
       return;
     }
-    setPreparing(true);
-    const sentSignature = await signatureFor(draft).finally(() => setPreparing(false));
     // What was typed while waiting goes too; nothing goes if the draft was
-    // closed meanwhile.
-    const current = useMailStore.getState().compose;
-    if (current?.id !== draft.id) return;
+    // closed meanwhile. The signature is always the one for the account
+    // and signature choice it's sent with: From and the signature's
+    // buttons are off while Send waits, and should they change all the
+    // same, it's worked out again.
+    let current: ComposeDraft = draft;
+    let sentSignature: SentSignature | null = null;
+    let settled = false;
+    setPreparing(true);
+    try {
+      while (!settled) {
+        const asked = current;
+        sentSignature = await signatureFor(asked);
+        const now = useMailStore.getState().compose;
+        if (now?.id !== draft.id) return;
+        current = now;
+        settled = now.accountId === asked.accountId && now.signature === asked.signature;
+      }
+    } finally {
+      setPreparing(false);
+    }
     try {
       await send.mutateAsync({
         accountId: current.accountId,
@@ -327,6 +347,8 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
                   id="mail-compose-from"
                   className="mail-compose__from"
                   value={draft.accountId}
+                  // The message goes from the account its signature is for.
+                  disabled={sending}
                   onChange={(e) =>
                     // The new account's signature replaces the old one, edited
                     // or not, as in Outlook.
@@ -433,7 +455,7 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
             />
           </Suspense>
 
-          <ComposeSignatureBlock view={signature} />
+          <ComposeSignatureBlock view={signature} disabled={sending} />
 
           {draft.quoteHtml && (
             <div className="mail-compose__quote">

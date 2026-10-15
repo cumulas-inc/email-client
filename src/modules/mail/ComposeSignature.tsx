@@ -8,8 +8,17 @@ import { useMailStore } from "./mailStore";
 import type { SignatureView } from "./signature";
 import { SignatureEditor } from "./SignatureEditor";
 
-/** The signature between what's written and the quoted original. */
-export function ComposeSignatureBlock({ view }: { view: SignatureView }) {
+/**
+ * The signature between what's written and the quoted original. Its
+ * buttons are `disabled` while Send waits for the signature.
+ */
+export function ComposeSignatureBlock({
+  view,
+  disabled = false,
+}: {
+  view: SignatureView;
+  disabled?: boolean;
+}) {
   const update = useMailStore((s) => s.updateCompose);
   const labelId = useId();
   const removeRef = useRef<HTMLButtonElement>(null);
@@ -39,6 +48,7 @@ export function ComposeSignatureBlock({ view }: { view: SignatureView }) {
         ref={addRef}
         type="button"
         className="btn btn--subtle btn--sm mail-signature-add"
+        disabled={disabled}
         onClick={() => {
           focusNext.current = "remove";
           update({ signature: "auto" });
@@ -63,6 +73,7 @@ export function ComposeSignatureBlock({ view }: { view: SignatureView }) {
           className="icon-btn icon-btn--sm mail-signature__remove"
           aria-label="Remove signature"
           title="Remove signature"
+          disabled={disabled}
           onClick={() => {
             focusNext.current = "add";
             update({ signature: "removed" });
@@ -74,6 +85,7 @@ export function ComposeSignatureBlock({ view }: { view: SignatureView }) {
           <button
             type="button"
             className="btn btn--subtle btn--sm mail-signature__restore"
+            disabled={disabled}
             onClick={() => {
               focusNext.current = "remove";
               update({ signature: "auto" });

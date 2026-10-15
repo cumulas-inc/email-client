@@ -581,6 +581,33 @@ describe("Signature", () => {
     );
   });
 
+  it("sends the signature of the account it's sent from, even if From changes while it waits", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const slow = deferred<ComposeSignature>();
+    const original = backend.getComposeSignature.bind(backend);
+    backend.getComposeSignature = (accountId, replyKind) =>
+      accountId === "acct-work" ? slow.promise : original(accountId, replyKind);
+    await renderMail({ backend });
+    const c = await newMessage(user);
+    await address(user, c);
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    // From can't change while Send waits for the signature.
+    expect(within(c).getByRole("combobox", { name: "From" })).toBeDisabled();
+
+    // Should the draft's account change all the same, the work account's
+    // signature doesn't go out from the personal one.
+    act(() => useMailStore.getState().updateCompose({ accountId: "acct-home", signature: "auto" }));
+    slow.resolve({ kind: "organization", html: "<p>Acme Corp</p>" });
+    const html = await sent(backend);
+    expect(backend.sent[0]!.accountId).toBe("acct-home");
+    expect(html).not.toContain("Acme Corp");
+    expect(html).toContain("<br><div>Alex Morgan</div><div>+1 (206) 555-0199</div>");
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "New message" })).not.toBeInTheDocument(),
+    );
+  });
+
   it("says when the organization signs on send, and adds none", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend({ signature: "addedOnSend" });
