@@ -47,7 +47,15 @@ describe("Reply and forward", () => {
       "Re: Atlas launch checklist — final review today",
     );
     const quote = within(c).getByTitle("Original message").getAttribute("srcdoc") ?? "";
-    expect(quote).toMatch(/On Wed, Oct 14, 2026, at \d{1,2}:\d\d [AP]M, Priya Raman wrote:<\/p>/);
+    // The demo message arrived this morning.
+    const today = new Date().toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+    expect(quote).toContain(`On ${today}, at `);
+    expect(quote).toMatch(/, at \d{1,2}:\d\d [AP]M, Priya Raman wrote:<\/p>/);
     expect(quote).toContain('<blockquote type="cite"');
     expect(quote).toContain("rollback plan");
     expect(quote).not.toContain("<b>From:</b>");
