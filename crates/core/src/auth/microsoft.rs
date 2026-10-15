@@ -24,7 +24,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 use url::Url;
 
-use super::TokenSource;
+use super::{SyncTokenError, SyncTokens, TokenSource};
 use crate::error::{Error, ErrorCode, Result};
 use crate::html::escape_html;
 use crate::secrets::{SecretStore, keys};
@@ -44,6 +44,15 @@ pub const SCOPES: &[&str] = &[
     "Contacts.ReadWrite",
     "Tasks.ReadWrite",
 ];
+
+/// The scope the Cumulas push service (Cumulas Sync) accepts tokens for, on
+/// the app's own registration: `api://<client id>/Sync.Receive`.
+pub const SYNC_SCOPE: &str = "Sync.Receive";
+
+/// The push service's scope for the app registration `client_id`.
+pub fn sync_scope(client_id: &str) -> String {
+    format!("api://{client_id}/{SYNC_SCOPE}")
+}
 
 /// Microsoft Entra ID's public cloud authority.
 pub const DEFAULT_AUTHORITY_HOST: &str = "https://login.microsoftonline.com";
@@ -77,6 +86,12 @@ const ADMIN_CONSENT_CODES: &[u32] = &[65001, 90093, 90094, 90095, 900941, 900981
 /// consent workflow enabled, so the user can request approval.
 const ADMIN_CONSENT_WORKFLOW_CODE: u32 = 90095;
 
+/// AADSTS codes meaning the app registration doesn't offer the scope asked
+/// for: 70011 InvalidScope, 500011 InvalidResourceServicePrincipalNotFound
+/// (no Application ID URI), 650053 (the scope doesn't exist on the resource)
+/// and 650057 InvalidResource (not among the app's permissions).
+const SCOPE_NOT_OFFERED_CODES: &[u32] = &[70011, 500011, 650053, 650057];
+
 /// AADSTS65004 UserDeclinedConsent. Also sent when the user picks "Back to
 /// app" after submitting an approval request in the admin consent workflow.
 const USER_DECLINED_CODE: u32 = 65004;
@@ -96,6 +111,9 @@ pub struct MicrosoftAuthConfig {
     pub tenant: String,
     /// Defaults to `https://login.microsoftonline.com`; overridable for tests.
     pub authority_host: String,
+    /// Scopes of other resources the sign-in also asks consent for (the
+    /// push service's), beyond the Graph scopes it redeems the code for.
+    pub consent_scopes: Vec<String>,
 }
 
 impl MicrosoftAuthConfig {
@@ -106,6 +124,7 @@ impl MicrosoftAuthConfig {
             client_id: client_id.into(),
             tenant: tenant.unwrap_or_else(|| "common".into()),
             authority_host: DEFAULT_AUTHORITY_HOST.into(),
+            consent_scopes: Vec::new(),
         }
     }
 
@@ -296,6 +315,8 @@ pub struct MicrosoftTokenSource {
     account_id: String,
     secrets: Arc<dyn SecretStore>,
     http: reqwest::Client,
+    /// What the tokens are for: the Graph scopes, or the push service's.
+    scope: String,
     /// Held across the refresh so concurrent callers wait for one refresh
     /// instead of each redeeming the refresh token.
     cache: Mutex<Option<CachedToken>>,
@@ -315,10 +336,11 @@ impl CachedToken {
         }
     }
 
-    fn is_fresh(&self) -> bool {
+    /// Whether it has more than `margin` left.
+    fn lasts(&self, margin: Duration) -> bool {
         self.expires_at
             .checked_duration_since(Instant::now())
-            .is_some_and(|left| left > REFRESH_MARGIN)
+            .is_some_and(|left| left > margin)
     }
 }
 
@@ -330,11 +352,21 @@ impl MicrosoftTokenSource {
         account_id: impl Into<String>,
         secrets: Arc<dyn SecretStore>,
     ) -> Self {
+        Self::with_scope(config, account_id, secrets, SCOPES.join(" "))
+    }
+
+    fn with_scope(
+        config: MicrosoftAuthConfig,
+        account_id: impl Into<String>,
+        secrets: Arc<dyn SecretStore>,
+        scope: String,
+    ) -> Self {
         Self {
             config,
             account_id: account_id.into(),
             secrets,
             http: http_client(),
+            scope,
             cache: Mutex::new(None),
         }
     }
@@ -343,25 +375,33 @@ impl MicrosoftTokenSource {
     pub async fn prime(&self, access_token: &str, expires_in: Duration) {
         *self.cache.lock().await = Some(CachedToken::new(access_token, expires_in));
     }
-}
 
-#[async_trait]
-impl TokenSource for MicrosoftTokenSource {
-    async fn access_token(&self) -> Result<String> {
+    /// The cached token if it has more than `margin` left (and `fresh`
+    /// isn't asked for), else a new one from the refresh token.
+    async fn token(
+        &self,
+        margin: Duration,
+        fresh: bool,
+    ) -> std::result::Result<String, TokenFailure> {
         let mut cache = self.cache.lock().await;
-        if let Some(token) = cache.as_ref()
-            && token.is_fresh()
+        if !fresh
+            && let Some(token) = cache.as_ref()
+            && token.lasts(margin)
         {
             return Ok(token.access_token.clone());
         }
 
         let key = keys::refresh_token(&self.account_id);
-        let refresh_token = self.secrets.get(&key).await?.ok_or_else(|| {
-            Error::auth_required(
-                "The Microsoft sign-in for this account is missing. Sign in again.",
-            )
-        })?;
-        let scope = SCOPES.join(" ");
+        let refresh_token = self
+            .secrets
+            .get(&key)
+            .await
+            .map_err(TokenFailure::Other)?
+            .ok_or_else(|| {
+                TokenFailure::Other(Error::auth_required(
+                    "The Microsoft sign-in for this account is missing. Sign in again.",
+                ))
+            })?;
         let tokens = request_token(
             &self.http,
             &self.config,
@@ -369,14 +409,10 @@ impl TokenSource for MicrosoftTokenSource {
                 ("client_id", self.config.client_id.as_str()),
                 ("grant_type", "refresh_token"),
                 ("refresh_token", refresh_token.as_str()),
-                ("scope", scope.as_str()),
+                ("scope", self.scope.as_str()),
             ],
         )
-        .await
-        .map_err(|e| match e {
-            TokenFailure::OAuth(e) => refresh_error(&e),
-            TokenFailure::Other(e) => e,
-        })?;
+        .await?;
 
         // Microsoft may rotate the refresh token; the new one replaces the old.
         // The old one keeps working until it expires, so failing to store the
@@ -392,9 +428,67 @@ impl TokenSource for MicrosoftTokenSource {
         *cache = Some(token);
         Ok(access_token)
     }
+}
+
+fn graph_token_error(e: TokenFailure) -> Error {
+    match e {
+        TokenFailure::OAuth(e) => refresh_error(&e),
+        TokenFailure::Other(e) => e,
+    }
+}
+
+#[async_trait]
+impl TokenSource for MicrosoftTokenSource {
+    async fn access_token(&self) -> Result<String> {
+        self.token(REFRESH_MARGIN, false)
+            .await
+            .map_err(graph_token_error)
+    }
+
+    async fn access_token_lasting(&self, at_least: Duration) -> Result<String> {
+        self.token(at_least.max(REFRESH_MARGIN), false)
+            .await
+            .map_err(graph_token_error)
+    }
 
     async fn invalidate(&self) {
         *self.cache.lock().await = None;
+    }
+}
+
+/// Tokens for the Cumulas push service, from the account's refresh token
+/// (shared with Graph) with a cache of their own. A refusal never becomes
+/// an account error: the account keeps syncing through Graph, and push
+/// falls back to checking the Inbox.
+pub struct SyncTokenSource(MicrosoftTokenSource);
+
+impl SyncTokenSource {
+    pub fn new(
+        config: MicrosoftAuthConfig,
+        account_id: impl Into<String>,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Self {
+        let scope = format!("{} offline_access", sync_scope(&config.client_id));
+        Self(MicrosoftTokenSource::with_scope(
+            config, account_id, secrets, scope,
+        ))
+    }
+}
+
+#[async_trait]
+impl SyncTokens for SyncTokenSource {
+    async fn sync_token(
+        &self,
+        min_left: Duration,
+        fresh: bool,
+    ) -> std::result::Result<String, SyncTokenError> {
+        self.0
+            .token(min_left.max(REFRESH_MARGIN), fresh)
+            .await
+            .map_err(|e| match e {
+                TokenFailure::OAuth(e) => sync_token_error(&e),
+                TokenFailure::Other(e) => SyncTokenError::Failed(e),
+            })
     }
 }
 
@@ -430,6 +524,18 @@ fn random_token(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
+/// The Graph scopes, then any other resource's the sign-in asks consent for.
+/// Microsoft lets the authorization request cover several resources; the
+/// code is then redeemed for Graph's alone, as a token is for one resource.
+fn authorize_scope(config: &MicrosoftAuthConfig) -> String {
+    SCOPES
+        .iter()
+        .copied()
+        .chain(config.consent_scopes.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn authorize_url(
     config: &MicrosoftAuthConfig,
     redirect_uri: &str,
@@ -450,7 +556,7 @@ fn authorize_url(
             .append_pair("response_type", "code")
             .append_pair("redirect_uri", redirect_uri)
             .append_pair("response_mode", "query")
-            .append_pair("scope", &SCOPES.join(" "))
+            .append_pair("scope", &authorize_scope(config))
             .append_pair("state", state)
             .append_pair("code_challenge", code_challenge)
             .append_pair("code_challenge_method", "S256")
@@ -864,6 +970,33 @@ fn refresh_error(error: &OAuthError) -> Error {
     }
 }
 
+/// Maps a refused push-service token. The scope is the app's own, so
+/// Microsoft refusing it says nothing about the Graph sign-in: a missing
+/// consent (or a sign-in that needs the user) waits for the next sign-in,
+/// and a scope the registration doesn't offer for it to be set up.
+fn sync_token_error(error: &OAuthError) -> SyncTokenError {
+    if SCOPE_NOT_OFFERED_CODES.iter().any(|c| error.has_code(*c))
+        || matches!(
+            error.error.as_str(),
+            "invalid_scope" | "invalid_resource" | "unauthorized_client"
+        )
+    {
+        return SyncTokenError::NotOffered;
+    }
+    if ADMIN_CONSENT_CODES.iter().any(|c| error.has_code(*c))
+        || error.has_code(USER_DECLINED_CODE)
+        || matches!(
+            error.error.as_str(),
+            "invalid_grant" | "consent_required" | "interaction_required" | "login_required"
+        )
+    {
+        return SyncTokenError::ConsentMissing;
+    }
+    SyncTokenError::Failed(
+        Error::provider(error.summary()).with_details(json!({ "error": error.error })),
+    )
+}
+
 /// All `AADSTSnnnn` codes mentioned in a description.
 fn aadsts_codes(description: &str) -> Vec<u32> {
     description
@@ -924,6 +1057,7 @@ mod tests {
             client_id: CLIENT_ID.into(),
             tenant: "common".into(),
             authority_host: server.uri(),
+            consent_scopes: Vec::new(),
         }
     }
 
@@ -1500,6 +1634,173 @@ mod tests {
             source.access_token().await.unwrap_err().code,
             ErrorCode::AuthRequired
         );
+    }
+
+    #[tokio::test]
+    async fn sign_in_can_ask_consent_for_the_push_service_too() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/common/oauth2/v2.0/token"))
+            .and(body_string_contains("grant_type=authorization_code"))
+            .respond_with(token_success())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let browser = fake_browser(vec![redirect_with("code=the-code")]);
+        let config = MicrosoftAuthConfig {
+            consent_scopes: vec![sync_scope(CLIENT_ID)],
+            ..config(&server)
+        };
+        sign_in(&config, &*browser.open, None, Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        // Consent covers both resources...
+        let authorize = browser.authorize_url.lock().unwrap().clone().unwrap();
+        let authorize: HashMap<String, String> = authorize.query_pairs().into_owned().collect();
+        let scopes: Vec<&str> = authorize["scope"].split(' ').collect();
+        assert_eq!(scopes.len(), SCOPES.len() + 1);
+        assert_eq!(scopes.last(), Some(&"api://test-client-id/Sync.Receive"));
+        // ...but the code is redeemed for Graph alone.
+        let requests = server.received_requests().await.unwrap();
+        let form: HashMap<String, String> = url::form_urlencoded::parse(&requests[0].body)
+            .into_owned()
+            .collect();
+        assert_eq!(form["scope"], SCOPES.join(" "));
+    }
+
+    async fn sync_tokens(server: &MockServer) -> SyncTokenSource {
+        let secrets = Arc::new(MemorySecretStore::default());
+        secrets
+            .set(&keys::refresh_token("acct"), "refresh-0")
+            .await
+            .unwrap();
+        SyncTokenSource::new(config(server), "acct", secrets)
+    }
+
+    #[tokio::test]
+    async fn push_service_tokens_have_their_own_scope_and_cache() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/common/oauth2/v2.0/token"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .and(body_string_contains(
+                "scope=api%3A%2F%2Ftest-client-id%2FSync.Receive+offline_access",
+            ))
+            .respond_with(token_success())
+            .expect(3)
+            .mount(&server)
+            .await;
+        let tokens = sync_tokens(&server).await;
+        let ten_minutes = Duration::from_secs(600);
+        assert_eq!(
+            tokens.sync_token(ten_minutes, false).await.unwrap(),
+            "access-1"
+        );
+        // Cached while it has the time asked for...
+        assert_eq!(
+            tokens.sync_token(ten_minutes, false).await.unwrap(),
+            "access-1"
+        );
+        // ...not when it hasn't (the token lasts an hour)...
+        tokens
+            .sync_token(Duration::from_secs(2 * 3600), false)
+            .await
+            .unwrap();
+        // ...nor when a fresh one is asked for (`renew`, `token_expiring`).
+        tokens.sync_token(ten_minutes, true).await.unwrap();
+        // Rotation is saved for Graph too: they share the refresh token.
+        assert_eq!(
+            tokens
+                .0
+                .secrets
+                .get(&keys::refresh_token("acct"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("refresh-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_push_service_tokens_are_not_account_errors() {
+        /// Microsoft's error, its description and code, and what it means.
+        type Case = (&'static str, &'static str, u32, fn(&SyncTokenError) -> bool);
+        let cases: &[Case] = &[
+            (
+                "invalid_grant",
+                "AADSTS65001: The user or administrator has not consented to use the application with ID 'x' named 'Cumulas Mail'.",
+                65001,
+                |e| matches!(e, SyncTokenError::ConsentMissing),
+            ),
+            (
+                "consent_required",
+                "AADSTS65001: consent required.",
+                65001,
+                |e| matches!(e, SyncTokenError::ConsentMissing),
+            ),
+            (
+                "interaction_required",
+                "AADSTS50076: multi-factor authentication required.",
+                50076,
+                |e| matches!(e, SyncTokenError::ConsentMissing),
+            ),
+            (
+                "invalid_scope",
+                "AADSTS70011: The provided value for the input parameter 'scope' isn't valid.",
+                70011,
+                |e| matches!(e, SyncTokenError::NotOffered),
+            ),
+            (
+                "invalid_resource",
+                "AADSTS500011: The resource principal named api://x was not found in the tenant.",
+                500011,
+                |e| matches!(e, SyncTokenError::NotOffered),
+            ),
+            (
+                "temporarily_unavailable",
+                "AADSTS90033: A transient error has occurred.",
+                90033,
+                |e| matches!(e, SyncTokenError::Failed(e) if e.code == ErrorCode::Provider),
+            ),
+        ];
+        for (error, description, code, expected) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(token_error(error, description, &[*code]))
+                .mount(&server)
+                .await;
+            let failure = sync_tokens(&server)
+                .await
+                .sync_token(Duration::from_secs(600), false)
+                .await
+                .unwrap_err();
+            assert!(expected(&failure), "{error}: {failure:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_tokens_can_be_asked_to_last() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("scope=openid+profile"))
+            .respond_with(token_success())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let source = token_source(&server, Some("refresh-0")).await;
+        source
+            .prime("twenty-minutes", Duration::from_secs(20 * 60))
+            .await;
+        assert_eq!(source.access_token().await.unwrap(), "twenty-minutes");
+        assert_eq!(
+            source
+                .access_token_lasting(Duration::from_secs(45 * 60))
+                .await
+                .unwrap(),
+            "access-1"
+        );
+        assert_eq!(source.access_token().await.unwrap(), "access-1");
     }
 
     #[test]

@@ -57,6 +57,7 @@ async fn provider_with_revoked_token(server: &MockServer) -> GraphProvider {
         client_id: "test-client-id".into(),
         tenant: "common".into(),
         authority_host: server.uri(),
+        consent_scopes: Vec::new(),
     };
     let tokens = Arc::new(MicrosoftTokenSource::new(config, "acct", secrets));
     tokens
