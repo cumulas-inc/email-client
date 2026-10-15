@@ -115,11 +115,13 @@ impl CoreService {
             .into_iter()
             .find(|r| r.key == key)
             .ok_or_else(|| Error::not_found("That reminder is no longer due."))?;
-        let mut state = self.state_for(&reminder, ReminderStatus::Snoozed, now)?;
+        let mut state = self.state_for(
+            &reminder,
+            ReminderStatus::Snoozed,
+            ServerAction::Snooze,
+            now,
+        )?;
         state.snooze_until = Some(until);
-        if state.pending.is_some() {
-            state.pending = Some(ServerAction::Snooze);
-        }
         self.store
             .put_reminder_states(std::slice::from_ref(&state))?;
         let active = self.reminder_pass()?;
@@ -134,11 +136,12 @@ impl CoreService {
         let active = self.reminder_pass()?;
         let mut states = Vec::new();
         for reminder in active.iter().filter(|r| keys.contains(&r.key)) {
-            let mut state = self.state_for(reminder, ReminderStatus::Dismissed, now)?;
-            if state.pending.is_some() {
-                state.pending = Some(ServerAction::Dismiss);
-            }
-            states.push(state);
+            states.push(self.state_for(
+                reminder,
+                ReminderStatus::Dismissed,
+                ServerAction::Dismiss,
+                now,
+            )?);
         }
         if states.is_empty() {
             return Ok(active);
@@ -152,13 +155,13 @@ impl CoreService {
         Ok(active)
     }
 
-    /// A state for `reminder`; `pending` is set (to be replaced by the
-    /// caller's action) when its server keeps reminders: an event of a
-    /// Microsoft account.
+    /// A state for `reminder`, with `action` pending when its server keeps
+    /// reminders (an event of a Microsoft account).
     fn state_for(
         &self,
         reminder: &ActiveReminder,
         status: ReminderStatus,
+        action: ServerAction,
         now: DateTime<Utc>,
     ) -> Result<ReminderState> {
         let on_server = reminder.kind == ReminderKind::Event
@@ -171,7 +174,7 @@ impl CoreService {
             fire_at: reminder.fire_at,
             status,
             snooze_until: None,
-            pending: on_server.then_some(ServerAction::Dismiss),
+            pending: on_server.then_some(action),
             updated_at: now,
         })
     }
