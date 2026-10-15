@@ -167,6 +167,27 @@ describe("SignatureEditor", () => {
     expect(onKeyDown).not.toHaveBeenCalled();
   });
 
+  it("reports no edit for a signature that only serializes differently", async () => {
+    const onChange = vi.fn();
+    // The parser adds a <tbody>, so the frame's HTML isn't the string given.
+    renderWithBackend(
+      <SignatureEditor html="<table><tr><td>Ada</td></tr></table>" onChange={onChange} />,
+    );
+    const doc = await loadFrame(frame());
+    expect(doc.body.innerHTML).toBe("<table><tbody><tr><td>Ada</td></tr></tbody></table>");
+    // Ctrl+B with nothing selected changes nothing.
+    doc.execCommand = vi.fn(() => true);
+    key(doc, { key: "b", ctrlKey: true });
+    act(() => void doc.body.dispatchEvent(new doc.defaultView!.Event("input", { bubbles: true })));
+    expect(onChange).not.toHaveBeenCalled();
+
+    editFrame(doc, "<table><tbody><tr><td>Ada L.</td></tr></tbody></table>");
+    expect(onChange).toHaveBeenCalledTimes(1);
+    // Nor is reporting it again a change.
+    act(() => void doc.body.dispatchEvent(new doc.defaultView!.Event("input", { bubbles: true })));
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
   it("closes the dialog around it on Escape, as a field would", async () => {
     const onCancel = vi.fn((e: React.SyntheticEvent) => e.preventDefault());
     renderWithBackend(

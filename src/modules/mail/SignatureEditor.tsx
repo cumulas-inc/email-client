@@ -80,6 +80,10 @@ export function SignatureEditor({
   // goes in when the frame loads, so a new reading font (a new document)
   // keeps the edits, and typing never reloads the frame.
   const content = useRef(html);
+  // What the frame shows, as its body serializes it, which may differ from
+  // the HTML that went in (a table gains its <tbody>): an edit is a change
+  // from this.
+  const shown = useRef("");
   const teardown = useRef<(() => void) | null>(null);
   /** Shows `content` in the loaded frame. */
   const fill = useRef<(() => void) | null>(null);
@@ -148,6 +152,7 @@ export function SignatureEditor({
     const markEmpty = () => body.toggleAttribute("data-empty", serialize(body) === "");
     fill.current = () => {
       body.innerHTML = content.current;
+      shown.current = serialize(body);
       markEmpty();
       measure();
     };
@@ -157,7 +162,8 @@ export function SignatureEditor({
       markEmpty();
       const next = serialize(body);
       // Ctrl+B with nothing selected, say, changes nothing yet.
-      if (next === content.current) return;
+      if (next === shown.current) return;
+      shown.current = next;
       content.current = next;
       handlers.current.onChange(next);
     };
