@@ -22,6 +22,9 @@ pub(crate) const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_RETRY_AFTER: Duration = Duration::from_secs(6 * 3600);
 /// The longest ETag kept to send back.
 const MAX_ETAG_LEN: usize = 256;
+/// The newest format of the service's answer this app reads. The service
+/// raises it only for a change an app reading this one would misread.
+pub(crate) const FORMAT_VERSION: u64 = 1;
 
 /// What the organization's service answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,12 +233,19 @@ fn error_code(body: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// Reads a 200 answer. Fields this app doesn't know are ignored; a source
-/// it doesn't know is an answer it can't act on.
+/// Reads a 200 answer. An answer in a newer format than
+/// [`FORMAT_VERSION`] (none given is 1) is one this app would misread, and
+/// so is a source it doesn't know: neither is acted on, and the last
+/// answer stays. Fields this app doesn't know are ignored.
 pub(crate) fn parse_answer(body: &[u8]) -> Result<ServerAnswer, String> {
+    fn first_format() -> u64 {
+        1
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Answer {
+        #[serde(default = "first_format")]
+        version: u64,
         #[serde(default)]
         source: String,
         #[serde(default)]
@@ -252,6 +262,16 @@ pub(crate) fn parse_answer(body: &[u8]) -> Result<ServerAnswer, String> {
     }
     let answer: Answer = serde_json::from_slice(body)
         .map_err(|_| "The signature service sent an answer this app can't read.".to_owned())?;
+    if answer.version > FORMAT_VERSION {
+        tracing::warn!(
+            "the signature service answered in format {}, newer than this app reads ({FORMAT_VERSION})",
+            answer.version
+        );
+        return Err(
+            "The signature service sent a newer kind of answer than this version of Cumulas Mail reads."
+                .into(),
+        );
+    }
     match answer.source.as_str() {
         "app" => {
             let signature = answer.signature.ok_or_else(|| {
@@ -441,7 +461,21 @@ mod tests {
             ),
             (
                 ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "version": 2, "source": "elsewhere" })),
+                    .set_body_json(serde_json::json!({ "version": 1, "source": "elsewhere" })),
+                None,
+            ),
+            // A newer format, which this app would misread, even with a
+            // source it knows.
+            (
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "version": 2, "source": "app", "applyToReplies": true,
+                    "signature": { "html": "<p>Ada</p>", "text": "Ada" },
+                })),
+                None,
+            ),
+            (
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "version": "1", "source": "none" })),
                 None,
             ),
             (
@@ -527,6 +561,7 @@ mod tests {
 
     #[test]
     fn a_text_only_signature_becomes_html() {
+        // No version: the first format.
         let answer = parse_answer(
             br#"{"source":"app","applyToReplies":false,"signature":{"html":"","text":"Ada <CEO>"}}"#,
         )
