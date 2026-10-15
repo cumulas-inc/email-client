@@ -1,14 +1,23 @@
 """End-to-end test of the real desktop app (Tauri + Rust core) through
-tauri-driver: add an IMAP account, read mail, send mail, restart.
+tauri-driver: add an IMAP account, read mail, send mail; then, with the window
+closed to the background, get notified of new mail (pushed over IMAP IDLE),
+open a message from its notification, use its buttons, and see notifications
+go once their mail is read elsewhere; finally restart.
 
 Run via ./run.sh, which provides the mail server, keyring and display.
 """
 
 import imaplib
 import os
+import smtplib
 import subprocess
 import time
+import uuid
+from email.message import EmailMessage
 from pathlib import Path
+
+from fake_notifications import FakeNotificationServer
+from Xlib import X, display, protocol
 
 from selenium import webdriver
 from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
@@ -116,10 +125,23 @@ def message_rows(driver) -> list[WebElement]:
     return [e for e in driver.find_elements(By.CSS_SELECTOR, "[role=option]") if e.is_displayed()]
 
 
+def ensure_archive_folder() -> None:
+    """GreenMail starts with an Inbox only; notifications offer Archive when
+    the account has an Archive folder."""
+    with imaplib.IMAP4("127.0.0.1", IMAP_PORT) as imap:
+        imap.login("alice", "secret")
+        imap.create("Archive")  # NO when it exists already, from an earlier run
+
+
 def test() -> None:
+    ensure_archive_folder()
+    # The app finds the notification server when it starts.
+    notifications = FakeNotificationServer()
+    notifications.start()
     driver = start()
     try:
         first_run(driver)
+        background_and_notifications(driver, notifications)
     except Exception:
         shot(driver, "failure")
         raise
@@ -201,6 +223,159 @@ def first_run(driver) -> None:
             what="sent copy in the Sent folder",
         )
         shot(driver, "05-sent")
+
+
+# --- new mail in the background ------------------------------------------------
+
+
+def app_windows() -> list:
+    """The app's top-level X windows: titled "Cumulas Mail", closable."""
+    d = display.Display()
+    protocols = d.intern_atom("WM_PROTOCOLS")
+    delete = d.intern_atom("WM_DELETE_WINDOW")
+
+    def walk(window):
+        yield window
+        for child in window.query_tree().children:
+            yield from walk(child)
+
+    found = []
+    for window in walk(d.screen().root):
+        try:
+            if window.get_wm_name() != "Cumulas Mail":
+                continue
+            prop = window.get_full_property(protocols, X.AnyPropertyType)
+            if prop and delete in prop.value:
+                found.append((d, window, protocols, delete))
+        except Exception:  # noqa: BLE001 - windows come and go
+            continue
+    return found
+
+
+def window_shown() -> bool:
+    return any(w.get_attributes().map_state == X.IsViewable for _, w, _, _ in app_windows())
+
+
+def close_window() -> None:
+    """Closes the window as the window manager's close button would."""
+    for d, window, protocols, delete in app_windows():
+        if window.get_attributes().map_state != X.IsViewable:
+            continue
+        event = protocol.event.ClientMessage(
+            window=window, client_type=protocols, data=(32, [delete, X.CurrentTime, 0, 0, 0])
+        )
+        window.send_event(event, event_mask=X.NoEventMask)
+        d.flush()
+    wait_for(lambda: not window_shown(), timeout=10, what="the window to hide")
+
+
+def deliver(subject: str, sender: str = "Pat Push <pat@example.com>") -> None:
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = "alice@example.com"
+    message["Subject"] = subject
+    message.set_content(f"{subject}: sent by the end-to-end test.")
+    with smtplib.SMTP("127.0.0.1", SMTP_PORT) as smtp:
+        smtp.login("bob", "secret")
+        smtp.send_message(message)
+
+
+def alice_flags(subject: str, folder: str = "INBOX") -> str | None:
+    """The message's flags on the server, or None if it isn't in `folder`."""
+    with imaplib.IMAP4("127.0.0.1", IMAP_PORT) as imap:
+        imap.login("alice", "secret")
+        imap.select(folder)
+        _, data = imap.search(None, "SUBJECT", f'"{subject}"')
+        uids = data[0].split()
+        if not uids:
+            return None
+        _, flags = imap.fetch(uids[-1], "(FLAGS)")
+        return flags[0].decode()
+
+
+def mark_read_elsewhere(subject: str) -> None:
+    with imaplib.IMAP4("127.0.0.1", IMAP_PORT) as imap:
+        imap.login("alice", "secret")
+        imap.select("INBOX")
+        _, data = imap.search(None, "SUBJECT", f'"{subject}"')
+        for uid in data[0].split():
+            imap.store(uid, "+FLAGS", "\\Seen")
+
+
+def action_key(notification: dict, label: str) -> str:
+    """The action key of a notification's button."""
+    actions = notification["actions"]
+    return actions[actions.index(label) - 1]
+
+
+def new_mail_notification(notifications: FakeNotificationServer, subject: str) -> dict:
+    return notifications.wait_for(
+        lambda n: n["body"] == subject and n["summary"] == "Pat Push",
+        timeout=30,
+        what=f"a notification for {subject!r}",
+    )
+
+
+def background_and_notifications(driver, notifications: FakeNotificationServer) -> None:
+    run = uuid.uuid4().hex[:6]
+
+    # Closing the window keeps the app running, and says so once.
+    close_window()
+    notifications.wait_for(
+        lambda n: n["summary"] == "Still running in the background", what="the background notice"
+    )
+    assert driver.title is not None  # still running
+
+    # New mail arrives over IMAP IDLE (the periodic sync is minutes away) and
+    # raises a notification with the sender, subject and buttons.
+    first = f"Pushed {run} one"
+    deliver(first)
+    shown = new_mail_notification(notifications, first)
+    assert shown["actions"][:2] == ["default", "Open"], shown["actions"]
+    assert "Mark as read" in shown["actions"] and "Archive" in shown["actions"], shown["actions"]
+    hints = shown["hints"]
+    assert hints.get("category") == "email.arrived", hints
+    assert hints.get("urgency") == 1, hints
+    assert hints.get("desktop-entry"), hints
+
+    # Clicking it (the server then closes it) opens the window on the
+    # message, which is marked read as it opens.
+    notifications.click(shown, token="e2e-activation-token")
+    wait_for(window_shown, timeout=15, what="the window to come back")
+    by_text(driver, first, "h1")
+    shot(driver, "07-opened-from-notification")
+    wait_for(
+        lambda: "\\Seen" in (alice_flags(first) or ""), timeout=20, what="read on the server"
+    )
+
+    # "Mark as read" works without the window.
+    close_window()
+    second = f"Pushed {run} two"
+    deliver(second)
+    shown = new_mail_notification(notifications, second)
+    notifications.click(shown, action_key(shown, "Mark as read"))
+    wait_for(
+        lambda: "\\Seen" in (alice_flags(second) or ""), timeout=20, what="read on the server"
+    )
+    assert not window_shown()
+
+    # So does "Archive".
+    third = f"Pushed {run} three"
+    deliver(third)
+    shown = new_mail_notification(notifications, third)
+    notifications.click(shown, action_key(shown, "Archive"))
+    wait_for(lambda: alice_flags(third) is None, timeout=20, what="the message to leave the Inbox")
+    assert alice_flags(third, "Archive") is not None, "not in Archive"
+
+    # Read on another device: the app withdraws the notification at the next
+    # sync (GreenMail doesn't report flag changes over IDLE).
+    fourth = f"Pushed {run} four"
+    deliver(fourth)
+    shown = new_mail_notification(notifications, fourth)
+    mark_read_elsewhere(fourth)
+    driver.execute_script("window.__TAURI_INTERNALS__.invoke('sync_all')")
+    notifications.wait_closed(shown["id"], timeout=30)
+    assert not window_shown()
 
 
 def bob_has(subject: str) -> bool:
