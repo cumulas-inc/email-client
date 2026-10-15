@@ -76,8 +76,9 @@ export function AboutSection() {
               <div className="about-row__text">
                 <p className="about-row__title">Passwords are kept in your keyring</p>
                 <p>
-                  Passwords and sign-in tokens are stored in your desktop&apos;s keyring, never in
-                  Cumulas Mail&apos;s own files.
+                  Passwords and sign-in tokens are kept encrypted by your desktop&apos;s keyring,
+                  never in plain text. In the Flatpak, they&apos;re in an encrypted keyring file in
+                  the app&apos;s data folder, unlocked through your desktop&apos;s keyring.
                 </p>
               </div>
             </div>
