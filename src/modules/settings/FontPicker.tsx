@@ -92,11 +92,20 @@ const ROW = 32;
 const MIN_BELOW = 4 * ROW + 8;
 /**
  * Installed fonts rendered past each end of the list's visible part: enough
- * that a fast wheel or touchpad scroll in WebKitGTK lands on painted rows.
+ * that a fast fling in WebKitGTK lands on rows that are already painted.
  */
-const OVERSCAN = 24;
-/** Installed fonts rendered before the list is measured. */
+const OVERSCAN = 100;
+/**
+ * Installed fonts past each end of the view shown in their own face. While
+ * the list scrolls, rows newly in view use the interface font: resolving a
+ * face per row as it mounts is what left a fast scroll blank.
+ */
+const FACE_MARGIN = 8;
+/** How long the list is still before the rows in view take their faces. */
+const SETTLE_MS = 100;
+/** Installed fonts rendered, and shown in their faces, before the list is measured. */
 const FIRST_RANGE: [number, number] = [0, MAX_HEIGHT / ROW + OVERSCAN];
+const FIRST_FACED: [number, number] = [0, MAX_HEIGHT / ROW + FACE_MARGIN];
 
 interface OptionRowProps<V> {
   id: string;
@@ -107,6 +116,8 @@ interface OptionRowProps<V> {
   active: boolean;
   /** The current choice. */
   current: boolean;
+  /** Shown in its own face (not while the list scrolls past it). */
+  face?: boolean;
   /** Its place among the installed fonts shown, which aren't all rendered. */
   setSize?: number;
   posInSet?: number;
@@ -120,6 +131,7 @@ function OptionRowBase<V>({
   option,
   active,
   current,
+  face = true,
   setSize,
   posInSet,
   onHover,
@@ -134,7 +146,7 @@ function OptionRowBase<V>({
       aria-posinset={posInSet}
       data-current={current || undefined}
       className="font-picker__option"
-      style={{ fontFamily: option.fontFamily }}
+      style={face ? { fontFamily: option.fontFamily } : undefined}
       onMouseMove={(e) => {
         // WebKit also sends one, without movement, when the list (or the
         // panel, making room for it) scrolls under a pointer that's still.
@@ -182,8 +194,11 @@ export function FontPicker<V>({
   // The highlighted option's index, or null for the current choice (which
   // may only be listed once the installed fonts arrive).
   const [active, setActive] = useState<number | null>(null);
-  // The installed fonts rendered: those in view, and a few either side.
+  // The installed fonts rendered: those in view, and many either side; and
+  // those shown in their own faces: in view when the list was last still.
   const [range, setRange] = useState(FIRST_RANGE);
+  const [faced, setFaced] = useState(FIRST_FACED);
+  const settleTimer = useRef<number | undefined>(undefined);
 
   const installed = useMemo(
     () =>
@@ -226,6 +241,7 @@ export function FontPicker<V>({
     setActive(null);
     setQuery(null);
     setRange(FIRST_RANGE);
+    setFaced(FIRST_FACED);
     setOpen(true);
     // Typing replaces the current name instead of adding to it.
     inputRef.current?.select();
@@ -302,23 +318,39 @@ export function FontPicker<V>({
     popup.dataset.side = downward.current ? "bottom" : "top";
   }, []);
 
-  // Which installed fonts to render: those in view, and a few either side.
+  // The installed fonts in view, give or take `margin` rows either side.
   // Measured in layout pixels, which the list's opening scale (and CSS zoom)
   // leave alone. The heading's offsetParent is the list, as that's fixed.
-  const measure = useCallback(() => {
+  // Null when nothing is laid out (as in tests).
+  const inView = useCallback((margin: number): [number, number] | null => {
     const popup = popupRef.current;
     const heading = headingRef.current;
-    if (!popup || !heading) return;
-    if (!popup.clientHeight) {
-      // Nothing is laid out (as in tests), so render them all.
-      setRange((r) => (r[1] === Infinity ? r : [0, Infinity]));
-      return;
-    }
+    if (!popup || !heading || !popup.clientHeight) return null;
     const top = (popup.scrollTop - heading.offsetTop - heading.offsetHeight) / ROW;
-    const first = Math.max(0, Math.floor(top) - OVERSCAN);
-    const last = Math.ceil(top + popup.clientHeight / ROW) + OVERSCAN;
-    setRange((r) => (r[0] === first && r[1] === last ? r : [first, last]));
+    return [
+      Math.max(0, Math.floor(top) - margin),
+      Math.ceil(top + popup.clientHeight / ROW) + margin,
+    ];
   }, []);
+
+  // Which installed fonts to render.
+  const measure = useCallback(() => {
+    if (!popupRef.current || !headingRef.current) return;
+    const [first, last] = inView(OVERSCAN) ?? [0, Infinity];
+    setRange((r) => (r[0] === first && r[1] === last ? r : [first, last]));
+  }, [inView]);
+
+  // Which to show in their faces, once the list has been still for a moment.
+  const settle = useCallback(() => {
+    if (!popupRef.current || !headingRef.current) return;
+    const [first, last] = inView(FACE_MARGIN) ?? [0, Infinity];
+    setFaced((r) => (r[0] === first && r[1] === last ? r : [first, last]));
+  }, [inView]);
+  useEffect(() => {
+    if (!open) return;
+    settle();
+    return () => window.clearTimeout(settleTimer.current);
+  }, [open, settle]);
 
   // In the top layer where popovers are supported, so the dialog's
   // scrolling panel can't clip it; it follows the input as that scrolls.
@@ -484,6 +516,7 @@ export function FontPicker<V>({
       <OptionRow
         key={option.key}
         {...rowProps(option, shownPresets.length + i)}
+        face={(i >= faced[0] && i < faced[1]) || i === highlighted}
         setSize={count}
         posInSet={i + 1}
       />,
@@ -509,6 +542,7 @@ export function FontPicker<V>({
         onChange={(e) => {
           if (!open) {
             setRange(FIRST_RANGE);
+            setFaced(FIRST_FACED);
             setOpen(true);
           }
           setQuery(e.target.value);
@@ -531,7 +565,11 @@ export function FontPicker<V>({
           onMouseDown={(e: MouseEvent) => e.preventDefault()}
           // The DOM has the rows scrolled to before the frame is painted, not
           // after it; the overscan covers what the compositor scrolls ahead.
-          onScroll={() => flushSync(measure)}
+          onScroll={() => {
+            flushSync(measure);
+            window.clearTimeout(settleTimer.current);
+            settleTimer.current = window.setTimeout(settle, SETTLE_MS);
+          }}
         >
           <div
             id={listId}

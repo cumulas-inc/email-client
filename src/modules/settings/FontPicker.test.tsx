@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -159,8 +159,8 @@ describe("FontPicker with thousands of fonts", () => {
     const user = userEvent.setup();
     const { input } = renderPicker();
     await user.click(input);
-    // Eight show under the preset and the heading, and 24 more are rendered.
-    expect(rendered()).toHaveLength(32);
+    // Eight show under the preset and the heading, and 100 more are rendered.
+    expect(rendered()).toHaveLength(108);
     expect(screen.getByRole("option", { name: "Family 0000" })).toHaveAttribute(
       "aria-posinset",
       "1",
@@ -176,15 +176,15 @@ describe("FontPicker with thousands of fonts", () => {
       expect(highlighted(input)).toHaveAttribute("aria-selected", "true");
     }
     expect(highlighted(input)).toHaveTextContent("Family 0039");
-    expect(rendered()).toContain("Family 0030");
-    expect(rendered()).not.toContain("Family 0000");
-    expect(rendered().length).toBeLessThan(60);
+    expect(rendered()).toContain("Family 0139");
+    expect(rendered()).not.toContain("Family 0140");
 
     // Far down, the highlighted font is rendered first, then those around it.
     for (let i = 0; i < 100; i++) await user.keyboard("{PageDown}");
     expect(highlighted(input)).toHaveTextContent("Family 1039");
     expect(rendered()).toContain("Family 1035");
-    expect(rendered().length).toBeLessThan(60);
+    expect(rendered()).not.toContain("Family 0000");
+    expect(rendered().length).toBeLessThan(220);
   });
 
   it("renders the fonts scrolled to, keeping the highlighted one", async () => {
@@ -204,6 +204,23 @@ describe("FontPicker with thousands of fonts", () => {
 
     await user.click(screen.getByRole("option", { name: "Family 0105" }));
     expect(onChange).toHaveBeenCalledWith({ kind: "family", family: "Family 0105" });
+  });
+
+  it("shows the fonts scrolled to in their own faces once the list is still", async () => {
+    const user = userEvent.setup();
+    const { input } = renderPicker();
+    await user.click(input);
+    const face = (name: string) => screen.getByRole("option", { name }).style.fontFamily;
+    expect(face("Family 0003")).toContain("Family 0003");
+
+    scrolled = ROWS_TOP + 1000 * 32;
+    fireEvent.scroll(screen.getByRole("listbox").parentElement!);
+    // While it scrolls, rows newly in view are in the interface font.
+    expect(face("Family 1003")).toBe("");
+    await waitFor(() => expect(face("Family 1003")).toContain("Family 1003"));
+    // The highlighted font is always in its own face.
+    await user.keyboard("{ArrowDown}");
+    expect(face(highlighted(input)!.textContent!)).toContain(highlighted(input)!.textContent!);
   });
 
   it("opens below when four fonts fit there, and stays there as the panel scrolls", async () => {
