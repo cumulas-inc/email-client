@@ -10,6 +10,7 @@ pub mod push;
 pub mod reminders;
 pub mod secrets;
 pub mod service;
+pub mod signatures;
 pub mod store;
 
 pub use error::{Error, ErrorCode, Result};
