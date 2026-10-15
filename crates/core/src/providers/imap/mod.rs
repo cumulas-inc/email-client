@@ -11,6 +11,7 @@
 
 mod connection;
 mod folders;
+mod idle;
 mod mime;
 mod smtp;
 mod sync;
@@ -22,6 +23,8 @@ use async_imap::imap_proto::rfc4315::UidSetMember;
 use async_imap::imap_proto::{Response, ResponseCode};
 use async_trait::async_trait;
 use tokio::sync::{Mutex, MutexGuard};
+
+pub use self::idle::{IdleConfig, ImapIdleWatcher};
 
 use self::connection::{ImapSession, MailboxInfo, quote};
 use super::{FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow};

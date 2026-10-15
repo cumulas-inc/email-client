@@ -6,6 +6,7 @@ pub mod error;
 pub mod html;
 pub mod model;
 pub mod providers;
+pub mod push;
 pub mod secrets;
 pub mod service;
 pub mod store;

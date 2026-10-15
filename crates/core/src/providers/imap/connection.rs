@@ -4,6 +4,8 @@
 //! Commands go through [`ImapSession::run`] rather than the convenience
 //! methods of `async-imap`: those ignore the tagged `NO`/`BAD` result of some
 //! commands (e.g. `UID FETCH`) and hide response codes such as `COPYUID`.
+//! IDLE is raw as well ([`ImapSession::idle`]): `Session::idle` consumes the
+//! session and its wait loop swallows `* OK [NOTIFICATIONOVERFLOW]`.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -22,16 +24,19 @@ use chrono::{DateTime, Utc};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use rustls_platform_verifier::BuilderVerifierExt;
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::{Sleep, timeout};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
+use tokio_util::sync::CancellationToken;
 
 use super::ImapCredentials;
 use super::mime::{self, StructureInfo};
 use crate::error::{Error, Result};
 use crate::model::TlsMode;
+use crate::push::PushEvent;
 
 /// Upper bound for establishing a connection (TCP, TLS and greeting).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -41,6 +46,22 @@ const IO_TIMEOUT: Duration = Duration::from_secs(60);
 /// Sessions unused for longer are replaced instead of reused: servers and NAT
 /// gateways silently drop idle connections, and detecting that costs a timeout.
 const MAX_IDLE: Duration = Duration::from_secs(240);
+/// TCP keepalive: the first probe after this much silence, then one every
+/// interval. Keeps NAT mappings open during IDLE and notices a vanished
+/// server in about three and a half minutes.
+const KEEPALIVE_TIME: Duration = Duration::from_secs(90);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const KEEPALIVE_RETRIES: u32 = 4;
+/// During IDLE the server may stay silent until the refresh; this is the
+/// allowance beyond it before the connection counts as dead.
+const IDLE_READ_SLACK: Duration = Duration::from_secs(90);
+/// Time for the server to confirm the end of IDLE.
+const IDLE_DONE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The same when shutting down, which must be quick.
+const IDLE_CANCEL_TIMEOUT: Duration = Duration::from_secs(1);
+/// A server ending IDLE by itself sooner than this is treated as a failure,
+/// so reconnecting backs off instead of re-issuing IDLE in a tight loop.
+const IDLE_MIN_SERVER_END: Duration = Duration::from_secs(60);
 
 /// Advice shown when the server rejects the password.
 pub(super) const APP_PASSWORD_HINT: &str = "If your provider uses two-step verification \
@@ -53,11 +74,13 @@ enum Transport {
     Tls(Box<TlsStream<TcpStream>>),
 }
 
-/// The connection to the server, plain or TLS. Reads and writes that stall
-/// for [`IO_TIMEOUT`] fail with [`io::ErrorKind::TimedOut`].
+/// The connection to the server, plain or TLS. Writes that stall for
+/// [`IO_TIMEOUT`], and reads that stall for the read timeout (the same,
+/// except during IDLE), fail with [`io::ErrorKind::TimedOut`].
 #[derive(Debug)]
 pub(super) struct MailStream {
     transport: Transport,
+    read_timeout: Duration,
     read_timer: Option<Pin<Box<Sleep>>>,
     write_timer: Option<Pin<Box<Sleep>>>,
 }
@@ -66,24 +89,32 @@ impl MailStream {
     fn new(transport: Transport) -> Self {
         Self {
             transport,
+            read_timeout: IO_TIMEOUT,
             read_timer: None,
             write_timer: None,
         }
     }
+
+    /// Changes how long a read may make no progress, starting afresh.
+    fn set_read_timeout(&mut self, limit: Duration) {
+        self.read_timeout = limit;
+        self.read_timer = None;
+    }
 }
 
 /// Turns a pending I/O poll into a timeout error once it has been pending for
-/// [`IO_TIMEOUT`] without any progress in between.
+/// `limit` without any progress in between.
 fn guard_progress<T>(
     result: Poll<io::Result<T>>,
     timer: &mut Option<Pin<Box<Sleep>>>,
+    limit: Duration,
     cx: &mut Context<'_>,
 ) -> Poll<io::Result<T>> {
     if result.is_ready() {
         *timer = None;
         return result;
     }
-    let sleep = timer.get_or_insert_with(|| Box::pin(tokio::time::sleep(IO_TIMEOUT)));
+    let sleep = timer.get_or_insert_with(|| Box::pin(tokio::time::sleep(limit)));
     if sleep.as_mut().poll(cx).is_pending() {
         return Poll::Pending;
     }
@@ -105,7 +136,7 @@ impl AsyncRead for MailStream {
             Transport::Plain(s) => Pin::new(s).poll_read(cx, buf),
             Transport::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
         };
-        guard_progress(result, &mut this.read_timer, cx)
+        guard_progress(result, &mut this.read_timer, this.read_timeout, cx)
     }
 }
 
@@ -120,7 +151,7 @@ impl AsyncWrite for MailStream {
             Transport::Plain(s) => Pin::new(s).poll_write(cx, buf),
             Transport::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
         };
-        guard_progress(result, &mut this.write_timer, cx)
+        guard_progress(result, &mut this.write_timer, IO_TIMEOUT, cx)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -129,7 +160,7 @@ impl AsyncWrite for MailStream {
             Transport::Plain(s) => Pin::new(s).poll_flush(cx),
             Transport::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
         };
-        guard_progress(result, &mut this.write_timer, cx)
+        guard_progress(result, &mut this.write_timer, IO_TIMEOUT, cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -248,6 +279,108 @@ pub(super) fn quote(value: &str) -> Result<String> {
     ))
 }
 
+/// Why [`ImapSession::idle`] returned with the session still usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdleExit {
+    /// The refresh interval passed; IDLE should be issued again.
+    Refreshed,
+    /// Cancelled; IDLE has ended.
+    Cancelled,
+}
+
+/// What an untagged response means to a session waiting in IDLE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Untagged {
+    Changed(PushEvent),
+    /// `* OK` without news; servers send these to keep the connection open.
+    Keepalive,
+    /// The server is closing the connection.
+    Bye,
+    Other,
+}
+
+/// Classifies an untagged response received in IDLE on the Inbox, with
+/// NOTIFY's `STATUS` (other folders) and `LIST` (folder list) responses.
+pub(super) fn classify(response: &Response<'_>) -> Untagged {
+    match response {
+        Response::MailboxData(MailboxDatum::Exists(_))
+        | Response::Expunge(_)
+        | Response::Vanished { .. }
+        // Flags changed, e.g. read on another device.
+        | Response::Fetch(..) => Untagged::Changed(PushEvent::InboxChanged),
+        Response::MailboxData(MailboxDatum::Status { mailbox, .. }) => {
+            Untagged::Changed(if mailbox.eq_ignore_ascii_case("INBOX") {
+                PushEvent::InboxChanged
+            } else {
+                PushEvent::FolderChanged {
+                    remote_id: mailbox.to_string(),
+                }
+            })
+        }
+        Response::MailboxData(MailboxDatum::List(_)) => {
+            Untagged::Changed(PushEvent::FolderListChanged)
+        }
+        Response::Data {
+            status: Status::Ok,
+            outcome,
+        } => {
+            // imap-proto doesn't know this RFC 5465 code and leaves it in
+            // the text: the server dropped notifications, so catch up.
+            let overflow = outcome
+                .information
+                .as_deref()
+                .and_then(|text| text.trim_start().get(..22))
+                .is_some_and(|code| code.eq_ignore_ascii_case("[NOTIFICATIONOVERFLOW]"));
+            if overflow {
+                Untagged::Changed(PushEvent::CatchUp)
+            } else {
+                Untagged::Keepalive
+            }
+        }
+        Response::Data {
+            status: Status::Bye,
+            ..
+        } => Untagged::Bye,
+        _ => Untagged::Other,
+    }
+}
+
+/// Login refusals that are about the server rather than the password: too
+/// many connections, or the server being unavailable for now (RFC 5530
+/// `UNAVAILABLE` and `LIMIT`).
+fn refuses_more_connections(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "[unavailable]",
+        "[limit]",
+        "too many",
+        "maximum number of connections",
+        "connection limit",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+/// Marks errors from [`refuses_more_connections`].
+const SERVER_BUSY: &str = "serverBusy";
+
+fn server_busy(host: &str) -> Error {
+    Error::network(format!(
+        "The IMAP server {host} isn't accepting more connections right now."
+    ))
+    .with_details(serde_json::json!({ "reason": SERVER_BUSY }))
+}
+
+/// Whether the server refused a connection because it has too many, or is
+/// unavailable for now; trying again soon won't help.
+pub(super) fn is_server_busy(error: &Error) -> bool {
+    error
+        .details
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .is_some_and(|r| r == SERVER_BUSY)
+}
+
 /// An authenticated IMAP session.
 pub(super) struct ImapSession {
     session: Session<MailStream>,
@@ -279,6 +412,9 @@ impl ImapSession {
             .await
         {
             Ok(session) => session,
+            Err((async_imap::error::Error::No(text), _)) if refuses_more_connections(&text) => {
+                return Err(server_busy(host));
+            }
             Err((async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_), _)) => {
                 return Err(Error::auth_required(format!(
                     "The IMAP server {host} rejected the user name or password for {}. \
@@ -329,8 +465,142 @@ impl ImapSession {
     }
 
     /// Logs out politely; failures are irrelevant as the session is dropped.
-    pub(super) async fn logout(mut self) {
-        let _ = timeout(Duration::from_secs(5), self.session.logout()).await;
+    pub(super) async fn logout(self) {
+        self.logout_within(Duration::from_secs(5)).await;
+    }
+
+    /// Logs out, giving up after `limit`.
+    pub(super) async fn logout_within(mut self, limit: Duration) {
+        let _ = timeout(limit, self.session.logout()).await;
+    }
+
+    fn set_read_timeout(&mut self, limit: Duration) {
+        self.session.get_mut().set_read_timeout(limit);
+    }
+
+    /// Waits in IDLE (RFC 2177) on the selected mailbox until `refresh`
+    /// passes or `cancel` fires, passing changes to `on` as they arrive.
+    /// News doesn't end the IDLE: the operations session syncs while this one
+    /// keeps listening. A server that refuses IDLE gives an `Unsupported`
+    /// error.
+    pub(super) async fn idle(
+        &mut self,
+        refresh: Duration,
+        cancel: &CancellationToken,
+        mut on: impl FnMut(PushEvent) + Send,
+    ) -> Result<IdleExit> {
+        self.healthy = false;
+        self.last_used = Instant::now();
+        // The server may legitimately say nothing until the refresh.
+        self.set_read_timeout(refresh + IDLE_READ_SLACK);
+        let result = self.run_idle(refresh, cancel, &mut on).await;
+        self.set_read_timeout(IO_TIMEOUT);
+        self.last_used = Instant::now();
+        result
+    }
+
+    async fn run_idle(
+        &mut self,
+        refresh: Duration,
+        cancel: &CancellationToken,
+        on: &mut (impl FnMut(PushEvent) + Send),
+    ) -> Result<IdleExit> {
+        let tag = self
+            .session
+            .run_command("IDLE")
+            .await
+            .map_err(imap_failure)?;
+        let mut farewell: Option<String> = None;
+        // The server accepts with a continuation ("+ idling").
+        loop {
+            let data = match self.session.read_response().await {
+                Ok(Some(data)) => data,
+                Ok(None) => return Err(closed(&farewell)),
+                Err(e) => return Err(io_failure(e)),
+            };
+            match data.parsed() {
+                Response::Continue(_) => break,
+                Response::Done {
+                    tag: done,
+                    status,
+                    outcome,
+                } if *done == tag => {
+                    // The command is over, so the session is fine; IDLE isn't.
+                    self.healthy = true;
+                    return Err(Error::unsupported(format!(
+                        "The IMAP server refused IDLE ({status:?}: {}).",
+                        outcome.information.as_deref().unwrap_or("no reason given")
+                    )));
+                }
+                other => report(other, on, &mut farewell),
+            }
+        }
+
+        let started = tokio::time::Instant::now();
+        let deadline = tokio::time::sleep(refresh);
+        tokio::pin!(deadline);
+        let exit = loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break IdleExit::Cancelled,
+                _ = &mut deadline => break IdleExit::Refreshed,
+                // Cancel-safe: the stream keeps partial responses buffered.
+                response = self.session.read_response() => {
+                    let data = match response {
+                        Ok(Some(data)) => data,
+                        Ok(None) => return Err(closed(&farewell)),
+                        Err(e) => return Err(io_failure(e)),
+                    };
+                    match data.parsed() {
+                        Response::Done { tag: done, status, outcome } if *done == tag => {
+                            // The server ended IDLE by itself.
+                            check_status("IDLE", status, outcome.information.as_deref())?;
+                            self.healthy = true;
+                            if started.elapsed() < IDLE_MIN_SERVER_END.min(refresh) {
+                                return Err(Error::network("The IMAP server keeps ending IDLE."));
+                            }
+                            return Ok(IdleExit::Refreshed);
+                        }
+                        other => report(other, on, &mut farewell),
+                    }
+                }
+            }
+        };
+
+        // DONE, then the tagged completion; changes may still arrive between.
+        self.set_read_timeout(IO_TIMEOUT);
+        let limit = match exit {
+            IdleExit::Cancelled => IDLE_CANCEL_TIMEOUT,
+            IdleExit::Refreshed => IDLE_DONE_TIMEOUT,
+        };
+        let finish = async {
+            self.session
+                .run_command_untagged("DONE")
+                .await
+                .map_err(imap_failure)?;
+            loop {
+                let data = match self.session.read_response().await {
+                    Ok(Some(data)) => data,
+                    Ok(None) => return Err(closed(&farewell)),
+                    Err(e) => return Err(io_failure(e)),
+                };
+                match data.parsed() {
+                    Response::Done {
+                        tag: done,
+                        status,
+                        outcome,
+                    } if *done == tag => {
+                        return check_status("IDLE", status, outcome.information.as_deref());
+                    }
+                    other => report(other, on, &mut farewell),
+                }
+            }
+        };
+        timeout(limit, finish)
+            .await
+            .map_err(|_| Error::network("The IMAP server did not end IDLE in time."))??;
+        self.healthy = true;
+        Ok(exit)
     }
 
     /// Runs one command, passing every response (including the tagged
@@ -561,6 +831,30 @@ impl ImapSession {
     }
 }
 
+/// Passes a change seen while idling to `on` and remembers a farewell.
+fn report(
+    response: &Response<'_>,
+    on: &mut (impl FnMut(PushEvent) + Send),
+    farewell: &mut Option<String>,
+) {
+    match classify(response) {
+        Untagged::Changed(event) => on(event),
+        Untagged::Bye => {
+            if let Response::Data { outcome, .. } = response {
+                *farewell = outcome.information.as_deref().map(str::to_owned);
+            }
+        }
+        Untagged::Keepalive | Untagged::Other => {}
+    }
+}
+
+fn closed(farewell: &Option<String>) -> Error {
+    Error::network(match farewell {
+        Some(reason) => format!("The IMAP server closed the connection: {reason}"),
+        None => "The IMAP server closed the connection.".to_owned(),
+    })
+}
+
 /// Opens the TCP connection, negotiates TLS and reads the greeting.
 async fn open_client(host: &str, port: u16, tls: TlsMode) -> Result<Client<MailStream>> {
     let tcp = TcpStream::connect((host, port)).await.map_err(|e| {
@@ -570,6 +864,13 @@ async fn open_client(host: &str, port: u16, tls: TlsMode) -> Result<Client<MailS
     })?;
     // Commands are small and latency-bound.
     let _ = tcp.set_nodelay(true);
+    let keepalive = TcpKeepalive::new()
+        .with_time(KEEPALIVE_TIME)
+        .with_interval(KEEPALIVE_INTERVAL)
+        .with_retries(KEEPALIVE_RETRIES);
+    if let Err(e) = SockRef::from(&tcp).set_tcp_keepalive(&keepalive) {
+        tracing::debug!("could not enable TCP keepalive: {e}");
+    }
     match tls {
         TlsMode::Tls => {
             let stream = tls_handshake(host, tcp).await?;
@@ -612,10 +913,15 @@ async fn greet(mut client: Client<MailStream>) -> Result<Client<MailStream>> {
         Some(Response::Data {
             status: Status::Bye,
             outcome,
-        }) => Err(Error::network(format!(
-            "The IMAP server refused the connection: {}",
-            outcome.information.as_deref().unwrap_or("no reason given")
-        ))),
+        }) => {
+            let reason = outcome.information.as_deref().unwrap_or("no reason given");
+            let error = Error::network(format!("The IMAP server refused the connection: {reason}"));
+            Err(if refuses_more_connections(reason) {
+                error.with_details(serde_json::json!({ "reason": SERVER_BUSY }))
+            } else {
+                error
+            })
+        }
         _ => Err(Error::provider(
             "The server did not greet like an IMAP server. Check the host and port.",
         )),
@@ -737,5 +1043,77 @@ mod tests {
     #[test]
     fn builds_tls_config_with_platform_verifier() {
         assert!(tls_config().is_ok());
+    }
+
+    fn classified(line: &str) -> Untagged {
+        let (rest, response) = Response::parse(line.as_bytes())
+            .unwrap_or_else(|e| panic!("{line:?} does not parse: {e:?}"));
+        assert!(rest.is_empty(), "{line:?}");
+        classify(&response)
+    }
+
+    #[test]
+    fn classifies_what_arrives_during_idle() {
+        let inbox = Untagged::Changed(PushEvent::InboxChanged);
+        for line in [
+            "* 23 EXISTS\r\n",
+            "* 3 EXPUNGE\r\n",
+            "* 4 FETCH (FLAGS (\\Seen))\r\n",
+            "* 4 FETCH (UID 99 FLAGS (\\Seen \\Flagged) MODSEQ (12345))\r\n",
+            "* VANISHED 41,43:116\r\n",
+            "* VANISHED (EARLIER) 300:310\r\n",
+            // NOTIFY may report the selected Inbox like any other folder.
+            "* STATUS INBOX (MESSAGES 3 UIDNEXT 9)\r\n",
+        ] {
+            assert_eq!(classified(line), inbox, "{line:?}");
+        }
+        assert_eq!(
+            classified("* STATUS \"Lists/Rust\" (MESSAGES 52 UIDNEXT 99 UNSEEN 3)\r\n"),
+            Untagged::Changed(PushEvent::FolderChanged {
+                remote_id: "Lists/Rust".into()
+            })
+        );
+        assert_eq!(
+            classified("* LIST () \"/\" \"Projects/New\"\r\n"),
+            Untagged::Changed(PushEvent::FolderListChanged)
+        );
+        assert_eq!(
+            classified("* OK [NOTIFICATIONOVERFLOW] Too many changes\r\n"),
+            Untagged::Changed(PushEvent::CatchUp)
+        );
+        assert_eq!(
+            classified("* ok [notificationoverflow]\r\n"),
+            Untagged::Changed(PushEvent::CatchUp)
+        );
+        assert_eq!(classified("* OK Still here\r\n"), Untagged::Keepalive);
+        assert_eq!(
+            classified("* OK [ALERT] Maintenance at 3 am\r\n"),
+            Untagged::Keepalive
+        );
+        assert_eq!(classified("* BYE Server shutting down\r\n"), Untagged::Bye);
+        assert_eq!(classified("* 2 RECENT\r\n"), Untagged::Other);
+        assert_eq!(
+            classified("* FLAGS (\\Seen \\Answered $Junk)\r\n"),
+            Untagged::Other
+        );
+    }
+
+    #[test]
+    fn tells_busy_servers_from_wrong_passwords() {
+        for text in [
+            "code: None, info: Some(\"[UNAVAILABLE] Maximum number of connections from user+IP exceeded\")",
+            "code: Some(Alert), info: Some(\"Too many simultaneous connections. (Failure)\")",
+            "code: None, info: Some(\"[LIMIT] Connection limit reached\")",
+        ] {
+            assert!(refuses_more_connections(text), "{text}");
+        }
+        for text in [
+            "code: None, info: Some(\"[AUTHENTICATIONFAILED] Invalid credentials\")",
+            "code: None, info: Some(\"LOGIN failed. Invalid login/password\")",
+        ] {
+            assert!(!refuses_more_connections(text), "{text}");
+        }
+        assert!(is_server_busy(&server_busy("imap.example.com")));
+        assert!(!is_server_busy(&Error::network("The connection was lost.")));
     }
 }

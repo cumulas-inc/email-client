@@ -32,6 +32,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 sha2 = "0.10"
 rand = "0.9"
 
+# Push: cancellation for the per-account watchers, TCP keepalive on IMAP sockets
+tokio-util = "0.7"
+socket2 = "0.6"
+
 # IMAP / SMTP / MIME
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 tokio-rustls = "0.26"
