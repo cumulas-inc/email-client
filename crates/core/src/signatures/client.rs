@@ -31,8 +31,9 @@ pub(crate) const FORMAT_VERSION: u64 = 1;
 pub enum ServerAnswer {
     /// The person's signature, which the app adds (`source: "app"`).
     Signature { html: String, on_replies: bool },
-    /// The organization's mail server adds it on send (`source: "relay"`).
-    AddedOnSend,
+    /// The organization's mail server adds it on send (`source: "relay"`),
+    /// to replies and forwards too when `on_replies`.
+    AddedOnSend { on_replies: bool },
     /// No signature for this person right now (`source: "none"`).
     None,
 }
@@ -289,7 +290,9 @@ pub(crate) fn parse_answer(body: &[u8]) -> Result<ServerAnswer, String> {
                 on_replies: answer.apply_to_replies,
             })
         }
-        "relay" => Ok(ServerAnswer::AddedOnSend),
+        "relay" => Ok(ServerAnswer::AddedOnSend {
+            on_replies: answer.apply_to_replies,
+        }),
         "none" => Ok(ServerAnswer::None),
         other => {
             tracing::warn!("the signature service answered with an unknown source ({other:.40})");
@@ -384,7 +387,16 @@ mod tests {
                     "version": 1, "source": "relay", "applyToReplies": false, "signature": null,
                 })),
                 Fetched::Answer {
-                    answer: ServerAnswer::AddedOnSend,
+                    answer: ServerAnswer::AddedOnSend { on_replies: false },
+                    etag: None,
+                },
+            ),
+            (
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "version": 1, "source": "relay", "applyToReplies": true, "signature": null,
+                })),
+                Fetched::Answer {
+                    answer: ServerAnswer::AddedOnSend { on_replies: true },
                     etag: None,
                 },
             ),

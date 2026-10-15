@@ -48,8 +48,12 @@ pub enum CheckOutcome {
         base: Option<Url>,
         etag: Option<String>,
     },
-    /// The organization's mail server adds the signature on send.
-    AddedOnSend { etag: Option<String> },
+    /// The organization's mail server adds the signature on send, to
+    /// replies and forwards too when `on_replies`.
+    AddedOnSend {
+        on_replies: bool,
+        etag: Option<String>,
+    },
     /// The organization doesn't use the service, or has no signature for
     /// the person; `etag` names the service's answer when it gave one.
     NotUsed { etag: Option<String> },
@@ -133,7 +137,9 @@ impl OrganizationSignatures for HttpOrganizationSignatures {
                         base: Some(self.client.base().clone()),
                         etag,
                     },
-                    ServerAnswer::AddedOnSend => CheckOutcome::AddedOnSend { etag },
+                    ServerAnswer::AddedOnSend { on_replies } => {
+                        CheckOutcome::AddedOnSend { on_replies, etag }
+                    }
                     ServerAnswer::None => CheckOutcome::NotUsed { etag },
                 },
                 Fetched::NotModified => CheckOutcome::Unchanged,
@@ -278,7 +284,17 @@ mod tests {
                         serde_json::json!({ "version": 1, "source": "relay", "signature": null }),
                     ),
                 CheckOutcome::AddedOnSend {
+                    on_replies: false,
                     etag: Some("\"r\"".into()),
+                },
+            ),
+            (
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "version": 1, "source": "relay", "applyToReplies": true, "signature": null,
+                })),
+                CheckOutcome::AddedOnSend {
+                    on_replies: true,
+                    etag: None,
                 },
             ),
             (

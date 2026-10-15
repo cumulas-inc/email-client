@@ -269,9 +269,12 @@ fn apply(
             ),
             Err(_) => failed(None, "the signature is too large to use"),
         },
-        CheckOutcome::AddedOnSend { etag } => {
-            answered(OrganizationSignatureState::AddedOnSend, None, false, etag)
-        }
+        CheckOutcome::AddedOnSend { on_replies, etag } => answered(
+            OrganizationSignatureState::AddedOnSend,
+            None,
+            on_replies,
+            etag,
+        ),
         CheckOutcome::NotUsed { etag } => {
             answered(OrganizationSignatureState::NotUsed, None, false, etag)
         }
@@ -304,7 +307,7 @@ fn visible(
     (
         o.state,
         o.html.as_deref().filter(|_| ready),
-        o.on_replies && ready,
+        o.on_replies && o.state.is_managed(),
         o.stale,
     )
 }
@@ -314,7 +317,8 @@ fn public(o: StoredOrganizationSignature) -> OrganizationSignature {
     OrganizationSignature {
         state: o.state,
         html: ready.then(|| o.html.unwrap_or_default()),
-        on_replies: o.on_replies && ready,
+        // Whoever adds it, the app or the organization's mail server.
+        on_replies: o.on_replies && o.state.is_managed(),
         checked_at: o.checked_at,
         stale: o.stale,
     }
@@ -356,28 +360,29 @@ pub(crate) fn next_check(
     o.retry_at.map_or(due, |at| due.max(at))
 }
 
-/// The signature a message starts with.
+/// The signature a message starts with. While the organization signs the
+/// account's mail, the own signature isn't used, not even on the replies
+/// and forwards it leaves unsigned.
 pub(crate) fn compose_signature(
     signature: &AccountSignature,
     reply_kind: Option<ReplyKind>,
 ) -> ComposeSignature {
     let new_message = reply_kind.is_none();
     let organization = &signature.organization;
+    let signed = new_message || organization.on_replies;
     match organization.state {
-        OrganizationSignatureState::Ready => {
-            if new_message || organization.on_replies {
-                ComposeSignature {
-                    kind: ComposeSignatureKind::Organization,
-                    html: Some(organization.html.clone().unwrap_or_default()),
-                }
-            } else {
-                ComposeSignature::none()
-            }
-        }
-        OrganizationSignatureState::AddedOnSend => ComposeSignature {
+        OrganizationSignatureState::Ready if signed => ComposeSignature {
+            kind: ComposeSignatureKind::Organization,
+            html: Some(organization.html.clone().unwrap_or_default()),
+        },
+        // Its mail server leaves the message as it is.
+        OrganizationSignatureState::AddedOnSend if signed => ComposeSignature {
             kind: ComposeSignatureKind::AddedOnSend,
             html: None,
         },
+        OrganizationSignatureState::Ready | OrganizationSignatureState::AddedOnSend => {
+            ComposeSignature::none()
+        }
         _ if !signature.own_html.is_empty() && (new_message || signature.own_on_replies) => {
             ComposeSignature {
                 kind: ComposeSignatureKind::Own,

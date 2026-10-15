@@ -661,8 +661,8 @@ pub enum OrganizationSignatureState {
     NotUsed,
     /// The organization's signature, which the app adds.
     Ready,
-    /// The organization's mail server adds the signature on send; the app
-    /// adds none.
+    /// The organization's mail server adds the signature on send (to
+    /// replies and forwards only with `on_replies`); the app adds none.
     AddedOnSend,
     /// The organization uses Cumulas Signatures but hasn't allowed Cumulas
     /// Mail.
@@ -683,7 +683,9 @@ pub struct OrganizationSignature {
     pub state: OrganizationSignatureState,
     /// Sanitized HTML; only while `Ready`.
     pub html: Option<String>,
-    /// The signature also goes on replies and forwards.
+    /// The organization's signature also goes on replies and forwards,
+    /// added by the app (`Ready`) or by its mail server (`AddedOnSend`);
+    /// false in other states.
     pub on_replies: bool,
     /// When the organization last answered (whatever it said).
     pub checked_at: Option<DateTime<Utc>>,
@@ -711,7 +713,7 @@ pub enum ComposeSignatureKind {
     Organization,
     Own,
     /// The organization's mail server signs the message on send: nothing
-    /// to insert.
+    /// to insert. A reply or forward it leaves unsigned is `None`.
     AddedOnSend,
 }
 

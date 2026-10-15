@@ -441,20 +441,24 @@ async fn only_answers_change_what_is_known_of_the_organization() {
     let steps = [
         (
             CheckOutcome::AddedOnSend {
+                on_replies: true,
                 etag: Some("\"2\"".into()),
             },
             OrganizationSignatureState::AddedOnSend,
+            true,
         ),
         (
             CheckOutcome::NotUsed { etag: None },
             OrganizationSignatureState::NotUsed,
+            false,
         ),
         (
             CheckOutcome::NotAllowed,
             OrganizationSignatureState::NotAllowed,
+            false,
         ),
     ];
-    for (outcome, state) in steps {
+    for (outcome, state, on_replies) in steps {
         sleep(61).await;
         s.organization.answer(outcome);
         let now = s
@@ -465,7 +469,7 @@ async fn only_answers_change_what_is_known_of_the_organization() {
             .organization;
         assert_eq!(now.state, state);
         assert_eq!(now.html, None);
-        assert!(!now.on_replies);
+        assert_eq!(now.on_replies, on_replies);
         assert!(!now.stale);
     }
     assert_eq!(s.sink.count(), 6);
@@ -557,11 +561,20 @@ async fn a_message_starts_with_the_signature_that_applies() {
             none.clone(),
         ),
         (
-            Some((State::AddedOnSend, false)),
+            Some((State::AddedOnSend, true)),
             "<p>Own</p>",
             true,
             added.clone(),
             added.clone(),
+        ),
+        // Its mail server leaves replies and forwards unsigned: nothing
+        // says it signs them, and the own signature isn't used either.
+        (
+            Some((State::AddedOnSend, false)),
+            "<p>Own</p>",
+            true,
+            added.clone(),
+            none.clone(),
         ),
         (
             Some((State::NotUsed, false)),
@@ -660,8 +673,10 @@ async fn a_message_waits_four_seconds_at_most_for_the_first_answer() {
     // A quick answer is waited for, and a check in progress joined.
     let other = work_account(&s);
     s.organization.take_slow(StdDuration::from_secs(1));
-    s.organization
-        .answer(CheckOutcome::AddedOnSend { etag: None });
+    s.organization.answer(CheckOutcome::AddedOnSend {
+        on_replies: true,
+        etag: None,
+    });
     let started = tokio::time::Instant::now();
     let (checked, composed) = tokio::join!(
         s.service.check_organization_signature(&other.id),
