@@ -222,7 +222,17 @@ impl Setup {
 
     /// Keeps an organization answer as if a check had just given it.
     fn known(&self, account: &Account, state: OrganizationSignatureState, on_replies: bool) {
-        let now = self.service.signatures.now();
+        self.known_at(account, state, on_replies, self.service.signatures.now());
+    }
+
+    /// Keeps an organization answer as if a check had given it at `now`.
+    fn known_at(
+        &self,
+        account: &Account,
+        state: OrganizationSignatureState,
+        on_replies: bool,
+        now: DateTime<Utc>,
+    ) {
         let stored = StoredOrganizationSignature {
             scope: Some(SCOPE.into()),
             state,
@@ -814,6 +824,86 @@ async fn kept_signatures_follow_the_current_sanitizer() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn starting_a_message_asks_again_only_while_the_organization_signs() {
+    use OrganizationSignatureState as State;
+    let s = setup();
+    let accounts: Vec<(State, Account)> = [
+        State::NotUsed,
+        State::NotAllowed,
+        State::AddedOnSend,
+        State::Ready,
+    ]
+    .into_iter()
+    .map(|state| {
+        let account = work_account(&s);
+        s.known(&account, state, true);
+        (state, account)
+    })
+    .collect();
+    sleep(2 * 3600).await;
+    // An organization that said it doesn't sign the mail (in most, that's
+    // Microsoft refusing the token) is asked once a day, not per message.
+    for (_, account) in &accounts[..2] {
+        s.compose(account, None).await;
+        s.compose(account, Some(ReplyKind::Reply)).await;
+    }
+    settle().await;
+    assert_eq!(s.organization.calls(), 0);
+    for (state, account) in &accounts[2..] {
+        s.organization.answer(CheckOutcome::Unchanged);
+        s.compose(account, None).await;
+        settle().await;
+        assert_eq!(
+            s.organization_state(account).checked_at,
+            Some(epoch() + Duration::hours(2)),
+            "{state:?}"
+        );
+    }
+    assert_eq!(s.organization.calls(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_organization_that_doesnt_sign_is_asked_once_a_day_across_starts() {
+    let s = setup();
+    let not_used = work_account(&s);
+    s.known(&not_used, OrganizationSignatureState::NotUsed, false);
+    let not_allowed = work_account(&s);
+    s.known_at(
+        &not_allowed,
+        OrganizationSignatureState::NotAllowed,
+        false,
+        epoch() - Duration::hours(20),
+    );
+    s.organization.answer(CheckOutcome::NotAllowed);
+    s.organization.answer(CheckOutcome::NotUsed { etag: None });
+    let start = tokio::time::Instant::now();
+    let at = |seconds: u64| tokio::time::sleep_until(start + StdDuration::from_secs(seconds));
+    s.service.start_background();
+
+    // Not because the app started...
+    at(60).await;
+    assert_eq!(s.organization.calls(), 0);
+    // ...but 24 hours after each last answer, by the wall clock.
+    at(4 * 3600 - 30).await;
+    assert_eq!(s.organization.calls(), 0);
+    at(4 * 3600 + 30).await;
+    assert_eq!(s.organization.calls(), 1);
+    assert_eq!(
+        s.organization_state(&not_allowed).checked_at,
+        Some(epoch() + Duration::hours(4))
+    );
+    at(24 * 3600 - 30).await;
+    assert_eq!(s.organization.calls(), 1);
+    at(24 * 3600 + 30).await;
+    assert_eq!(s.organization.calls(), 2);
+    assert_eq!(
+        s.organization_state(&not_used).checked_at,
+        Some(epoch() + Duration::hours(24))
+    );
+    s.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn one_check_at_a_time_and_one_a_minute() {
     let s = setup();
     let account = work_account(&s);
@@ -1053,6 +1143,7 @@ async fn signing_in_asks_at_once() {
         expires_in: StdDuration::from_secs(3600),
         consent_refused: None,
     });
+    let sign_in = s.connector.sign_in.lock().unwrap().clone();
     let account = s
         .service
         .add_microsoft_account(&|_| Ok(()), None)
@@ -1060,6 +1151,27 @@ async fn signing_in_asks_at_once() {
         .unwrap();
     settle().await;
     assert_eq!(s.organization.calls(), 1);
+    assert_eq!(
+        s.organization_state(&account).state,
+        OrganizationSignatureState::Ready
+    );
+
+    // Whatever was said: an organization that hadn't allowed the app may
+    // have since.
+    s.known(&account, OrganizationSignatureState::NotAllowed, false);
+    s.organization.answer(CheckOutcome::Signature {
+        html: "<p>Org</p>".into(),
+        on_replies: false,
+        base: Some(base()),
+        etag: None,
+    });
+    *s.connector.sign_in.lock().unwrap() = sign_in;
+    s.service
+        .add_microsoft_account(&|_| Ok(()), None)
+        .await
+        .unwrap();
+    settle().await;
+    assert_eq!(s.organization.calls(), 2);
     assert_eq!(
         s.organization_state(&account).state,
         OrganizationSignatureState::Ready
@@ -1116,11 +1228,26 @@ fn the_next_check_follows_what_was_said() {
         attempted_at: Some(now - Duration::hours(hours_ago)),
         ..Default::default()
     };
-    // Not asked yet this run: now, whatever was said.
+    // Not asked yet this run: now, while the organization signs the mail
+    // or nothing is known...
+    for state in [State::Ready, State::AddedOnSend] {
+        assert_eq!(next_check(&answered(state, 1), false, false, now), now);
+    }
     assert_eq!(
-        next_check(&answered(State::Ready, 1), false, false, now),
+        next_check(&StoredOrganizationSignature::default(), false, false, now),
         now
     );
+    // ...but a day after it said it doesn't, whether asked this run or not.
+    for asked in [false, true] {
+        assert_eq!(
+            next_check(&answered(State::NotUsed, 1), asked, false, now),
+            now + Duration::hours(23)
+        );
+        assert_eq!(
+            next_check(&answered(State::NotAllowed, 20), asked, false, now),
+            now + Duration::hours(4)
+        );
+    }
     assert_eq!(
         next_check(&answered(State::Ready, 1), true, false, now),
         now + Duration::hours(5)
@@ -1152,6 +1279,16 @@ fn the_next_check_follows_what_was_said() {
     );
     // The network came back.
     assert_eq!(next_check(&failed, true, true, now), now);
+    // A failed check goes again at the start, whatever was known.
+    let failed_not_used = StoredOrganizationSignature {
+        state: State::NotUsed,
+        ..failed.clone()
+    };
+    assert_eq!(next_check(&failed_not_used, false, false, now), now);
+    assert_eq!(
+        next_check(&failed_not_used, true, false, now),
+        now + Duration::minutes(20)
+    );
     // The service said when: never before.
     let busy = StoredOrganizationSignature {
         retry_at: Some(now + Duration::hours(2)),

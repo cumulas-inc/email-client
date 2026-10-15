@@ -7,12 +7,17 @@
 //! wanting the person), what was known stays, marked stale: a signature the
 //! organization gave keeps working offline.
 //!
-//! The organization is asked about 15 seconds after the app starts, then
-//! every 6 hours while it signs the account's mail, every 24 hours while it
-//! doesn't, and 30 minutes after a failure (or when the service says, or as
-//! soon as the network is back). Signing in asks at once. Times go by the
-//! wall clock, which keeps counting while the computer sleeps; the
-//! scheduler looks at it at least every minute.
+//! While the organization signs the account's mail, or nothing is known
+//! yet, or the last check failed, it's asked about 15 seconds after the app
+//! starts, then every 6 hours, and in the background when a message is
+//! started more than an hour after its last answer (while it signs the
+//! mail). While it doesn't, or doesn't allow the app (in most organizations,
+//! Microsoft refusing the token), it's asked once every 24 hours, also
+//! across restarts, and never because the app started or a message was. A
+//! failed check goes again 30 minutes later (or when the service says, or as
+//! soon as the network is back). Signing in asks at once, whatever was
+//! said. Times go by the wall clock, which keeps counting while the
+//! computer sleeps; the scheduler looks at it at least every minute.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,7 +49,8 @@ use crate::store::{Store, StoredOrganizationSignature};
 pub(crate) const FIRST_CHECK_DELAY: StdDuration = StdDuration::from_secs(15);
 /// How often an organization that signs the account's mail is asked again.
 pub(crate) const MANAGED_EVERY: Duration = Duration::hours(6);
-/// How often one that doesn't (or doesn't allow the app) is asked again.
+/// How often one that doesn't (or doesn't allow the app) is asked again,
+/// whether the app restarted meanwhile or not.
 pub(crate) const UNMANAGED_EVERY: Duration = Duration::hours(24);
 /// How long after a failed check the next one comes, unless the service
 /// said.
@@ -55,8 +61,9 @@ const MIN_RETRY_AFTER: Duration = Duration::minutes(1);
 pub(crate) const MIN_INTERVAL: StdDuration = StdDuration::from_secs(60);
 /// Starting a message waits this long at most for a first check.
 pub(crate) const COMPOSE_WAIT: StdDuration = StdDuration::from_secs(4);
-/// Starting a message checks again, in the background, when the last
-/// answer is older than this.
+/// Starting a message checks again, in the background, when the
+/// organization signs the account's mail and its last answer is older than
+/// this.
 pub(crate) const COMPOSE_RECHECK: Duration = Duration::hours(1);
 /// The longest the scheduler sleeps: its timer stands still while the
 /// computer sleeps, so it looks at the clock at least this often.
@@ -356,8 +363,10 @@ fn unsupported() -> OrganizationSignature {
     }
 }
 
-/// When the organization is to be asked next: soon after the app starts,
-/// then by what it last said.
+/// When the organization is to be asked next, by what it last said:
+/// soon after the app starts, unless it said it doesn't sign the account's
+/// mail (or doesn't allow the app), which is asked once a day whatever the
+/// app did meanwhile.
 pub(crate) fn next_check(
     o: &StoredOrganizationSignature,
     asked_this_run: bool,
@@ -366,16 +375,23 @@ pub(crate) fn next_check(
 ) -> DateTime<Utc> {
     use OrganizationSignatureState as State;
     let since = |at: Option<DateTime<Utc>>, every: Duration| at.map_or(now, |at| at + every);
-    let due = if !asked_this_run || (o.stale && retry_failed) {
-        now
-    } else if o.stale {
-        o.retry_at
-            .unwrap_or_else(|| since(o.attempted_at, RETRY_AFTER_FAILURE))
+    let due = if o.stale {
+        if !asked_this_run || retry_failed {
+            now
+        } else {
+            o.retry_at
+                .unwrap_or_else(|| since(o.attempted_at, RETRY_AFTER_FAILURE))
+        }
     } else {
         match o.state {
-            State::Ready | State::AddedOnSend => since(o.checked_at, MANAGED_EVERY),
+            State::Ready | State::AddedOnSend if asked_this_run => {
+                since(o.checked_at, MANAGED_EVERY)
+            }
+            // Mostly Microsoft refusing the token in an organization
+            // without the service's app: asking at every start would only
+            // fill its sign-in logs.
             State::NotUsed | State::NotAllowed => since(o.checked_at, UNMANAGED_EVERY),
-            State::Unchecked | State::Unsupported => now,
+            State::Ready | State::AddedOnSend | State::Unchecked | State::Unsupported => now,
         }
     };
     // Never before the service said.
@@ -474,8 +490,9 @@ impl CoreService {
 
     /// The signature a new message (`reply_kind` `None`), reply or forward
     /// from the account starts with. Waits up to four seconds for the
-    /// organization's first answer; checks again in the background when
-    /// its last is more than an hour old.
+    /// organization's first answer; checks again in the background when it
+    /// signs the account's mail and its last answer is more than an hour
+    /// old.
     pub async fn get_compose_signature(
         &self,
         account_id: &str,
@@ -501,7 +518,8 @@ impl CoreService {
                 {
                     signature = self.account_signature(&account)?;
                 }
-            } else {
+            } else if state.is_managed() {
+                // Not otherwise: what it said is asked again once a day.
                 let old = signature
                     .organization
                     .checked_at
