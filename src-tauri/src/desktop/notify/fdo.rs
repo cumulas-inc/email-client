@@ -438,7 +438,7 @@ impl FdoNotifier {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::time::Duration;
 
     use tokio::sync::mpsc;
@@ -995,15 +995,16 @@ mod tests {
     // --- on a real bus -------------------------------------------------------
 
     /// A private `dbus-daemon`, for what only a real bus does: it drops a
-    /// client that sends it a malformed message, and tells who owns a name.
-    struct PrivateBus {
+    /// client that sends it a malformed message, tells who owns a name, and
+    /// names each connection (portal requests go by that name).
+    pub(crate) struct PrivateBus {
         daemon: std::process::Child,
-        address: String,
+        pub(crate) address: String,
     }
 
     impl PrivateBus {
         /// `None` (and the test passes untried) without `dbus-daemon`.
-        fn start() -> Option<Self> {
+        pub(crate) fn start() -> Option<Self> {
             let daemon = std::process::Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--print-address"])
                 .stdout(std::process::Stdio::piped())
@@ -1022,7 +1023,7 @@ mod tests {
             Some(bus)
         }
 
-        async fn connection(&self) -> zbus::Result<zbus::Connection> {
+        pub(crate) async fn connection(&self) -> zbus::Result<zbus::Connection> {
             zbus::connection::Builder::address(self.address.as_str())?
                 .build()
                 .await

@@ -39,11 +39,11 @@ fontdb = "0.24"
 ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 
 # The desktop around the core (src/desktop): notifications through the
-# portal (Flatpak) or org.freedesktop.Notifications, the Background and
-# NetworkMonitor portals, the tray's StatusNotifier host check, and the
-# window's startup id for focus on Wayland.
+# portal (Flatpak) or org.freedesktop.Notifications, the Background,
+# NetworkMonitor and OpenURI portals, the tray's StatusNotifier host check,
+# and the window's startup id for focus on Wayland.
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "notification", "background", "network_monitor"] }
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "notification", "background", "network_monitor", "open_uri"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 gtk = "0.18"
 # The tray library is loaded at run time, and tray-icon panics when it's

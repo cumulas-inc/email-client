@@ -142,7 +142,7 @@ async def run() -> None:
             "Open Cumulas Mail",
             "New message",
             "Check for new mail",
-            "Pause notifications",
+            "Pause mail notifications",
             "For 1 hour",
             "Until tomorrow",
             "Resume",

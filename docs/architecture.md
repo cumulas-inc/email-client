@@ -99,7 +99,8 @@ this sends where.
 - `tray.rs`: a tray icon only where the libayatana-appindicator library loads
   and a StatusNotifier host owns `org.kde.StatusNotifierWatcher` (followed as
   it comes and goes). Its menu opens the app, starts a message, checks mail,
-  pauses notifications and quits; its icon and first line show unread mail.
+  pauses mail notifications (reminders still show) and quits; its icon and
+  first line show unread mail.
 - `background.rs`: inside a Flatpak, the Background portal allows running
   without a window and starting at login (a refusal makes closing the window
   quit) and shows a status; a native install writes

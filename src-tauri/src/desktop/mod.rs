@@ -12,13 +12,15 @@ pub mod window;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::time::Duration;
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use cumulas_core::model::{Account, ActiveReminder, FolderRole, Settings};
 use cumulas_core::service::MailAlert;
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use self::background::Background;
 use self::notify::{
@@ -45,48 +47,53 @@ pub struct Desktop {
     pub window: WindowState,
     pub tray: Tray,
     pub background: Background,
-    /// Reminder changes, carried out one after another (see
-    /// [`Desktop::reminders_changed`]); set by [`start`].
-    reminders: OnceLock<mpsc::UnboundedSender<ReminderChange>>,
+    /// Reminder changes, carried out one after another by [`start`] (see
+    /// [`serve_reminders`]).
+    reminders: mpsc::UnboundedSender<ReminderChange>,
 }
 
 /// Reminders that came due, and keys of those no longer due.
 type ReminderChange = (Vec<ActiveReminder>, Vec<String>);
 
+/// What [`start`] serves: clicks on notifications, and reminder changes
+/// (those from before it started wait for it).
+pub struct Inbound {
+    invoked: mpsc::UnboundedReceiver<notify::Invoked>,
+    reminders: mpsc::UnboundedReceiver<ReminderChange>,
+}
+
+/// How often reminders whose notification didn't show are shown again, and
+/// for how long: the notification service may be restarting, or not reached
+/// yet (it's tried again a minute after it wasn't), and reminders are about
+/// now.
+const RETRY_REMINDERS: Duration = Duration::from_secs(30);
+const RETRY_REMINDERS_FOR: Duration = Duration::from_secs(5 * 60);
+
 impl Desktop {
-    /// The desktop state, and where notification clicks arrive (for
-    /// [`start`]).
-    pub fn new(app: &AppHandle) -> (Self, mpsc::UnboundedReceiver<notify::Invoked>) {
+    /// The desktop state, and what [`start`] serves.
+    pub fn new(app: &AppHandle) -> (Self, Inbound) {
         let (clicks, invoked) = mpsc::unbounded_channel();
+        let (reminders, changes) = mpsc::unbounded_channel();
         let desktop = Self {
             notifications: Notifications::new(clicks),
             router: Router::default(),
             window: WindowState::default(),
             tray: Tray::default(),
             background: Background::new(app),
-            reminders: OnceLock::new(),
+            reminders,
         };
-        (desktop, invoked)
+        let inbound = Inbound {
+            invoked,
+            reminders: changes,
+        };
+        (desktop, inbound)
     }
 
     /// The reminders changed: their notifications follow, in the order the
     /// changes came (a reminder shown and dismissed at once mustn't be
     /// withdrawn before it's shown).
-    pub fn reminders_changed(
-        &self,
-        app: &AppHandle,
-        newly_due: Vec<ActiveReminder>,
-        cleared: Vec<String>,
-    ) {
-        if let Some(queue) = self.reminders.get() {
-            let _ = queue.send((newly_due, cleared));
-            return;
-        }
-        // Before the desktop side started.
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            reminders_changed(&app, newly_due, cleared).await;
-        });
+    pub fn reminders_changed(&self, newly_due: Vec<ActiveReminder>, cleared: Vec<String>) {
+        let _ = self.reminders.send((newly_due, cleared));
     }
 
     /// Whether closing the window keeps the app running: the setting is on,
@@ -132,20 +139,17 @@ impl Desktop {
     }
 }
 
-/// Starts the desktop side once the core runs: notification clicks, the
-/// tray, the network monitor and the background status.
-pub fn start(app: &AppHandle, invoked: mpsc::UnboundedReceiver<notify::Invoked>) {
-    let (queue, mut changes) = mpsc::unbounded_channel::<ReminderChange>();
-    if app.state::<Desktop>().reminders.set(queue).is_ok() {
-        let handle = app.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some((newly_due, cleared)) = changes.recv().await {
-                reminders_changed(&handle, newly_due, cleared).await;
-            }
-        });
-    }
+/// Starts the desktop side once the core runs: notification clicks,
+/// reminders, the tray, the network monitor and the background status.
+pub fn start(app: &AppHandle, inbound: Inbound) {
     let handle = app.clone();
-    tauri::async_runtime::spawn(serve_clicks(invoked, move |click| {
+    let show = move |due: Vec<ActiveReminder>, cleared: Vec<String>, now: DateTime<Utc>| {
+        let handle = handle.clone();
+        async move { reminders_changed(&handle, due, &cleared, now).await }
+    };
+    tauri::async_runtime::spawn(serve_reminders(inbound.reminders, Utc::now, show));
+    let handle = app.clone();
+    tauri::async_runtime::spawn(serve_clicks(inbound.invoked, move |click| {
         let handle = handle.clone();
         async move { router::handle(&handle, click).await }
     }));
@@ -184,6 +188,80 @@ async fn serve_clicks<F>(
         } else {
             handle(click).await;
         }
+    }
+}
+
+/// Carries out reminder changes in the order they came, with `show`, which
+/// returns the reminders whose notification didn't show. Those are shown
+/// again with the next change and every [`RETRY_REMINDERS`], until they
+/// show, are no longer due, or are no longer news: the core shows a
+/// reminder once.
+async fn serve_reminders<F, Fut>(
+    mut changes: mpsc::UnboundedReceiver<ReminderChange>,
+    clock: impl Fn() -> DateTime<Utc>,
+    show: F,
+) where
+    F: Fn(Vec<ActiveReminder>, Vec<String>, DateTime<Utc>) -> Fut,
+    Fut: Future<Output = Vec<ActiveReminder>>,
+{
+    let mut unshown: Vec<Unshown> = Vec::new();
+    loop {
+        let retry = !unshown.is_empty();
+        let (newly_due, cleared) = tokio::select! {
+            change = changes.recv() => match change {
+                Some(change) => change,
+                None => return,
+            },
+            () = tokio::time::sleep(RETRY_REMINDERS), if retry => (Vec::new(), Vec::new()),
+        };
+        let now = clock();
+        let awake = Instant::now();
+        unshown.retain(|u| {
+            let key = &u.reminder.key;
+            if cleared.contains(key) || newly_due.iter().any(|n| &n.key == key) {
+                return false;
+            }
+            let stale = u.stale(now, awake);
+            if stale {
+                tracing::warn!("gave up showing a reminder's notification");
+            }
+            !stale
+        });
+        let mut due: Vec<ActiveReminder> = unshown.iter().map(|u| u.reminder.clone()).collect();
+        due.extend(newly_due);
+        let failed = show(due, cleared, now).await;
+        unshown = failed
+            .into_iter()
+            .map(|reminder| {
+                let earlier = unshown.iter().find(|u| u.reminder.key == reminder.key);
+                Unshown {
+                    since: earlier.map_or(now, |u| u.since),
+                    awake_since: earlier.map_or(awake, |u| u.awake_since),
+                    reminder,
+                }
+            })
+            .collect();
+    }
+}
+
+/// A reminder whose notification didn't show yet, and since when: by the
+/// wall clock, which runs on while the computer sleeps (tokio's timers
+/// don't), and by tokio's, which isn't set back.
+struct Unshown {
+    reminder: ActiveReminder,
+    since: DateTime<Utc>,
+    awake_since: Instant,
+}
+
+impl Unshown {
+    /// No longer news: its event is over (the core lists a reminder it
+    /// couldn't show before then as missed; it doesn't show it), or it's
+    /// been [`RETRY_REMINDERS_FOR`], asleep or not.
+    fn stale(&self, now: DateTime<Utc>, awake: Instant) -> bool {
+        let over = self.reminder.ends_at.is_some_and(|end| end <= now);
+        let age = (now - self.since).to_std().unwrap_or_default();
+        let awake_for = awake.duration_since(self.awake_since);
+        over || age.max(awake_for) >= RETRY_REMINDERS_FOR
     }
 }
 
@@ -234,19 +312,19 @@ pub async fn new_mail(app: &AppHandle, account: &Account, alert: MailAlert) {
 }
 
 /// The reminders changed: the notifications of those no longer due go, and
-/// those that just came due show. Unlike new mail's, they show while the
-/// window is in front too: they're about now, and the window may not be
-/// the one in front for long. (The header's bell lists them as well.)
-async fn reminders_changed(app: &AppHandle, newly_due: Vec<ActiveReminder>, cleared: Vec<String>) {
+/// those due show. Unlike new mail's, they show while the window is in
+/// front too: they're about now, and the window may not be the one in
+/// front for long. (The header's bell lists them as well.) Returns the
+/// reminders whose notification didn't show.
+async fn reminders_changed(
+    app: &AppHandle,
+    due: Vec<ActiveReminder>,
+    cleared: &[String],
+    now: DateTime<Utc>,
+) -> Vec<ActiveReminder> {
     let Some(desktop) = app.try_state::<Desktop>() else {
-        return;
+        return Vec::new();
     };
-    if !cleared.is_empty() {
-        desktop.notifications.settle(&cleared).await;
-    }
-    if newly_due.is_empty() {
-        return;
-    }
     let settings = app
         .try_state::<AppState>()
         .and_then(|state| state.service.get_settings().ok())
@@ -255,11 +333,30 @@ async fn reminders_changed(app: &AppHandle, newly_due: Vec<ActiveReminder>, clea
         snooze_minutes: settings.default_snooze_minutes,
         sound: settings.notify_sound,
     };
-    for (toast, keys) in reminder_toasts(&newly_due, options, Local::now()) {
-        if let Err(e) = desktop.notifications.show(&toast, keys).await {
+    let now = now.with_timezone(&Local);
+    show_reminders(&desktop.notifications, due, cleared, options, now).await
+}
+
+/// Withdraws the notifications of reminders no longer due, and shows those
+/// of `due`; returns the reminders whose notification didn't show.
+async fn show_reminders(
+    notifications: &Notifications,
+    due: Vec<ActiveReminder>,
+    cleared: &[String],
+    options: ReminderToastOptions,
+    now: DateTime<Local>,
+) -> Vec<ActiveReminder> {
+    if !cleared.is_empty() {
+        notifications.settle(cleared).await;
+    }
+    let mut unshown = Vec::new();
+    for (toast, keys) in reminder_toasts(&due, options, now) {
+        if let Err(e) = notifications.show(&toast, keys.clone()).await {
             tracing::warn!("could not show a reminder: {e}");
+            unshown.extend(due.iter().filter(|r| keys.contains(&r.key)).cloned());
         }
     }
+    unshown
 }
 
 /// Says once that closing the window left the app running.
@@ -419,9 +516,13 @@ pub(crate) fn find_desktop_entry(dirs: &[PathBuf]) -> Option<notify::fdo::Deskto
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use chrono::TimeZone;
+    use cumulas_core::model::ReminderKind;
 
     use super::*;
+    use crate::desktop::notify::tests::{Recording, reminder};
 
     #[tokio::test]
     async fn a_slow_mark_as_read_holds_up_no_other_click() {
@@ -469,6 +570,173 @@ mod tests {
             [Action::Archive("b".into()), Action::MarkRead("a".into())]
         );
         drop(clicks);
+        serving.await.unwrap();
+    }
+
+    /// The wall clock, which runs on while the computer sleeps, while
+    /// tokio's (paused in these tests) stands still; and which can be set
+    /// back.
+    #[derive(Clone)]
+    struct WallClock {
+        base: DateTime<Utc>,
+        awake_since: Instant,
+        moved: Arc<std::sync::Mutex<chrono::Duration>>,
+    }
+
+    impl WallClock {
+        fn new(base: DateTime<Local>) -> Self {
+            Self {
+                base: base.with_timezone(&Utc),
+                awake_since: Instant::now(),
+                moved: Arc::default(),
+            }
+        }
+
+        fn now(&self) -> DateTime<Utc> {
+            let awake = chrono::Duration::from_std(self.awake_since.elapsed()).unwrap();
+            self.base + awake + *self.moved.lock().unwrap()
+        }
+
+        fn sleep(&self, how_long: chrono::Duration) {
+            *self.moved.lock().unwrap() += how_long;
+        }
+
+        fn set_back(&self, by: chrono::Duration) {
+            *self.moved.lock().unwrap() -= by;
+        }
+    }
+
+    /// Serves reminder changes with `clock` onto a recording notification
+    /// server: where changes go, the server, and the serving task.
+    fn serving_reminders(
+        clock: &WallClock,
+    ) -> (
+        mpsc::UnboundedSender<ReminderChange>,
+        Arc<Recording>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let recording = Arc::new(Recording::default());
+        let (clicks, _) = mpsc::unbounded_channel();
+        let notifications = Arc::new(Notifications::with_notifier(recording.clone(), clicks));
+        let options = ReminderToastOptions {
+            snooze_minutes: 5,
+            sound: true,
+        };
+        let (changes, queue) = mpsc::unbounded_channel();
+        let clock = clock.clone();
+        let serving = tokio::spawn(serve_reminders(
+            queue,
+            move || clock.now(),
+            move |due, cleared, now| {
+                let notifications = Arc::clone(&notifications);
+                async move {
+                    let now = now.with_timezone(&Local);
+                    show_reminders(&notifications, due, &cleared, options, now).await
+                }
+            },
+        ));
+        (changes, recording, serving)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reminder_that_didn_t_show_shows_once_the_server_is_back() {
+        let start = Local.with_ymd_and_hms(2026, 10, 15, 16, 45, 0).unwrap();
+        let clock = WallClock::new(start);
+        let (changes, recording, serving) = serving_reminders(&clock);
+        let server_gone = |gone| recording.failing.store(gone, Ordering::SeqCst);
+        let wait = tokio::time::sleep;
+        let at = |minutes| Some(start + chrono::Duration::minutes(minutes));
+        let standup = reminder(ReminderKind::Event, "Standup", at(15));
+        let review = reminder(ReminderKind::Task, "Review", None);
+        let lunch = reminder(ReminderKind::Task, "Lunch", None);
+
+        // The notification server is gone (restarting, say) when two come
+        // due, and one of them is dismissed meanwhile.
+        server_gone(true);
+        let due = vec![standup.clone(), review.clone()];
+        changes.send((due, vec![])).unwrap();
+        wait(Duration::from_secs(1)).await;
+        changes.send((vec![], vec![review.key.clone()])).unwrap();
+        wait(RETRY_REMINDERS * 2).await;
+        assert!(recording.shown_ids().is_empty());
+
+        // It's back: the one still due shows, once.
+        server_gone(false);
+        wait(RETRY_REMINDERS).await;
+        let standup_id = notify::reminder_toast_id(&standup.key);
+        assert_eq!(recording.shown_ids(), std::slice::from_ref(&standup_id));
+        wait(RETRY_REMINDERS * 4).await;
+        assert_eq!(recording.shown_ids(), std::slice::from_ref(&standup_id));
+
+        // Gone for too long: given up on, even with the clock set back
+        // meanwhile.
+        server_gone(true);
+        changes.send((vec![lunch], vec![])).unwrap();
+        wait(Duration::from_secs(1)).await;
+        clock.set_back(chrono::Duration::hours(1));
+        wait(RETRY_REMINDERS_FOR + RETRY_REMINDERS).await;
+        server_gone(false);
+        changes.send((vec![], vec![])).unwrap();
+        wait(RETRY_REMINDERS * 2).await;
+        assert_eq!(recording.shown_ids(), [standup_id]);
+
+        drop(changes);
+        serving.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reminder_that_didn_t_show_before_the_computer_slept_doesn_t_after() {
+        let start = Local.with_ymd_and_hms(2026, 10, 15, 16, 45, 0).unwrap();
+        let clock = WallClock::new(start);
+        let (changes, recording, serving) = serving_reminders(&clock);
+        let server_gone = |gone| recording.failing.store(gone, Ordering::SeqCst);
+        let wait = tokio::time::sleep;
+        let at = |minutes| Some(start + chrono::Duration::minutes(minutes));
+
+        // A call that ends in two minutes and a task come due while the
+        // server is gone; the computer sleeps for three minutes. The call
+        // is over by then (the core lists such a reminder as missed, it
+        // doesn't show it), and the task still shows.
+        let call = reminder(ReminderKind::Event, "Call", at(-28));
+        let lunch = reminder(ReminderKind::Task, "Lunch", None);
+        assert_eq!(call.ends_at, at(2).map(|end| end.with_timezone(&Utc)));
+        server_gone(true);
+        changes.send((vec![call, lunch.clone()], vec![])).unwrap();
+        wait(Duration::from_secs(5)).await;
+        clock.sleep(chrono::Duration::minutes(3));
+        server_gone(false);
+        wait(RETRY_REMINDERS).await;
+        let lunch_id = notify::reminder_toast_id(&lunch.key);
+        assert_eq!(recording.shown_ids(), std::slice::from_ref(&lunch_id));
+
+        // A meeting coming up and a task come due while the server is
+        // gone, and the computer sleeps until the next day: a few seconds
+        // went by for tokio, but neither is news by now.
+        server_gone(true);
+        let standup = reminder(ReminderKind::Event, "Standup", at(20));
+        let review = reminder(ReminderKind::Task, "Review", None);
+        changes.send((vec![standup, review], vec![])).unwrap();
+        wait(Duration::from_secs(5)).await;
+        clock.sleep(chrono::Duration::hours(16));
+        server_gone(false);
+        wait(RETRY_REMINDERS * 2).await;
+        changes.send((vec![], vec![])).unwrap();
+        wait(RETRY_REMINDERS * 2).await;
+        assert_eq!(recording.shown_ids(), std::slice::from_ref(&lunch_id));
+
+        // Time awake and asleep add up: a meeting's reminder that failed
+        // for two minutes awake and four asleep is given up on, though the
+        // meeting hasn't started.
+        server_gone(true);
+        let planning = reminder(ReminderKind::Event, "Planning", at(16 * 60 + 120));
+        changes.send((vec![planning], vec![])).unwrap();
+        wait(RETRY_REMINDERS * 4).await;
+        clock.sleep(chrono::Duration::minutes(4));
+        server_gone(false);
+        wait(RETRY_REMINDERS).await;
+        assert_eq!(recording.shown_ids(), [lunch_id]);
+
+        drop(changes);
         serving.await.unwrap();
     }
 

@@ -189,7 +189,7 @@ fn build(app: &AppHandle) -> tauri::Result<()> {
     let resume = MenuItem::with_id(app, "pause-resume", "Resume", paused, None::<&str>)?;
     let pause = Submenu::with_items(
         app,
-        "Pause notifications",
+        "Pause mail notifications",
         true,
         &[
             &MenuItem::with_id(app, "pause-hour", "For 1 hour", true, None::<&str>)?,

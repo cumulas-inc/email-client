@@ -32,8 +32,9 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   Dismiss, and Join for online meetings), even while the window is in front,
   and in the Reminders panel under the bell at the top. Reminders missed
   while the computer slept go off when it wakes, for up to a day. For
-  Microsoft 365, dismissing or snoozing also does so in Outlook and on your
-  phone, and the reverse.
+  Microsoft 365 events, dismissing or snoozing also does so in Outlook and on
+  your phone, and the reverse; a task's reminder is dismissed or snoozed in
+  this app only.
 - **Runs in the background**: closing the window keeps the app running for
   notifications, with an optional tray icon and start at login. Quit is in the
   main menu and the tray icon's menu.

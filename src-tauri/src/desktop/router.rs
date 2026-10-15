@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
-use cumulas_core::model::{Snooze, TaskPatch, TaskStatus};
+use cumulas_core::model::{ReminderKind, Snooze, TaskPatch, TaskStatus};
 use cumulas_core::store::Store;
 use cumulas_core::{CoreService, ErrorCode};
 use serde::Serialize;
@@ -189,13 +189,100 @@ pub async fn handle(app: &AppHandle, click: Invoked) {
                 tracing::warn!("not opening a meeting address that isn't https");
                 return;
             }
-            if let Err(e) = app.opener().open_url(url.trim(), None::<&str>) {
-                tracing::warn!("could not open the meeting: {e}");
-            }
+            join(app, url.trim().to_owned(), click.activation_token);
         }
         action @ Action::CompleteTask(_) => {
             reminder_action(&desktop.notifications, service, action).await;
         }
+    }
+}
+
+/// Opens a meeting in the browser, handing it the click's activation token
+/// so that it comes to the front on Wayland (the opener plugin can't pass
+/// one on): through the OpenURI portal in a Flatpak, else `xdg-open`.
+/// Without a token, or when that fails, the opener plugin opens it.
+fn join(app: &AppHandle, url: String, activation_token: Option<String>) {
+    #[cfg(target_os = "linux")]
+    if let Some(token) = activation_token {
+        if super::is_flatpak() {
+            let app = app.clone();
+            // The portal may ask which browser first: no click waits for it.
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = open_uri(&url, token, None).await {
+                    tracing::info!("the portal didn't open the meeting ({e}); opening it without");
+                    open_url(&app, &url);
+                }
+            });
+            return;
+        }
+        match xdg_open(&url, &token).spawn() {
+            Ok(mut child) => {
+                tauri::async_runtime::spawn_blocking(move || match child.wait() {
+                    Ok(status) if !status.success() => {
+                        tracing::warn!("could not open the meeting: xdg-open {status}");
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("could not open the meeting: {e}"),
+                });
+                return;
+            }
+            Err(e) => tracing::info!("could not run xdg-open ({e}); opening the meeting without"),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = activation_token;
+    open_url(app, &url);
+}
+
+/// Opens a meeting with the opener plugin, without an activation token.
+fn open_url(app: &AppHandle, url: &str) {
+    if let Err(e) = app.opener().open_url(url, None::<&str>) {
+        tracing::warn!("could not open the meeting: {e}");
+    }
+}
+
+/// `xdg-open url`, with the activation token where the browser it starts
+/// (or hands the address to) looks for it: XDG_ACTIVATION_TOKEN on Wayland,
+/// DESKTOP_STARTUP_ID on X11.
+#[cfg(target_os = "linux")]
+fn xdg_open(url: &str, token: &str) -> std::process::Command {
+    use std::process::Stdio;
+    let mut command = std::process::Command::new("xdg-open");
+    command
+        .arg(url)
+        .env("XDG_ACTIVATION_TOKEN", token)
+        .env("DESKTOP_STARTUP_ID", token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Asks the OpenURI portal to open `url`, with the activation token for
+/// the app it opens it in; through `connection`, else the session bus.
+#[cfg(target_os = "linux")]
+async fn open_uri(
+    url: &str,
+    token: String,
+    connection: Option<zbus::Connection>,
+) -> Result<(), String> {
+    use ashpd::desktop::open_uri::OpenFileRequest;
+    let uri = ashpd::Uri::parse(url).map_err(|e| e.to_string())?;
+    let opened = OpenFileRequest::default()
+        .connection(connection)
+        .activation_token(ashpd::ActivationToken::from(token))
+        .send_uri(&uri)
+        .await
+        .and_then(|request| request.response());
+    match opened {
+        Ok(()) => Ok(()),
+        // It answered, opening nothing (the user closed its choice of
+        // browser, say): asking again would only ask again.
+        Err(ashpd::Error::Response(e)) => {
+            tracing::info!("the portal opened no meeting: {e:?}");
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -224,14 +311,46 @@ pub(crate) async fn reminder_action(
             };
             // Its reminder clears once it's done (see `reminders_changed`).
             if let Err(e) = service.update_task(&id, patch).await {
-                tracing::warn!("could not complete the task from its notification: {e}");
-                let toast = failed_reminder_toast("Couldn't complete the task", None);
-                if let Err(e) = notifications.show(&toast, Vec::new()).await {
-                    tracing::warn!("could not say a notification's button failed: {e}");
-                }
+                not_completed(notifications, service, &id, e).await;
             }
         }
         _ => {}
+    }
+}
+
+/// A task's Mark complete button failed: a notification naming the task
+/// takes its reminder's place (the desktop closed it on the click), and
+/// goes with the reminder. A task deleted meanwhile is done.
+async fn not_completed(
+    notifications: &Notifications,
+    service: &CoreService,
+    task_id: &str,
+    e: cumulas_core::Error,
+) {
+    let reminder = service.list_active_reminders().ok().and_then(|active| {
+        active
+            .into_iter()
+            .find(|r| r.kind == ReminderKind::Task && r.item_id == task_id)
+    });
+    if e.code == ErrorCode::NotFound {
+        if let Some(r) = reminder {
+            notifications.withdraw(&reminder_toast_id(&r.key)).await;
+        }
+        return;
+    }
+    tracing::warn!("could not complete the task from its notification: {e}");
+    let mut toast = failed_reminder_toast("Couldn't complete the task", reminder.as_ref());
+    if reminder.is_none() {
+        // No longer due (dismissed meanwhile, say): the task still names it.
+        toast.body = service
+            .store()
+            .get_task(task_id)
+            .map(|t| t.title)
+            .unwrap_or_default();
+    }
+    let keys = reminder.map(|r| vec![r.key]).unwrap_or_default();
+    if let Err(e) = notifications.show(&toast, keys).await {
+        tracing::warn!("could not say a notification's button failed: {e}");
     }
 }
 
@@ -289,13 +408,19 @@ async fn failed(notifications: &Notifications, store: &Store, id: &str, title: &
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use cumulas_core::model::{Folder, FolderRole};
     use cumulas_core::providers::MessageBatch;
     use tokio::sync::mpsc;
+    #[cfg(target_os = "linux")]
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::desktop::notify::fdo::tests::PrivateBus;
     use crate::desktop::notify::tests::{Recording, account, message};
 
     #[test]
@@ -416,16 +541,122 @@ mod tests {
         .await;
         assert_eq!(recording.shown.lock().unwrap().len(), 1);
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn join_hands_xdg_open_the_activation_token() {
+        let command = xdg_open("https://teams.example/join/1", "token-7");
+        assert_eq!(command.get_program(), "xdg-open");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["https://teams.example/join/1"]
+        );
+        let mut envs: Vec<_> = command.get_envs().collect();
+        envs.sort();
+        assert_eq!(
+            envs,
+            [
+                ("DESKTOP_STARTUP_ID".as_ref(), Some("token-7".as_ref())),
+                ("XDG_ACTIVATION_TOKEN".as_ref(), Some("token-7".as_ref())),
+            ]
+        );
+    }
+
+    /// What the portal was asked to open, and with which activation token.
+    #[cfg(target_os = "linux")]
+    type Opened = Mutex<Vec<(String, Option<String>)>>;
+
+    /// The OpenURI portal: records what it's asked to open, and answers
+    /// that it did.
+    #[cfg(target_os = "linux")]
+    struct FakeOpenUri {
+        opened: Arc<Opened>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[zbus::interface(name = "org.freedesktop.portal.OpenURI")]
+    impl FakeOpenUri {
+        #[zbus(property)]
+        fn version(&self) -> u32 {
+            5
+        }
+
+        #[zbus(name = "OpenURI")]
+        async fn open_uri(
+            &self,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+            #[zbus(connection)] connection: &zbus::Connection,
+            _parent_window: &str,
+            uri: &str,
+            options: HashMap<String, OwnedValue>,
+        ) -> zbus::fdo::Result<OwnedObjectPath> {
+            let option = |key: &str| {
+                options
+                    .get(key)
+                    .and_then(|v| String::try_from(v.try_clone().ok()?).ok())
+            };
+            self.opened
+                .lock()
+                .unwrap()
+                .push((uri.to_owned(), option("activation_token")));
+            let sender = header.sender().unwrap();
+            let request = format!(
+                "/org/freedesktop/portal/desktop/request/{}/{}",
+                sender.trim_start_matches(':').replace('.', "_"),
+                option("handle_token").unwrap_or_default(),
+            );
+            connection
+                .emit_signal(
+                    Some(sender.as_str()),
+                    request.as_str(),
+                    "org.freedesktop.portal.Request",
+                    "Response",
+                    &(0u32, HashMap::<String, OwnedValue>::new()),
+                )
+                .await?;
+            Ok(OwnedObjectPath::try_from(request).unwrap())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn in_a_flatpak_join_hands_the_portal_the_activation_token() {
+        let Some(bus) = PrivateBus::start() else {
+            return;
+        };
+        let opened = Arc::default();
+        let fake = FakeOpenUri {
+            opened: Arc::clone(&opened),
+        };
+        let _portal = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .serve_at("/org/freedesktop/portal/desktop", fake)
+            .unwrap()
+            .name("org.freedesktop.portal.Desktop")
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let app = bus.connection().await.unwrap();
+        let url = "https://teams.example/join/1";
+        open_uri(url, "token-7".into(), Some(app)).await.unwrap();
+        assert_eq!(
+            *opened.lock().unwrap(),
+            [(url.to_owned(), Some("token-7".to_owned()))]
+        );
+    }
 }
 
 #[cfg(test)]
 mod reminder_tests {
     use std::sync::Arc;
 
-    use chrono::Duration;
-    use cumulas_core::model::{Calendar, EventDraft, ShowAs, TaskDraft, TaskList};
+    use chrono::{Duration, Local};
+    use cumulas_core::auth::microsoft::SignInResult;
+    use cumulas_core::model::{Account, Calendar, EventDraft, ShowAs, TaskDraft, TaskList};
+    use cumulas_core::providers::imap::ImapCredentials;
     use cumulas_core::secrets::{MemorySecretStore, SecretStore, keys};
-    use cumulas_core::service::{LiveConnector, NullSink};
+    use cumulas_core::service::{BrowserOpener, Connector, LiveConnector, NullSink, ProviderSet};
     use tokio::sync::mpsc;
 
     use super::*;
@@ -565,16 +796,102 @@ mod reminder_tests {
         reminder_action(&notifications, &service, gone).await;
         assert_eq!(recording.withdrawn.lock().unwrap().len(), 2);
         assert_eq!(recording.shown.lock().unwrap().len(), 3);
+    }
 
-        // A button that failed says so.
+    /// Reaches no server: every account's connection fails with `code`.
+    struct Unreachable(ErrorCode);
+
+    #[async_trait::async_trait]
+    impl Connector for Unreachable {
+        async fn providers(&self, _: &Account) -> cumulas_core::Result<ProviderSet> {
+            Err(cumulas_core::Error::new(self.0, "unreachable"))
+        }
+
+        async fn verify_imap(&self, _: &ImapCredentials) -> cumulas_core::Result<()> {
+            Err(cumulas_core::Error::new(self.0, "unreachable"))
+        }
+
+        async fn microsoft_sign_in(
+            &self,
+            _: &BrowserOpener,
+            _: Option<&str>,
+            _: bool,
+        ) -> cumulas_core::Result<SignInResult> {
+            Err(cumulas_core::Error::new(self.0, "unreachable"))
+        }
+    }
+
+    /// The service's data, through a connection that fails with `code`.
+    fn unreachable(service: &CoreService, code: ErrorCode) -> CoreService {
+        CoreService::new(
+            Arc::clone(service.store()),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(Unreachable(code)),
+            Arc::new(NullSink),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_failed_mark_complete_names_its_task_and_goes_with_its_reminder() {
+        let (service, task_id) = service().await;
+        let reminder = service
+            .list_active_reminders()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.item_id == task_id)
+            .unwrap();
+        let recording = Arc::new(Recording::default());
+        let (clicks, _) = mpsc::unbounded_channel();
+        let notifications = Notifications::with_notifier(recording.clone(), clicks);
+        let options = ReminderToastOptions {
+            snooze_minutes: 5,
+            sound: true,
+        };
+        let show_reminder = || async {
+            let toasts = reminder_toasts(std::slice::from_ref(&reminder), options, Local::now());
+            for (toast, keys) in toasts {
+                notifications.show(&toast, keys).await.unwrap();
+            }
+        };
+        let id = reminder_toast_id(&reminder.key);
+        let complete = || Action::CompleteTask(task_id.clone());
+
+        // Offline: the notification that takes the reminder's place says
+        // which task, and goes when the reminder does (the task completed
+        // in the app later, say).
+        show_reminder().await;
+        let offline = unreachable(&service, ErrorCode::Network);
+        reminder_action(&notifications, &offline, complete()).await;
+        {
+            let shown = recording.shown.lock().unwrap();
+            let [_, toast] = shown.as_slice() else {
+                panic!("{shown:?}");
+            };
+            assert_eq!(toast.id, id);
+            assert_eq!(toast.title, "Couldn't complete the task");
+            assert_eq!(toast.body, "Pay rent");
+            assert_eq!(toast.default_action, Action::OpenReminders);
+        }
+        notifications
+            .settle(std::slice::from_ref(&reminder.key))
+            .await;
+        assert_eq!(
+            *recording.withdrawn.lock().unwrap(),
+            std::slice::from_ref(&id)
+        );
+
+        // Deleted elsewhere (the server doesn't know it): done, and its
+        // notification goes. Deleted here: nothing to say either.
+        show_reminder().await;
+        let deleted = unreachable(&service, ErrorCode::NotFound);
+        reminder_action(&notifications, &deleted, complete()).await;
+        assert_eq!(*recording.withdrawn.lock().unwrap(), [id.clone(), id]);
         reminder_action(
             &notifications,
             &service,
             Action::CompleteTask("missing".into()),
         )
         .await;
-        let shown = recording.shown.lock().unwrap();
-        assert_eq!(shown.last().unwrap().title, "Couldn't complete the task");
-        assert_eq!(shown.last().unwrap().default_action, Action::OpenReminders);
+        assert_eq!(recording.shown.lock().unwrap().len(), 3);
     }
 }

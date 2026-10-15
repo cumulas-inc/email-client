@@ -105,7 +105,7 @@ impl EventSink for TauriSink {
             },
         );
         if let Some(desktop) = self.app.try_state::<Desktop>() {
-            desktop.reminders_changed(&self.app, newly_due.to_vec(), cleared.to_vec());
+            desktop.reminders_changed(newly_due.to_vec(), cleared.to_vec());
         }
     }
 }
@@ -177,7 +177,7 @@ pub fn run() {
                 service: Arc::clone(&service),
                 persistent_secrets,
             });
-            let (desktop, clicks) = Desktop::new(app.handle());
+            let (desktop, inbound) = Desktop::new(app.handle());
             app.manage(desktop);
             // Without an account there's nothing to watch in the background.
             let watching = service.list_accounts().is_ok_and(|a| !a.is_empty());
@@ -187,7 +187,7 @@ pub fn run() {
             // Periodic sync, push and the resume detector; inside the
             // runtime, where their tasks live.
             tauri::async_runtime::block_on(async { service.start_background() });
-            desktop::start(app.handle(), clicks);
+            desktop::start(app.handle(), inbound);
             Ok(())
         })
         .on_window_event(desktop::window::on_window_event)

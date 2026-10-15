@@ -908,7 +908,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn reminder(
+    pub(crate) fn reminder(
         kind: ReminderKind,
         title: &str,
         starts_at: Option<DateTime<Local>>,
@@ -1207,10 +1207,12 @@ pub(crate) mod tests {
         pub(crate) shown: Mutex<Vec<Toast>>,
         pub(crate) withdrawn: Mutex<Vec<String>>,
         closed: AtomicBool,
+        /// Shows nothing: the server is gone (restarting, say).
+        pub(crate) failing: AtomicBool,
     }
 
     impl Recording {
-        fn shown_ids(&self) -> Vec<String> {
+        pub(crate) fn shown_ids(&self) -> Vec<String> {
             self.shown
                 .lock()
                 .unwrap()
@@ -1231,6 +1233,9 @@ pub(crate) mod tests {
         }
 
         async fn show(&self, toast: &Toast) -> Result<(), String> {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err("The name is not activatable".into());
+            }
             self.shown.lock().unwrap().push(toast.clone());
             Ok(())
         }
