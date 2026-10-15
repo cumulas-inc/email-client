@@ -24,6 +24,7 @@ use async_imap::imap_proto::{Response, ResponseCode};
 use async_trait::async_trait;
 use tokio::sync::{Mutex, MutexGuard};
 
+pub(crate) use self::connection::is_server_busy;
 pub use self::idle::{IdleConfig, ImapIdleWatcher};
 
 use self::connection::{ImapSession, MailboxInfo, quote};

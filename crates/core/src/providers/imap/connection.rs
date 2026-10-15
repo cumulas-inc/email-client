@@ -12,7 +12,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use async_imap::imap_proto::{
@@ -55,6 +55,8 @@ const KEEPALIVE_RETRIES: u32 = 4;
 /// During IDLE the server may stay silent until the refresh; this is the
 /// allowance beyond it before the connection counts as dead.
 const IDLE_READ_SLACK: Duration = Duration::from_secs(90);
+/// Time for the server to accept IDLE with its continuation.
+const IDLE_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// Time for the server to confirm the end of IDLE.
 const IDLE_DONE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The same when shutting down, which must be quick.
@@ -83,6 +85,8 @@ pub(super) struct MailStream {
     read_timeout: Duration,
     read_timer: Option<Pin<Box<Sleep>>>,
     write_timer: Option<Pin<Box<Sleep>>>,
+    /// Set on the push session; see [`Screen`].
+    screen: Option<Screen>,
 }
 
 impl MailStream {
@@ -92,6 +96,7 @@ impl MailStream {
             read_timeout: IO_TIMEOUT,
             read_timer: None,
             write_timer: None,
+            screen: None,
         }
     }
 
@@ -125,6 +130,20 @@ fn guard_progress<T>(
     )))
 }
 
+fn read_transport(
+    transport: &mut Transport,
+    timer: &mut Option<Pin<Box<Sleep>>>,
+    limit: Duration,
+    cx: &mut Context<'_>,
+    buf: &mut ReadBuf<'_>,
+) -> Poll<io::Result<()>> {
+    let result = match transport {
+        Transport::Plain(s) => Pin::new(s).poll_read(cx, buf),
+        Transport::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+    };
+    guard_progress(result, timer, limit, cx)
+}
+
 impl AsyncRead for MailStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -132,12 +151,102 @@ impl AsyncRead for MailStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let result = match &mut this.transport {
-            Transport::Plain(s) => Pin::new(s).poll_read(cx, buf),
-            Transport::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+        let (transport, timer, limit) =
+            (&mut this.transport, &mut this.read_timer, this.read_timeout);
+        let Some(screen) = &mut this.screen else {
+            return read_transport(transport, timer, limit, cx, buf);
         };
-        guard_progress(result, &mut this.read_timer, this.read_timeout, cx)
+        while screen.ready.is_empty() {
+            let mut chunk = [0; 4096];
+            let mut chunk = ReadBuf::new(&mut chunk);
+            ready!(read_transport(transport, timer, limit, cx, &mut chunk))?;
+            if chunk.filled().is_empty() {
+                // The end: an incomplete line goes on as it is.
+                screen.ready.append(&mut screen.line);
+                break;
+            }
+            screen.feed(chunk.filled());
+        }
+        let n = screen.ready.len().min(buf.remaining());
+        buf.put_slice(&screen.ready[..n]);
+        screen.ready.drain(..n);
+        Poll::Ready(Ok(()))
     }
+}
+
+/// Begins the stand-in for a response imap-proto can't parse, followed by
+/// that response.
+const UNPARSED: &str = "[UNPARSED]";
+
+/// Replaces untagged responses that imap-proto can't parse with
+/// `* OK [UNPARSED] <response>`. async-imap stops reading for good after a
+/// parse error, so on the push session one response it doesn't know, such
+/// as the `LIST` with `OLDNAME` that Dovecot's NOTIFY sends for a rename,
+/// would end the connection. Lines are held back until complete; literals
+/// and the rest of a response with one go on unchecked.
+#[derive(Debug, Default)]
+struct Screen {
+    /// The incomplete line received so far.
+    line: Vec<u8>,
+    /// Checked bytes, to be read.
+    ready: Vec<u8>,
+    /// Bytes of a literal still to come.
+    literal: usize,
+    /// The current response has a literal, so its lines aren't responses.
+    continued: bool,
+}
+
+impl Screen {
+    fn feed(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            if self.literal > 0 {
+                let n = self.literal.min(bytes.len());
+                self.ready.extend_from_slice(&bytes[..n]);
+                self.literal -= n;
+                bytes = &bytes[n..];
+            } else if let Some(end) = bytes.iter().position(|&b| b == b'\n') {
+                self.line.extend_from_slice(&bytes[..=end]);
+                bytes = &bytes[end + 1..];
+                self.check_line();
+            } else {
+                self.line.extend_from_slice(bytes);
+                return;
+            }
+        }
+    }
+
+    fn check_line(&mut self) {
+        let mut line = std::mem::take(&mut self.line);
+        let literal = literal_length(&line);
+        let whole = !self.continued && literal.is_none();
+        self.continued = literal.is_some();
+        self.literal = literal.unwrap_or(0);
+        if whole
+            && line.starts_with(b"* ")
+            && Response::parse(&line).is_err_and(|e| !e.is_incomplete())
+        {
+            let text: String = String::from_utf8_lossy(&line[2..])
+                .trim_end()
+                .chars()
+                .take(300)
+                .map(|c| if c.is_ascii_graphic() { c } else { ' ' })
+                .collect();
+            tracing::debug!("skipped an IMAP response that could not be parsed: {text}");
+            self.ready
+                .extend_from_slice(format!("* OK {UNPARSED} {text}\r\n").as_bytes());
+        } else {
+            self.ready.append(&mut line);
+        }
+    }
+}
+
+/// The length of the literal announced at the end of `line` (`{12}\r\n`).
+fn literal_length(line: &[u8]) -> Option<usize> {
+    let line = line.strip_suffix(b"\n")?;
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let digits = line.strip_suffix(b"}")?;
+    let start = digits.iter().rposition(|&b| b == b'{')?;
+    std::str::from_utf8(&digits[start + 1..]).ok()?.parse().ok()
 }
 
 impl AsyncWrite for MailStream {
@@ -284,6 +393,9 @@ pub(super) fn quote(value: &str) -> Result<String> {
 pub(super) enum IdleExit {
     /// The refresh interval passed; IDLE should be issued again.
     Refreshed,
+    /// The server dropped notifications and turned NOTIFY off (RFC 5465
+    /// §5.8); IDLE has ended so that NOTIFY can be set again.
+    Overflowed,
     /// Cancelled; IDLE has ended.
     Cancelled,
 }
@@ -292,6 +404,8 @@ pub(super) enum IdleExit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Untagged {
     Changed(PushEvent),
+    /// `* OK [NOTIFICATIONOVERFLOW]`: changes were dropped and NOTIFY is off.
+    Overflow,
     /// `* OK` without news; servers send these to keep the connection open.
     Keepalive,
     /// The server is closing the connection.
@@ -324,15 +438,22 @@ pub(super) fn classify(response: &Response<'_>) -> Untagged {
             status: Status::Ok,
             outcome,
         } => {
-            // imap-proto doesn't know this RFC 5465 code and leaves it in
-            // the text: the server dropped notifications, so catch up.
-            let overflow = outcome
-                .information
-                .as_deref()
-                .and_then(|text| text.trim_start().get(..22))
-                .is_some_and(|code| code.eq_ignore_ascii_case("[NOTIFICATIONOVERFLOW]"));
-            if overflow {
-                Untagged::Changed(PushEvent::CatchUp)
+            // imap-proto doesn't know this RFC 5465 code, nor the stand-in
+            // for what it can't parse, and leaves them in the text.
+            let text = outcome.information.as_deref().unwrap_or_default();
+            if after_code(text, "[NOTIFICATIONOVERFLOW]").is_some() {
+                Untagged::Overflow
+            } else if let Some(response) = after_code(text, UNPARSED) {
+                // Likely NOTIFY news, e.g. a rename's LIST with OLDNAME.
+                let list = response
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("LIST"));
+                Untagged::Changed(if list {
+                    PushEvent::FolderListChanged
+                } else {
+                    PushEvent::CatchUp
+                })
             } else {
                 Untagged::Keepalive
             }
@@ -343,6 +464,14 @@ pub(super) fn classify(response: &Response<'_>) -> Untagged {
         } => Untagged::Bye,
         _ => Untagged::Other,
     }
+}
+
+/// The text after a response code such as `[ALERT]` (any case) at the start
+/// of `text`.
+fn after_code<'a>(text: &'a str, code: &str) -> Option<&'a str> {
+    let text = text.trim_start();
+    let head = text.get(..code.len())?;
+    head.eq_ignore_ascii_case(code).then(|| &text[code.len()..])
 }
 
 /// Login refusals that are about the server rather than the password: too
@@ -373,7 +502,7 @@ fn server_busy(host: &str) -> Error {
 
 /// Whether the server refused a connection because it has too many, or is
 /// unavailable for now; trying again soon won't help.
-pub(super) fn is_server_busy(error: &Error) -> bool {
+pub(crate) fn is_server_busy(error: &Error) -> bool {
     error
         .details
         .as_ref()
@@ -478,11 +607,18 @@ impl ImapSession {
         self.session.get_mut().set_read_timeout(limit);
     }
 
+    /// From now on, stands in for untagged responses that can't be parsed
+    /// instead of failing (see [`Screen`]). Only for the push session: on
+    /// others a skipped response would be lost data.
+    pub(super) fn skip_unparsable(&mut self) {
+        self.session.get_mut().screen = Some(Screen::default());
+    }
+
     /// Waits in IDLE (RFC 2177) on the selected mailbox until `refresh`
-    /// passes or `cancel` fires, passing changes to `on` as they arrive.
-    /// News doesn't end the IDLE: the operations session syncs while this one
-    /// keeps listening. A server that refuses IDLE gives an `Unsupported`
-    /// error.
+    /// passes, `cancel` fires or the server overflows notifications, passing
+    /// changes to `on` as they arrive. News doesn't end the IDLE: the
+    /// operations session syncs while this one keeps listening. A server
+    /// that refuses IDLE gives an `Unsupported` error.
     pub(super) async fn idle(
         &mut self,
         refresh: Duration,
@@ -491,8 +627,6 @@ impl ImapSession {
     ) -> Result<IdleExit> {
         self.healthy = false;
         self.last_used = Instant::now();
-        // The server may legitimately say nothing until the refresh.
-        self.set_read_timeout(refresh + IDLE_READ_SLACK);
         let result = self.run_idle(refresh, cancel, &mut on).await;
         self.set_read_timeout(IO_TIMEOUT);
         self.last_used = Instant::now();
@@ -505,41 +639,59 @@ impl ImapSession {
         cancel: &CancellationToken,
         on: &mut (impl FnMut(PushEvent) + Send),
     ) -> Result<IdleExit> {
-        let tag = self
-            .session
-            .run_command("IDLE")
-            .await
-            .map_err(imap_failure)?;
         let mut farewell: Option<String> = None;
+        let mut overflowed = false;
         // The server accepts with a continuation ("+ idling").
-        loop {
-            let data = match self.session.read_response().await {
-                Ok(Some(data)) => data,
-                Ok(None) => return Err(closed(&farewell)),
-                Err(e) => return Err(io_failure(e)),
-            };
-            match data.parsed() {
-                Response::Continue(_) => break,
-                Response::Done {
-                    tag: done,
-                    status,
-                    outcome,
-                } if *done == tag => {
-                    // The command is over, so the session is fine; IDLE isn't.
-                    self.healthy = true;
-                    return Err(Error::unsupported(format!(
-                        "The IMAP server refused IDLE ({status:?}: {}).",
-                        outcome.information.as_deref().unwrap_or("no reason given")
-                    )));
+        let accepted = async {
+            let tag = self
+                .session
+                .run_command("IDLE")
+                .await
+                .map_err(imap_failure)?;
+            loop {
+                let data = match self.session.read_response().await {
+                    Ok(Some(data)) => data,
+                    Ok(None) => return Err(closed(&farewell)),
+                    Err(e) => return Err(io_failure(e)),
+                };
+                match data.parsed() {
+                    Response::Continue(_) => return Ok(tag),
+                    Response::Done {
+                        tag: done,
+                        status,
+                        outcome,
+                    } if *done == tag => {
+                        // The command is over, so the session is fine; IDLE isn't.
+                        self.healthy = true;
+                        return Err(Error::unsupported(format!(
+                            "The IMAP server refused IDLE ({status:?}: {}).",
+                            outcome.information.as_deref().unwrap_or("no reason given")
+                        )));
+                    }
+                    other => overflowed |= report(other, on, &mut farewell),
                 }
-                other => report(other, on, &mut farewell),
             }
-        }
+        };
+        let tag = tokio::select! {
+            biased;
+            // DONE can't be sent before the continuation; the session is
+            // left unhealthy, to be dropped.
+            _ = cancel.cancelled() => {
+                return Err(Error::network("IDLE was stopped before the IMAP server accepted it."));
+            }
+            accepted = timeout(IDLE_START_TIMEOUT, accepted) => accepted
+                .map_err(|_| Error::network("The IMAP server did not accept IDLE in time."))??,
+        };
+        // The server may legitimately say nothing until the refresh.
+        self.set_read_timeout(refresh + IDLE_READ_SLACK);
 
         let started = tokio::time::Instant::now();
         let deadline = tokio::time::sleep(refresh);
         tokio::pin!(deadline);
         let exit = loop {
+            if overflowed {
+                break IdleExit::Overflowed;
+            }
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break IdleExit::Cancelled,
@@ -561,7 +713,7 @@ impl ImapSession {
                             }
                             return Ok(IdleExit::Refreshed);
                         }
-                        other => report(other, on, &mut farewell),
+                        other => overflowed |= report(other, on, &mut farewell),
                     }
                 }
             }
@@ -571,7 +723,7 @@ impl ImapSession {
         self.set_read_timeout(IO_TIMEOUT);
         let limit = match exit {
             IdleExit::Cancelled => IDLE_CANCEL_TIMEOUT,
-            IdleExit::Refreshed => IDLE_DONE_TIMEOUT,
+            IdleExit::Refreshed | IdleExit::Overflowed => IDLE_DONE_TIMEOUT,
         };
         let finish = async {
             self.session
@@ -592,7 +744,7 @@ impl ImapSession {
                     } if *done == tag => {
                         return check_status("IDLE", status, outcome.information.as_deref());
                     }
-                    other => report(other, on, &mut farewell),
+                    other => overflowed |= report(other, on, &mut farewell),
                 }
             }
         };
@@ -600,7 +752,10 @@ impl ImapSession {
             .await
             .map_err(|_| Error::network("The IMAP server did not end IDLE in time."))??;
         self.healthy = true;
-        Ok(exit)
+        Ok(match exit {
+            IdleExit::Refreshed if overflowed => IdleExit::Overflowed,
+            exit => exit,
+        })
     }
 
     /// Runs one command, passing every response (including the tagged
@@ -832,13 +987,18 @@ impl ImapSession {
 }
 
 /// Passes a change seen while idling to `on` and remembers a farewell.
+/// True for a notification overflow, which `on` hears of as a catch-up.
 fn report(
     response: &Response<'_>,
     on: &mut (impl FnMut(PushEvent) + Send),
     farewell: &mut Option<String>,
-) {
+) -> bool {
     match classify(response) {
         Untagged::Changed(event) => on(event),
+        Untagged::Overflow => {
+            on(PushEvent::CatchUp);
+            return true;
+        }
         Untagged::Bye => {
             if let Response::Data { outcome, .. } = response {
                 *farewell = outcome.information.as_deref().map(str::to_owned);
@@ -846,6 +1006,7 @@ fn report(
         }
         Untagged::Keepalive | Untagged::Other => {}
     }
+    false
 }
 
 fn closed(farewell: &Option<String>) -> Error {
@@ -1079,10 +1240,19 @@ mod tests {
         );
         assert_eq!(
             classified("* OK [NOTIFICATIONOVERFLOW] Too many changes\r\n"),
-            Untagged::Changed(PushEvent::CatchUp)
+            Untagged::Overflow
         );
         assert_eq!(
             classified("* ok [notificationoverflow]\r\n"),
+            Untagged::Overflow
+        );
+        // Stand-ins for responses imap-proto can't parse (see `Screen`).
+        assert_eq!(
+            classified("* OK [UNPARSED] LIST () \"/\" \"New\" (\"OLDNAME\" (\"Old\"))\r\n"),
+            Untagged::Changed(PushEvent::FolderListChanged)
+        );
+        assert_eq!(
+            classified("* OK [UNPARSED] STATUS \"Odd\" (MAILBOXID (F2212))\r\n"),
             Untagged::Changed(PushEvent::CatchUp)
         );
         assert_eq!(classified("* OK Still here\r\n"), Untagged::Keepalive);
@@ -1096,6 +1266,51 @@ mod tests {
             classified("* FLAGS (\\Seen \\Answered $Junk)\r\n"),
             Untagged::Other
         );
+    }
+
+    /// What a [`Screen`] passes on when `input` arrives in pieces of
+    /// `piece` bytes.
+    fn screened(input: &str, piece: usize) -> String {
+        let mut screen = Screen::default();
+        for chunk in input.as_bytes().chunks(piece) {
+            screen.feed(chunk);
+        }
+        assert!(screen.line.is_empty(), "{:?}", screen.line);
+        String::from_utf8(screen.ready).unwrap()
+    }
+
+    #[test]
+    fn stands_in_for_responses_that_cannot_be_parsed() {
+        let input = concat!(
+            "* 4 EXISTS\r\n",
+            "* LIST () \"/\" \"New\" (\"OLDNAME\" (\"Old\"))\r\n",
+            // A literal, even one that looks like an unparsable response,
+            // and the rest of its response go on unchecked.
+            "* STATUS {11}\r\n* LIST (((( (MESSAGES 1)\r\n",
+            "* 2 FETCH (BODY[HEADER] {9}\r\n* (((\r\n\r\n FLAGS (\\Seen))\r\n",
+            "+ idling\r\n",
+            "A0005 OK IDLE terminated\r\n",
+        );
+        let expected = concat!(
+            "* 4 EXISTS\r\n",
+            "* OK [UNPARSED] LIST () \"/\" \"New\" (\"OLDNAME\" (\"Old\"))\r\n",
+            "* STATUS {11}\r\n* LIST (((( (MESSAGES 1)\r\n",
+            "* 2 FETCH (BODY[HEADER] {9}\r\n* (((\r\n\r\n FLAGS (\\Seen))\r\n",
+            "+ idling\r\n",
+            "A0005 OK IDLE terminated\r\n",
+        );
+        for piece in [1, 2, 7, input.len()] {
+            assert_eq!(screened(input, piece), expected, "in pieces of {piece}");
+        }
+        // Every stand-in parses, whatever the bytes it replaces.
+        let odd = screened(
+            "* LIST () \"/\" \"Neu\u{e4}\" (\"OLDNAME\" (\"\tOld\"))\r\n",
+            3,
+        );
+        let (rest, _) = Response::parse(odd.as_bytes()).unwrap();
+        assert!(rest.is_empty(), "{odd:?}");
+        assert_eq!(literal_length(b"* 1 FETCH (BODY[] {120}\r\n"), Some(120));
+        assert_eq!(literal_length(b"* OK {braces}\r\n"), None);
     }
 
     #[test]

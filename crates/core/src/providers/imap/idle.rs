@@ -5,21 +5,27 @@
 
 use std::time::Duration;
 
+use async_imap::imap_proto::Response;
 use async_trait::async_trait;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::ImapCredentials;
-use super::connection::{IdleExit, ImapSession, is_server_busy};
+use super::connection::{IdleExit, ImapSession, Untagged, classify, is_server_busy};
 use crate::error::{Error, ErrorCode, Result};
 use crate::push::{EndReason, MailWatcher, PushEvent, PushMode, WatchSink};
 
-/// Asks for new and removed messages and flag changes in the selected
-/// mailbox (the Inbox), and for the same plus folder changes elsewhere,
-/// which arrive as `STATUS` and `LIST` responses.
-const NOTIFY_SET: &str = "NOTIFY SET (selected (MessageNew (UID) MessageExpunge FlagChange)) \
+/// NOTIFY's events: new and removed messages and flag changes in the
+/// selected mailbox (the Inbox), and the same plus folder changes
+/// elsewhere, which arrive as `STATUS` and `LIST` responses.
+const NOTIFY_EVENTS: &str = "(selected (MessageNew (UID) MessageExpunge FlagChange)) \
      (personal (MessageNew MessageExpunge FlagChange MailboxName))";
 /// How long logging out may take when stopping.
 const LOGOUT_LIMIT: Duration = Duration::from_millis(500);
+/// A notification overflow this soon after the last one ends the connection
+/// rather than setting NOTIFY again, so a server that keeps overflowing
+/// meets the supervisor's backoff instead of a loop.
+const OVERFLOW_MIN_GAP: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct IdleConfig {
@@ -61,16 +67,13 @@ impl ImapIdleWatcher {
             session.logout_within(LOGOUT_LIMIT).await;
             return Ok(None);
         }
+        session.skip_unparsable();
         let mut mode = PushMode::ImapIdle;
-        if self.config.use_notify && session.has_capability("NOTIFY") {
-            match session.execute(NOTIFY_SET, |_| {}).await {
-                Ok(()) => mode = PushMode::ImapNotify,
-                // Refused: IDLE on the Inbox works all the same.
-                Err(e) if session.is_healthy() => {
-                    tracing::debug!("the IMAP server refused NOTIFY ({e}); using IDLE alone");
-                }
-                Err(e) => return Err(e),
-            }
+        if self.config.use_notify
+            && session.has_capability("NOTIFY")
+            && set_notify(&mut session, &format!("NOTIFY SET {NOTIFY_EVENTS}"), |_| {}).await?
+        {
+            mode = PushMode::ImapNotify;
         }
         // Read-only, so this session never changes \Recent or anything else.
         session.select("INBOX", false).await?;
@@ -86,27 +89,80 @@ impl MailWatcher for ImapIdleWatcher {
             _ = cancel.cancelled() => return EndReason::Cancelled,
             opened = self.open() => opened,
         };
-        let (mut session, mode) = match opened {
+        let (mut session, mut mode) = match opened {
             Ok(Some(opened)) => opened,
             Ok(None) => return EndReason::Unsupported,
             Err(e) => return end_reason(e),
         };
-        sink.connected(mode);
+        sink.connected(mode.clone());
         // Whatever changed while there was no connection.
         sink.changed(PushEvent::CatchUp);
+        let mut overflowed_at: Option<Instant> = None;
         loop {
             let idled = session
                 .idle(self.config.refresh, cancel, |event| sink.changed(event))
                 .await;
             match idled {
                 Ok(IdleExit::Refreshed) => {}
+                // Without NOTIFY there's nothing to set again.
+                Ok(IdleExit::Overflowed) if mode != PushMode::ImapNotify => {}
+                Ok(IdleExit::Overflowed) => {
+                    if overflowed_at.is_some_and(|at| at.elapsed() < OVERFLOW_MIN_GAP) {
+                        session.logout_within(LOGOUT_LIMIT).await;
+                        return EndReason::Failed(Error::network(
+                            "The IMAP server keeps dropping notifications.",
+                        ));
+                    }
+                    overflowed_at = Some(Instant::now());
+                    // NOTIFY is off (RFC 5465 §5.8). STATUS has the server
+                    // report every folder, which catches up on the news it
+                    // dropped.
+                    let command = format!("NOTIFY SET STATUS {NOTIFY_EVENTS}");
+                    let report = |response: &Response<'_>| {
+                        if let Untagged::Changed(event) = classify(response) {
+                            sink.changed(event);
+                        }
+                    };
+                    let set = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return EndReason::Cancelled,
+                        set = set_notify(&mut session, &command, report) => set,
+                    };
+                    match set {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            mode = PushMode::ImapIdle;
+                            sink.connected(mode.clone());
+                        }
+                        Err(e) => return end_reason(e),
+                    }
+                }
                 Ok(IdleExit::Cancelled) => {
                     session.logout_within(LOGOUT_LIMIT).await;
                     return EndReason::Cancelled;
                 }
+                // Stopped while starting IDLE, so the session is dropped.
+                Err(_) if cancel.is_cancelled() => return EndReason::Cancelled,
                 Err(e) => return end_reason(e),
             }
         }
+    }
+}
+
+/// Turns NOTIFY on with `command`, passing its responses to `on`. False
+/// when the server refuses: IDLE on the Inbox works all the same.
+async fn set_notify(
+    session: &mut ImapSession,
+    command: &str,
+    on: impl FnMut(&Response<'_>) + Send,
+) -> Result<bool> {
+    match session.execute(command, on).await {
+        Ok(()) => Ok(true),
+        Err(e) if session.is_healthy() => {
+            tracing::debug!("the IMAP server refused NOTIFY ({e}); using IDLE alone");
+            Ok(false)
+        }
+        Err(e) => Err(e),
     }
 }
 
