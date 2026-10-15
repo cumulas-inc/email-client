@@ -1,5 +1,5 @@
 //! Tauri shell: wires [`CoreService`] to the webview through commands and
-//! events, and runs periodic background sync.
+//! events, and starts and stops the core's background work (sync and push).
 
 mod commands;
 mod fonts;
@@ -9,12 +9,16 @@ use std::time::Duration;
 
 use cumulas_core::CoreService;
 use cumulas_core::model::{Account, DataKind, MessageSummary, SyncStatus};
+use cumulas_core::push::PushStatus;
 use cumulas_core::secrets::{KeyringSecretStore, MemorySecretStore, SecretStore};
 use cumulas_core::service::{EventSink, LiveConnector, MailAlert};
 use cumulas_core::store::Store;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_notification::NotificationExt;
+
+/// The most the app waits on exit for push connections to close.
+const SHUTDOWN_LIMIT: Duration = Duration::from_secs(2);
 
 pub(crate) struct AppState {
     pub service: Arc<CoreService>,
@@ -80,6 +84,10 @@ impl EventSink for TauriSink {
             }
         }
     }
+
+    fn push_status(&self, status: &PushStatus) {
+        let _ = self.app.emit("push-status", status);
+    }
 }
 
 /// Who a message is from, for a notification title.
@@ -101,22 +109,6 @@ async fn open_secret_store() -> (Arc<dyn SecretStore>, bool) {
             (Arc::new(MemorySecretStore::default()), false)
         }
     }
-}
-
-fn spawn_background_sync(service: Arc<CoreService>) {
-    tauri::async_runtime::spawn(async move {
-        // Give the window a moment to render before the first sync.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        loop {
-            service.sync_all().await;
-            let minutes = service
-                .get_settings()
-                .map(|s| s.sync_interval_minutes)
-                .unwrap_or(5)
-                .max(1);
-            tokio::time::sleep(Duration::from_secs(u64::from(minutes) * 60)).await;
-        }
-    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -151,7 +143,9 @@ pub fn run() {
                     tracing::warn!("could not set the zoom to {zoom}: {e}");
                 }
             }
-            spawn_background_sync(Arc::clone(&service));
+            // Periodic sync, push and the resume detector; inside the
+            // runtime, where their tasks live.
+            tauri::async_runtime::block_on(async { service.start_background() });
             app.manage(AppState {
                 service,
                 persistent_secrets,
@@ -175,6 +169,7 @@ pub fn run() {
             commands::sync_account,
             commands::sync_all,
             commands::get_sync_statuses,
+            commands::get_push_statuses,
             // mail
             commands::list_folders,
             commands::list_messages,
@@ -209,6 +204,17 @@ pub fn run() {
             commands::update_task,
             commands::delete_task,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Cumulas Mail");
+        .build(tauri::generate_context!())
+        .expect("error while building Cumulas Mail")
+        .run(|app, event| {
+            if let RunEvent::Exit = event
+                && let Some(state) = app.try_state::<AppState>()
+            {
+                // Close push connections (IMAP LOGOUT) and stop syncing.
+                let service = Arc::clone(&state.service);
+                tauri::async_runtime::block_on(async move {
+                    let _ = tokio::time::timeout(SHUTDOWN_LIMIT, service.shutdown()).await;
+                });
+            }
+        });
 }

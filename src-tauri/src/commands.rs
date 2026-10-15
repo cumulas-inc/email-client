@@ -9,6 +9,7 @@ use cumulas_core::model::{
     Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount,
     OutgoingMessage, Settings, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
+use cumulas_core::push::PushStatus;
 use cumulas_core::service::BUILTIN_MICROSOFT_CLIENT_ID;
 use cumulas_core::{Error, Result};
 use serde::Serialize;
@@ -170,6 +171,13 @@ pub fn sync_all(state: State<'_, AppState>) {
 #[tauri::command]
 pub fn get_sync_statuses(state: State<'_, AppState>) -> Result<Vec<SyncStatus>> {
     state.service.sync_statuses()
+}
+
+/// How each account hears about new mail; changes arrive as `push-status`
+/// events.
+#[tauri::command]
+pub fn get_push_statuses(state: State<'_, AppState>) -> Result<Vec<PushStatus>> {
+    state.service.push_statuses()
 }
 
 // --- mail -----------------------------------------------------------------------
