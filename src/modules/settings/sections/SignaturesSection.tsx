@@ -1,7 +1,6 @@
 import { Building2, LoaderCircle, Signature } from "lucide-react";
 import { type CSSProperties, useCallback, useEffect, useId, useRef, useState } from "react";
 
-import { useBackend } from "../../../api/context";
 import {
   useAccounts,
   useAccountSignature,
@@ -11,9 +10,8 @@ import {
 import type { Account, AccountSignature, OrganizationSignature } from "../../../api/types";
 import { EmptyState } from "../../../components/EmptyState";
 import { PaneSpinner } from "../../../components/Spinner";
-import { classifyLink, signatureAppearance } from "../../mail/bodyHtml";
+import { signatureAppearance } from "../../mail/bodyHtml";
 import { useIsDark } from "../../mail/hooks";
-import { MessageBody } from "../../mail/MessageBody";
 import { SignatureEditor, type SignatureEditorHandle } from "../../mail/SignatureEditor";
 import { Callout } from "../Fields";
 import { trackSave } from "../saveStatus";
@@ -142,22 +140,14 @@ function OrganizationPreview({
   organization: OrganizationSignature;
   html: string;
 }) {
-  const backend = useBackend();
   const isDark = useIsDark();
   const appearance = signatureAppearance(html, isDark);
   return (
     <>
+      {/* In the frame the composer edits it in, so it looks as it does
+          there, and as it's sent. */}
       <div className={`signature-preview signature-preview--${appearance}`}>
-        <MessageBody
-          html={html}
-          allowRemote
-          appearance={appearance}
-          title="Your organization's signature"
-          onLink={(href) => {
-            const link = classifyLink(href);
-            if (link.kind === "open") void backend.openLink(link.url);
-          }}
-        />
+        <SignatureEditor html={html} readOnly title="Your organization's signature" />
       </div>
       <p className="signature-caption">
         <Signature size={16} strokeWidth={1.75} aria-hidden="true" />

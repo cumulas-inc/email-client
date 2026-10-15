@@ -819,8 +819,17 @@ describe("Signatures", () => {
       name: "Alex Morgan alex.morgan@acme.example",
     });
     expect(group("Alex Morgan")).toBe(work);
-    const preview = await within(work).findByTitle("Your organization's signature");
-    expect(preview.getAttribute("srcdoc")).toContain("Engineering Manager, Atlas");
+    const preview = (await within(work).findByTitle(
+      "Your organization's signature",
+    )) as HTMLIFrameElement;
+    // Shown as the composer shows it, without the reader's styles, and
+    // not editable.
+    const srcdoc = preview.getAttribute("srcdoc") ?? "";
+    expect(srcdoc).not.toContain("max-width: 72ch");
+    expect(srcdoc).not.toMatch(/\bp \{ margin/);
+    const doc = await loadFrame(preview);
+    expect(doc.body.innerHTML).toContain("Engineering Manager, Atlas");
+    expect(doc.body.hasAttribute("contenteditable")).toBe(false);
     expect(work).toHaveTextContent(
       "Set by your organization with Cumulas Signatures. Added to new messages and replies. " +
         "You can change it in any message before you send.",

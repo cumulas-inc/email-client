@@ -2,6 +2,7 @@ import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { MockBackend } from "../../api/mock";
 import { ACME_SIGNATURE } from "../../api/mock/data";
 import { renderWithBackend } from "../../test/render";
 import { buildSignatureSrcDoc, DEFAULT_BODY_FONT, isBlankHtml } from "./bodyHtml";
@@ -186,6 +187,50 @@ describe("SignatureEditor", () => {
     // Nor is reporting it again a change.
     act(() => void doc.body.dispatchEvent(new doc.defaultView!.Event("input", { bubbles: true })));
     expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a signature read-only as the composer does, its links opening in the browser", async () => {
+    const backend = new MockBackend();
+    const openLink = vi.spyOn(backend, "openLink").mockResolvedValue();
+    const onChange = vi.fn();
+    renderWithBackend(
+      <SignatureEditor
+        html={ACME_SIGNATURE}
+        readOnly
+        title="Your organization's signature"
+        onChange={onChange}
+      />,
+      { backend },
+    );
+    const el = screen.getByTitle("Your organization's signature") as HTMLIFrameElement;
+    const srcdoc = el.getAttribute("srcdoc") ?? "";
+    expect(srcdoc).toContain("line-height: normal;");
+    expect(srcdoc).not.toContain("max-width: 72ch");
+    expect(srcdoc).not.toMatch(/\bp \{ margin/);
+
+    const doc = await loadFrame(el);
+    expect(doc.body.innerHTML).toContain("Engineering Manager, Atlas");
+    for (const name of ["contenteditable", "role", "aria-multiline", "data-placeholder"]) {
+      expect(doc.body.hasAttribute(name)).toBe(false);
+    }
+    expect(doc.body.hasAttribute("data-empty")).toBe(false);
+
+    const click = (href: string) => {
+      const event = new doc.defaultView!.MouseEvent("click", { bubbles: true, cancelable: true });
+      doc.querySelector(`a[href="${href}"]`)!.dispatchEvent(event);
+      return event;
+    };
+    // Never in the frame; the web through the browser.
+    expect(click("https://acme.example").defaultPrevented).toBe(true);
+    expect(openLink).toHaveBeenCalledWith("https://acme.example/");
+    expect(click("tel:+12065550147").defaultPrevented).toBe(true);
+    expect(openLink).toHaveBeenCalledTimes(1);
+
+    // Formatting keys do nothing to it.
+    doc.execCommand = vi.fn(() => true);
+    key(doc, { key: "b", ctrlKey: true });
+    expect(doc.execCommand).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("closes the dialog around it on Escape, as a field would", async () => {

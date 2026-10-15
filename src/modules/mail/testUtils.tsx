@@ -107,7 +107,8 @@ export function deferred<T = void>() {
 
 /**
  * Loads a frame's srcdoc, which jsdom leaves blank: writes it into the
- * frame, which then fires load, and waits for an editable signature to fill.
+ * frame, which then fires load (a signature frame fills on it), and waits
+ * for its body.
  */
 export async function loadFrame(frame: HTMLIFrameElement): Promise<Document> {
   const doc = frame.contentDocument!;
@@ -115,7 +116,7 @@ export async function loadFrame(frame: HTMLIFrameElement): Promise<Document> {
   doc.write(frame.getAttribute("srcdoc") ?? "");
   doc.close();
   await waitFor(() => {
-    if (!doc.body?.hasAttribute("contenteditable")) throw new Error("not loaded");
+    if (!doc.body) throw new Error("not loaded");
   });
   return doc;
 }

@@ -12,6 +12,9 @@
 // this component's, so without it edits, focus and keys would go unheard.
 // No script can run in it all the same: its Content Security Policy allows
 // none, from anywhere, on top of the app's own.
+//
+// Read-only, the same frame shows a signature exactly as the composer
+// does (an organization's, in Settings), without editing.
 
 import clsx from "clsx";
 import {
@@ -24,8 +27,15 @@ import {
   useState,
 } from "react";
 
+import { useBackend } from "../../api/context";
 import { useBodyFont } from "./bodyFont";
-import { anchorOf, buildSignatureSrcDoc, isBlankHtml, signatureAppearance } from "./bodyHtml";
+import {
+  anchorOf,
+  buildSignatureSrcDoc,
+  classifyLink,
+  isBlankHtml,
+  signatureAppearance,
+} from "./bodyHtml";
 import { useIsDark } from "./hooks";
 
 export interface SignatureEditorHandle {
@@ -39,13 +49,17 @@ interface SignatureEditorProps {
    */
   html: string;
   /** The body's HTML after each edit; "" once nothing is left. */
-  onChange: (html: string) => void;
+  onChange?: (html: string) => void;
   onBlur?: () => void;
   /** Set text the signature doesn't style like the letter (the person's own). */
   letter?: boolean;
   placeholder?: string;
   /** Lines it's tall at least. */
   minLines?: number;
+  /** Shown, not edited; its links open in the browser. */
+  readOnly?: boolean;
+  /** The frame's name. */
+  title?: string;
   className?: string;
   ref?: Ref<SignatureEditorHandle>;
 }
@@ -58,6 +72,25 @@ function serialize(body: HTMLElement): string {
   return isBlankHtml(html) ? "" : html;
 }
 
+/** What makes the document's body an editor (see buildSignatureSrcDoc). */
+const EDITING = [
+  "contenteditable",
+  "role",
+  "aria-multiline",
+  "aria-label",
+  "spellcheck",
+  "data-placeholder",
+  "data-empty",
+];
+
+/** Makes the loaded document show its signature without editing it. */
+function showOnly(doc: Document): void {
+  for (const name of EDITING) doc.body.removeAttribute(name);
+  const style = doc.createElement("style");
+  style.textContent = "body, a { cursor: auto; } a[href] { cursor: pointer; }";
+  doc.head.append(style);
+}
+
 export function SignatureEditor({
   html,
   onChange,
@@ -65,15 +98,18 @@ export function SignatureEditor({
   letter = false,
   placeholder = "",
   minLines = 1,
+  readOnly = false,
+  title = "Signature",
   className,
   ref,
 }: SignatureEditorProps) {
+  const backend = useBackend();
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(Math.round(minLines * 25));
   const [focused, setFocused] = useState(false);
-  const handlers = useRef({ onChange, onBlur });
+  const handlers = useRef({ onChange, onBlur, readOnly, backend });
   useEffect(() => {
-    handlers.current = { onChange, onBlur };
+    handlers.current = { onChange, onBlur, readOnly, backend };
   });
 
   // What the frame holds: the latest `html`, or what it last reported. It
@@ -107,11 +143,11 @@ export function SignatureEditor({
             font,
             letter,
             placeholder,
-            label: "Signature",
+            label: title,
             minLines,
           })
         : null,
-    [firstAppearance, font, letter, placeholder, minLines],
+    [firstAppearance, font, letter, placeholder, title, minLines],
   );
 
   // Another signature: shown in place, unless it's the edit just reported.
@@ -141,6 +177,8 @@ export function SignatureEditor({
     // The document from srcdoc, not the blank one a frame starts with.
     if (!frame || !doc || !body || !body.hasAttribute("contenteditable")) return;
     teardown.current?.();
+    const readOnly = handlers.current.readOnly;
+    if (readOnly) showOnly(doc);
     doc.documentElement.setAttribute("data-appearance", look.current);
     // A new document (the reading font changed) starts without the focus.
     setFocused(false);
@@ -149,7 +187,9 @@ export function SignatureEditor({
       const root = doc.documentElement;
       if (root) setHeight(Math.max(Math.ceil(root.getBoundingClientRect().height), 20));
     };
-    const markEmpty = () => body.toggleAttribute("data-empty", serialize(body) === "");
+    const markEmpty = () => {
+      if (!readOnly) body.toggleAttribute("data-empty", serialize(body) === "");
+    };
     fill.current = () => {
       body.innerHTML = content.current;
       shown.current = serialize(body);
@@ -165,12 +205,19 @@ export function SignatureEditor({
       if (next === shown.current) return;
       shown.current = next;
       content.current = next;
-      handlers.current.onChange(next);
+      handlers.current.onChange?.(next);
     };
 
-    // A click places the caret in a link's text; it never follows the link.
+    // A click places the caret in a link's text; it never follows the link
+    // in the frame. Read-only, the link opens in the browser instead.
     const stayPut = (e: MouseEvent) => {
-      if (anchorOf(e.target)) e.preventDefault();
+      const anchor = anchorOf(e.target);
+      if (!anchor) return;
+      e.preventDefault();
+      if (readOnly && e.type === "click") {
+        const link = classifyLink(anchor.getAttribute?.("href"));
+        if (link.kind === "open") void handlers.current.backend.openLink(link.url);
+      }
     };
     // Dropped files would come in as links to this computer's files.
     const noFiles = (e: DragEvent) => {
@@ -181,7 +228,7 @@ export function SignatureEditor({
       if (e.isComposing) return;
       const ctrl = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey;
       const key = e.key.toLowerCase();
-      const format = ctrl ? FORMATS[key] : undefined;
+      const format = ctrl && !readOnly ? FORMATS[key] : undefined;
       if (format) {
         e.preventDefault();
         doc.execCommand?.(format);
@@ -190,7 +237,7 @@ export function SignatureEditor({
       }
       // Ctrl+K inserts a link in the message body; here it does nothing,
       // rather than leaving for the search box mid-edit.
-      if (ctrl && key === "k") {
+      if (ctrl && key === "k" && !readOnly) {
         e.preventDefault();
         return;
       }
@@ -273,7 +320,7 @@ export function SignatureEditor({
         <iframe
           ref={frameRef}
           className="signature-editor__frame"
-          title="Signature"
+          title={title}
           sandbox="allow-same-origin allow-scripts"
           referrerPolicy="no-referrer"
           srcDoc={srcDoc}
