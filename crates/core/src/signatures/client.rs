@@ -48,8 +48,9 @@ pub enum Fetched {
     Unauthorized,
     /// 403 `app-not-allowed`: the organization hasn't allowed this app.
     NotAllowed,
-    /// 404: the service doesn't serve the person's organization, or isn't
-    /// set up for mail apps.
+    /// 404 `not-managed` or `not-set-up`: the service doesn't serve the
+    /// person's organization, or isn't set up for mail apps. A 404 without
+    /// either code (a proxy's, or a server without the route) is `Failed`.
     NotUsed,
     /// Anything else: try again later, not before `retry_after` when the
     /// service said.
@@ -138,7 +139,11 @@ impl SignatureClient {
             },
             StatusCode::UNAUTHORIZED => Fetched::Unauthorized,
             StatusCode::FORBIDDEN if error_code(&body) == "app-not-allowed" => Fetched::NotAllowed,
-            StatusCode::NOT_FOUND => Fetched::NotUsed,
+            StatusCode::NOT_FOUND
+                if matches!(error_code(&body).as_str(), "not-managed" | "not-set-up") =>
+            {
+                Fetched::NotUsed
+            }
             _ => Fetched::Failed {
                 retry_after,
                 reason: match error_code(&body) {
@@ -406,9 +411,28 @@ mod tests {
                 Some(MAX_RETRY_AFTER),
             ),
             (ResponseTemplate::new(500), None),
-            // A 403 that isn't the service's refusal (a proxy's, say).
+            // A 403 or 404 that isn't the service's answer (a proxy's, say,
+            // or a server without the route): it says nothing of the
+            // organization.
             (
                 ResponseTemplate::new(403).set_body_string("Forbidden"),
+                None,
+            ),
+            (
+                ResponseTemplate::new(404).set_body_string("Not Found"),
+                None,
+            ),
+            (
+                ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                    "message": "Route GET:/apps/signature not found",
+                    "error": "Not Found",
+                    "statusCode": 404,
+                })),
+                None,
+            ),
+            (
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({ "error": "Gone.", "code": "elsewhere" })),
                 None,
             ),
             (

@@ -314,6 +314,26 @@ mod tests {
                 .await;
             assert_eq!(outcome, expected);
         }
+
+        // A 404 that isn't the service's says nothing of the organization.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .mount(&server)
+            .await;
+        let outcome = checker(&server, Arc::new(CountingTokens::default()))
+            .check(Some("\"r\""))
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                CheckOutcome::Failed {
+                    retry_after: None,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
     }
 
     #[test]
