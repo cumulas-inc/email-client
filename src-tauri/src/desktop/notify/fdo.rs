@@ -5,7 +5,9 @@
 //! The server numbers notifications itself, so the app keeps a small map
 //! from its own toast ids to the server's (to replace and withdraw them)
 //! and back (to know which of the clicks it hears about are its own: the
-//! server's signals go to every client).
+//! server's signals go to every client). A server that starts again (after
+//! a crash, or another taking over) numbers from scratch, so the map is
+//! forgotten then.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -19,6 +21,9 @@ use super::{Action, Invoked, InvokedSender, Notifier, NotifierKind, Toast, Toast
 /// The most notifications the app remembers; older ones can no longer be
 /// replaced, withdrawn or clicked through.
 const REMEMBERED: usize = 256;
+
+/// `NotificationClosed`'s reason for a notification that timed out.
+const EXPIRED: u32 = 1;
 
 #[zbus::proxy(
     interface = "org.freedesktop.Notifications",
@@ -71,12 +76,17 @@ pub(crate) struct IdMap {
     order: VecDeque<u32>,
     /// Activation tokens that arrived ahead of their click.
     tokens: HashMap<u32, String>,
+    /// The server the ids are from: its unique name on the bus, when known.
+    server: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct Shown {
     toast_id: String,
     default_action: Action,
+    /// The server closed it as timed out, which can leave it in the
+    /// desktop's history (KDE Plasma's) until the app closes it.
+    expired: bool,
 }
 
 impl IdMap {
@@ -85,18 +95,22 @@ impl IdMap {
         self.by_toast.get(toast_id).copied().unwrap_or(0)
     }
 
-    /// The server showed `toast` as `server_id`.
-    pub(crate) fn shown(&mut self, toast: &Toast, server_id: u32) {
+    /// The server showed `toast` as `server_id`; returns the server ids of
+    /// the toast's earlier showings that expired, to close now.
+    pub(crate) fn shown(&mut self, toast: &Toast, server_id: u32) -> Vec<u32> {
         if let Some(old) = self.by_toast.insert(toast.id.clone(), server_id)
             && old != server_id
         {
             self.by_server.remove(&old);
         }
+        let mut expired = self.take_expired(&toast.id);
+        expired.retain(|id| *id != server_id);
         self.by_server.insert(
             server_id,
             Shown {
                 toast_id: toast.id.clone(),
                 default_action: toast.default_action.clone(),
+                expired: false,
             },
         );
         self.order.retain(|id| *id != server_id);
@@ -109,26 +123,60 @@ impl IdMap {
                 self.by_toast.remove(&shown.toast_id);
             }
         }
+        expired
     }
 
-    /// Forgets a toast the app withdraws; returns its server id.
-    pub(crate) fn withdrawn(&mut self, toast_id: &str) -> Option<u32> {
-        let server_id = self.by_toast.remove(toast_id)?;
-        self.by_server.remove(&server_id);
-        self.tokens.remove(&server_id);
-        Some(server_id)
+    /// Forgets a toast the app withdraws; returns the server ids to close:
+    /// its own, and its earlier showings' that expired.
+    pub(crate) fn withdrawn(&mut self, toast_id: &str) -> Vec<u32> {
+        let mut server_ids = self.take_expired(toast_id);
+        if let Some(server_id) = self.by_toast.remove(toast_id) {
+            self.by_server.remove(&server_id);
+            self.tokens.remove(&server_id);
+            server_ids.push(server_id);
+        }
+        server_ids
     }
 
     /// The server closed one (dismissed, expired, clicked): it can't be
-    /// replaced or withdrawn any more. What a click on it does is kept until
-    /// it's forgotten, in case the click is reported after the close.
-    pub(crate) fn closed(&mut self, server_id: u32) {
-        if let Some(shown) = self.by_server.get(&server_id)
+    /// replaced any more (Plasma would keep a replacement for an expired one
+    /// in its history, without a popup), and only an expired one can still
+    /// be withdrawn. What a click on it does is kept until it's forgotten,
+    /// in case the click is reported after the close.
+    pub(crate) fn closed(&mut self, server_id: u32, reason: u32) {
+        if let Some(shown) = self.by_server.get_mut(&server_id)
             && self.by_toast.get(&shown.toast_id) == Some(&server_id)
         {
             self.by_toast.remove(&shown.toast_id);
+            shown.expired = reason == EXPIRED;
         }
         self.tokens.remove(&server_id);
+    }
+
+    /// Takes out the server ids of a toast's showings that expired.
+    fn take_expired(&mut self, toast_id: &str) -> Vec<u32> {
+        let server_ids: Vec<u32> = self
+            .by_server
+            .iter()
+            .filter(|(_, shown)| shown.expired && shown.toast_id == toast_id)
+            .map(|(server_id, _)| *server_id)
+            .collect();
+        for server_id in &server_ids {
+            self.by_server.remove(server_id);
+        }
+        server_ids
+    }
+
+    /// The server is now `server` (its unique name; `None` for none). Another
+    /// one than before numbers its notifications afresh: none of the ids are
+    /// its.
+    pub(crate) fn served_by(&mut self, server: Option<&str>) {
+        if self.server.as_deref() != server {
+            *self = Self {
+                server: server.map(str::to_owned),
+                ..Self::default()
+            };
+        }
     }
 
     pub(crate) fn activation_token(&mut self, server_id: u32, token: String) {
@@ -207,12 +255,18 @@ impl FdoNotifier {
     }
 }
 
-/// Follows the server's signals: activation tokens, clicks and closes.
+/// Follows the server's signals (activation tokens, clicks and closes), and
+/// which server it is.
 async fn listen(
     proxy: &NotificationsProxy<'static>,
     ids: Arc<Mutex<IdMap>>,
     clicks: InvokedSender,
 ) -> Result<(), String> {
+    let mut owner = proxy
+        .inner()
+        .receive_owner_changed()
+        .await
+        .map_err(|e| e.to_string())?;
     let mut invoked = proxy
         .receive_action_invoked()
         .await
@@ -228,8 +282,12 @@ async fn listen(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                // The token comes before its click.
+                // The old server's ids go before the new one's signals; the
+                // token comes before its click.
                 biased;
+                Some(owner) = owner.next() => {
+                    ids.lock().unwrap().served_by(owner.as_ref().map(|o| o.as_str()));
+                }
                 Some(signal) = tokens.next() => {
                     if let Ok(args) = signal.args() {
                         ids.lock()
@@ -248,7 +306,7 @@ async fn listen(
                 }
                 Some(signal) = closed.next() => {
                     if let Ok(args) = signal.args() {
-                        ids.lock().unwrap().closed(args.id);
+                        ids.lock().unwrap().closed(args.id, args.reason);
                     }
                 }
                 else => return,
@@ -276,6 +334,10 @@ pub(crate) fn escape_markup(text: &str) -> String {
 impl Notifier for FdoNotifier {
     fn kind(&self) -> NotifierKind {
         NotifierKind::Freedesktop
+    }
+
+    fn is_closed(&self) -> bool {
+        self.proxy.inner().connection().is_closed()
     }
 
     async fn show(&self, toast: &Toast) -> Result<(), String> {
@@ -309,32 +371,62 @@ impl Notifier for FdoNotifier {
         } else {
             toast.body.clone()
         };
-        let server_id = self
+        // Called by hand rather than through the proxy, to learn which server
+        // answered.
+        let reply = self
             .proxy
-            .notify(
-                "Cumulas Mail",
-                replaces,
-                &self.entry.icon,
-                &toast.title,
-                &body,
-                &actions,
-                hints,
-                -1,
+            .inner()
+            .call_method(
+                "Notify",
+                &(
+                    "Cumulas Mail",
+                    replaces,
+                    self.entry.icon.as_str(),
+                    toast.title.as_str(),
+                    body.as_str(),
+                    &actions,
+                    hints,
+                    -1i32,
+                ),
             )
             .await
             .map_err(|e| e.to_string())?;
-        self.ids.lock().unwrap().shown(toast, server_id);
+        let server_id: u32 = reply.body().deserialize().map_err(|e| e.to_string())?;
+        let expired = {
+            let mut ids = self.ids.lock().unwrap();
+            // A server started since (by the bus, for this very notification,
+            // say) numbers afresh. Its reply can come before the listener
+            // hears of it, or after.
+            ids.served_by(reply.header().sender().map(|s| s.as_str()));
+            ids.shown(toast, server_id)
+        };
+        // Superseded: out of the desktop's history.
+        if let Err(e) = self.close(&expired).await {
+            tracing::debug!("could not close expired notifications: {e}");
+        }
         Ok(())
     }
 
     async fn withdraw(&self, id: &str) -> Result<(), String> {
-        let Some(server_id) = self.ids.lock().unwrap().withdrawn(id) else {
-            return Ok(());
-        };
-        self.proxy
-            .close_notification(server_id)
-            .await
-            .map_err(|e| e.to_string())
+        let server_ids = self.ids.lock().unwrap().withdrawn(id);
+        self.close(&server_ids).await
+    }
+}
+
+impl FdoNotifier {
+    /// Closes these notifications, all of them even when the server already
+    /// dropped some (an expired one, on most desktops); reports the first
+    /// error.
+    async fn close(&self, server_ids: &[u32]) -> Result<(), String> {
+        let mut result = Ok(());
+        for &server_id in server_ids {
+            if let Err(e) = self.proxy.close_notification(server_id).await
+                && result.is_ok()
+            {
+                result = Err(e.to_string());
+            }
+        }
+        result
     }
 }
 
@@ -346,6 +438,7 @@ mod tests {
     use zbus::object_server::SignalEmitter;
     use zbus::zvariant::OwnedValue;
 
+    use super::super::{Connect, Notifications};
     use super::*;
 
     fn toast(id: &str, default_action: Action) -> Toast {
@@ -395,21 +488,69 @@ mod tests {
         // A replacement under a new server id drops the old one.
         ids.shown(&first, 8);
         assert_eq!(ids.invoked(7, "default"), None);
-        assert_eq!(ids.withdrawn("mail:m1"), Some(8));
-        assert_eq!(ids.withdrawn("mail:m1"), None);
+        assert_eq!(ids.withdrawn("mail:m1"), [8]);
+        assert!(ids.withdrawn("mail:m1").is_empty());
     }
 
     #[test]
     fn closed_notifications_are_not_replaced_but_still_clickable() {
         let mut ids = IdMap::default();
         ids.shown(&toast("mail:m1", Action::OpenMessage("m1".into())), 3);
-        ids.closed(3);
+        // Dismissed.
+        ids.closed(3, 2);
         assert_eq!(ids.replaces("mail:m1"), 0);
-        assert_eq!(ids.withdrawn("mail:m1"), None);
+        assert!(ids.withdrawn("mail:m1").is_empty());
         assert_eq!(
             ids.invoked(3, "default").map(|i| i.action),
             Some(Action::OpenMessage("m1".into()))
         );
+    }
+
+    #[test]
+    fn expired_notifications_are_withdrawn_but_not_replaced() {
+        let mut ids = IdMap::default();
+        let first = toast("mail:m1", Action::OpenMessage("m1".into()));
+        ids.shown(&first, 3);
+        ids.closed(3, EXPIRED);
+        assert_eq!(ids.replaces("mail:m1"), 0);
+        assert_eq!(
+            ids.invoked(3, "default").map(|i| i.action),
+            Some(Action::OpenMessage("m1".into()))
+        );
+        assert_eq!(ids.withdrawn("mail:m1"), [3]);
+        assert!(ids.withdrawn("mail:m1").is_empty());
+
+        // Shown anew: the expired one is closed then, the new one later.
+        ids.shown(&first, 4);
+        ids.closed(4, EXPIRED);
+        assert_eq!(ids.shown(&first, 5), [4]);
+        assert_eq!(ids.replaces("mail:m1"), 5);
+        assert_eq!(ids.withdrawn("mail:m1"), [5]);
+    }
+
+    #[test]
+    fn a_new_server_s_ids_are_not_the_app_s() {
+        let mut ids = IdMap::default();
+        let first = toast("mail:m1", Action::OpenMessage("m1".into()));
+        ids.served_by(Some(":1.5"));
+        ids.shown(&first, 1);
+        ids.shown(&toast("mail:m2", Action::OpenMessage("m2".into())), 2);
+        ids.closed(2, EXPIRED);
+        ids.served_by(Some(":1.5"));
+        assert_eq!(ids.replaces("mail:m1"), 1);
+
+        // The server went.
+        ids.served_by(None);
+        assert_eq!(ids.replaces("mail:m1"), 0);
+        assert_eq!(ids.invoked(1, "default"), None);
+        assert!(ids.withdrawn("mail:m1").is_empty());
+        assert!(ids.withdrawn("mail:m2").is_empty());
+
+        // A new one, which the app heard from before the bus said so.
+        ids.served_by(Some(":1.9"));
+        ids.shown(&first, 1);
+        ids.served_by(Some(":1.9"));
+        assert_eq!(ids.replaces("mail:m1"), 1);
     }
 
     #[test]
@@ -533,6 +674,13 @@ mod tests {
 
     const PATH: &str = "/org/freedesktop/Notifications";
 
+    fn entry() -> DesktopEntry {
+        DesktopEntry {
+            id: "co.cumulas.Mail".into(),
+            icon: "co.cumulas.Mail".into(),
+        }
+    }
+
     /// The notifier and a fake server, talking peer to peer.
     async fn harness(capabilities: &[&str]) -> Harness {
         let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
@@ -554,12 +702,8 @@ mod tests {
         let (server, client) = tokio::join!(server, client);
         let (server, client) = (server.unwrap(), client.unwrap());
         let (tx, clicks) = mpsc::unbounded_channel();
-        let entry = DesktopEntry {
-            id: "co.cumulas.Mail".into(),
-            icon: "co.cumulas.Mail".into(),
-        };
         // The notifier's proxy keeps the client connection open.
-        let notifier = FdoNotifier::with_connection(&client, tx, entry)
+        let notifier = FdoNotifier::with_connection(&client, tx, entry())
             .await
             .unwrap();
         Harness {
@@ -715,5 +859,265 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(h.recorded.lock().unwrap().notified[2].replaces_id, 0);
+    }
+
+    /// Waits for what a signal does, which happens asynchronously.
+    async fn until(done: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("not done within 2 s");
+    }
+
+    #[tokio::test]
+    async fn expired_notifications_still_go_once_read() {
+        let h = harness(&["actions"]).await;
+        let summary = toast("mail-summary:acct", Action::OpenInbox("acct".into()));
+        h.notifier
+            .show(&toast("mail:m1", Action::OpenMessage("m1".into())))
+            .await
+            .unwrap();
+        h.notifier.show(&summary).await.unwrap();
+        // The popups timed out; KDE Plasma keeps them in its history.
+        let emitter = h.emit();
+        FakeServer::notification_closed(&emitter, 41, EXPIRED)
+            .await
+            .unwrap();
+        FakeServer::notification_closed(&emitter, 42, EXPIRED)
+            .await
+            .unwrap();
+        until(|| h.notifier.ids.lock().unwrap().replaces("mail-summary:acct") == 0).await;
+
+        // The mail was read.
+        h.notifier.withdraw("mail:m1").await.unwrap();
+        assert_eq!(h.recorded.lock().unwrap().closed, [41]);
+        // A new summary is a new notification, and the old one goes.
+        h.notifier.show(&summary).await.unwrap();
+        let recorded = h.recorded.lock().unwrap();
+        assert_eq!(recorded.notified[2].replaces_id, 0);
+        assert_eq!(recorded.closed, [41, 42]);
+    }
+
+    #[tokio::test]
+    async fn a_lost_connection_shows() {
+        let h = harness(&["actions"]).await;
+        assert!(!h.notifier.is_closed());
+        h.server.clone().close().await.unwrap();
+        until(|| h.notifier.is_closed()).await;
+    }
+
+    // --- on a real bus -------------------------------------------------------
+
+    /// A private `dbus-daemon`, for what only a real bus does: it drops a
+    /// client that sends it a malformed message, and tells who owns a name.
+    struct PrivateBus {
+        daemon: std::process::Child,
+        address: String,
+    }
+
+    impl PrivateBus {
+        /// `None` (and the test passes untried) without `dbus-daemon`.
+        fn start() -> Option<Self> {
+            let daemon = std::process::Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .inspect_err(|e| eprintln!("not tried on a real bus, no dbus-daemon: {e}"))
+                .ok()?;
+            let mut bus = Self {
+                daemon,
+                address: String::new(),
+            };
+            let stdout = bus.daemon.stdout.take()?;
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut bus.address)
+                .ok()?;
+            bus.address = bus.address.trim().to_owned();
+            Some(bus)
+        }
+
+        async fn connection(&self) -> zbus::Result<zbus::Connection> {
+            zbus::connection::Builder::address(self.address.as_str())?
+                .build()
+                .await
+        }
+
+        /// A notification server on the bus, numbering from 41.
+        async fn serve(&self) -> (zbus::Connection, Arc<Mutex<Recorded>>) {
+            let recorded = Arc::new(Mutex::new(Recorded::default()));
+            let fake = FakeServer {
+                recorded: Arc::clone(&recorded),
+                capabilities: vec!["actions".into(), "body".into()],
+                next_id: 40,
+            };
+            let server = zbus::connection::Builder::address(self.address.as_str())
+                .unwrap()
+                .serve_at(PATH, fake)
+                .unwrap()
+                .name("org.freedesktop.Notifications")
+                .unwrap()
+                .build()
+                .await
+                .unwrap();
+            (server, recorded)
+        }
+
+        /// How the app's notifications reach the bus.
+        fn connect(&self) -> Connect {
+            let address = self.address.clone();
+            Box::new(move |clicks| {
+                let address = address.clone();
+                Box::pin(async move {
+                    let connection = zbus::connection::Builder::address(address.as_str())
+                        .map_err(|e| e.to_string())?
+                        .build()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let notifier =
+                        FdoNotifier::with_connection(&connection, clicks, entry()).await?;
+                    Ok(Arc::new(notifier) as Arc<dyn Notifier>)
+                })
+            })
+        }
+    }
+
+    impl Drop for PrivateBus {
+        fn drop(&mut self) {
+            let _ = self.daemon.kill();
+            let _ = self.daemon.wait();
+        }
+    }
+
+    async fn click(clicks: &mut mpsc::UnboundedReceiver<Invoked>) -> Action {
+        tokio::time::timeout(Duration::from_secs(5), clicks.recv())
+            .await
+            .expect("no click within 5 s")
+            .unwrap()
+            .action
+    }
+
+    #[tokio::test]
+    async fn on_a_real_bus_a_nul_in_mail_is_harmless() {
+        let Some(bus) = PrivateBus::start() else {
+            return;
+        };
+        let (server, recorded) = bus.serve().await;
+        let (tx, mut clicks) = mpsc::unbounded_channel();
+        let notifications = Notifications::with_connect(bus.connect(), tx);
+        // What `Subject: =?UTF-8?B?SGkAdGhlcmU=?=` from `=?UTF-8?B?QWRhAA==?=`
+        // decodes to.
+        let mut nul = toast("mail:m1", Action::OpenMessage("m1".into()));
+        nul.title = "Ada\0".into();
+        nul.body = "Hi\0there".into();
+        notifications.show(&nul, vec!["m1".into()]).await.unwrap();
+        notifications
+            .show(
+                &toast("mail:m2", Action::OpenMessage("m2".into())),
+                vec!["m2".into()],
+            )
+            .await
+            .unwrap();
+        // Still connected, and hearing clicks.
+        let emitter = SignalEmitter::new(&server, PATH).unwrap();
+        FakeServer::action_invoked(&emitter, 41, "default")
+            .await
+            .unwrap();
+        assert_eq!(click(&mut clicks).await, Action::OpenMessage("m1".into()));
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.notified.len(), 2);
+        assert_eq!(recorded.notified[0].summary, "Ada");
+        assert_eq!(recorded.notified[0].body, "Hithere");
+    }
+
+    #[tokio::test]
+    async fn on_a_real_bus_a_dropped_app_connects_again() {
+        let Some(bus) = PrivateBus::start() else {
+            return;
+        };
+        let (server, recorded) = bus.serve().await;
+        let (tx, mut clicks) = mpsc::unbounded_channel();
+        let notifications = Notifications::with_connect(bus.connect(), tx);
+        let first = notifications.notifier().await.unwrap();
+        // What a NUL did before the text was cleaned: the bus drops the app.
+        let mut nul = toast("mail:m1", Action::OpenMessage("m1".into()));
+        nul.body = "Hi\0there".into();
+        assert!(first.show(&nul).await.is_err());
+        until(|| first.is_closed()).await;
+
+        notifications
+            .show(
+                &toast("mail:m2", Action::OpenMessage("m2".into())),
+                vec!["m2".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded.lock().unwrap().notified.len(), 1);
+        let emitter = SignalEmitter::new(&server, PATH).unwrap();
+        FakeServer::action_invoked(&emitter, 41, "default")
+            .await
+            .unwrap();
+        assert_eq!(click(&mut clicks).await, Action::OpenMessage("m2".into()));
+    }
+
+    #[tokio::test]
+    async fn on_a_real_bus_a_restarted_server_s_ids_are_its_own() {
+        let Some(bus) = PrivateBus::start() else {
+            return;
+        };
+        let (old, _) = bus.serve().await;
+        let connection = bus.connection().await.unwrap();
+        let (tx, mut clicks) = mpsc::unbounded_channel();
+        let notifier = FdoNotifier::with_connection(&connection, tx, entry())
+            .await
+            .unwrap();
+        let summary = toast("mail-summary:acct", Action::OpenInbox("acct".into()));
+        notifier
+            .show(&toast("mail:m1", Action::OpenMessage("m1".into())))
+            .await
+            .unwrap();
+        notifier.show(&summary).await.unwrap();
+
+        // The server restarts, numbering from 41 again.
+        old.close().await.unwrap();
+        let recorded = Arc::new(Mutex::new(Recorded::default()));
+        let mut new = None;
+        for _ in 0..200 {
+            let fake = FakeServer {
+                recorded: Arc::clone(&recorded),
+                capabilities: vec!["actions".into()],
+                next_id: 40,
+            };
+            let built = zbus::connection::Builder::address(bus.address.as_str())
+                .unwrap()
+                .serve_at(PATH, fake)
+                .unwrap()
+                .name("org.freedesktop.Notifications")
+                .unwrap()
+                .build()
+                .await;
+            if let Ok(server) = built {
+                new = Some(server);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let new = new.expect("the name wasn't released");
+        until(|| notifier.ids.lock().unwrap().replaces("mail:m1") == 0).await;
+
+        // Its 41 is another app's.
+        let emitter = SignalEmitter::new(&new, PATH).unwrap();
+        FakeServer::action_invoked(&emitter, 41, "default")
+            .await
+            .unwrap();
+        // Not a replacement for its 42, another app's too.
+        notifier.show(&summary).await.unwrap();
+        assert_eq!(recorded.lock().unwrap().notified[0].replaces_id, 0);
+        FakeServer::action_invoked(&emitter, 41, "default")
+            .await
+            .unwrap();
+        assert_eq!(click(&mut clicks).await, Action::OpenInbox("acct".into()));
     }
 }

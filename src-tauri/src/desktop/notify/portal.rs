@@ -21,7 +21,13 @@ pub struct PortalNotifier {
 
 impl PortalNotifier {
     pub async fn connect(clicks: InvokedSender) -> Result<Self, String> {
-        let proxy = NotificationProxy::new()
+        // A connection of its own rather than the one ashpd shares, which
+        // lasts as long as the app: if the bus drops this one, a new one can
+        // be made, and the other portals don't go with it.
+        let connection = zbus::Connection::session()
+            .await
+            .map_err(|e| format!("no session bus: {e}"))?;
+        let proxy = NotificationProxy::with_connection(connection)
             .await
             .map_err(|e| format!("no Notification portal: {e}"))?;
         // The signal through the proxy's D-Bus side, whose stream owns
@@ -130,6 +136,10 @@ fn button_action(action: &Action) -> &'static str {
 impl Notifier for PortalNotifier {
     fn kind(&self) -> NotifierKind {
         NotifierKind::Portal
+    }
+
+    fn is_closed(&self) -> bool {
+        self.proxy.connection().is_closed()
     }
 
     async fn show(&self, toast: &Toast) -> Result<(), String> {

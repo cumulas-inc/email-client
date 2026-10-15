@@ -1,14 +1,16 @@
 //! Where notification clicks (and the tray's items) lead: opening a message
 //! shows the window and tells the page to go there (the `navigate` event);
-//! marking read and archiving happen without the window.
+//! marking read and archiving happen without the window (and a new
+//! notification says when they failed).
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use cumulas_core::store::Store;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::notify::{Action, Invoked, mail_toast_id};
+use super::notify::{Action, Invoked, Notifications, failed_toast, mail_toast_id};
 use super::{Desktop, window};
 use crate::AppState;
 
@@ -103,27 +105,59 @@ pub async fn handle(app: &AppHandle, click: Invoked) {
                 },
             );
         }
-        Action::MarkRead(id) => {
-            if let Err(e) = service.set_read(std::slice::from_ref(&id), true).await {
+        Action::MarkRead(id) => match service.set_read(std::slice::from_ref(&id), true).await {
+            Ok(()) => desktop.notifications.withdraw(&mail_toast_id(&id)).await,
+            Err(e) => {
                 tracing::warn!("could not mark the message read from its notification: {e}");
+                let title = "Couldn't mark the message as read";
+                failed(&desktop.notifications, service.store(), &id, title).await;
             }
-            desktop.notifications.withdraw(&mail_toast_id(&id)).await;
-        }
-        Action::Archive(id) => {
-            if let Err(e) = service.archive_messages(std::slice::from_ref(&id)).await {
+        },
+        Action::Archive(id) => match service.archive_messages(std::slice::from_ref(&id)).await {
+            Ok(()) => desktop.notifications.withdraw(&mail_toast_id(&id)).await,
+            Err(e) => {
                 tracing::warn!("could not archive the message from its notification: {e}");
+                let title = "Couldn't archive the message";
+                failed(&desktop.notifications, service.store(), &id, title).await;
             }
-            desktop.notifications.withdraw(&mail_toast_id(&id)).await;
-        }
+        },
         Action::ShowWindow => {
             window::show_main(app, click.activation_token);
         }
     }
 }
 
+/// A notification's button failed. The desktop closed the notification on
+/// the click, so a new one says so; otherwise the message would look
+/// handled.
+async fn failed(notifications: &Notifications, store: &Store, id: &str, title: &str) {
+    let message = store.get_message_summary(id);
+    let account = message
+        .as_ref()
+        .ok()
+        .and_then(|m| store.get_account(&m.account_id).ok());
+    let (Ok(message), Some(account)) = (message, account) else {
+        // Moved or deleted meanwhile: nothing is left to do.
+        notifications.withdraw(&mail_toast_id(id)).await;
+        return;
+    };
+    let preview = store.get_settings().unwrap_or_default().notify_show_preview;
+    let toast = failed_toast(title, &message, &account, preview);
+    if let Err(e) = notifications.show(&toast, vec![message.id]).await {
+        tracing::warn!("could not say a notification's button failed: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use cumulas_core::model::{Folder, FolderRole};
+    use cumulas_core::providers::MessageBatch;
+    use tokio::sync::mpsc;
+
     use super::*;
+    use crate::desktop::notify::tests::{Recording, account, message};
 
     #[test]
     fn navigation_serializes_for_the_page() {
@@ -164,5 +198,57 @@ mod tests {
         assert!(router.page_ready.load(Ordering::SeqCst));
         router.page_gone();
         assert!(!router.page_ready.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_failed_button_says_so() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_account(&account()).unwrap();
+        let inbox = Folder {
+            id: "inbox".into(),
+            account_id: "acct".into(),
+            remote_id: "inbox".into(),
+            parent_id: None,
+            name: "Inbox".into(),
+            role: FolderRole::Inbox,
+            unread_count: 0,
+            total_count: 0,
+        };
+        store
+            .replace_folders("acct", std::slice::from_ref(&inbox))
+            .unwrap();
+        let batch = MessageBatch {
+            upserts: vec![message("m1", Some(("Ada", "ada@example.com")), "Engines")],
+            ..MessageBatch::default()
+        };
+        store.apply_message_batch(&inbox, &batch).unwrap();
+        let recording = Arc::new(Recording::default());
+        let (clicks, _) = mpsc::unbounded_channel();
+        let notifications = Notifications::with_notifier(recording.clone(), clicks);
+
+        failed(&notifications, &store, "m1", "Couldn't archive the message").await;
+        {
+            let shown = recording.shown.lock().unwrap();
+            let [toast] = shown.as_slice() else {
+                panic!("{shown:?}");
+            };
+            assert_eq!(toast.id, "mail:m1");
+            assert_eq!(toast.title, "Couldn't archive the message");
+            assert_eq!(toast.body, "Engines");
+            assert_eq!(toast.default_action, Action::OpenMessage("m1".into()));
+        }
+        // It goes once the message is read, like the one it took the place of.
+        notifications.settle(&["m1".into()]).await;
+        assert_eq!(*recording.withdrawn.lock().unwrap(), ["mail:m1"]);
+
+        // Moved or deleted meanwhile: nothing to say.
+        failed(
+            &notifications,
+            &store,
+            "gone",
+            "Couldn't archive the message",
+        )
+        .await;
+        assert_eq!(recording.shown.lock().unwrap().len(), 1);
     }
 }

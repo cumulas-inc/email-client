@@ -10,6 +10,9 @@
 //!
 //! Do Not Disturb is left to the desktop: no notification is urgent (which
 //! would get past it), and the app never plays sounds itself.
+//!
+//! Subjects and senders' names say whatever the sender wants, so every
+//! toast's text is cleaned on its way out (see `clean`).
 
 #[cfg(target_os = "linux")]
 pub mod fdo;
@@ -17,12 +20,14 @@ pub mod fdo;
 pub mod portal;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use cumulas_core::model::{Account, MessageSummary};
 use cumulas_core::service::MailAlert;
+use futures::future::BoxFuture;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
@@ -86,7 +91,7 @@ pub struct Invoked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
     Mail,
-    /// About the app itself (still running, a test).
+    /// About the app itself (still running, a test, a button that failed).
     App,
 }
 
@@ -111,6 +116,9 @@ pub struct Toast {
 #[async_trait]
 pub trait Notifier: Send + Sync {
     fn kind(&self) -> NotifierKind;
+    /// Its connection to the desktop is gone: it can't show anything any
+    /// more, nor hear clicks.
+    fn is_closed(&self) -> bool;
     async fn show(&self, toast: &Toast) -> Result<(), String>;
     /// Withdraws the toast with this id, if it's still showing.
     async fn withdraw(&self, id: &str) -> Result<(), String>;
@@ -130,14 +138,24 @@ pub enum NotifierKind {
 pub type InvokedSender = mpsc::UnboundedSender<Invoked>;
 
 /// The app's notifications: connects to the desktop on first use (and again
-/// later if that failed), and remembers which messages each notification
-/// shown is about, so that it can go once they're read, moved or deleted.
+/// later if that failed, or the connection was lost), and remembers which
+/// messages each notification shown is about, so that it can go once
+/// they're read, moved or deleted.
 pub struct Notifications {
     backend: tokio::sync::Mutex<Backend>,
-    /// Toast id → the messages it's about.
-    shown: Mutex<HashMap<String, Vec<String>>>,
+    connect: Connect,
+    /// Toast id → when it was shown (a count of shows) and the messages
+    /// it's about.
+    shown: Mutex<HashMap<String, (u64, Vec<String>)>>,
+    shows: AtomicU64,
     clicks: InvokedSender,
 }
+
+/// Reaches the desktop's notification service, which sends clicks to the
+/// sender given.
+pub(crate) type Connect = Box<
+    dyn Fn(InvokedSender) -> BoxFuture<'static, Result<Arc<dyn Notifier>, String>> + Send + Sync,
+>;
 
 enum Backend {
     NotTried,
@@ -153,11 +171,23 @@ const REMEMBERED_TOASTS: usize = 1000;
 /// again (the desktop's shell may have been restarting).
 const RETRY_CONNECT: Duration = Duration::from_secs(60);
 
+/// The most characters of a notification's title (and buttons), and of its
+/// text: more than a desktop shows, where a subject can be any length.
+const MAX_TITLE_CHARS: usize = 200;
+const MAX_TEXT_CHARS: usize = 1000;
+
 impl Notifications {
     pub fn new(clicks: InvokedSender) -> Self {
+        Self::with_connect(Box::new(|clicks| Box::pin(connect(clicks))), clicks)
+    }
+
+    /// Notifications through whatever `connect` reaches.
+    pub(crate) fn with_connect(connect: Connect, clicks: InvokedSender) -> Self {
         Self {
             backend: tokio::sync::Mutex::new(Backend::NotTried),
+            connect,
             shown: Mutex::default(),
+            shows: AtomicU64::new(0),
             clicks,
         }
     }
@@ -165,22 +195,27 @@ impl Notifications {
     /// For tests: notifications through `notifier`.
     #[cfg(test)]
     pub fn with_notifier(notifier: Arc<dyn Notifier>, clicks: InvokedSender) -> Self {
-        Self {
-            backend: tokio::sync::Mutex::new(Backend::Connected(notifier)),
-            shown: Mutex::default(),
-            clicks,
-        }
+        let connect: Connect = Box::new(move |_| {
+            let notifier = Arc::clone(&notifier);
+            Box::pin(async move { Ok(notifier) })
+        });
+        Self::with_connect(connect, clicks)
     }
 
     /// The connected notifier, connecting first if needed.
     pub async fn notifier(&self) -> Option<Arc<dyn Notifier>> {
         let mut backend = self.backend.lock().await;
         match &*backend {
-            Backend::Connected(notifier) => return Some(Arc::clone(notifier)),
+            Backend::Connected(notifier) if !notifier.is_closed() => {
+                return Some(Arc::clone(notifier));
+            }
+            // The bus dropped the app, or went away: a new connection, which
+            // also hears clicks again.
+            Backend::Connected(_) => tracing::warn!("lost the notification service; reconnecting"),
             Backend::Failed(at) if at.elapsed() < RETRY_CONNECT => return None,
             _ => {}
         }
-        match connect(self.clicks.clone()).await {
+        match (self.connect)(self.clicks.clone()).await {
             Ok(notifier) => {
                 tracing::info!("notifications go through {:?}", notifier.kind());
                 *backend = Backend::Connected(Arc::clone(&notifier));
@@ -206,16 +241,21 @@ impl Notifications {
             .notifier()
             .await
             .ok_or_else(|| "No notification service is running.".to_owned())?;
-        notifier.show(toast).await?;
+        notifier.show(&cleaned(toast)).await?;
         let mut shown = self.shown.lock().unwrap();
-        // Unread mail the app runs alongside for weeks: past this many, an
-        // old notification is no longer withdrawn when its mail is read.
+        let count = self.shows.fetch_add(1, Ordering::Relaxed);
+        // Unread mail the app runs alongside for weeks: past this many, the
+        // oldest notification is no longer withdrawn when its mail is read.
         if shown.len() >= REMEMBERED_TOASTS
-            && let Some(old) = shown.keys().find(|k| **k != toast.id).cloned()
+            && !shown.contains_key(&toast.id)
+            && let Some(oldest) = shown
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(id, _)| id.clone())
         {
-            shown.remove(&old);
+            shown.remove(&oldest);
         }
-        shown.insert(toast.id.clone(), messages);
+        shown.insert(toast.id.clone(), (count, messages));
         Ok(())
     }
 
@@ -253,9 +293,9 @@ impl Notifications {
 /// Takes the settled messages out of the shown toasts, and those left
 /// about nothing out of `shown`; returns their ids. The app's own toasts
 /// (about no messages) stay.
-fn settled(shown: &mut HashMap<String, Vec<String>>, message_ids: &[String]) -> Vec<String> {
+fn settled(shown: &mut HashMap<String, (u64, Vec<String>)>, message_ids: &[String]) -> Vec<String> {
     let mut done = Vec::new();
-    shown.retain(|toast, messages| {
+    shown.retain(|toast, (_, messages)| {
         if messages.is_empty() {
             return true;
         }
@@ -269,6 +309,66 @@ fn settled(shown: &mut HashMap<String, Vec<String>>, message_ids: &[String]) -> 
     });
     done.sort();
     done
+}
+
+/// The toast as it goes to the desktop: its text [`clean`]ed.
+fn cleaned(toast: &Toast) -> Toast {
+    Toast {
+        id: toast.id.clone(),
+        title: clean(&toast.title, MAX_TITLE_CHARS),
+        body: clean(&toast.body, MAX_TEXT_CHARS),
+        kind: toast.kind,
+        default_action: toast.default_action.clone(),
+        buttons: toast
+            .buttons
+            .iter()
+            .map(|(label, action)| (clean(label, MAX_TITLE_CHARS), action.clone()))
+            .collect(),
+        sound: toast.sound,
+    }
+}
+
+/// Text that can go to the desktop, whatever a sender put in it:
+/// - no control characters but line breaks and tabs (a NUL gets the app cut
+///   off the bus, and with it every later notification and click);
+/// - no bidi embeddings or overrides, and isolates only in pairs, so that
+///   none reorders the text after it;
+/// - at most `max` characters.
+fn clean(text: &str, max: usize) -> String {
+    let mut chars: Vec<char> = text
+        .chars()
+        .filter(|&c| {
+            matches!(c, '\n' | '\t') || !(c.is_control() || matches!(c, '\u{202A}'..='\u{202E}'))
+        })
+        .collect();
+    if chars.len() > max {
+        chars.truncate(max - 1);
+        chars.push('…');
+    }
+    // An isolate still open at the end of its line, or a close with none
+    // open, goes.
+    let mut keep = vec![true; chars.len()];
+    let mut open = Vec::new();
+    for (i, c) in chars.iter().enumerate() {
+        match c {
+            '\u{2066}'..='\u{2068}' => open.push(i),
+            '\u{2069}' => keep[i] = open.pop().is_some(),
+            '\n' | '\u{2029}' => {
+                for j in open.drain(..) {
+                    keep[j] = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    for j in open {
+        keep[j] = false;
+    }
+    chars
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(c, keep)| keep.then_some(c))
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -366,6 +466,32 @@ pub fn mail_toasts(
     }
 }
 
+/// The notification that takes a message's place when its "Mark as read"
+/// or "Archive" button failed (the desktop closed the notification on the
+/// click, and the message would look handled): `title` says what failed,
+/// the text which message, or the account without previews. Clicking it
+/// opens the message, to try again there.
+pub fn failed_toast(
+    title: &str,
+    message: &MessageSummary,
+    account: &Account,
+    preview: bool,
+) -> Toast {
+    Toast {
+        id: mail_toast_id(&message.id),
+        title: title.to_owned(),
+        body: if preview {
+            subject(message)
+        } else {
+            account.email.clone()
+        },
+        kind: ToastKind::App,
+        default_action: Action::OpenMessage(message.id.clone()),
+        buttons: Vec::new(),
+        sound: false,
+    }
+}
+
 /// Who a message is from, for a notification title.
 fn sender(message: &MessageSummary, account: &Account) -> String {
     message
@@ -391,7 +517,9 @@ fn subject(message: &MessageSummary) -> String {
     }
 }
 
-/// "From Ada, Grace and 3 others", newest first, each sender once.
+/// "From Ada, Grace and 3 others", newest first, each sender once. Each name
+/// is isolated, so that it can't reorder the rest (a name in another script
+/// would move the commas; an override in one, the whole line).
 fn summary_senders(messages: &[MessageSummary], account: &Account) -> String {
     let mut names: Vec<String> = Vec::new();
     for m in messages {
@@ -400,6 +528,15 @@ fn summary_senders(messages: &[MessageSummary], account: &Account) -> String {
             names.push(name);
         }
     }
+    // The name's own isolates go first: one left open would pair with the
+    // close put around the name.
+    let names: Vec<String> = names
+        .iter()
+        .map(|n| {
+            let n = n.replace(['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'], "");
+            format!("\u{2068}{n}\u{2069}")
+        })
+        .collect();
     match names.as_slice() {
         [] => account.email.clone(),
         [one] => format!("From {one}"),
@@ -410,14 +547,16 @@ fn summary_senders(messages: &[MessageSummary], account: &Account) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
     use chrono::Utc;
     use cumulas_core::model::{
         AccountKind, AccountSettings, EmailAddress, ImapSettings, Importance, TlsMode,
     };
 
-    fn account() -> Account {
+    pub(crate) fn account() -> Account {
         Account {
             id: "acct".into(),
             kind: AccountKind::Imap,
@@ -439,7 +578,7 @@ mod tests {
         }
     }
 
-    fn message(id: &str, from: Option<(&str, &str)>, subject: &str) -> MessageSummary {
+    pub(crate) fn message(id: &str, from: Option<(&str, &str)>, subject: &str) -> MessageSummary {
         MessageSummary {
             id: id.into(),
             account_id: "acct".into(),
@@ -570,7 +709,10 @@ mod tests {
         let (toast, messages) = &toasts[0];
         assert_eq!(toast.id, "mail-summary:acct");
         assert_eq!(toast.title, "5 new messages");
-        assert_eq!(toast.body, "From Ada, Bob and 2 others");
+        assert_eq!(
+            toast.body,
+            "From \u{2068}Ada\u{2069}, \u{2068}Bob\u{2069} and 2 others"
+        );
         assert_eq!(toast.default_action, Action::OpenInbox("acct".into()));
         assert!(toast.buttons.is_empty());
         assert_eq!(messages.len(), 5);
@@ -584,15 +726,44 @@ mod tests {
             mail_toasts(&account(), &three, options(true, true))[0]
                 .0
                 .body,
-            "From Ada, Bob and Cy"
+            "From \u{2068}Ada\u{2069}, \u{2068}Bob\u{2069} and \u{2068}Cy\u{2069}"
+        );
+    }
+
+    #[test]
+    fn a_sender_s_name_can_t_reorder_the_rest_of_the_summary() {
+        // A right-to-left override, and an isolate that would take the
+        // place of the one around the name, left open.
+        let summary = MailAlert::Summary(vec![
+            message("m1", Some(("Mallory\u{202E}\u{2067}", "m@x")), "a"),
+            message("m2", Some(("Bob", "b@x")), "b"),
+            message("m3", Some(("Cy", "c@x")), "c"),
+            message("m4", Some(("Di", "d@x")), "d"),
+        ]);
+        let (toast, _) = &mail_toasts(&account(), &summary, options(true, true))[0];
+        assert_eq!(
+            toast.body,
+            "From \u{2068}Mallory\u{202E}\u{2069}, \u{2068}Bob\u{2069} and 2 others"
         );
     }
 
     /// Records what it's asked to do.
     #[derive(Default)]
-    struct Recording {
-        shown: Mutex<Vec<String>>,
-        withdrawn: Mutex<Vec<String>>,
+    pub(crate) struct Recording {
+        pub(crate) shown: Mutex<Vec<Toast>>,
+        pub(crate) withdrawn: Mutex<Vec<String>>,
+        closed: AtomicBool,
+    }
+
+    impl Recording {
+        fn shown_ids(&self) -> Vec<String> {
+            self.shown
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|t| t.id.clone())
+                .collect()
+        }
     }
 
     #[async_trait]
@@ -601,8 +772,12 @@ mod tests {
             NotifierKind::Freedesktop
         }
 
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+
         async fn show(&self, toast: &Toast) -> Result<(), String> {
-            self.shown.lock().unwrap().push(toast.id.clone());
+            self.shown.lock().unwrap().push(toast.clone());
             Ok(())
         }
 
@@ -624,7 +799,7 @@ mod tests {
         for (toast, messages) in mail_toasts(&account(), &alert, options(true, true)) {
             notifications.show(&toast, messages).await.unwrap();
         }
-        assert_eq!(*recording.shown.lock().unwrap(), ["mail:m1", "mail:m2"]);
+        assert_eq!(recording.shown_ids(), ["mail:m1", "mail:m2"]);
 
         notifications.settle(&["m2".into(), "m9".into()]).await;
         assert_eq!(*recording.withdrawn.lock().unwrap(), ["mail:m2"]);
@@ -634,16 +809,157 @@ mod tests {
         assert_eq!(*recording.withdrawn.lock().unwrap(), ["mail:m2", "mail:m1"]);
     }
 
+    #[tokio::test]
+    async fn text_from_mail_is_cleaned_before_it_reaches_the_desktop() {
+        let recording = Arc::new(Recording::default());
+        let (clicks, _) = mpsc::unbounded_channel();
+        let notifications = Notifications::with_notifier(recording.clone(), clicks);
+        // What `Subject: =?UTF-8?B?SGkAdGhlcmU=?=` and a From name of
+        // `=?UTF-8?B?QWRhAA==?=` decode to. A NUL gets the app cut off the
+        // bus, and with it every later notification and click.
+        let alert = MailAlert::Each(vec![message(
+            "m1",
+            Some(("Ada\0", "ada@example.com")),
+            "Hi\0there\u{7}\r\n\u{9b}again\u{202E}!",
+        )]);
+        for (toast, messages) in mail_toasts(&account(), &alert, options(true, true)) {
+            notifications.show(&toast, messages).await.unwrap();
+        }
+        {
+            let shown = recording.shown.lock().unwrap();
+            assert_eq!(shown[0].title, "Ada");
+            assert_eq!(shown[0].body, "Hithere\nagain!");
+            assert_eq!(shown[0].default_action, Action::OpenMessage("m1".into()));
+        }
+
+        let long = message("m2", None, &"x".repeat(5000));
+        let alert = MailAlert::Each(vec![long]);
+        for (toast, messages) in mail_toasts(&account(), &alert, options(true, true)) {
+            notifications.show(&toast, messages).await.unwrap();
+        }
+        let body = &recording.shown.lock().unwrap()[1].body;
+        assert!(body.chars().count() <= 1000, "{}", body.len());
+        assert!(body.ends_with('…'));
+    }
+
+    #[test]
+    fn cleaning_keeps_lines_tabs_and_isolates_in_pairs() {
+        assert_eq!(clean("Q1\tplan\nNext", 100), "Q1\tplan\nNext");
+        assert_eq!(clean("a\0b\u{1b}[31mc\u{7f}\u{85}d", 100), "ab[31mcd");
+        // Embeddings and overrides go; marks stay.
+        assert_eq!(
+            clean("\u{202A}a\u{202B}b\u{202C}c\u{202D}d\u{202E}e\u{200F}", 100),
+            "abcde\u{200F}"
+        );
+        // Isolates that close stay; an open one or a stray close goes,
+        // within each line.
+        let summary = "From \u{2068}Ada\u{2069}, \u{2068}Bob\u{2069}";
+        assert_eq!(clean(summary, 100), summary);
+        let nested = "\u{2067}a\u{2068}b\u{2069}\u{2069}c";
+        assert_eq!(clean(&format!("{nested}\u{2066}"), 100), nested);
+        assert_eq!(clean("a\u{2069}b\u{2067}c", 100), "abc");
+        assert_eq!(clean("\u{2066}a\nb\u{2069}", 100), "a\nb");
+        // At most so many characters, an isolate cut open included.
+        assert_eq!(clean("abcdef", 4), "abc…");
+        assert_eq!(clean("añb", 3), "añb");
+        assert_eq!(clean("ab\u{2068}cdef\u{2069}", 5), "abc…");
+    }
+
+    #[tokio::test]
+    async fn a_lost_connection_is_made_again() {
+        let first = Arc::new(Recording::default());
+        let second = Arc::new(Recording::default());
+        let connections = Arc::new(AtomicU64::new(0));
+        let connect: Connect = {
+            let (first, second) = (Arc::clone(&first), Arc::clone(&second));
+            let connections = Arc::clone(&connections);
+            Box::new(move |_| {
+                let notifier: Arc<dyn Notifier> = match connections.fetch_add(1, Ordering::SeqCst) {
+                    0 => first.clone(),
+                    _ => second.clone(),
+                };
+                Box::pin(async move { Ok(notifier) })
+            })
+        };
+        let (clicks, _) = mpsc::unbounded_channel();
+        let notifications = Notifications::with_connect(connect, clicks);
+        let alert = MailAlert::Each(vec![
+            message("m1", Some(("Ada", "ada@example.com")), "One"),
+            message("m2", Some(("Bob", "bob@example.com")), "Two"),
+        ]);
+        let toasts = mail_toasts(&account(), &alert, options(true, true));
+        notifications
+            .show(&toasts[0].0, toasts[0].1.clone())
+            .await
+            .unwrap();
+        notifications
+            .show(&toasts[0].0, toasts[0].1.clone())
+            .await
+            .unwrap();
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+
+        // The bus dropped the app.
+        first.closed.store(true, Ordering::SeqCst);
+        notifications
+            .show(&toasts[1].0, toasts[1].1.clone())
+            .await
+            .unwrap();
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        assert_eq!(first.shown_ids(), ["mail:m1", "mail:m1"]);
+        assert_eq!(second.shown_ids(), ["mail:m2"]);
+        assert_eq!(notifications.kind().await, Some(NotifierKind::Freedesktop));
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_failed_button_says_so_about_its_message() {
+        let mail = message("m1", Some(("Ada", "ada@example.com")), "Engines");
+        let toast = failed_toast("Couldn't archive the message", &mail, &account(), true);
+        assert_eq!(toast.id, "mail:m1");
+        assert_eq!(toast.title, "Couldn't archive the message");
+        assert_eq!(toast.body, "Engines");
+        assert_eq!(toast.default_action, Action::OpenMessage("m1".into()));
+        assert!(toast.buttons.is_empty());
+        assert!(!toast.sound);
+        let private = failed_toast("Couldn't archive the message", &mail, &account(), false);
+        assert_eq!(private.body, "alice@example.com");
+    }
+
+    #[tokio::test]
+    async fn past_the_cap_the_oldest_toast_is_forgotten() {
+        let recording = Arc::new(Recording::default());
+        let (clicks, _) = mpsc::unbounded_channel();
+        let notifications = Notifications::with_notifier(recording.clone(), clicks);
+        let show = |n: usize| {
+            let alert = MailAlert::Each(vec![message(&format!("m{n}"), None, "Hello")]);
+            mail_toasts(&account(), &alert, options(true, true)).remove(0)
+        };
+        // One more than the cap: the first one goes.
+        for n in 0..=REMEMBERED_TOASTS {
+            let (toast, messages) = show(n);
+            notifications.show(&toast, messages).await.unwrap();
+        }
+        // Shown again, so not one more: nothing goes.
+        let (toast, messages) = show(REMEMBERED_TOASTS);
+        notifications.show(&toast, messages).await.unwrap();
+
+        let all: Vec<String> = (0..=REMEMBERED_TOASTS).map(|n| format!("m{n}")).collect();
+        notifications.settle(&all).await;
+        let withdrawn = recording.withdrawn.lock().unwrap();
+        assert_eq!(withdrawn.len(), REMEMBERED_TOASTS);
+        assert!(!withdrawn.contains(&"mail:m0".to_owned()));
+    }
+
     #[test]
     fn settling_withdraws_only_toasts_left_about_nothing() {
         let mut shown = HashMap::from([
-            ("mail:m1".to_owned(), vec!["m1".to_owned()]),
-            ("mail:m2".to_owned(), vec!["m2".to_owned()]),
+            ("mail:m1".to_owned(), (0, vec!["m1".to_owned()])),
+            ("mail:m2".to_owned(), (1, vec!["m2".to_owned()])),
             (
                 "mail-summary:a".to_owned(),
-                vec!["m3".to_owned(), "m4".to_owned()],
+                (2, vec!["m3".to_owned(), "m4".to_owned()]),
             ),
-            ("app:background".to_owned(), vec![]),
+            ("app:background".to_owned(), (3, vec![])),
         ]);
         assert_eq!(
             settled(&mut shown, &["m1".into(), "m3".into()]),
