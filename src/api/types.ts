@@ -351,7 +351,10 @@ export interface OrganizationSignature {
   state: OrganizationSignatureState;
   /** Sanitized HTML; only while `ready`. */
   html: string | null;
-  /** It also goes on replies and forwards; false unless `ready`. */
+  /**
+   * It also goes on replies and forwards, added by the app (`ready`) or by
+   * the organization's mail server (`addedOnSend`); false otherwise.
+   */
   onReplies: boolean;
   /** When the organization last answered (ISO 8601). */
   checkedAt: string | null;

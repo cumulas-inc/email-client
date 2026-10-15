@@ -831,7 +831,7 @@ describe("Signatures", () => {
     expect(doc.body.innerHTML).toContain("Engineering Manager, Atlas");
     expect(doc.body.hasAttribute("contenteditable")).toBe(false);
     expect(work).toHaveTextContent(
-      "Set by your organization with Cumulas Signatures. Added to new messages and replies. " +
+      "Set by your organization with Cumulas Signatures. Added to new messages, replies and forwards. " +
         "You can change it in any message before you send.",
     );
     // The organization's replaces the own one: nothing to edit here.
@@ -900,15 +900,35 @@ describe("Signatures", () => {
     expect(within(work).getByTitle("Signature")).toBeInTheDocument();
   });
 
-  it("says when the organization signs on send", async () => {
+  it("says when the organization signs on send, and to what", async () => {
     openAt("signatures", new MockBackend({ signature: "addedOnSend" }));
     const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
     expect(
       await within(work).findByText(
-        "Your organization adds your signature when you send, so Cumulas Mail doesn't add one.",
+        "Your organization adds your signature to new messages, replies and forwards when you send, so Cumulas Mail doesn't add one.",
       ),
     ).toBeInTheDocument();
     expect(within(work).queryByTitle("Signature")).not.toBeInTheDocument();
+  });
+
+  it("says a relay that signs only new messages does, and when it couldn't be asked", async () => {
+    const backend = new MockBackend();
+    const relay = { state: "addedOnSend", html: null, onReplies: false } as const;
+    backend.setOrganizationSignature("acct-work", { ...relay, stale: true }, "unreachable");
+    openAt("signatures", backend);
+    const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
+    expect(
+      await within(work).findByText(
+        "Your organization adds your signature to new messages when you send, so Cumulas Mail doesn't add one.",
+      ),
+    ).toBeInTheDocument();
+    // Nothing is shown, so no "last version" either.
+    expect(
+      within(work).getByText(
+        "Couldn't check for changes; this is what your organization last said.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(work).queryByText(/showing the last version/)).not.toBeInTheDocument();
   });
 
   it("shows the last version when the organization couldn't be asked", async () => {

@@ -1,5 +1,13 @@
 import { Building2, LoaderCircle, Signature } from "lucide-react";
-import { type CSSProperties, useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 
 import {
   useAccounts,
@@ -104,11 +112,16 @@ function SignatureSettings({
         <p className="signature-caption">
           <Building2 size={16} strokeWidth={1.75} aria-hidden="true" />
           <span>
-            Your organization adds your signature when you send, so Cumulas Mail doesn&apos;t add
-            one.
+            Your organization adds your signature to new messages
+            {organization.onReplies ? ", replies and forwards" : ""} when you send, so Cumulas Mail
+            doesn&apos;t add one.
           </span>
         </p>
-        {organization.stale && <StaleNote />}
+        {organization.stale && (
+          <StaleNote>
+            Couldn&apos;t check for changes; this is what your organization last said.
+          </StaleNote>
+        )}
       </>
     );
   }
@@ -146,12 +159,9 @@ function SignatureSettings({
   );
 }
 
-function StaleNote() {
-  return (
-    <p className="signature-caption signature-caption--quiet">
-      Couldn&apos;t check for updates; showing the last version.
-    </p>
-  );
+/** The last check failed: what's shown is what the organization last said. */
+function StaleNote({ children }: { children: ReactNode }) {
+  return <p className="signature-caption signature-caption--quiet">{children}</p>;
 }
 
 function OrganizationPreview({
@@ -174,11 +184,13 @@ function OrganizationPreview({
         <Signature size={16} strokeWidth={1.75} aria-hidden="true" />
         <span>
           Set by your organization with Cumulas Signatures. Added to new messages
-          {organization.onReplies ? " and replies" : ""}. You can change it in any message before
-          you send.
+          {organization.onReplies ? ", replies and forwards" : ""}. You can change it in any message
+          before you send.
         </span>
       </p>
-      {organization.stale && <StaleNote />}
+      {organization.stale && (
+        <StaleNote>Couldn&apos;t check for updates; showing the last version.</StaleNote>
+      )}
     </>
   );
 }
