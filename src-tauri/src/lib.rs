@@ -104,10 +104,9 @@ impl EventSink for TauriSink {
                 cleared,
             },
         );
-        let (app, newly_due, cleared) = (self.app.clone(), newly_due.to_vec(), cleared.to_vec());
-        tauri::async_runtime::spawn(async move {
-            desktop::reminders_changed(&app, newly_due, cleared).await;
-        });
+        if let Some(desktop) = self.app.try_state::<Desktop>() {
+            desktop.reminders_changed(&self.app, newly_due.to_vec(), cleared.to_vec());
+        }
     }
 }
 

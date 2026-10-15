@@ -358,7 +358,9 @@ impl CoreService {
             &chrono::Local,
             &last.due,
         );
-        self.store.put_reminder_states(&plan.updates)?;
+        if !plan.updates.is_empty() {
+            self.store.put_reminder_states(&plan.updates)?;
+        }
         self.store.set_reminders_checked_until(now)?;
         if plan.active != last.active || !plan.newly_due.is_empty() || !plan.cleared.is_empty() {
             self.sink

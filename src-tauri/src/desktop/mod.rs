@@ -12,7 +12,7 @@ pub mod window;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Local};
 use cumulas_core::model::{Account, ActiveReminder, FolderRole, Settings};
@@ -45,7 +45,13 @@ pub struct Desktop {
     pub window: WindowState,
     pub tray: Tray,
     pub background: Background,
+    /// Reminder changes, carried out one after another (see
+    /// [`Desktop::reminders_changed`]); set by [`start`].
+    reminders: OnceLock<mpsc::UnboundedSender<ReminderChange>>,
 }
+
+/// Reminders that came due, and keys of those no longer due.
+type ReminderChange = (Vec<ActiveReminder>, Vec<String>);
 
 impl Desktop {
     /// The desktop state, and where notification clicks arrive (for
@@ -58,8 +64,29 @@ impl Desktop {
             window: WindowState::default(),
             tray: Tray::default(),
             background: Background::new(app),
+            reminders: OnceLock::new(),
         };
         (desktop, invoked)
+    }
+
+    /// The reminders changed: their notifications follow, in the order the
+    /// changes came (a reminder shown and dismissed at once mustn't be
+    /// withdrawn before it's shown).
+    pub fn reminders_changed(
+        &self,
+        app: &AppHandle,
+        newly_due: Vec<ActiveReminder>,
+        cleared: Vec<String>,
+    ) {
+        if let Some(queue) = self.reminders.get() {
+            let _ = queue.send((newly_due, cleared));
+            return;
+        }
+        // Before the desktop side started.
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            reminders_changed(&app, newly_due, cleared).await;
+        });
     }
 
     /// Whether closing the window keeps the app running: the setting is on,
@@ -108,6 +135,15 @@ impl Desktop {
 /// Starts the desktop side once the core runs: notification clicks, the
 /// tray, the network monitor and the background status.
 pub fn start(app: &AppHandle, invoked: mpsc::UnboundedReceiver<notify::Invoked>) {
+    let (queue, mut changes) = mpsc::unbounded_channel::<ReminderChange>();
+    if app.state::<Desktop>().reminders.set(queue).is_ok() {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some((newly_due, cleared)) = changes.recv().await {
+                reminders_changed(&handle, newly_due, cleared).await;
+            }
+        });
+    }
     let handle = app.clone();
     tauri::async_runtime::spawn(serve_clicks(invoked, move |click| {
         let handle = handle.clone();
@@ -201,11 +237,7 @@ pub async fn new_mail(app: &AppHandle, account: &Account, alert: MailAlert) {
 /// those that just came due show. Unlike new mail's, they show while the
 /// window is in front too: they're about now, and the window may not be
 /// the one in front for long. (The header's bell lists them as well.)
-pub async fn reminders_changed(
-    app: &AppHandle,
-    newly_due: Vec<ActiveReminder>,
-    cleared: Vec<String>,
-) {
+async fn reminders_changed(app: &AppHandle, newly_due: Vec<ActiveReminder>, cleared: Vec<String>) {
     let Some(desktop) = app.try_state::<Desktop>() else {
         return;
     };
