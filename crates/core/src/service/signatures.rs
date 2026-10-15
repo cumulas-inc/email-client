@@ -15,7 +15,7 @@
 //! scheduler looks at it at least every minute.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration as StdDuration;
 
@@ -69,8 +69,9 @@ pub(crate) struct SignatureHub {
     services: Mutex<HashMap<String, Option<Arc<dyn OrganizationSignatures>>>>,
     /// When each account's last check this run ended.
     finished: Mutex<HashMap<String, Instant>>,
-    /// The network came back: failed checks go again at once.
-    retry_failed: AtomicBool,
+    /// When the network last came back: checks that failed before then go
+    /// again at once.
+    network_back_at: Mutex<Option<DateTime<Utc>>>,
     next_check_id: AtomicU64,
     /// Wakes the scheduler.
     pub(crate) poke: Arc<Notify>,
@@ -89,7 +90,7 @@ impl Default for SignatureHub {
             checks: Mutex::default(),
             services: Mutex::default(),
             finished: Mutex::default(),
-            retry_failed: AtomicBool::new(false),
+            network_back_at: Mutex::default(),
             next_check_id: AtomicU64::new(0),
             poke: Arc::new(Notify::new()),
             clock: RwLock::new(Arc::new(Utc::now)),
@@ -164,7 +165,7 @@ impl SignatureHub {
 
     /// The network came back.
     pub(crate) fn network_back(&self) {
-        self.retry_failed.store(true, Ordering::SeqCst);
+        *self.network_back_at.lock().unwrap() = Some(self.now());
         self.poke.notify_one();
     }
 }
@@ -602,7 +603,7 @@ impl CoreService {
             }
         };
         let online = *self.push.online.borrow();
-        let retry_failed = online && self.signatures.retry_failed.swap(false, Ordering::SeqCst);
+        let network_back_at = *self.signatures.network_back_at.lock().unwrap();
         let now = self.signatures.now();
         let mut next: Option<DateTime<Utc>> = None;
         for account in accounts {
@@ -621,6 +622,9 @@ impl CoreService {
                 }
             };
             let asked = self.signatures.asked_this_run(&account.id);
+            // Failed while the network was away.
+            let retry_failed = network_back_at
+                .is_some_and(|back| stored.stale && stored.attempted_at.is_none_or(|at| at < back));
             let cooling =
                 Duration::from_std(self.signatures.cooling(&account.id)).unwrap_or_default();
             let due = next_check(&stored, asked, retry_failed, now).max(now + cooling);

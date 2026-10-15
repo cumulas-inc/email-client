@@ -885,6 +885,31 @@ async fn failed_checks_go_again_when_the_network_is_back_or_the_service_says() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_check_that_failed_just_before_the_network_came_back_goes_again() {
+    let s = setup();
+    let account = work_account(&s);
+    s.organization.answer(failure(None));
+    s.organization.answer(CheckOutcome::NotUsed { etag: None });
+    s.service.start_background();
+    sleep(16).await;
+    assert_eq!(s.organization.calls(), 1);
+    s.service.network_changed(false);
+    sleep(10).await;
+    s.service.network_changed(true);
+    settle().await;
+    // Not within the minute of the last...
+    assert_eq!(s.organization.calls(), 1);
+    // ...but once it's over, rather than 30 minutes after the failure.
+    sleep(60).await;
+    assert_eq!(s.organization.calls(), 2);
+    assert_eq!(
+        s.organization_state(&account).state,
+        OrganizationSignatureState::NotUsed
+    );
+    s.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_computer_that_slept_checks_when_it_wakes() {
     let s = setup();
     let account = work_account(&s);
