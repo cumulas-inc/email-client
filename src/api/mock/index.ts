@@ -117,6 +117,70 @@ function newestFirst(a: { receivedAt: string }, b: { receivedAt: string }) {
   return b.receivedAt.localeCompare(a.receivedAt);
 }
 
+// The demo's text size (see setZoom). CSS zoom on the root scales the page,
+// but media queries and viewport units go on measuring the whole window,
+// where the desktop webview's zoom has them measure the zoomed one. So the
+// lengths in media queries scale up (at 1.2, a 900px query matches a 1080px
+// window) and viewport units down (100vh is the window's height again).
+// Style sheets that come later (the modules load lazily) or change (hot
+// reload) follow.
+const MEDIA_LENGTH = /(\d*\.?\d+)(px)\b/g;
+const VIEWPORT_LENGTH = /(\d*\.?\d+)([sld]?v(?:w|h|min|max))\b/g;
+const zoomed = { factor: 1, original: new WeakMap<CSSRule, string>(), watching: false };
+
+function scaleLengths(text: string, lengths: RegExp, by: number): string {
+  if (by === 1) return text;
+  return text.replace(
+    lengths,
+    (_, n: string, unit: string) => `${Math.round(Number(n) * by * 1000) / 1000}${unit}`,
+  );
+}
+
+function zoomViewport(factor: number): void {
+  zoomed.factor = factor;
+  const visit = (rules: CSSRuleList) => {
+    for (const rule of Array.from(rules)) {
+      if (rule instanceof CSSMediaRule) {
+        const text = zoomed.original.get(rule) ?? rule.media.mediaText;
+        zoomed.original.set(rule, text);
+        const scaled = scaleLengths(text, MEDIA_LENGTH, factor);
+        if (rule.media.mediaText !== scaled) rule.media.mediaText = scaled;
+      } else if (rule instanceof CSSStyleRule) {
+        const text = zoomed.original.get(rule) ?? rule.style.cssText;
+        const scaled = scaleLengths(text, VIEWPORT_LENGTH, 1 / factor);
+        if (scaled !== text) zoomed.original.set(rule, text);
+        if (zoomed.original.has(rule) && rule.style.cssText !== scaled) rule.style.cssText = scaled;
+      }
+      if ("cssRules" in rule) visit(rule.cssRules as CSSRuleList);
+    }
+  };
+  for (const sheet of Array.from(document.styleSheets)) {
+    let rules: CSSRuleList;
+    try {
+      rules = sheet.cssRules;
+    } catch {
+      continue; // Another origin's style sheet can't be read; the app has none.
+    }
+    visit(rules);
+  }
+  if (zoomed.watching || factor === 1) return;
+  zoomed.watching = true;
+  const again = () => zoomViewport(zoomed.factor);
+  new MutationObserver(again).observe(document.head, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  });
+  // A linked style sheet (in a build) has its rules once it has loaded.
+  document.addEventListener(
+    "load",
+    (e) => {
+      if (e.target instanceof HTMLLinkElement) again();
+    },
+    true,
+  );
+}
+
 export interface MockOptions {
   /** Artificial latency in ms for every call (default 0). */
   latency?: number;
@@ -375,8 +439,10 @@ export class MockBackend implements Backend {
 
   async setZoom(factor: number) {
     // A page can't zoom itself the way the desktop webview does; CSS zoom on
-    // the root comes close enough for the demo.
+    // the root, with the window's measures scaled to match, comes close
+    // enough for the demo.
     document.documentElement.style.setProperty("zoom", factor === 1 ? null : String(factor));
+    zoomViewport(factor);
   }
 
   async syncAccount(accountId: string) {

@@ -700,6 +700,12 @@
     gap: 14px;
   }
 
+  /* As wide as the card, not as the account address, so a long one is cut
+     short and the name wraps within the card. */
+  .people-details__identity {
+    align-self: stretch;
+  }
+
   .people-field {
     grid-template-columns: minmax(0, 1fr);
   }

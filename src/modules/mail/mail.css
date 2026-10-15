@@ -79,6 +79,12 @@
   min-width: 340px;
 }
 
+/* Side by side, the list and the reading pane keep their minimum widths:
+   in a narrow window the folders give way instead. */
+.mail--right .mail__main {
+  min-width: calc(300px + var(--pane-gap) + 340px);
+}
+
 .mail--bottom .mail__reader-panel,
 .mail--off .mail__reader-panel {
   min-width: 0;

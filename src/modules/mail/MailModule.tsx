@@ -24,6 +24,12 @@ const LIST_SHARE = 0.45;
 const LIST_MIN_H = 160;
 const LIST_MAX_H = 720;
 
+// The narrowest the folders and the list can be: a small window at a larger
+// text size squeezes them this far (mail.css), and the user can drag them
+// there too. Wider windows hold them a little wider.
+const FOLDERS_MIN_W = 180;
+const LIST_MIN_W = 250;
+
 /** A draft that is open but not on screen: one click brings it back. */
 function DraftBar() {
   const compose = useMailStore((s) => s.compose);
@@ -93,8 +99,13 @@ export function MailModule() {
   const composeVisible = useMailStore((s) => s.composeVisible);
   const hideCompose = useMailStore((s) => s.hideCompose);
 
-  const [foldersWidth, setFoldersWidth] = usePersistentNumber("mail.foldersWidth", 260, 200, 420);
-  const [listWidth, setListWidth] = usePersistentNumber("mail.listWidth", 420, 300, 760);
+  const [foldersWidth, setFoldersWidth] = usePersistentNumber(
+    "mail.foldersWidth",
+    260,
+    FOLDERS_MIN_W,
+    420,
+  );
+  const [listWidth, setListWidth] = usePersistentNumber("mail.listWidth", 420, LIST_MIN_W, 760);
   const [listHeightSet, setListHeight] = usePersistentSize(
     "mail.bottomListHeight",
     LIST_MIN_H,
@@ -195,7 +206,7 @@ export function MailModule() {
       <Splitter
         orientation="vertical"
         value={foldersWidth}
-        min={200}
+        min={FOLDERS_MIN_W}
         max={420}
         onChange={setFoldersWidth}
         label="Resize folder pane"
@@ -215,7 +226,7 @@ export function MailModule() {
           <Splitter
             orientation={readingPane === "bottom" ? "horizontal" : "vertical"}
             value={readingPane === "bottom" ? (listHeight ?? LIST_MIN_H) : listWidth}
-            min={readingPane === "bottom" ? LIST_MIN_H : 300}
+            min={readingPane === "bottom" ? LIST_MIN_H : LIST_MIN_W}
             max={readingPane === "bottom" ? LIST_MAX_H : 760}
             onChange={readingPane === "bottom" ? setListHeight : setListWidth}
             label={readingPane === "bottom" ? "Resize message list height" : "Resize message list"}
