@@ -18,23 +18,39 @@
 //! `CUMULAS_TEST_STARTTLS=1` (the plain port offers STARTTLS), and
 //! `CUMULAS_TEST_UNTRUSTED_TLS_PORT` (a port with an untrusted certificate,
 //! such as GreenMail's self-signed 3993, which must be refused).
+//!
+//! The push tests (`idle_*`, `core_push_end_to_end`) each get a mailbox of
+//! their own, so they can run alongside the others: GreenMail creates a user
+//! for any address it delivers to, with the address as login and password.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Utc;
-use cumulas_core::ErrorCode;
 use cumulas_core::model::{
-    EmailAddress, Folder, FolderRole, ImapSettings, Importance, MessageSummary, OutgoingAttachment,
-    OutgoingMessage, TlsMode,
+    Account, DataKind, EmailAddress, Folder, FolderRole, ImapSettings, Importance, MessageSummary,
+    NewImapAccount, OutgoingAttachment, OutgoingMessage, SyncStatus, TlsMode,
 };
-use cumulas_core::providers::imap::{self, ImapCredentials, ImapProvider};
+use cumulas_core::providers::imap::{
+    self, IdleConfig, ImapCredentials, ImapIdleWatcher, ImapProvider,
+};
 use cumulas_core::providers::{MailProvider, MessageBatch, MessageLocator, SyncWindow};
+use cumulas_core::push::backoff::Backoff;
+use cumulas_core::push::supervisor::Supervisor;
+use cumulas_core::push::{
+    EndReason, MailWatcher, PushEvent, PushHealth, PushMode, PushStatus, WatchSignal, WatchSink,
+};
+use cumulas_core::secrets::MemorySecretStore;
+use cumulas_core::service::{EventSink, LiveConnector, MailAlert};
+use cumulas_core::store::Store;
+use cumulas_core::{CoreService, ErrorCode};
+use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 struct Config {
     host: String,
@@ -628,4 +644,408 @@ async fn reuses_the_session_and_reconnects_after_a_drop() {
     // Other tests may add folders meanwhile; the inbox is always there.
     assert!(again.iter().any(|f| f.id == inbox.id));
     assert_eq!(proxy.connections.load(Ordering::SeqCst), 2);
+}
+
+// --- push ----------------------------------------------------------------------
+
+impl Config {
+    /// A mailbox of its own, holding one message.
+    async fn fresh_mailbox(&self) -> ImapCredentials {
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let address = format!("push-{}@example.com", &tag[..12]);
+        self.deliver(&address, "Welcome").await;
+        let mut credentials = self.credentials();
+        credentials.settings.username = address.clone();
+        credentials.password = address.clone();
+        credentials.email = address;
+        credentials
+    }
+
+    /// Sends a message to `to` through the server's SMTP port.
+    async fn deliver(&self, to: &str, subject: &str) {
+        let message = lettre::Message::builder()
+            .from("Grace Hopper <grace@example.com>".parse().unwrap())
+            .to(to.parse().unwrap())
+            .subject(subject)
+            .body("Hello there.".to_owned())
+            .unwrap();
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.host)
+            .port(self.smtp_port)
+            .build()
+            .send(message)
+            .await
+            .expect("SMTP delivery");
+    }
+
+    /// Another client logged in to the mailbox of `credentials`.
+    async fn other_device(&self, credentials: &ImapCredentials) -> async_imap::Session<TcpStream> {
+        let tcp = TcpStream::connect((self.host.as_str(), self.imap_port))
+            .await
+            .expect("connect");
+        let mut client = async_imap::Client::new(tcp);
+        client.read_response().await.expect("greeting");
+        client
+            .login(&credentials.settings.username, &credentials.password)
+            .await
+            .map_err(|(e, _)| e)
+            .expect("login")
+    }
+}
+
+/// Reports what a watcher sees through a channel.
+fn channel_sink() -> (WatchSink, mpsc::UnboundedReceiver<WatchSignal>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let sink = WatchSink::new(move |signal| {
+        let _ = tx.send(signal);
+    });
+    (sink, rx)
+}
+
+/// Waits up to five seconds for `wanted`, skipping other signals.
+async fn expect_signal(signals: &mut mpsc::UnboundedReceiver<WatchSignal>, wanted: WatchSignal) {
+    let found = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(signal) = signals.recv().await {
+            if signal == wanted {
+                return;
+            }
+        }
+        panic!("the watcher stopped");
+    })
+    .await;
+    assert!(found.is_ok(), "no {wanted:?} within five seconds");
+}
+
+/// A watcher running in a task.
+struct Watching {
+    cancel: CancellationToken,
+    signals: mpsc::UnboundedReceiver<WatchSignal>,
+    task: tokio::task::JoinHandle<EndReason>,
+}
+
+impl Watching {
+    async fn stop(self) {
+        self.cancel.cancel();
+        let end = tokio::time::timeout(Duration::from_secs(2), self.task)
+            .await
+            .expect("stops within two seconds")
+            .unwrap();
+        assert!(matches!(end, EndReason::Cancelled), "{end:?}");
+    }
+}
+
+/// Starts `watcher` and waits until it is listening. GreenMail has no NOTIFY.
+async fn start_watching(watcher: ImapIdleWatcher) -> Watching {
+    let (sink, mut signals) = channel_sink();
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { watcher.watch(&sink, &cancel).await }
+    });
+    expect_signal(&mut signals, WatchSignal::Connected(PushMode::ImapIdle)).await;
+    expect_signal(&mut signals, WatchSignal::Changed(PushEvent::CatchUp)).await;
+    // The IDLE command follows the catch-up.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    Watching {
+        cancel,
+        signals,
+        task,
+    }
+}
+
+#[tokio::test]
+async fn idle_reports_new_mail() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let credentials = config.fresh_mailbox().await;
+    let watcher = ImapIdleWatcher::new(credentials.clone(), IdleConfig::default());
+    let mut watching = start_watching(watcher).await;
+    config.deliver(&credentials.email, "Pushed").await;
+    expect_signal(
+        &mut watching.signals,
+        WatchSignal::Changed(PushEvent::InboxChanged),
+    )
+    .await;
+    watching.stop().await;
+}
+
+#[tokio::test]
+async fn idle_reports_expunge() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let credentials = config.fresh_mailbox().await;
+    let watcher = ImapIdleWatcher::new(credentials.clone(), IdleConfig::default());
+    let mut watching = start_watching(watcher).await;
+    let mut other = config.other_device(&credentials).await;
+    other.select("INBOX").await.expect("select");
+    other
+        .run_command_and_check_ok("STORE 1 +FLAGS (\\Deleted)")
+        .await
+        .expect("store");
+    other
+        .run_command_and_check_ok("EXPUNGE")
+        .await
+        .expect("expunge");
+    expect_signal(
+        &mut watching.signals,
+        WatchSignal::Changed(PushEvent::InboxChanged),
+    )
+    .await;
+    other.logout().await.ok();
+    watching.stop().await;
+}
+
+#[tokio::test]
+async fn idle_survives_refresh() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let credentials = config.fresh_mailbox().await;
+    let proxy = CuttableProxy::start(&config.host, config.imap_port).await;
+    let mut proxied = credentials.clone();
+    proxied.settings.imap_host = "127.0.0.1".into();
+    proxied.settings.imap_port = proxy.port;
+    let watcher = ImapIdleWatcher::new(
+        proxied,
+        IdleConfig {
+            refresh: Duration::from_secs(1),
+            use_notify: true,
+        },
+    );
+    let mut watching = start_watching(watcher).await;
+    // Several refreshes (DONE, IDLE) go by...
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    // ...and the connection still reports new mail.
+    config.deliver(&credentials.email, "After refreshes").await;
+    expect_signal(
+        &mut watching.signals,
+        WatchSignal::Changed(PushEvent::InboxChanged),
+    )
+    .await;
+    assert_eq!(proxy.connections.load(Ordering::SeqCst), 1);
+    watching.stop().await;
+}
+
+/// A supervisor running in a task, with its health reports and events.
+struct Supervised {
+    cancel: CancellationToken,
+    healths: Arc<Mutex<Vec<PushHealth>>>,
+    events: mpsc::UnboundedReceiver<PushEvent>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// A supervisor around `watcher`.
+fn supervise(watcher: ImapIdleWatcher) -> Supervised {
+    let cancel = CancellationToken::new();
+    let healths = Arc::new(Mutex::new(Vec::new()));
+    let (tx, events) = mpsc::unbounded_channel();
+    let (wake, wake_rx) = watch::channel(0);
+    let (online, online_rx) = watch::channel(true);
+    let supervisor = Supervisor::new(
+        "integration",
+        Arc::new(move |event| {
+            let _ = tx.send(event);
+        }),
+        {
+            let healths = healths.clone();
+            Arc::new(move |_, health| healths.lock().unwrap().push(health))
+        },
+        cancel.clone(),
+        wake_rx,
+        online_rx,
+    )
+    .with_backoff(Backoff::seeded(7));
+    let watcher: Arc<dyn MailWatcher> = Arc::new(watcher);
+    let task = tokio::spawn(async move {
+        let _senders = (wake, online);
+        supervisor.watch(watcher).await
+    });
+    Supervised {
+        cancel,
+        healths,
+        events,
+        task,
+    }
+}
+
+async fn next_event(events: &mut mpsc::UnboundedReceiver<PushEvent>) -> PushEvent {
+    tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("an event within five seconds")
+        .expect("the supervisor runs")
+}
+
+#[tokio::test]
+async fn idle_reconnects_after_cut() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let credentials = config.fresh_mailbox().await;
+    let proxy = CuttableProxy::start(&config.host, config.imap_port).await;
+    let mut proxied = credentials.clone();
+    proxied.settings.imap_host = "127.0.0.1".into();
+    proxied.settings.imap_port = proxy.port;
+    let Supervised {
+        cancel,
+        healths,
+        mut events,
+        task,
+    } = supervise(ImapIdleWatcher::new(proxied, IdleConfig::default()));
+    assert_eq!(next_event(&mut events).await, PushEvent::CatchUp);
+
+    // Like a NAT gateway dropping the connection.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    proxy.cut.send(()).expect("cut");
+    assert_eq!(next_event(&mut events).await, PushEvent::CatchUp);
+    assert_eq!(proxy.connections.load(Ordering::SeqCst), 2);
+    assert!(
+        healths
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|h| matches!(h, PushHealth::Degraded { .. }))
+    );
+
+    // The new connection reports new mail.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    config.deliver(&credentials.email, "After the cut").await;
+    assert_eq!(next_event(&mut events).await, PushEvent::InboxChanged);
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("stops within two seconds")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn idle_auth_failure_stops() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let proxy = CuttableProxy::start(&config.host, config.imap_port).await;
+    let mut wrong = config.credentials();
+    wrong.password = "not-the-password".into();
+    wrong.settings.imap_host = "127.0.0.1".into();
+    wrong.settings.imap_port = proxy.port;
+    let Supervised {
+        cancel,
+        healths,
+        task,
+        ..
+    } = supervise(ImapIdleWatcher::new(wrong, IdleConfig::default()));
+    for _ in 0..100 {
+        if healths.lock().unwrap().contains(&PushHealth::AuthRequired) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        healths.lock().unwrap().last(),
+        Some(&PushHealth::AuthRequired)
+    );
+    // No retries.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(proxy.connections.load(Ordering::SeqCst), 1);
+    cancel.cancel();
+    task.await.unwrap();
+}
+
+/// Records what the service reports.
+#[derive(Default)]
+struct RecordingSink {
+    new_mail: Mutex<Vec<String>>,
+    synced: AtomicUsize,
+    push: Mutex<Vec<PushStatus>>,
+}
+
+impl EventSink for RecordingSink {
+    fn data_changed(&self, _: &[DataKind], _: Option<&str>) {}
+
+    fn sync_status(&self, status: &SyncStatus) {
+        if status.last_synced_at.is_some() && status.message.is_none() {
+            self.synced.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn new_mail(&self, _: &Account, alert: &MailAlert) {
+        let mut seen = self.new_mail.lock().unwrap();
+        seen.extend(alert.messages().iter().map(|m| m.subject.clone()));
+    }
+
+    fn push_status(&self, status: &PushStatus) {
+        self.push.lock().unwrap().push(status.clone());
+    }
+}
+
+/// Polls `done` every 50 ms for up to `limit`.
+async fn eventually(what: &str, limit: Duration, done: impl Fn() -> bool) {
+    let start = tokio::time::Instant::now();
+    while !done() {
+        assert!(start.elapsed() < limit, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn core_push_end_to_end() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let credentials = config.fresh_mailbox().await;
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let secrets = Arc::new(MemorySecretStore::default());
+    let sink = Arc::new(RecordingSink::default());
+    let service = Arc::new(CoreService::new(
+        store.clone(),
+        secrets.clone(),
+        Arc::new(LiveConnector::new(store, secrets)),
+        sink.clone(),
+    ));
+    let account = service
+        .add_imap_account(NewImapAccount {
+            display_name: "Push Tester".into(),
+            email: credentials.email.clone(),
+            password: credentials.password.clone(),
+            settings: credentials.settings.clone(),
+        })
+        .await
+        .expect("add the account");
+    service.start_background();
+
+    // The first full sync (after two seconds) brings the Inbox in; that
+    // isn't news.
+    eventually("the first sync", Duration::from_secs(15), || {
+        sink.synced.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    eventually("push to be live", Duration::from_secs(5), || {
+        service.push_statuses().unwrap().iter().any(|s| {
+            s.account_id == account.id
+                && s.mode == PushMode::ImapIdle
+                && s.health == PushHealth::Live
+        })
+    })
+    .await;
+    assert!(sink.new_mail.lock().unwrap().is_empty());
+
+    // The next full sync is minutes away, so this can only come by push.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let subject = format!("Pushed {}", &account.id[..8]);
+    config.deliver(&credentials.email, &subject).await;
+    eventually("the new mail notification", Duration::from_secs(5), || {
+        sink.new_mail.lock().unwrap().contains(&subject)
+    })
+    .await;
+    assert_eq!(sink.synced.load(Ordering::SeqCst), 1, "no full sync needed");
+    let inbox = service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Inbox)
+        .unwrap()
+        .unwrap();
+    assert_eq!((inbox.unread_count, inbox.total_count), (2, 2));
+
+    let started = tokio::time::Instant::now();
+    service.shutdown().await;
+    assert!(started.elapsed() <= Duration::from_secs(2));
 }
