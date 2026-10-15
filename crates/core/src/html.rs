@@ -133,7 +133,8 @@ const LAYOUT_ATTRIBUTES: &[&str] = &[
 /// `http`, `https`, `mailto` and `tel`. Relative URLs are resolved against
 /// `base`, or dropped without one. A declaration of a `style` attribute that
 /// loads something else, or could run code, goes; so does a `<style>` block
-/// with `@import`, `expression(`, `javascript:`, `behavior:` or a `url()`
+/// with `@import`, `expression(`, `javascript:`, `behavior:`, `image-set(`
+/// (whose bare strings are image URLs that no rule here reads) or a `url()`
 /// other than `https:` or `data:`. Comments go too, and with them the
 /// conditional comments Outlook writes for its own font fallbacks (Word's
 /// `<!--[if mso]>` blocks), which nothing else reads.
@@ -216,8 +217,10 @@ fn is_signature_image(url: &Url) -> bool {
     }
 }
 
-/// What in CSS can run code or load another stylesheet, once comments,
-/// escapes and whitespace are gone (see [`normalize_css`]).
+/// What in CSS can run code, load another stylesheet, or load an image from
+/// a URL that isn't in a `url()`, once comments, escapes and whitespace are
+/// gone (see [`normalize_css`]). `image-set(` takes bare strings as image
+/// URLs; it also stands for `-webkit-image-set(`. Mail hardly ever uses it.
 const UNSAFE_CSS: &[&str] = &[
     "@import",
     "expression(",
@@ -225,6 +228,7 @@ const UNSAFE_CSS: &[&str] = &[
     "vbscript:",
     "behavior:",
     "-moz-binding",
+    "image-set(",
 ];
 
 /// A `style` attribute without the declarations that load from anywhere
@@ -755,7 +759,10 @@ mod tests {
                <td style="width: expression(alert(1)); color: navy">e</td>
                <td style="background: url(java\73 cript:alert(1)); margin: 0">f</td>
                <td style="behavior: url(x.htc); padding: 0">g</td>
-               <td style="background: url(/relative.png)">h</td></tr></table>"#,
+               <td style="background: url(/relative.png)">h</td>
+               <td style="background-image: image-set('http://cdn.example/i.png' 1x); color: teal">i</td>
+               <td style="background: -webkit-image-set(&quot;https://cdn.example/i.png&quot; 1x); color: olive">j</td>
+               <td style="list-style-image: \69 mage-set('/relative-set.png'); color: maroon">k</td></tr></table>"#,
         );
         assert!(
             out.contains(r#"style="color: red; font-size: 12px""#),
@@ -772,6 +779,10 @@ mod tests {
         assert!(out.contains(r#"style="color: navy""#), "{out}");
         assert!(out.contains(r#"style="margin: 0""#), "{out}");
         assert!(out.contains(r#"style="padding: 0""#), "{out}");
+        // image-set's strings are URLs too: it goes, even over https.
+        assert!(out.contains(r#"style="color: teal""#), "{out}");
+        assert!(out.contains(r#"style="color: olive""#), "{out}");
+        assert!(out.contains(r#"style="color: maroon""#), "{out}");
         for gone in [
             "http://cdn",
             "data:text",
@@ -779,6 +790,7 @@ mod tests {
             "cript",
             "behavior",
             "relative",
+            "image-set",
         ] {
             assert!(!out.contains(gone), "{gone} in {out}");
         }
@@ -806,6 +818,11 @@ mod tests {
             "p { background: url(javascript:alert(1)) }",
             "p { behavior: url(x.htc) }",
             "p { color: red } /* */ @im/**/port 'x.css';",
+            "p { background: image-set('http://cdn.example/bg.png' 1x) }",
+            "p { background: -webkit-image-set(\"https://cdn.example/bg.png\" 1x) }",
+            "p { background: image-set('/relative.png' 1x) }",
+            "p { background: im\\61 ge-se\\74(\"http://cdn.example/bg.png\") }",
+            "p { background: IMAGE-/**/SET('http://cdn.example/bg.png') }",
         ] {
             let out = signature(&format!("<style>{css}</style><p>Ada</p>"));
             assert_eq!(out, "<p>Ada</p>", "{css}");
