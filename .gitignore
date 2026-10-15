@@ -33,3 +33,6 @@ build-dir/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# Python bytecode (e2e/desktop)
+__pycache__/
