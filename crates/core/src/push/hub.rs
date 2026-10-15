@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{PushHealth, PushMode, PushStatus};
+use super::{AdminConsent, PushHealth, PushMode, PushStatus};
 use crate::error::{Error, ErrorCode};
 use crate::service::targeted::SyncQueue;
 use crate::service::{CoreService, EventSink, SyncScope};
@@ -94,28 +94,32 @@ impl PushHub {
         detail: Option<String>,
     ) {
         // Missing consent that the last sign-in was refused says why, rather
-        // than suggesting a sign-in that would be refused again.
-        let detail = {
+        // than suggesting a sign-in that would be refused again, and carries
+        // the approval link when an administrator must approve.
+        let (detail, refused, admin_consent) = {
             let mut refusals = self.consent_refusals.lock().unwrap();
             match health {
-                PushHealth::ConsentMissing => refusals
-                    .get(account_id)
-                    .map(|e| e.message.clone())
-                    .or(detail),
+                PushHealth::ConsentMissing => match refusals.get(account_id) {
+                    Some(e) => (Some(e.message.clone()), true, AdminConsent::from_error(e)),
+                    None => (detail, false, None),
+                },
                 // Consent was given after all (an administrator approved).
                 PushHealth::Live => {
                     refusals.remove(account_id);
-                    detail
+                    (detail, false, None)
                 }
-                _ => detail,
+                _ => (detail, false, None),
             }
         };
         let status = {
             let mut statuses = self.statuses.lock().unwrap();
-            if statuses
-                .get(account_id)
-                .is_some_and(|s| s.mode == mode && s.health == health && s.detail == detail)
-            {
+            if statuses.get(account_id).is_some_and(|s| {
+                s.mode == mode
+                    && s.health == health
+                    && s.detail == detail
+                    && s.consent_refused == refused
+                    && s.admin_consent == admin_consent
+            }) {
                 return;
             }
             let status = PushStatus {
@@ -123,6 +127,8 @@ impl PushHub {
                 mode,
                 health,
                 detail,
+                consent_refused: refused,
+                admin_consent,
                 since: Utc::now(),
             };
             statuses.insert(account_id.to_owned(), status.clone());

@@ -95,8 +95,45 @@ pub struct PushStatus {
     pub health: PushHealth,
     /// An explanation for the user, when there is one.
     pub detail: Option<String>,
+    /// Consent to the push service is missing because it was refused at the
+    /// account's last sign-in (so signing in again won't ask again).
+    pub consent_refused: bool,
+    /// Set while consent to the push service is missing because the
+    /// account's organization requires an administrator to approve it.
+    pub admin_consent: Option<AdminConsent>,
     /// When the mode or health last changed.
     pub since: DateTime<Utc>,
+}
+
+/// The approval an organization's administrator can give so that its
+/// accounts may use the push service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminConsent {
+    /// The page where an administrator approves Cumulas Mail for the
+    /// organization.
+    pub url: String,
+    /// The organization: a tenant id or domain.
+    pub tenant: String,
+}
+
+impl AdminConsent {
+    /// The approval link an `AdminConsentRequired` error carries in its
+    /// details, if it is one.
+    pub fn from_error(error: &Error) -> Option<Self> {
+        if error.code != crate::error::ErrorCode::AdminConsentRequired {
+            return None;
+        }
+        let details = error.details.as_ref()?;
+        Some(Self {
+            url: details.get("adminConsentUrl")?.as_str()?.to_owned(),
+            tenant: details
+                .get("tenant")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+        })
+    }
 }
 
 /// Why a watcher stopped.

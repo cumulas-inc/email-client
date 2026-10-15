@@ -35,6 +35,34 @@ impl Store {
         Ok(())
     }
 
+    /// A small value the app keeps between runs that isn't a setting, such
+    /// as whether a one-time notice was shown. Callers prefix their keys
+    /// (`shell.` for the desktop shell) so they never meet the core's own.
+    pub fn app_value(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_app_value(&self, key: &str, value: &str) -> Result<()> {
+        if matches!(key, SETTINGS_KEY | INSTALLATION_ID_KEY) {
+            return Err(crate::error::Error::invalid_input(format!(
+                "{key} is not an app value"
+            )));
+        }
+        self.conn().execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// The id of this installation: 22 URL-safe characters (128 random
     /// bits), made the first time it is asked for and kept from then on.
     pub fn installation_id(&self) -> Result<String> {
@@ -116,6 +144,24 @@ mod tests {
             Store::open_in_memory().unwrap().installation_id().unwrap(),
             id
         );
+    }
+
+    #[test]
+    fn app_values_persist_and_leave_settings_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.app_value("shell.notice").unwrap(), None);
+        store.set_app_value("shell.notice", "shown").unwrap();
+        store.set_app_value("shell.notice", "shown again").unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened.app_value("shell.notice").unwrap().as_deref(),
+            Some("shown again")
+        );
+        assert!(reopened.set_app_value(SETTINGS_KEY, "{}").is_err());
+        assert!(reopened.set_app_value(INSTALLATION_ID_KEY, "x").is_err());
+        assert_eq!(reopened.get_settings().unwrap(), Settings::default());
     }
 
     #[test]

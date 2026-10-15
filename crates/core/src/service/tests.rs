@@ -1923,6 +1923,9 @@ async fn missing_consent_polls_and_offers_it_at_the_next_sign_in() {
     assert_eq!(status.mode, PushMode::Polling { every_secs: 30 });
     assert_eq!(status.health, PushHealth::ConsentMissing);
     assert_eq!(status.detail.as_deref(), Some(CONSENT_HINT));
+    // Signing in again asks for it.
+    assert!(!status.consent_refused);
+    assert_eq!(status.admin_consent, None);
     // Not an account error: syncing goes on.
     assert!(r.b.service.list_accounts().unwrap()[0].sync_error.is_none());
     let syncs = r.b.h.server.lock().unwrap().inbox_syncs;
@@ -1961,7 +1964,12 @@ async fn refused_push_consent_says_why_and_is_not_asked_again() {
     let refusal = Error::new(
         ErrorCode::AdminConsentRequired,
         "Your organization requires an administrator to approve instant updates.",
-    );
+    )
+    .with_details(serde_json::json!({
+        "adminConsentUrl": "https://login.microsoftonline.com/contoso.com/v2.0/adminconsent?client_id=x",
+        "tenant": "contoso.com",
+        "canRequestApproval": false,
+    }));
     *r.b.h.connector.sign_in.lock().unwrap() = Some(SignInResult {
         email: "adele@contoso.com".into(),
         display_name: "Adele".into(),
@@ -1988,8 +1996,18 @@ async fn refused_push_consent_says_why_and_is_not_asked_again() {
             .unwrap()
     };
     assert_eq!(status().health, PushHealth::ConsentMissing);
-    // Why, not "sign in again", which would be refused again.
+    // Why, not "sign in again", which would be refused again, with the link
+    // an administrator approves it at.
     assert_eq!(status().detail.as_deref(), Some(refusal.message.as_str()));
+    assert!(status().consent_refused);
+    assert_eq!(
+        status().admin_consent,
+        Some(crate::push::AdminConsent {
+            url: "https://login.microsoftonline.com/contoso.com/v2.0/adminconsent?client_id=x"
+                .into(),
+            tenant: "contoso.com".into(),
+        })
+    );
 
     // A later sign-in doesn't ask again, which would open the browser twice.
     let service = &r.b.service;
@@ -2007,6 +2025,8 @@ async fn refused_push_consent_says_why_and_is_not_asked_again() {
     // wait) and the refusal goes.
     tokio::time::sleep(std::time::Duration::from_secs(7 * 60 * 60)).await;
     assert_eq!(status().health, PushHealth::Live);
+    assert_eq!(status().admin_consent, None);
+    assert!(!status().consent_refused);
     assert!(!r.b.service.push.consent_refused(&account.id));
     r.b.service.shutdown().await;
 }
