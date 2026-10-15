@@ -87,6 +87,13 @@ export const tauriBackend: Backend = {
   openAttachment: (messageId, attachmentId) =>
     invoke("open_attachment", { messageId, attachmentId }),
 
+  getAccountSignature: (accountId) => invoke("get_account_signature", { accountId }),
+  updateOwnSignature: (accountId, html, onReplies) =>
+    invoke("update_own_signature", { accountId, html, onReplies }),
+  checkOrganizationSignature: (accountId) => invoke("check_organization_signature", { accountId }),
+  getComposeSignature: (accountId, replyKind) =>
+    invoke("get_compose_signature", { accountId, replyKind }),
+
   listCalendars: () => invoke("list_calendars"),
   listEvents: (start, end, calendarIds) =>
     invoke("list_events", { start, end, calendarIds: calendarIds ?? null }),

@@ -13,7 +13,7 @@ import type {
   SyncStatus,
 } from "../../api/types";
 
-const ALL_KINDS: DataKind[] = ["accounts", "mail", "calendar", "contacts", "tasks"];
+const ALL_KINDS: DataKind[] = ["accounts", "mail", "calendar", "contacts", "tasks", "signatures"];
 
 /** Adding or removing an account changes every kind of data. */
 function refreshEverything(client: QueryClient) {

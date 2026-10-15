@@ -3,8 +3,17 @@
 
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 
+import type { Backend } from "./backend";
 import { useBackend } from "./context";
-import type { ActiveReminder, BackgroundState, DataKind, Settings, SnoozeFor } from "./types";
+import type {
+  AccountSignature,
+  ActiveReminder,
+  BackgroundState,
+  DataKind,
+  ReplyKind,
+  Settings,
+  SnoozeFor,
+} from "./types";
 
 export const qk = {
   root: (kind: DataKind) => [kind] as const,
@@ -32,6 +41,10 @@ export const qk = {
 
   /** Not under a DataKind: the reminders-changed event keeps it up to date. */
   reminders: () => ["reminders", "active"] as const,
+
+  accountSignature: (accountId: string) => ["signatures", "account", accountId] as const,
+  composeSignature: (accountId: string, replyKind: ReplyKind | null) =>
+    ["signatures", "compose", accountId, replyKind ?? "new"] as const,
 
   taskLists: () => ["tasks", "lists"] as const,
   tasks: (listId: string | null, includeCompleted: boolean) =>
@@ -164,5 +177,66 @@ export function useDismissReminders() {
       );
     },
     onError: () => void client.invalidateQueries({ queryKey: qk.reminders() }),
+  });
+}
+
+// --- Signatures -------------------------------------------------------------------
+
+export function useAccountSignature(accountId: string) {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: qk.accountSignature(accountId),
+    queryFn: () => backend.getAccountSignature(accountId),
+  });
+}
+
+/** The signature a message from the account starts with; also for fetchQuery. */
+export function composeSignatureQuery(
+  backend: Backend,
+  accountId: string,
+  replyKind: ReplyKind | null,
+) {
+  return {
+    queryKey: qk.composeSignature(accountId, replyKind),
+    queryFn: () => backend.getComposeSignature(accountId, replyKind),
+  };
+}
+
+export function useComposeSignature(
+  accountId: string,
+  replyKind: ReplyKind | null,
+  enabled = true,
+) {
+  const backend = useBackend();
+  return useQuery({ ...composeSignatureQuery(backend, accountId, replyKind), enabled });
+}
+
+function storeSignature(client: QueryClient, signature: AccountSignature) {
+  client.setQueryData(qk.accountSignature(signature.accountId), signature);
+}
+
+export function useUpdateOwnSignature() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      accountId,
+      html,
+      onReplies,
+    }: {
+      accountId: string;
+      html: string;
+      onReplies: boolean;
+    }) => backend.updateOwnSignature(accountId, html, onReplies),
+    onSuccess: (signature) => storeSignature(client, signature),
+  });
+}
+
+export function useCheckOrganizationSignature() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (accountId: string) => backend.checkOrganizationSignature(accountId),
+    onSuccess: (signature) => storeSignature(client, signature),
   });
 }

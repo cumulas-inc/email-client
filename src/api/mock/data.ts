@@ -3,6 +3,7 @@
 
 import type {
   Account,
+  AccountSignature,
   Attendee,
   Calendar,
   CalendarEvent,
@@ -29,6 +30,8 @@ export interface MockState {
    * large mailboxes report: added to the counts `recount` derives.
    */
   remoteCounts?: Record<string, { unread: number; total: number }>;
+  /** Signatures the demo starts with; other accounts start without any. */
+  signatures?: AccountSignature[];
 }
 
 const WORK = "acct-work";
@@ -611,6 +614,64 @@ function workdaysAround(): number[] {
   return out;
 }
 
+// Acme's mark for its signature: a white A on a teal tile, as an inline SVG
+// image so the demo (and its screenshots) need no network.
+const ACME_LOGO =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">' +
+  '<rect width="48" height="48" rx="11" fill="#0b7a75"/>' +
+  '<path fill="#fff" fill-rule="evenodd" d="M24 11 36 37h-5.3l-2.5-5.6h-8.4L17.3 37H12zm-2.4 15.8h4.8L24 21.4z"/>' +
+  "</svg>";
+
+/**
+ * Alex's signature as Acme sets it with Cumulas Signatures: a table with the
+ * logo beside the name, title, company, phone and website, styles inline.
+ */
+export const ACME_SIGNATURE =
+  '<table cellpadding="0" cellspacing="0" border="0" role="presentation" style="border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:19px;color:#3c4043">' +
+  "<tr>" +
+  '<td style="padding:2px 14px 2px 0;vertical-align:top;border-right:2px solid #0b7a75">' +
+  `<img src="data:image/svg+xml;base64,${btoa(ACME_LOGO)}" width="48" height="48" alt="Acme" style="display:block;border:0">` +
+  "</td>" +
+  '<td style="padding:0 0 0 14px;vertical-align:top">' +
+  '<div style="font-size:15px;line-height:21px;font-weight:bold;color:#1d1c1a">Alex Morgan</div>' +
+  "<div>Engineering Manager, Atlas</div>" +
+  '<div style="padding-top:6px"><span style="font-weight:bold;color:#0b7a75">Acme</span> · 1 Canal Street, Seattle</div>' +
+  '<div><a href="tel:+12065550147" style="color:#3c4043;text-decoration:none">+1 (206) 555-0147</a> · ' +
+  '<a href="https://acme.example" style="color:#0b7a75;text-decoration:none">acme.example</a></div>' +
+  "</td>" +
+  "</tr>" +
+  "</table>";
+
+/** The demo's signatures: Acme's on the work account, Alex's own at home. */
+function demoSignatures(): AccountSignature[] {
+  return [
+    {
+      accountId: WORK,
+      ownHtml: "",
+      ownOnReplies: true,
+      organization: {
+        state: "ready",
+        html: ACME_SIGNATURE,
+        onReplies: true,
+        checkedAt: iso(new Date(Date.now() - 5 * 60_000)),
+        stale: false,
+      },
+    },
+    {
+      accountId: HOME,
+      ownHtml: "<div>Alex Morgan</div><div>+1 (206) 555-0199</div>",
+      ownOnReplies: true,
+      organization: {
+        state: "unsupported",
+        html: null,
+        onReplies: false,
+        checkedAt: null,
+        stale: false,
+      },
+    },
+  ];
+}
+
 export function createDemoState(): MockState {
   messageSeq = 0;
   const accounts: Account[] = [
@@ -1129,6 +1190,7 @@ export function createDemoState(): MockState {
     contacts,
     taskLists,
     tasks,
+    signatures: demoSignatures(),
   };
   recount(state);
   return state;

@@ -332,6 +332,51 @@ export interface RemindersChangedEvent {
 /** How long to snooze: some minutes, or until a time (ISO 8601). */
 export type SnoozeFor = { minutes: number } | { until: string };
 
+// --- Signatures ---------------------------------------------------------------
+
+/**
+ * What the account's organization last said about its signature:
+ * - unsupported: an IMAP or personal Microsoft account, or company signatures are off.
+ * - unchecked: not asked yet.
+ * - notUsed: the organization doesn't use Cumulas Signatures, or has no signature for this person.
+ * - ready: the organization's signature, which the app adds (`html`).
+ * - addedOnSend: the organization's mail server adds it on send; the app adds none.
+ * - notAllowed: the organization uses Cumulas Signatures but hasn't allowed Cumulas Mail.
+ */
+export type OrganizationSignatureState =
+  "unsupported" | "unchecked" | "notUsed" | "ready" | "addedOnSend" | "notAllowed";
+
+export interface OrganizationSignature {
+  state: OrganizationSignatureState;
+  /** Sanitized HTML; only while `ready`. */
+  html: string | null;
+  /** It also goes on replies and forwards; false unless `ready`. */
+  onReplies: boolean;
+  /** When the organization last answered (ISO 8601). */
+  checkedAt: string | null;
+  /** The last check failed (offline, the service down): `state` is the last known. */
+  stale: boolean;
+}
+
+/** An account's signatures: the person's own and the organization's. */
+export interface AccountSignature {
+  accountId: string;
+  /** Sanitized HTML; "" for none. */
+  ownHtml: string;
+  /** The own signature also goes on replies and forwards. */
+  ownOnReplies: boolean;
+  organization: OrganizationSignature;
+}
+
+export type ComposeSignatureKind = "none" | "organization" | "own" | "addedOnSend";
+
+/** The signature a new message, reply or forward starts with. */
+export interface ComposeSignature {
+  kind: ComposeSignatureKind;
+  /** Set for "organization" and "own". */
+  html: string | null;
+}
+
 // --- Sync, settings, app ----------------------------------------------------
 
 export type SyncState = "idle" | "syncing" | "error";
@@ -343,7 +388,7 @@ export interface SyncStatus {
   lastSyncedAt: string | null;
 }
 
-export type DataKind = "accounts" | "mail" | "calendar" | "contacts" | "tasks";
+export type DataKind = "accounts" | "mail" | "calendar" | "contacts" | "tasks" | "signatures";
 
 export interface DataChangedEvent {
   kinds: DataKind[];
@@ -492,6 +537,12 @@ export interface AppInfo {
   microsoftClientIdBuiltIn: boolean;
   /** Host of the push service Microsoft accounts use, for the privacy note. */
   syncServer: string;
+  /**
+   * Host of the service company signatures come from (normally
+   * signature.cumulas.co); null when this build has none, and company
+   * signatures are off.
+   */
+  signatureServer: string | null;
 }
 
 // --- Errors -----------------------------------------------------------------

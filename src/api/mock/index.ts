@@ -4,10 +4,13 @@
 import type { Backend, Unsubscribe } from "../backend";
 import type {
   Account,
+  AccountSignature,
   ActiveReminder,
+  AppInfo,
   BackendError,
   BackgroundState,
   CalendarEvent,
+  ComposeSignature,
   Contact,
   DataChangedEvent,
   DataKind,
@@ -15,8 +18,10 @@ import type {
   Message,
   MessageSummary,
   Navigate,
+  OrganizationSignature,
   PushStatus,
   RemindersChangedEvent,
+  ReplyKind,
   Settings,
   SnoozeFor,
   SyncStatus,
@@ -200,6 +205,42 @@ function zoomViewport(factor: number): void {
   );
 }
 
+/** Microsoft's tenant for personal accounts, which never have company signatures. */
+const CONSUMER_TENANT = "9188040d-6c67-4c5b-b112-36a304b66dad";
+const MAX_SIGNATURE_BYTES = 512 * 1024;
+
+/** What an organization says when asked for its signature; "unreachable" when it can't be asked. */
+type OrganizationAnswer =
+  Pick<OrganizationSignature, "state" | "html" | "onReplies"> | "unreachable";
+
+const NOT_USED: OrganizationAnswer = { state: "notUsed", html: null, onReplies: false };
+
+/**
+ * Like the core's signature sanitizer, roughly: no scripts, frames or event
+ * handlers, and a signature with neither text nor a picture is none.
+ */
+function cleanSignature(html: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const root = template.content;
+  root.querySelectorAll("script, iframe, object, embed, form").forEach((el) => el.remove());
+  for (const el of root.querySelectorAll("*")) {
+    for (const attribute of Array.from(el.attributes)) {
+      if (/^on/i.test(attribute.name)) el.removeAttribute(attribute.name);
+    }
+  }
+  if (!root.textContent?.trim() && !root.querySelector("img")) return "";
+  return template.innerHTML;
+}
+
+/**
+ * States the demo's Microsoft account's company signature can show
+ * (`?signature=` in the URL): the organization adds it on send, hasn't
+ * allowed Cumulas Mail, couldn't be reached since its last answer, or
+ * doesn't use Cumulas Signatures.
+ */
+export type DemoSignature = "addedOnSend" | "notAllowed" | "stale" | "notUsed";
+
 /** Push states the demo can show for its Microsoft account (`?push=` in the URL). */
 export type DemoPush = "consent" | "refused" | "unreachable";
 
@@ -212,6 +253,8 @@ export interface MockOptions {
   worst?: boolean;
   /** Show the Microsoft account's push in this state. */
   push?: DemoPush;
+  /** Show the Microsoft account's company signature in this state. */
+  signature?: DemoSignature;
   /** Add a task reminder that went off 12 minutes ago (`?reminders`), besides the events' own. */
   overdueReminder?: boolean;
   /** What the desktop reports (the tray, the portal…). */
@@ -288,6 +331,12 @@ export class MockBackend implements Backend {
   private pendingSignIn: (() => void) | null = null;
   /** Messages sent through the mock, for tests. */
   readonly sent: Parameters<Backend["sendMessage"]>[0][] = [];
+  /** Each account's signatures, once asked for. */
+  private signatures = new Map<string, AccountSignature>();
+  /** What each account's organization says when asked; Cumulas Signatures isn't used by default. */
+  private organizationAnswers = new Map<string, OrganizationAnswer>();
+  /** When each account's organization was last asked (ms). */
+  private signatureChecks = new Map<string, number>();
 
   constructor(options: MockOptions = {}) {
     this.latency = options.latency ?? 0;
@@ -305,6 +354,14 @@ export class MockBackend implements Backend {
     };
     const microsoft = this.state.accounts.find((a) => a.kind === "microsoft");
     if (options.push && microsoft) this.pushOverrides.set(microsoft.id, demoPush(options.push));
+    for (const signature of this.state.signatures ?? []) {
+      this.signatures.set(signature.accountId, signature);
+      const { state, html, onReplies } = signature.organization;
+      if (state !== "unsupported" && state !== "unchecked") {
+        this.organizationAnswers.set(signature.accountId, { state, html, onReplies });
+      }
+    }
+    if (options.signature && microsoft) this.demoSignature(microsoft.id, options.signature);
     if (options.overdueReminder) {
       const metrics = this.state.tasks.find((t) => t.title === "Send Q3 metrics to Dana");
       if (metrics) metrics.reminderAt = new Date(Date.now() - 12 * 60_000).toISOString();
@@ -340,12 +397,13 @@ export class MockBackend implements Backend {
 
   // --- app --------------------------------------------------------------------
 
-  async getAppInfo() {
+  async getAppInfo(): Promise<AppInfo> {
     return {
       version: "0.1.0-demo",
       persistentSecrets: true,
       microsoftClientIdBuiltIn: true,
       syncServer: "sync.cumulas.co",
+      signatureServer: "signature.cumulas.co",
     };
   }
 
@@ -531,7 +589,10 @@ export class MockBackend implements Backend {
     s.contacts = s.contacts.filter((c) => c.accountId !== accountId);
     s.taskLists = s.taskLists.filter((l) => l.accountId !== accountId);
     s.tasks = s.tasks.filter((t) => t.accountId !== accountId);
-    this.emit(["accounts", "mail", "calendar", "contacts", "tasks"]);
+    this.signatures.delete(accountId);
+    this.organizationAnswers.delete(accountId);
+    this.signatureChecks.delete(accountId);
+    this.emit(["accounts", "mail", "calendar", "contacts", "tasks", "signatures"]);
   }
 
   async getSettings() {
@@ -1052,6 +1113,116 @@ export class MockBackend implements Backend {
     if (!this.message(messageId).attachments.some((a) => a.id === attachmentId)) {
       fail("notFound", "attachment not found");
     }
+  }
+
+  // --- signatures -----------------------------------------------------------------
+
+  /** Puts the demo's company signature in a state (`?signature=`). */
+  private demoSignature(accountId: string, kind: DemoSignature): void {
+    const signature = this.accountSignature(accountId);
+    const answer: OrganizationAnswer =
+      kind === "addedOnSend"
+        ? { state: "addedOnSend", html: null, onReplies: false }
+        : kind === "notAllowed"
+          ? { state: "notAllowed", html: null, onReplies: false }
+          : kind === "notUsed"
+            ? NOT_USED
+            : "unreachable";
+    this.organizationAnswers.set(accountId, answer);
+    signature.organization =
+      answer === "unreachable"
+        ? { ...signature.organization, stale: true }
+        : { ...answer, checkedAt: new Date().toISOString(), stale: false };
+  }
+
+  /** Like the core: IMAP and personal Microsoft accounts have no company signature. */
+  private accountSignature(accountId: string): AccountSignature {
+    const account = this.account(accountId);
+    let signature = this.signatures.get(accountId);
+    if (!signature) {
+      const supported =
+        account.settings.kind === "microsoft" &&
+        account.settings.tenantId !== "" &&
+        account.settings.tenantId !== CONSUMER_TENANT;
+      signature = {
+        accountId,
+        ownHtml: "",
+        ownOnReplies: true,
+        organization: {
+          state: supported ? "unchecked" : "unsupported",
+          html: null,
+          onReplies: false,
+          checkedAt: null,
+          stale: false,
+        },
+      };
+      this.signatures.set(accountId, signature);
+    }
+    return signature;
+  }
+
+  async getAccountSignature(accountId: string) {
+    await this.delay();
+    return clone(this.accountSignature(accountId));
+  }
+
+  async updateOwnSignature(accountId: string, html: string, onReplies: boolean) {
+    await this.delay();
+    const signature = this.accountSignature(accountId);
+    if (new TextEncoder().encode(html).length > MAX_SIGNATURE_BYTES) {
+      fail("invalidInput", "That signature is too large. Signatures can be 512 KB at most.");
+    }
+    signature.ownHtml = cleanSignature(html);
+    signature.ownOnReplies = onReplies;
+    this.emit(["signatures"], accountId);
+    return clone(signature);
+  }
+
+  async checkOrganizationSignature(accountId: string) {
+    await this.delay();
+    const signature = this.accountSignature(accountId);
+    const before = signature.organization;
+    const last = this.signatureChecks.get(accountId);
+    // Like the core, at most once a minute.
+    if (before.state === "unsupported" || (last !== undefined && Date.now() - last < 60_000)) {
+      return clone(signature);
+    }
+    this.signatureChecks.set(accountId, Date.now());
+    const answer = this.organizationAnswers.get(accountId) ?? NOT_USED;
+    signature.organization =
+      answer === "unreachable"
+        ? { ...before, stale: true }
+        : { ...answer, checkedAt: new Date().toISOString(), stale: false };
+    const after = signature.organization;
+    if (
+      after.state !== before.state ||
+      after.html !== before.html ||
+      after.onReplies !== before.onReplies ||
+      after.stale !== before.stale
+    ) {
+      this.emit(["signatures"], accountId);
+    }
+    return clone(signature);
+  }
+
+  async getComposeSignature(accountId: string, replyKind: ReplyKind | null) {
+    await this.delay();
+    let signature = this.accountSignature(accountId);
+    if (signature.organization.state === "unchecked") {
+      signature = await this.checkOrganizationSignature(accountId);
+    }
+    const organization = signature.organization;
+    const fresh = replyKind === null;
+    let result: ComposeSignature = { kind: "none", html: null };
+    if (organization.state === "ready" && organization.html) {
+      if (fresh || organization.onReplies)
+        result = { kind: "organization", html: organization.html };
+    } else if (organization.state === "addedOnSend") {
+      result = { kind: "addedOnSend", html: null };
+    } else if (signature.ownHtml && (fresh || signature.ownOnReplies)) {
+      result = { kind: "own", html: signature.ownHtml };
+    }
+    return result;
   }
 
   // --- calendar -------------------------------------------------------------------

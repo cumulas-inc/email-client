@@ -1,10 +1,12 @@
 import type {
   Account,
+  AccountSignature,
   ActiveReminder,
   AppInfo,
   BackgroundState,
   Calendar,
   CalendarEvent,
+  ComposeSignature,
   Contact,
   ContactDraft,
   DataChangedEvent,
@@ -22,6 +24,7 @@ import type {
   OutgoingMessage,
   PushStatus,
   RemindersChangedEvent,
+  ReplyKind,
   Settings,
   SnoozeFor,
   SyncStatus,
@@ -121,6 +124,28 @@ export interface Backend {
   /** Resolves to the saved path, or null if the user canceled. */
   saveAttachment(messageId: string, attachmentId: string): Promise<string | null>;
   openAttachment(messageId: string, attachmentId: string): Promise<void>;
+
+  // Signatures
+  /** The account's own signature and what its organization last said about its own. */
+  getAccountSignature(accountId: string): Promise<AccountSignature>;
+  /** Saves the account's own signature, sanitized; more than 512 KB is refused (invalidInput). */
+  updateOwnSignature(
+    accountId: string,
+    html: string,
+    onReplies: boolean,
+  ): Promise<AccountSignature>;
+  /**
+   * Asks the account's organization for its signature now, unless it was
+   * asked in the last minute. Doesn't fail for the network or the service:
+   * the answer is then the last known state, marked stale.
+   */
+  checkOrganizationSignature(accountId: string): Promise<AccountSignature>;
+  /**
+   * The signature a new message (`replyKind` null), reply or forward from the
+   * account starts with. Waits (at most a few seconds) for an account's first
+   * check.
+   */
+  getComposeSignature(accountId: string, replyKind: ReplyKind | null): Promise<ComposeSignature>;
 
   // Calendar
   listCalendars(): Promise<Calendar[]>;

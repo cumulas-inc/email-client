@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ActiveReminder, RemindersChangedEvent } from "../types";
+import type { ActiveReminder, DataChangedEvent, RemindersChangedEvent } from "../types";
 import { MockBackend } from ".";
 
 function addStyle(css: string): CSSRule[] {
@@ -162,5 +162,91 @@ describe("the demo's reminders", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("the demo's signatures", () => {
+  it("start with Acme's on the work account and Alex's own at home", async () => {
+    const backend = new MockBackend();
+    expect((await backend.getAppInfo()).signatureServer).toBe("signature.cumulas.co");
+
+    const work = await backend.getAccountSignature("acct-work");
+    expect(work.organization).toMatchObject({ state: "ready", onReplies: true, stale: false });
+    // A Cumulas Signatures table: the logo travels inside it, so the demo needs no network.
+    expect(work.organization.html).toMatch(/^<table[^>]*style="[^"]*font-family:Arial/);
+    expect(work.organization.html).toContain('src="data:image/svg+xml;base64,');
+    expect(work.organization.html).toContain(">Alex Morgan</div>");
+    expect(work.organization.html).toContain('href="https://acme.example"');
+    expect(await backend.getComposeSignature("acct-work", null)).toEqual({
+      kind: "organization",
+      html: work.organization.html,
+    });
+    expect((await backend.getComposeSignature("acct-work", "replyAll")).kind).toBe("organization");
+
+    const home = await backend.getAccountSignature("acct-home");
+    expect(home.organization.state).toBe("unsupported");
+    expect(home.ownHtml).toContain("Alex Morgan");
+    expect(await backend.getComposeSignature("acct-home", "forward")).toEqual({
+      kind: "own",
+      html: home.ownHtml,
+    });
+    // An IMAP account's organization is never asked.
+    expect(
+      (await backend.checkOrganizationSignature("acct-home")).organization.checkedAt,
+    ).toBeNull();
+  });
+
+  it("save the own signature, cleaned, and say so", async () => {
+    const backend = new MockBackend();
+    const events: DataChangedEvent[] = [];
+    backend.onDataChanged((e) => events.push(e));
+    const saved = await backend.updateOwnSignature(
+      "acct-home",
+      '<p onclick="steal()">Alex</p><script>steal()</script>',
+      false,
+    );
+    expect(saved).toMatchObject({ ownHtml: "<p>Alex</p>", ownOnReplies: false });
+    await Promise.resolve();
+    expect(events).toEqual([{ kinds: ["signatures"], accountId: "acct-home" }]);
+    expect((await backend.getComposeSignature("acct-home", "reply")).kind).toBe("none");
+    expect((await backend.getComposeSignature("acct-home", null)).kind).toBe("own");
+
+    // What an emptied editor leaves is no signature.
+    expect((await backend.updateOwnSignature("acct-home", "<div><br></div>", true)).ownHtml).toBe(
+      "",
+    );
+    await expect(
+      backend.updateOwnSignature("acct-home", "x".repeat(512 * 1024 + 1), true),
+    ).rejects.toMatchObject({ code: "invalidInput" });
+  });
+
+  it("check a new work account's organization before its first message", async () => {
+    const backend = new MockBackend();
+    const account = await backend.addMicrosoftAccount("sam@contoso.example");
+    const before = await backend.getAccountSignature(account.id);
+    expect(before.organization).toMatchObject({ state: "unchecked", checkedAt: null });
+
+    // Contoso doesn't use Cumulas Signatures, so the own signature applies.
+    await backend.updateOwnSignature(account.id, "<div>Sam</div>", true);
+    expect(await backend.getComposeSignature(account.id, null)).toEqual({
+      kind: "own",
+      html: "<div>Sam</div>",
+    });
+    const after = await backend.getAccountSignature(account.id);
+    expect(after.organization.state).toBe("notUsed");
+    expect(after.organization.checkedAt).not.toBeNull();
+  });
+
+  it("show the states the demo can be started in", async () => {
+    const relay = new MockBackend({ signature: "addedOnSend" });
+    expect(await relay.getComposeSignature("acct-work", null)).toEqual({
+      kind: "addedOnSend",
+      html: null,
+    });
+    const blocked = new MockBackend({ signature: "notAllowed" });
+    expect((await blocked.getAccountSignature("acct-work")).organization.state).toBe("notAllowed");
+    const stale = new MockBackend({ signature: "stale" });
+    const checked = await stale.checkOrganizationSignature("acct-work");
+    expect(checked.organization).toMatchObject({ state: "ready", stale: true });
   });
 });
