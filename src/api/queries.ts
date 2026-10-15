@@ -4,7 +4,7 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 
 import { useBackend } from "./context";
-import type { BackgroundState, DataKind, Settings } from "./types";
+import type { ActiveReminder, BackgroundState, DataKind, Settings, SnoozeFor } from "./types";
 
 export const qk = {
   root: (kind: DataKind) => [kind] as const,
@@ -29,6 +29,9 @@ export const qk = {
 
   contacts: (accountId?: string, text?: string) =>
     ["contacts", "list", accountId ?? "all", text ?? ""] as const,
+
+  /** Not under a DataKind: the reminders-changed event keeps it up to date. */
+  reminders: () => ["reminders", "active"] as const,
 
   taskLists: () => ["tasks", "lists"] as const,
   tasks: (listId: string | null, includeCompleted: boolean) =>
@@ -122,5 +125,41 @@ export function useSetStartAtLogin() {
       backend.setStartAtLogin(enabled, hidden),
     onSuccess: (state) => applyBackgroundState(client, state),
     onError: () => void client.invalidateQueries({ queryKey: qk.backgroundState() }),
+  });
+}
+
+/** The reminders due now, or snoozed; kept current by the reminders-changed event. */
+export function useActiveReminders() {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: qk.reminders(),
+    queryFn: () => backend.listActiveReminders(),
+    staleTime: Infinity,
+  });
+}
+
+export function useSnoozeReminder() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ key, snooze }: { key: string; snooze: SnoozeFor }) =>
+      backend.snoozeReminder(key, snooze),
+    onSuccess: (active: ActiveReminder[]) => client.setQueryData(qk.reminders(), active),
+  });
+}
+
+export function useDismissReminders() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (keys: string[]) => backend.dismissReminders(keys),
+    onMutate: (keys: string[]) => {
+      // Gone at once; the backend's answer replaces this.
+      client.setQueryData<ActiveReminder[]>(qk.reminders(), (old) =>
+        old?.filter((r) => !keys.includes(r.key)),
+      );
+    },
+    onSuccess: (active: ActiveReminder[]) => client.setQueryData(qk.reminders(), active),
+    onError: () => void client.invalidateQueries({ queryKey: qk.reminders() }),
   });
 }

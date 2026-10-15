@@ -744,7 +744,6 @@ export function createDemoState(): MockState {
     }),
     event(nextId(), "cal-work", WORK, "Focus time", at(0, 10, 30), 90, {
       showAs: "busy",
-      reminderMinutes: null,
     }),
     event(nextId(), "cal-work", WORK, "1:1 Dana / Alex", at(1, 11), 30, {
       organizer: people.dana,
@@ -847,6 +846,9 @@ export function createDemoState(): MockState {
       organizer: people.jonas,
       responseStatus: "tentative",
       showAs: "tentative",
+      isOnlineMeeting: true,
+      onlineMeetingUrl: "https://meet.example/security-review",
+      reminderMinutes: 60,
       attendees: attending(
         [people.jonas, "organizer"],
         [people.it, "accepted"],
@@ -1054,6 +1056,7 @@ export function createDemoState(): MockState {
     status: "notStarted",
     importance: "normal",
     dueDate: null,
+    reminderAt: null,
     completedAt: null,
     createdAt: now,
     updatedAt: now,
@@ -1061,7 +1064,11 @@ export function createDemoState(): MockState {
   });
   const created = (daysAgo: number) => ({ createdAt: iso(at(-daysAgo, 9)) });
   const tasks: Task[] = [
-    task("tl-atlas", WORK, "Review rollback plan", { dueDate: dateOnly(0), importance: "high" }),
+    task("tl-atlas", WORK, "Review rollback plan", {
+      dueDate: dateOnly(0),
+      importance: "high",
+      reminderAt: iso(at(0, 16)),
+    }),
     task("tl-atlas", WORK, "Confirm launch-week on-call rotation", { dueDate: dateOnly(1) }),
     task("tl-atlas", WORK, "Approve customer announcement", {
       dueDate: dateOnly(2),

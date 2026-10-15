@@ -1,5 +1,6 @@
 import type {
   Account,
+  ActiveReminder,
   AppInfo,
   BackgroundState,
   Calendar,
@@ -20,7 +21,9 @@ import type {
   NewImapAccount,
   OutgoingMessage,
   PushStatus,
+  RemindersChangedEvent,
   Settings,
+  SnoozeFor,
   SyncStatus,
   Task,
   TaskDraft,
@@ -94,6 +97,14 @@ export interface Backend {
    */
   takePendingNavigation(): Promise<Navigate | null>;
 
+  // Reminders
+  /** The reminders due now, or snoozed. */
+  listActiveReminders(): Promise<ActiveReminder[]>;
+  /** Snoozes a reminder; resolves to the reminders then active. */
+  snoozeReminder(key: string, snooze: SnoozeFor): Promise<ActiveReminder[]>;
+  /** Dismisses reminders; resolves to the reminders then active. */
+  dismissReminders(keys: string[]): Promise<ActiveReminder[]>;
+
   // Mail
   listFolders(accountId?: string): Promise<Folder[]>;
   listMessages(folderId: string, query: MessageQuery): Promise<MessagePage>;
@@ -145,6 +156,8 @@ export interface Backend {
   onPushStatus(handler: (status: PushStatus) => void): Unsubscribe;
   onNavigate(handler: (to: Navigate) => void): Unsubscribe;
   onBackgroundState(handler: (state: BackgroundState) => void): Unsubscribe;
+  /** Reminders came due, or went (dismissed, snoozed, done). */
+  onRemindersChanged(handler: (event: RemindersChangedEvent) => void): Unsubscribe;
   /**
    * Quit from outside the page (the tray): the page quits as for its own
    * Quit, asking first when an unsent message would be lost.

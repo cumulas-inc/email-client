@@ -15,7 +15,8 @@ const DEMO_PUSH: readonly DemoPush[] = ["consent", "refused", "unreachable"];
  * plain browser (`pnpm dev`). Add `?empty` to the URL to start the demo with
  * no accounts, or `?worst` to start it with worst-case data for stress-testing
  * the UI. `?push=consent|refused|unreachable` shows the Microsoft account's
- * push in that state, and `?notray` a desktop without tray icons.
+ * push in that state, `?notray` a desktop without tray icons, and
+ * `?reminders` a task reminder 12 minutes overdue besides the events' own.
  */
 export function createBackend(): Backend {
   if (isTauri()) return tauriBackend;
@@ -26,6 +27,7 @@ export function createBackend(): Backend {
     empty: params.has("empty"),
     worst: params.has("worst"),
     push: push && DEMO_PUSH.includes(push) ? push : undefined,
+    overdueReminder: params.has("reminders"),
     background: params.has("notray") ? { trayAvailable: false } : undefined,
   });
 }

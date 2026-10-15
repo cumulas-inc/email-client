@@ -265,6 +265,8 @@ export interface Task {
   status: TaskStatus;
   importance: Importance;
   dueDate: string | null;
+  /** When to remind about the task (ISO 8601); null for no reminder. */
+  reminderAt: string | null;
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -276,6 +278,7 @@ export interface TaskDraft {
   notes?: string | null;
   importance?: Importance | null;
   dueDate?: string | null;
+  reminderAt?: string | null;
 }
 
 export interface TaskPatch {
@@ -286,7 +289,48 @@ export interface TaskPatch {
   importance?: Importance;
   dueDate?: string;
   clearDueDate?: boolean;
+  /** A new reminder time (ISO 8601). */
+  reminderAt?: string;
+  clearReminder?: boolean;
 }
+
+// --- Reminders ----------------------------------------------------------------
+
+export type ReminderKind = "event" | "task";
+
+/** A reminder that is due, or snoozed. */
+export interface ActiveReminder {
+  /** `{event|task}:{item id}:{fire time}`; a moved event's reminder gets a new key. */
+  key: string;
+  kind: ReminderKind;
+  /** The event's or task's id. */
+  itemId: string;
+  accountId: string;
+  title: string;
+  /** When the event starts (an all-day event: local midnight); null for tasks. */
+  startsAt: string | null;
+  endsAt: string | null;
+  location: string | null;
+  onlineMeetingUrl: string | null;
+  /** When the reminder went off. */
+  fireAt: string;
+  /** Snoozed until then (not due again yet); null when due. */
+  snoozedUntil: string | null;
+  /** The event has started, or the task is past its reminder time. */
+  overdue: boolean;
+  /** The event was over before the reminder could show: listed, never shown as a notification. */
+  missed: boolean;
+}
+
+/** The `reminders-changed` event: every active reminder, the ones that just came due, and the keys of those no longer due. */
+export interface RemindersChangedEvent {
+  active: ActiveReminder[];
+  newlyDue: ActiveReminder[];
+  cleared: string[];
+}
+
+/** How long to snooze: some minutes, or until a time (ISO 8601). */
+export type SnoozeFor = { minutes: number } | { until: string };
 
 // --- Sync, settings, app ----------------------------------------------------
 
@@ -435,7 +479,12 @@ export type Navigate =
   | { kind: "message"; messageId: string; folderId: string; accountId: string }
   /** An account's Inbox, or every Inbox; `notice` says why, when there's something to say. */
   | { kind: "inbox"; accountId: string | null; notice: string | null }
-  | { kind: "compose" };
+  | { kind: "compose" }
+  /** An event: the day it starts on (the UTC date of `start` for an all-day event). */
+  | { kind: "event"; eventId: string; start: string; isAllDay: boolean }
+  | { kind: "task"; taskId: string; listId: string }
+  /** The Reminders panel; `notice` says why, when there's something to say. */
+  | { kind: "reminders"; notice: string | null };
 
 export interface AppInfo {
   version: string;

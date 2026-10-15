@@ -1538,6 +1538,7 @@ function taskData(rng: Rng): { taskLists: TaskList[]; tasks: Task[] } {
       status: "notStarted",
       importance: "normal",
       dueDate: null,
+      reminderAt: null,
       completedAt: null,
       createdAt: created,
       updatedAt: created,

@@ -4,6 +4,7 @@
 import type { Backend, Unsubscribe } from "../backend";
 import type {
   Account,
+  ActiveReminder,
   BackendError,
   BackgroundState,
   CalendarEvent,
@@ -15,7 +16,9 @@ import type {
   MessageSummary,
   Navigate,
   PushStatus,
+  RemindersChangedEvent,
   Settings,
+  SnoozeFor,
   SyncStatus,
   Task,
 } from "../types";
@@ -209,6 +212,8 @@ export interface MockOptions {
   worst?: boolean;
   /** Show the Microsoft account's push in this state. */
   push?: DemoPush;
+  /** Add a task reminder that went off 12 minutes ago (`?reminders`), besides the events' own. */
+  overdueReminder?: boolean;
   /** What the desktop reports (the tray, the portal…). */
   background?: Partial<
     Pick<BackgroundState, "backgroundAllowed" | "autostart" | "trayAvailable" | "notifications">
@@ -261,6 +266,12 @@ export class MockBackend implements Backend {
   private navigateHandlers = new Set<(to: Navigate) => void>();
   private backgroundHandlers = new Set<(state: BackgroundState) => void>();
   private quitHandlers = new Set<() => void>();
+  private reminderHandlers = new Set<(event: RemindersChangedEvent) => void>();
+  /** What became of reminders: snoozed until, or dismissed. */
+  private reminderStates = new Map<string, { snoozedUntil?: number; dismissed?: boolean }>();
+  /** The keys due, and all active, when the reminders were last looked at. */
+  private dueReminders = new Set<string>();
+  private lastReminders = "[]";
   /** When each account's push status last changed. */
   private pushSince = new Map<string, string>();
   /** Push statuses set by tests or the demo, by account. */
@@ -294,6 +305,13 @@ export class MockBackend implements Backend {
     };
     const microsoft = this.state.accounts.find((a) => a.kind === "microsoft");
     if (options.push && microsoft) this.pushOverrides.set(microsoft.id, demoPush(options.push));
+    if (options.overdueReminder) {
+      const metrics = this.state.tasks.find((t) => t.title === "Send Q3 metrics to Dana");
+      if (metrics) metrics.reminderAt = new Date(Date.now() - 12 * 60_000).toISOString();
+    }
+    const active = this.reminders();
+    this.dueReminders = new Set(active.filter((r) => r.snoozedUntil === null).map((r) => r.key));
+    this.lastReminders = JSON.stringify(active);
   }
 
   private async delay(): Promise<void> {
@@ -308,6 +326,8 @@ export class MockBackend implements Backend {
   private emit(kinds: DataKind[], accountId: string | null = null): void {
     const event = { kinds, accountId };
     queueMicrotask(() => this.dataHandlers.forEach((h) => h(event)));
+    // The scheduler looks again when events or tasks change.
+    if (kinds.includes("calendar") || kinds.includes("tasks")) this.checkReminders();
   }
 
   private message(id: string): Message {
@@ -535,7 +555,9 @@ export class MockBackend implements Backend {
       settings.usePushRelay !== this.settings.usePushRelay;
     // Like the desktop app, these change only through their own calls.
     const { runInBackground, startAtLogin, startHidden } = this.settings;
+    const remindersChanged = settings.remindersEnabled !== this.settings.remindersEnabled;
     this.settings = { ...clone(settings), runInBackground, startAtLogin, startHidden };
+    if (remindersChanged) this.checkReminders();
     if (pushChanged) {
       this.pushSince.clear();
       const statuses = await this.getPushStatuses();
@@ -683,6 +705,136 @@ export class MockBackend implements Backend {
   /** What the tray's Quit does while the page is there: asks the page. */
   requestQuit() {
     this.quitHandlers.forEach((h) => h());
+  }
+
+  // --- reminders ----------------------------------------------------------------
+
+  /**
+   * The reminders due (or snoozed) now, worked out from the events and tasks
+   * much as the desktop app does: an event's from when its reminder goes off
+   * until it ends, a task's from its reminder time; a day back at most.
+   */
+  private reminders(now = Date.now()): ActiveReminder[] {
+    const lookback = now - 24 * 3_600_000;
+    const out: ActiveReminder[] = [];
+    const add = (r: Omit<ActiveReminder, "key" | "snoozedUntil" | "overdue" | "missed">) => {
+      const fire = Date.parse(r.fireAt);
+      if (fire > now || fire < lookback) return;
+      const key = `${r.kind}:${r.itemId}:${Math.floor(fire / 1000)}`;
+      const state = this.reminderStates.get(key);
+      if (state?.dismissed) return;
+      const snoozed = state?.snoozedUntil !== undefined && state.snoozedUntil > now;
+      out.push({
+        ...r,
+        key,
+        snoozedUntil: snoozed ? new Date(state.snoozedUntil!).toISOString() : null,
+        overdue: Date.parse(r.startsAt ?? r.fireAt) <= now,
+        missed: false,
+      });
+    };
+    for (const e of this.state.events) {
+      if (e.reminderMinutes === null || e.isCancelled || e.responseStatus === "declined") continue;
+      // All-day events start at local midnight of their (UTC) date.
+      const start = e.isAllDay
+        ? new Date(
+            new Date(e.start).getUTCFullYear(),
+            new Date(e.start).getUTCMonth(),
+            new Date(e.start).getUTCDate(),
+          ).getTime()
+        : Date.parse(e.start);
+      const end = e.isAllDay
+        ? start + (Date.parse(e.end) - Date.parse(e.start))
+        : Date.parse(e.end);
+      if (end <= now) continue;
+      add({
+        kind: "event",
+        itemId: e.id,
+        accountId: e.accountId,
+        title: e.subject,
+        startsAt: new Date(start).toISOString(),
+        endsAt: new Date(end).toISOString(),
+        location: e.location,
+        onlineMeetingUrl: e.onlineMeetingUrl,
+        fireAt: new Date(start - e.reminderMinutes * 60_000).toISOString(),
+      });
+    }
+    for (const t of this.state.tasks) {
+      if (t.reminderAt === null || t.status === "completed") continue;
+      add({
+        kind: "task",
+        itemId: t.id,
+        accountId: t.accountId,
+        title: t.title,
+        startsAt: null,
+        endsAt: null,
+        location: null,
+        onlineMeetingUrl: null,
+        fireAt: t.reminderAt,
+      });
+    }
+    const order = (r: ActiveReminder) =>
+      [
+        r.snoozedUntil === null ? 0 : 1,
+        Date.parse(r.snoozedUntil ?? r.startsAt ?? r.fireAt),
+      ] as const;
+    return out.sort((a, b) => {
+      const [x, y] = [order(a), order(b)];
+      return x[0] - y[0] || x[1] - y[1] || a.key.localeCompare(b.key);
+    });
+  }
+
+  /**
+   * Looks at the reminders again and tells the page what changed, as the
+   * desktop app's scheduler does: on changes to events and tasks, and when
+   * a test or the demo calls it.
+   */
+  checkReminders(): ActiveReminder[] {
+    const active = this.settings.remindersEnabled ? this.reminders() : [];
+    const due = new Set(active.filter((r) => r.snoozedUntil === null).map((r) => r.key));
+    const newlyDue = active.filter((r) => due.has(r.key) && !this.dueReminders.has(r.key));
+    const cleared = [...this.dueReminders].filter((k) => !due.has(k)).sort();
+    this.dueReminders = due;
+    const json = JSON.stringify(active);
+    if (json !== this.lastReminders || newlyDue.length > 0 || cleared.length > 0) {
+      this.lastReminders = json;
+      const event = clone({ active, newlyDue, cleared });
+      queueMicrotask(() => this.reminderHandlers.forEach((h) => h(event)));
+    }
+    return active;
+  }
+
+  private reminder(key: string): ActiveReminder {
+    return (
+      this.reminders().find((r) => r.key === key) ??
+      fail("notFound", "That reminder is no longer due.")
+    );
+  }
+
+  async listActiveReminders() {
+    await this.delay();
+    return clone(this.settings.remindersEnabled ? this.reminders() : []);
+  }
+
+  async snoozeReminder(key: string, snooze: SnoozeFor) {
+    await this.delay();
+    const now = Date.now();
+    const until = "minutes" in snooze ? now + snooze.minutes * 60_000 : Date.parse(snooze.until);
+    if ("minutes" in snooze && snooze.minutes < 1)
+      fail("invalidInput", "Snooze for at least one minute.");
+    if (!(until > now)) fail("invalidInput", "Choose a time that hasn't passed.");
+    if (until > now + 30 * 86_400_000) fail("invalidInput", "Snooze for 30 days at most.");
+    this.reminder(key);
+    this.reminderStates.set(key, { snoozedUntil: until });
+    return clone(this.checkReminders());
+  }
+
+  async dismissReminders(keys: string[]) {
+    await this.delay();
+    const active = new Set(this.reminders().map((r) => r.key));
+    for (const key of keys.filter((k) => active.has(k))) {
+      this.reminderStates.set(key, { dismissed: true });
+    }
+    return clone(this.checkReminders());
   }
 
   async getSyncStatuses() {
@@ -1135,6 +1287,7 @@ export class MockBackend implements Backend {
       status: "notStarted",
       importance: draft.importance ?? "normal",
       dueDate: draft.dueDate ?? null,
+      reminderAt: draft.reminderAt ?? null,
       completedAt: null,
       createdAt: now,
       updatedAt: now,
@@ -1157,6 +1310,8 @@ export class MockBackend implements Backend {
     if (patch.importance) task.importance = patch.importance;
     if (patch.clearDueDate) task.dueDate = null;
     else if (patch.dueDate) task.dueDate = patch.dueDate;
+    if (patch.clearReminder) task.reminderAt = null;
+    else if (patch.reminderAt) task.reminderAt = new Date(patch.reminderAt).toISOString();
     if (patch.status) {
       if (patch.status === "completed" && task.status !== "completed") {
         task.completedAt = new Date().toISOString();
@@ -1206,6 +1361,11 @@ export class MockBackend implements Backend {
   onQuitRequested(handler: () => void): Unsubscribe {
     this.quitHandlers.add(handler);
     return () => this.quitHandlers.delete(handler);
+  }
+
+  onRemindersChanged(handler: (event: RemindersChangedEvent) => void): Unsubscribe {
+    this.reminderHandlers.add(handler);
+    return () => this.reminderHandlers.delete(handler);
   }
 }
 

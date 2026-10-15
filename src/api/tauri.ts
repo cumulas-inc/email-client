@@ -3,7 +3,14 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import type { Backend, Unsubscribe } from "./backend";
-import type { BackgroundState, DataChangedEvent, Navigate, PushStatus, SyncStatus } from "./types";
+import type {
+  BackgroundState,
+  DataChangedEvent,
+  Navigate,
+  PushStatus,
+  RemindersChangedEvent,
+  SyncStatus,
+} from "./types";
 
 function subscribe<T>(event: string, handler: (payload: T) => void): Unsubscribe {
   let unlisten: (() => void) | null = null;
@@ -53,6 +60,15 @@ export const tauriBackend: Backend = {
   sendTestNotification: () => invoke("send_test_notification"),
   takePendingNavigation: () => invoke("take_pending_navigation"),
 
+  listActiveReminders: () => invoke("list_active_reminders"),
+  snoozeReminder: (reminderKey, snooze) =>
+    invoke("snooze_reminder", {
+      reminderKey,
+      minutes: "minutes" in snooze ? snooze.minutes : null,
+      until: "until" in snooze ? snooze.until : null,
+    }),
+  dismissReminders: (reminderKeys) => invoke("dismiss_reminders", { reminderKeys }),
+
   listFolders: (accountId) => invoke("list_folders", { accountId: accountId ?? null }),
   listMessages: (folderId, query) => invoke("list_messages", { folderId, query }),
   searchMessages: (text, accountId) =>
@@ -98,5 +114,6 @@ export const tauriBackend: Backend = {
   onPushStatus: (handler) => subscribe<PushStatus>("push-status", handler),
   onNavigate: (handler) => subscribe<Navigate>("navigate", handler),
   onBackgroundState: (handler) => subscribe<BackgroundState>("background-state", handler),
+  onRemindersChanged: (handler) => subscribe<RemindersChangedEvent>("reminders-changed", handler),
   onQuitRequested: (handler) => subscribe<null>("quit-requested", () => handler()),
 };

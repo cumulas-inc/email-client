@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ActiveReminder, RemindersChangedEvent } from "../types";
 import { MockBackend } from ".";
 
 function addStyle(css: string): CSSRule[] {
@@ -98,5 +99,68 @@ describe("push and background settings", () => {
     ).rejects.toMatchObject({
       code: "invalidInput",
     });
+  });
+});
+
+describe("the demo's reminders", () => {
+  it("come due, snooze, dismiss and clear like the desktop app's", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // Wednesday, October 14, 2026, 10:24 AM.
+      vi.setSystemTime(new Date(2026, 9, 14, 10, 24));
+      const backend = new MockBackend({ overdueReminder: true });
+      const events: RemindersChangedEvent[] = [];
+      backend.onRemindersChanged((e) => events.push(e));
+      const active = await backend.listActiveReminders();
+      expect(active.map((r) => [r.title, r.kind, r.overdue])).toEqual([
+        ["Send Q3 metrics to Dana", "task", true],
+        ["Focus time", "event", false],
+        ["Security review", "event", false],
+      ]);
+      const [task, focus] = active as [ActiveReminder, ActiveReminder];
+
+      await expect(backend.snoozeReminder(focus.key, { minutes: 0 })).rejects.toMatchObject({
+        code: "invalidInput",
+      });
+      await expect(backend.snoozeReminder("event:gone:1", { minutes: 5 })).rejects.toMatchObject({
+        code: "notFound",
+      });
+      const snoozed = await backend.snoozeReminder(focus.key, { minutes: 5 });
+      expect(snoozed.at(-1)).toMatchObject({
+        key: focus.key,
+        snoozedUntil: new Date(2026, 9, 14, 10, 29).toISOString(),
+      });
+      await Promise.resolve();
+      expect(events.at(-1)?.cleared).toEqual([focus.key]);
+
+      // Completing the task clears its reminder.
+      await backend.updateTask(task.itemId, { status: "completed" });
+      await Promise.resolve();
+      expect(events.at(-1)?.cleared).toEqual([task.key]);
+
+      await backend.dismissReminders([focus.key]);
+      expect((await backend.listActiveReminders()).map((r) => r.title)).toEqual([
+        "Security review",
+      ]);
+
+      // The snooze is over: due again, and announced.
+      vi.setSystemTime(new Date(2026, 9, 14, 10, 30));
+      const fresh = new MockBackend();
+      const freshKey = (await fresh.listActiveReminders())[0]!.key;
+      await fresh.snoozeReminder(freshKey, { minutes: 5 });
+      const seen: RemindersChangedEvent[] = [];
+      fresh.onRemindersChanged((e) => seen.push(e));
+      vi.setSystemTime(new Date(2026, 9, 14, 10, 36));
+      fresh.checkReminders();
+      await Promise.resolve();
+      expect(seen.at(-1)?.newlyDue.map((r) => r.key)).toContain(freshKey);
+
+      // Off: nothing is active.
+      const settings = await fresh.getSettings();
+      await fresh.updateSettings({ ...settings, remindersEnabled: false });
+      expect(await fresh.listActiveReminders()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
