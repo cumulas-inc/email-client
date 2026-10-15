@@ -126,6 +126,14 @@ jobs:
         with:
           name: flatpak-sources
           path: packaging/flatpak
+      # Flathub's shared modules (libayatana-appindicator for the tray), a git
+      # submodule in the Flathub repository; pinned here.
+      - name: Fetch Flathub shared modules
+        run: |
+          git init -q packaging/flatpak/shared-modules
+          git -C packaging/flatpak/shared-modules fetch -q --depth 1 \
+            https://github.com/flathub/shared-modules cb9ec602a1ece1c76d5a4f8aa1d87c4a6bf99c3e
+          git -C packaging/flatpak/shared-modules checkout -q FETCH_HEAD
       - name: Install Flatpak tooling
         run: |
           sudo apt-get update

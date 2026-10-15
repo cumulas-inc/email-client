@@ -36,3 +36,6 @@ build-dir/
 
 # Python bytecode (e2e/desktop)
 __pycache__/
+
+# Flathub shared modules, cloned for Flatpak builds (packaging/flatpak/README.md).
+packaging/flatpak/shared-modules/

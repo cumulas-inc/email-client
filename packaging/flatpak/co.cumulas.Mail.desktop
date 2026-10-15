@@ -9,3 +9,4 @@ Terminal=false
 Categories=Office;Email;Calendar;ContactManagement;
 Keywords=email;mail;microsoft 365;exchange;imap;calendar;contacts;tasks;
 StartupNotify=true
+X-GNOME-UsesNotifications=true

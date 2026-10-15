@@ -5,3 +5,4 @@ package-lock.json
 packaging/flatpak/*-sources.json
 .claude
 crates/**/fixtures
+src-tauri/linux/*.hbs

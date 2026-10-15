@@ -19,17 +19,25 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
-  # Mail, calendar and sign-in servers.
+  # Mail, calendar and sign-in servers, and the push service.
   - --share=network
-  # New-mail notifications.
-  - --talk-name=org.freedesktop.Notifications
-  # Passwords and tokens use the Secret portal, files the FileChooser portal
-  # and links the OpenURI portal, so no keyring or filesystem access is needed.
+  # The tray icon (StatusNotifierItem), where the desktop shows tray icons.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Notifications go through the Notification portal, running in the
+  # background and starting at login through the Background portal, and
+  # passwords and tokens through the Secret portal; files use the
+  # FileChooser portal and links the OpenURI portal. So no notification
+  # server, keyring, autostart folder or filesystem access is needed.
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
 
 modules:
+  # The tray icon's library, which the app loads when the desktop shows tray
+  # icons. Flathub's shared module: a git submodule in the Flathub
+  # repository; CI clones flathub/shared-modules next to this file.
+  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+
   - name: cumulas-mail
     buildsystem: simple
     build-options:
@@ -62,6 +70,7 @@ modules:
           - .claude
           - .flatpak-builder
           - target
+          - packaging/flatpak/shared-modules
           - node_modules
           - dist
           - flatpak_app

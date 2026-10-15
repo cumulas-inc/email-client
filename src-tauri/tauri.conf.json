@@ -48,7 +48,12 @@
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"],
     "linux": {
       "deb": {
-        "depends": []
+        "depends": ["libayatana-appindicator3-1"],
+        "desktopTemplate": "linux/cumulas-mail.desktop.hbs"
+      },
+      "rpm": {
+        "depends": ["libayatana-appindicator-gtk3"],
+        "desktopTemplate": "linux/cumulas-mail.desktop.hbs"
       }
     }
   }
