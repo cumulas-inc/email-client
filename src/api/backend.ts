@@ -1,6 +1,7 @@
 import type {
   Account,
   AppInfo,
+  BackgroundState,
   Calendar,
   CalendarEvent,
   Contact,
@@ -15,6 +16,7 @@ import type {
   MessagePage,
   MessageQuery,
   MessageSummary,
+  Navigate,
   NewImapAccount,
   OutgoingMessage,
   PushStatus,
@@ -38,6 +40,8 @@ export type Unsubscribe = () => void;
 export interface Backend {
   getAppInfo(): Promise<AppInfo>;
   openLink(url: string): Promise<void>;
+  /** Quits, even while running in the background is on. */
+  quitApp(): Promise<void>;
 
   // Accounts & settings
   listAccounts(): Promise<Account[]>;
@@ -51,6 +55,11 @@ export interface Backend {
   updateAccount(accountId: string, displayName?: string, color?: string): Promise<Account>;
   removeAccount(accountId: string): Promise<void>;
   getSettings(): Promise<Settings>;
+  /**
+   * Saves the settings. `runInBackground`, `startAtLogin` and `startHidden`
+   * keep their saved values: they change through setRunInBackground and
+   * setStartAtLogin, which also tell the system.
+   */
   updateSettings(settings: Settings): Promise<Settings>;
   /** Installed font families, sorted, for the font settings. */
   listFonts(): Promise<string[]>;
@@ -65,6 +74,20 @@ export interface Backend {
   getSyncStatuses(): Promise<SyncStatus[]>;
   /** How each account hears about new mail (IMAP IDLE, polling, ...). */
   getPushStatuses(): Promise<PushStatus[]>;
+
+  // Desktop
+  getBackgroundState(): Promise<BackgroundState>;
+  /** Keeps the app running when its window closes (asking the system in a Flatpak). */
+  setRunInBackground(enabled: boolean): Promise<BackgroundState>;
+  /** Starts the app at login; `hidden` starts it without a window. */
+  setStartAtLogin(enabled: boolean, hidden: boolean): Promise<BackgroundState>;
+  /** Shows a notification like new mail's. */
+  sendTestNotification(): Promise<void>;
+  /**
+   * Where a notification clicked before the page started asked to go. Call
+   * once the page listens for onNavigate.
+   */
+  takePendingNavigation(): Promise<Navigate | null>;
 
   // Mail
   listFolders(accountId?: string): Promise<Folder[]>;
@@ -115,4 +138,6 @@ export interface Backend {
   onDataChanged(handler: (event: DataChangedEvent) => void): Unsubscribe;
   onSyncStatus(handler: (status: SyncStatus) => void): Unsubscribe;
   onPushStatus(handler: (status: PushStatus) => void): Unsubscribe;
+  onNavigate(handler: (to: Navigate) => void): Unsubscribe;
+  onBackgroundState(handler: (state: BackgroundState) => void): Unsubscribe;
 }

@@ -385,9 +385,57 @@ export interface PushStatus {
   mode: PushMode;
   health: PushHealth;
   detail: string | null;
+  /**
+   * Consent to the push service is missing because it was refused at the
+   * account's last sign-in, so signing in again won't ask for it again.
+   */
+  consentRefused: boolean;
+  /**
+   * Set while consent to the push service is missing because the account's
+   * organization requires an administrator to approve it.
+   */
+  adminConsent: AdminConsent | null;
   /** When the mode or health last changed (ISO 8601). */
   since: string;
 }
+
+/** The approval an organization's administrator can give for the push service. */
+export interface AdminConsent {
+  /** The page where an administrator approves Cumulas Mail for the organization. */
+  url: string;
+  /** The organization: a tenant id or domain. */
+  tenant: string;
+}
+
+/** How starting at login works: the Background portal (Flatpak) or an autostart file. */
+export type AutostartBackend = "portal" | "xdgAutostartFile" | "unsupported";
+
+/** How notifications reach the desktop. */
+export type NotifierKind = "portal" | "freedesktop";
+
+/** Running in the background, starting at login and the tray, for Settings. */
+export interface BackgroundState {
+  runInBackground: boolean;
+  /**
+   * Whether the system lets the app run without a window: always outside a
+   * Flatpak; inside, the Background portal's answer (null until asked).
+   */
+  backgroundAllowed: boolean | null;
+  startAtLogin: boolean;
+  startHidden: boolean;
+  autostart: AutostartBackend;
+  /** A tray icon can be shown: the desktop shows tray icons and the library is installed. */
+  trayAvailable: boolean;
+  /** Null when no notification service answered. */
+  notifications: NotifierKind | null;
+}
+
+/** Where the desktop asks the page to go (a notification or the tray was clicked). */
+export type Navigate =
+  | { kind: "message"; messageId: string; folderId: string; accountId: string }
+  /** An account's Inbox, or every Inbox; `notice` says why, when there's something to say. */
+  | { kind: "inbox"; accountId: string | null; notice: string | null }
+  | { kind: "compose" };
 
 export interface AppInfo {
   version: string;

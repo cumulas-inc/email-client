@@ -5,6 +5,7 @@ import type { Backend, Unsubscribe } from "../backend";
 import type {
   Account,
   BackendError,
+  BackgroundState,
   CalendarEvent,
   Contact,
   DataChangedEvent,
@@ -12,6 +13,7 @@ import type {
   ErrorCode,
   Message,
   MessageSummary,
+  Navigate,
   PushStatus,
   Settings,
   SyncStatus,
@@ -195,6 +197,9 @@ function zoomViewport(factor: number): void {
   );
 }
 
+/** Push states the demo can show for its Microsoft account (`?push=` in the URL). */
+export type DemoPush = "consent" | "refused" | "unreachable";
+
 export interface MockOptions {
   /** Artificial latency in ms for every call (default 0). */
   latency?: number;
@@ -202,6 +207,49 @@ export interface MockOptions {
   empty?: boolean;
   /** Start with worst-case data (long, empty, huge and non-Latin values). */
   worst?: boolean;
+  /** Show the Microsoft account's push in this state. */
+  push?: DemoPush;
+  /** What the desktop reports (the tray, the portal…). */
+  background?: Partial<
+    Pick<BackgroundState, "backgroundAllowed" | "autostart" | "trayAvailable" | "notifications">
+  >;
+}
+
+/** The demo's Microsoft account's push status for `?push=`. */
+function demoPush(
+  kind: DemoPush,
+): Pick<PushStatus, "mode" | "health" | "detail" | "consentRefused" | "adminConsent"> {
+  const polling = { kind: "polling", everySecs: 30 } as const;
+  switch (kind) {
+    case "consent":
+      return {
+        mode: polling,
+        health: { kind: "consentMissing" },
+        detail: "Sign in again to turn on instant updates.",
+        consentRefused: false,
+        adminConsent: null,
+      };
+    case "refused":
+      return {
+        mode: polling,
+        health: { kind: "consentMissing" },
+        detail:
+          "Your organization requires an administrator to approve instant updates. Send the approval link to your IT department; until then, the Inbox is checked every 30 seconds.",
+        consentRefused: true,
+        adminConsent: {
+          url: "https://login.microsoftonline.com/acme.example/v2.0/adminconsent?client_id=00000000-0000-0000-0000-000000000000",
+          tenant: "acme.example",
+        },
+      };
+    case "unreachable":
+      return {
+        mode: polling,
+        health: { kind: "degraded", reason: "Could not reach the push service." },
+        detail: null,
+        consentRefused: false,
+        adminConsent: null,
+      };
+  }
 }
 
 export class MockBackend implements Backend {
@@ -210,8 +258,19 @@ export class MockBackend implements Backend {
   private dataHandlers = new Set<(e: DataChangedEvent) => void>();
   private syncHandlers = new Set<(s: SyncStatus) => void>();
   private pushHandlers = new Set<(s: PushStatus) => void>();
+  private navigateHandlers = new Set<(to: Navigate) => void>();
+  private backgroundHandlers = new Set<(state: BackgroundState) => void>();
   /** When each account's push status last changed. */
   private pushSince = new Map<string, string>();
+  /** Push statuses set by tests or the demo, by account. */
+  private pushOverrides = new Map<string, Partial<PushStatus>>();
+  private desktop: Pick<
+    BackgroundState,
+    "backgroundAllowed" | "autostart" | "trayAvailable" | "notifications"
+  >;
+  private pendingNavigation: Navigate | null = null;
+  /** Calls the desktop app would have acted on, for tests. */
+  readonly calls = { quit: 0, testNotifications: 0 };
   private seq = 1000;
   private latency: number;
   private pendingSignIn: (() => void) | null = null;
@@ -225,6 +284,15 @@ export class MockBackend implements Backend {
       : options.worst
         ? createWorstState()
         : createDemoState();
+    this.desktop = {
+      backgroundAllowed: true,
+      autostart: "xdgAutostartFile",
+      trayAvailable: true,
+      notifications: "freedesktop",
+      ...options.background,
+    };
+    const microsoft = this.state.accounts.find((a) => a.kind === "microsoft");
+    if (options.push && microsoft) this.pushOverrides.set(microsoft.id, demoPush(options.push));
   }
 
   private async delay(): Promise<void> {
@@ -262,6 +330,11 @@ export class MockBackend implements Backend {
 
   async openLink(url: string) {
     window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async quitApp() {
+    // A page can't quit the browser; the count is for tests.
+    this.calls.quit += 1;
   }
 
   // --- accounts & settings ------------------------------------------------------
@@ -455,13 +528,15 @@ export class MockBackend implements Backend {
     const pushChanged =
       settings.instantPush !== this.settings.instantPush ||
       settings.usePushRelay !== this.settings.usePushRelay;
-    this.settings = clone(settings);
+    // Like the desktop app, these change only through their own calls.
+    const { runInBackground, startAtLogin, startHidden } = this.settings;
+    this.settings = { ...clone(settings), runInBackground, startAtLogin, startHidden };
     if (pushChanged) {
       this.pushSince.clear();
       const statuses = await this.getPushStatuses();
       queueMicrotask(() => statuses.forEach((s) => this.pushHandlers.forEach((h) => h(s))));
     }
-    return clone(settings);
+    return clone(this.settings);
   }
 
   async listFonts() {
@@ -516,9 +591,88 @@ export class MockBackend implements Backend {
               : { kind: "polling", everySecs: 30 },
         health: { kind: "live" },
         detail: null,
+        consentRefused: false,
+        adminConsent: null,
         since: this.pushSince.get(a.id)!,
+        ...this.pushOverrides.get(a.id),
       };
     });
+  }
+
+  /** Sets an account's push status, as the desktop app would report it (tests, demos). */
+  setPushStatus(accountId: string, status: Partial<PushStatus>) {
+    this.pushOverrides.set(accountId, status);
+    void this.getPushStatuses().then((all) => {
+      const changed = all.find((s) => s.accountId === accountId);
+      if (changed) this.pushHandlers.forEach((h) => h(changed));
+    });
+  }
+
+  // --- desktop ------------------------------------------------------------------
+
+  private backgroundState(): BackgroundState {
+    return {
+      runInBackground: this.settings.runInBackground,
+      startAtLogin: this.settings.startAtLogin,
+      startHidden: this.settings.startHidden,
+      ...this.desktop,
+    };
+  }
+
+  private announceBackground(): BackgroundState {
+    const state = this.backgroundState();
+    queueMicrotask(() => this.backgroundHandlers.forEach((h) => h(clone(state))));
+    return state;
+  }
+
+  async getBackgroundState() {
+    await this.delay();
+    return this.backgroundState();
+  }
+
+  async setRunInBackground(enabled: boolean) {
+    await this.delay();
+    this.settings = { ...this.settings, runInBackground: enabled };
+    return this.announceBackground();
+  }
+
+  async setStartAtLogin(enabled: boolean, hidden: boolean) {
+    await this.delay();
+    if (this.desktop.autostart === "unsupported") {
+      fail("unsupported", "Starting at login isn't available on this system.");
+    }
+    if (enabled && this.desktop.backgroundAllowed === false) {
+      this.announceBackground();
+      fail(
+        "unsupported",
+        "Your system didn't allow Cumulas Mail to start at login. You can allow it in your system's settings for apps.",
+      );
+    }
+    this.settings = { ...this.settings, startAtLogin: enabled, startHidden: hidden };
+    return this.announceBackground();
+  }
+
+  async sendTestNotification() {
+    await this.delay();
+    if (!this.desktop.notifications) {
+      fail("unsupported", "Couldn't show a notification. No notification service is running.");
+    }
+    this.calls.testNotifications += 1;
+  }
+
+  async takePendingNavigation() {
+    const pending = this.pendingNavigation;
+    this.pendingNavigation = null;
+    return pending;
+  }
+
+  /**
+   * What clicking a notification does in the desktop app: sends the page
+   * somewhere, or keeps it for takePendingNavigation when nothing listens.
+   */
+  navigate(to: Navigate) {
+    if (this.navigateHandlers.size === 0) this.pendingNavigation = to;
+    else this.navigateHandlers.forEach((h) => h(to));
   }
 
   async getSyncStatuses() {
@@ -1027,6 +1181,16 @@ export class MockBackend implements Backend {
   onPushStatus(handler: (status: PushStatus) => void): Unsubscribe {
     this.pushHandlers.add(handler);
     return () => this.pushHandlers.delete(handler);
+  }
+
+  onNavigate(handler: (to: Navigate) => void): Unsubscribe {
+    this.navigateHandlers.add(handler);
+    return () => this.navigateHandlers.delete(handler);
+  }
+
+  onBackgroundState(handler: (state: BackgroundState) => void): Unsubscribe {
+    this.backgroundHandlers.add(handler);
+    return () => this.backgroundHandlers.delete(handler);
   }
 }
 

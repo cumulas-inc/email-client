@@ -1,10 +1,10 @@
 // Shared React Query keys and hooks. Every key starts with a DataKind so a
 // backend "data-changed" event can invalidate exactly the affected queries.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 
 import { useBackend } from "./context";
-import type { DataKind, Settings } from "./types";
+import type { BackgroundState, DataKind, Settings } from "./types";
 
 export const qk = {
   root: (kind: DataKind) => [kind] as const,
@@ -15,6 +15,7 @@ export const qk = {
   appInfo: () => ["accounts", "app-info"] as const,
   syncStatuses: () => ["accounts", "sync-statuses"] as const,
   pushStatuses: () => ["accounts", "push-statuses"] as const,
+  backgroundState: () => ["accounts", "background"] as const,
 
   folders: (accountId?: string) => ["mail", "folders", accountId ?? "all"] as const,
   messages: (folderId: string, filter: string) => ["mail", "messages", folderId, filter] as const,
@@ -80,4 +81,46 @@ export function useSyncStatuses() {
 export function usePushStatuses() {
   const backend = useBackend();
   return useQuery({ queryKey: qk.pushStatuses(), queryFn: () => backend.getPushStatuses() });
+}
+
+/** Running in the background, starting at login, the tray and notifications. */
+export function useBackgroundState() {
+  const backend = useBackend();
+  return useQuery({ queryKey: qk.backgroundState(), queryFn: () => backend.getBackgroundState() });
+}
+
+/** Keeps the background state, and the settings it mirrors, in step with the backend. */
+export function applyBackgroundState(client: QueryClient, state: BackgroundState): void {
+  client.setQueryData(qk.backgroundState(), state);
+  client.setQueryData<Settings>(qk.settings(), (old) =>
+    old
+      ? {
+          ...old,
+          runInBackground: state.runInBackground,
+          startAtLogin: state.startAtLogin,
+          startHidden: state.startHidden,
+        }
+      : old,
+  );
+}
+
+export function useSetRunInBackground() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (enabled: boolean) => backend.setRunInBackground(enabled),
+    onSuccess: (state) => applyBackgroundState(client, state),
+    onError: () => void client.invalidateQueries({ queryKey: qk.backgroundState() }),
+  });
+}
+
+export function useSetStartAtLogin() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ enabled, hidden }: { enabled: boolean; hidden: boolean }) =>
+      backend.setStartAtLogin(enabled, hidden),
+    onSuccess: (state) => applyBackgroundState(client, state),
+    onError: () => void client.invalidateQueries({ queryKey: qk.backgroundState() }),
+  });
 }

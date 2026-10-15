@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import type { Backend, Unsubscribe } from "./backend";
-import type { DataChangedEvent, PushStatus, SyncStatus } from "./types";
+import type { BackgroundState, DataChangedEvent, Navigate, PushStatus, SyncStatus } from "./types";
 
 function subscribe<T>(event: string, handler: (payload: T) => void): Unsubscribe {
   let unlisten: (() => void) | null = null;
@@ -22,6 +22,7 @@ function subscribe<T>(event: string, handler: (payload: T) => void): Unsubscribe
 export const tauriBackend: Backend = {
   getAppInfo: () => invoke("get_app_info"),
   openLink: (url) => invoke("open_link", { url }),
+  quitApp: () => invoke("quit_app"),
 
   listAccounts: () => invoke("list_accounts"),
   addImapAccount: (input) => invoke("add_imap_account", { input }),
@@ -44,6 +45,12 @@ export const tauriBackend: Backend = {
   syncAll: () => invoke("sync_all"),
   getSyncStatuses: () => invoke("get_sync_statuses"),
   getPushStatuses: () => invoke("get_push_statuses"),
+
+  getBackgroundState: () => invoke("get_background_state"),
+  setRunInBackground: (enabled) => invoke("set_run_in_background", { enabled }),
+  setStartAtLogin: (enabled, hidden) => invoke("set_start_at_login", { enabled, hidden }),
+  sendTestNotification: () => invoke("send_test_notification"),
+  takePendingNavigation: () => invoke("take_pending_navigation"),
 
   listFolders: (accountId) => invoke("list_folders", { accountId: accountId ?? null }),
   listMessages: (folderId, query) => invoke("list_messages", { folderId, query }),
@@ -88,4 +95,6 @@ export const tauriBackend: Backend = {
   onDataChanged: (handler) => subscribe<DataChangedEvent>("data-changed", handler),
   onSyncStatus: (handler) => subscribe<SyncStatus>("sync-status", handler),
   onPushStatus: (handler) => subscribe<PushStatus>("push-status", handler),
+  onNavigate: (handler) => subscribe<Navigate>("navigate", handler),
+  onBackgroundState: (handler) => subscribe<BackgroundState>("background-state", handler),
 };
