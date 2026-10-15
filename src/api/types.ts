@@ -341,7 +341,8 @@ export type SnoozeFor = { minutes: number } | { until: string };
  * - notUsed: the organization doesn't use Cumulas Signatures, or has no signature for this person.
  * - ready: the organization's signature, which the app adds (`html`).
  * - addedOnSend: the organization's mail server adds it on send; the app adds none.
- * - notAllowed: the organization uses Cumulas Signatures but hasn't allowed Cumulas Mail.
+ * - notAllowed: Microsoft or the service didn't let Cumulas Mail get the signature, which may
+ *   be how the service is set up rather than the organization's choice.
  */
 export type OrganizationSignatureState =
   "unsupported" | "unchecked" | "notUsed" | "ready" | "addedOnSend" | "notAllowed";

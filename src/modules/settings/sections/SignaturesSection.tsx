@@ -13,7 +13,6 @@ import { PaneSpinner } from "../../../components/Spinner";
 import { signatureAppearance } from "../../mail/bodyHtml";
 import { useIsDark } from "../../mail/hooks";
 import { SignatureEditor, type SignatureEditorHandle } from "../../mail/SignatureEditor";
-import { Callout } from "../Fields";
 import { trackSave } from "../saveStatus";
 
 /** Opening the section asks organizations again after this long (or after a failed check). */
@@ -115,13 +114,16 @@ function SignatureSettings({
   }
   return (
     <>
+      {/* Microsoft or the service refused the app, which may be down to
+          how the service is set up rather than to the organization. */}
       {organization.state === "notAllowed" && (
-        <Callout>
-          <p>
-            Your organization uses Cumulas Signatures but hasn&apos;t allowed Cumulas Mail yet. Ask
-            your IT admin to allow it, and your signature will appear here.
-          </p>
-        </Callout>
+        <p className="signature-caption">
+          <Building2 size={16} strokeWidth={1.75} aria-hidden="true" />
+          <span>
+            Cumulas Mail can&apos;t get a company signature from Cumulas Signatures for this account
+            yet. Until it can, your own signature below is used.
+          </span>
+        </p>
       )}
       {/* Never asked yet, or asked again here after a failed first check. */}
       {organization.state === "unchecked" && (!organization.stale || checking) && (

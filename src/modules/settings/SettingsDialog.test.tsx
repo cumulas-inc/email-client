@@ -887,14 +887,16 @@ describe("Signatures", () => {
     expect(update).toHaveBeenCalledWith("acct-home", "<div>Bye</div>", true);
   });
 
-  it("explains an organization that hasn't allowed Cumulas Mail, and offers the own signature", async () => {
+  it("says when Cumulas Mail isn't allowed the company signature, and offers the own one", async () => {
     openAt("signatures", new MockBackend({ signature: "notAllowed" }));
     const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
     expect(
       await within(work).findByText(
-        "Your organization uses Cumulas Signatures but hasn't allowed Cumulas Mail yet. Ask your IT admin to allow it, and your signature will appear here.",
+        "Cumulas Mail can't get a company signature from Cumulas Signatures for this account yet. Until it can, your own signature below is used.",
       ),
     ).toBeInTheDocument();
+    // A quiet caption: there's nothing for the person to do about it.
+    expect(work.querySelector(".callout")).toBeNull();
     expect(within(work).getByTitle("Signature")).toBeInTheDocument();
   });
 
