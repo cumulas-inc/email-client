@@ -221,6 +221,11 @@ pub fn run() {
             commands::list_active_reminders,
             commands::snooze_reminder,
             commands::dismiss_reminders,
+            // signatures
+            commands::get_account_signature,
+            commands::update_own_signature,
+            commands::check_organization_signature,
+            commands::get_compose_signature,
             // mail
             commands::list_folders,
             commands::list_messages,

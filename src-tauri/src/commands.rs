@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use cumulas_core::model::{
-    Account, ActiveReminder, Calendar, Contact, ContactDraft, EmailAddress, Event, EventDraft,
-    EventResponse, Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary,
-    NewImapAccount, OutgoingMessage, Settings, Snooze, SyncStatus, Task, TaskDraft, TaskList,
-    TaskPatch,
+    Account, AccountSignature, ActiveReminder, Calendar, ComposeSignature, Contact, ContactDraft,
+    EmailAddress, Event, EventDraft, EventResponse, Folder, ImapAccountUpdate, Message,
+    MessagePage, MessageQuery, MessageSummary, NewImapAccount, OutgoingMessage, ReplyKind,
+    Settings, Snooze, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::push::PushStatus;
 use cumulas_core::service::BUILTIN_MICROSOFT_CLIENT_ID;
@@ -35,6 +35,10 @@ pub struct AppInfo {
     /// The host of the push service Microsoft accounts use (normally
     /// `sync.cumulas.co`), for the privacy note.
     sync_server: String,
+    /// The host of the service company signatures come from (normally
+    /// `signature.cumulas.co`); `None` when this build has none, and
+    /// company signatures are off.
+    signature_server: Option<String>,
 }
 
 #[tauri::command]
@@ -44,6 +48,7 @@ pub fn get_app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
         persistent_secrets: state.persistent_secrets,
         microsoft_client_id_built_in: BUILTIN_MICROSOFT_CLIENT_ID.is_some(),
         sync_server: cumulas_core::push::relay::sync_host(),
+        signature_server: cumulas_core::signatures::config::signature_host(),
     }
 }
 
@@ -316,6 +321,60 @@ pub async fn dismiss_reminders(
             .await;
     }
     Ok(active)
+}
+
+// --- signatures -------------------------------------------------------------------
+
+/// The account's own signature and what its organization last said about
+/// its own; changes arrive as `data-changed` events with `signatures`.
+#[tauri::command]
+pub fn get_account_signature(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<AccountSignature> {
+    state.service.get_account_signature(&account_id)
+}
+
+/// Saves the account's own signature, sanitized; more than 512 KB is
+/// refused (`invalidInput`).
+#[tauri::command]
+pub async fn update_own_signature(
+    state: State<'_, AppState>,
+    account_id: String,
+    html: String,
+    on_replies: bool,
+) -> Result<AccountSignature> {
+    state
+        .service
+        .update_own_signature(&account_id, &html, on_replies)
+}
+
+/// Asks the account's organization for its signature now, unless it was
+/// asked in the last minute. A failure for the network or the service
+/// isn't an error: the result says what was known, marked stale.
+#[tauri::command]
+pub async fn check_organization_signature(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<AccountSignature> {
+    state
+        .service
+        .check_organization_signature(&account_id)
+        .await
+}
+
+/// The signature a new message (`replyKind` null), reply or forward from
+/// the account starts with.
+#[tauri::command]
+pub async fn get_compose_signature(
+    state: State<'_, AppState>,
+    account_id: String,
+    reply_kind: Option<ReplyKind>,
+) -> Result<ComposeSignature> {
+    state
+        .service
+        .get_compose_signature(&account_id, reply_kind)
+        .await
 }
 
 // --- mail -----------------------------------------------------------------------
@@ -614,12 +673,32 @@ pub async fn delete_task(state: State<'_, AppState>, task_id: String) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::safe_file_name;
+    use super::{AppInfo, safe_file_name};
 
     #[test]
     fn attachment_names_cannot_escape() {
         assert_eq!(safe_file_name("../../etc/passwd"), "_.._etc_passwd");
         assert_eq!(safe_file_name("..."), "attachment");
         assert_eq!(safe_file_name("report.pdf"), "report.pdf");
+    }
+
+    /// The shape `src/api/types.ts` mirrors.
+    #[test]
+    fn app_info_names_the_signature_server_or_null() {
+        let info = |signature_server: Option<&str>| {
+            serde_json::to_value(AppInfo {
+                version: "0.1.0".into(),
+                persistent_secrets: true,
+                microsoft_client_id_built_in: false,
+                sync_server: "sync.cumulas.co".into(),
+                signature_server: signature_server.map(str::to_owned),
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            info(Some("signature.cumulas.co"))["signatureServer"],
+            "signature.cumulas.co"
+        );
+        assert_eq!(info(None)["signatureServer"], serde_json::Value::Null);
     }
 }
