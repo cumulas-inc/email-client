@@ -24,27 +24,32 @@ describe("the message frame's font", () => {
     expect(doc).toContain(`font-family: ${SERIF_STACK};`);
   });
 
-  it("only names an installed family, without carrying any faces", () => {
+  it("names a chosen family in front of Charis SIL, which still travels in the frame", () => {
+    // If Literata isn't installed, or lacks a letter, the frame falls back to
+    // the bundled Charis SIL as the rest of the app does.
     const font = bodyFont(fonts({ kind: "default" }, { kind: "family", family: "Literata" }), null);
     expect(font).toEqual({ family: `"Literata", ${SERIF_STACK}`, faces: "" });
     const doc = buildSrcDoc("<p>Hi</p>", { allowRemote: false, appearance: "plain", font: font! });
-    expect(doc).not.toContain("@font-face");
+    expect(doc).toContain('@font-face { font-family: "Charis SIL"');
     expect(doc).toContain(`font-family: "Literata", ${SERIF_STACK};`);
   });
 
-  it("follows the interface font, waiting for Inter's faces when it's the bundled one", () => {
+  it("follows the interface font, waiting for Inter's faces when Inter is the font or its fallback", () => {
     const system = bodyFont(fonts({ kind: "system" }, { kind: "interface" }), null);
     expect(system).toEqual({ family: `system-ui, ${SANS_STACK}`, faces: "" });
-    const installed = bodyFont(
-      fonts({ kind: "family", family: "Cantarell" }, { kind: "interface" }),
-      null,
-    );
-    expect(installed).toEqual({ family: `"Cantarell", ${SANS_STACK}`, faces: "" });
 
     const inter = fonts({ kind: "default" }, { kind: "interface" });
     expect(bodyFont(inter, null)).toBeNull();
     expect(bodyFont(inter, "@font-face {}")).toEqual({
       family: SANS_STACK,
+      faces: "@font-face {}",
+    });
+
+    // A chosen interface family that isn't installed falls back to Inter.
+    const chosen = fonts({ kind: "family", family: "Cantarell" }, { kind: "interface" });
+    expect(bodyFont(chosen, null)).toBeNull();
+    expect(bodyFont(chosen, "@font-face {}")).toEqual({
+      family: `"Cantarell", ${SANS_STACK}`,
       faces: "@font-face {}",
     });
   });
@@ -80,7 +85,8 @@ describe("MessageBody", () => {
   it("sets text in the reading font, leaving the mail's own fonts alone", async () => {
     await renderBody({ readingFont: { kind: "family", family: "Literata" } });
     await waitFor(() => expect(srcdoc()).toContain(`font-family: "Literata", ${SERIF_STACK};`));
-    expect(srcdoc()).not.toContain("@font-face");
+    expect(srcdoc()).toContain('@font-face { font-family: "Charis SIL"');
+    expect(srcdoc()).not.toContain('@font-face { font-family: "Inter Variable"');
     expect(srcdoc()).toContain('<p style="font-family: Arial">Own font</p>');
   });
 
@@ -88,6 +94,16 @@ describe("MessageBody", () => {
     await renderBody({ readingFont: { kind: "interface" } });
     await waitFor(() => expect(srcdoc()).toContain('@font-face { font-family: "Inter Variable"'));
     expect(srcdoc()).toContain(`font-family: ${SANS_STACK};`);
-    expect(srcdoc()).not.toContain('font-family: "Charis SIL"; font-style');
+    // Charis SIL stays for mail that names it (mail written here does).
+    expect(srcdoc()).toContain('@font-face { font-family: "Charis SIL"');
+  });
+
+  it("brings Inter in behind a chosen interface family, in case it isn't installed", async () => {
+    await renderBody({
+      interfaceFont: { kind: "family", family: "Fira Sans" },
+      readingFont: { kind: "interface" },
+    });
+    await waitFor(() => expect(srcdoc()).toContain(`font-family: "Fira Sans", ${SANS_STACK};`));
+    expect(srcdoc()).toContain('@font-face { font-family: "Inter Variable"');
   });
 });

@@ -1,8 +1,11 @@
 // The reading font inside the message frame. The frame can't see the app's
 // fonts (its CSP allows data: fonts only), so the bundled faces travel in
-// it as data: URLs; an installed family is just named, since the webview
-// finds installed fonts by name. Mail that sets its own fonts keeps them:
-// this is only the frame's default.
+// it as data: URLs; an installed family is named in front of them, since
+// the webview finds installed fonts by name. Behind a chosen family the
+// frame falls back as the app does: to Charis SIL (always in the frame), or
+// to Inter when messages follow the interface font. So a family that isn't
+// installed, or lacks a letter, reads like the subject above it. Mail that
+// sets its own fonts keeps them: this is only the frame's default.
 
 import { useEffect, useState } from "react";
 
@@ -13,15 +16,19 @@ import { type BodyFont, DEFAULT_BODY_FONT, dataFace } from "./bodyHtml";
 
 type FontSettings = Pick<Settings, "interfaceFont" | "readingFont">;
 
-/** Whether the reading font is the bundled Inter ("Same as interface font" with the default interface font). */
-function readsInBundledInter(settings: FontSettings | undefined): boolean {
-  return settings?.readingFont.kind === "interface" && settings.interfaceFont.kind === "default";
+/**
+ * Whether the reading font is, or falls back to, the bundled Inter: "Same as
+ * interface font" with Inter or a chosen family as the interface font. (The
+ * system font is always there, so Inter behind it is never reached.)
+ */
+function needsInterFaces(settings: FontSettings | undefined): boolean {
+  return settings?.readingFont.kind === "interface" && settings.interfaceFont.kind !== "system";
 }
 
 /**
  * The frame's font for these settings. `interFaces` are Inter's @font-face
- * rules, needed only when the reading font is the bundled Inter; null until
- * they have loaded, and then this returns null too.
+ * rules, needed only when the reading font is or falls back to the bundled
+ * Inter; null until they have loaded, and then this returns null too.
  */
 export function bodyFont(
   settings: FontSettings | undefined,
@@ -29,8 +36,7 @@ export function bodyFont(
 ): BodyFont | null {
   if (!settings || settings.readingFont.kind === "default") return DEFAULT_BODY_FONT;
   const family = readingStack(settings);
-  if (readsInBundledInter(settings))
-    return interFaces === null ? null : { family, faces: interFaces };
+  if (needsInterFaces(settings)) return interFaces === null ? null : { family, faces: interFaces };
   return { family, faces: "" };
 }
 
@@ -59,7 +65,7 @@ function loadInterFaces(): Promise<string> {
 /** The frame's font from the settings; null while Inter's faces load (once). */
 export function useBodyFont(): BodyFont | null {
   const { data: settings } = useSettings();
-  const needsInter = readsInBundledInter(settings);
+  const needsInter = needsInterFaces(settings);
   const [faces, setFaces] = useState(interFaces);
   useEffect(() => {
     if (!needsInter || faces !== null) return;

@@ -30,12 +30,14 @@ export function contentSecurityPolicy(allowRemote: boolean): string {
 
 // The frame is a separate document: the app's tokens and @font-face rules
 // don't reach it, and it has its own CSP (font-src data:). So the bundled
-// reading serif travels inside it as data: URLs (an installed font chosen as
-// the reading font is just named; see bodyFont.ts). That is the Latin subset of Charis
-// SIL in four styles, about 92 KB of WOFF2 (124 KB as base64) that every
-// message document carries. Measured in Chromium, it adds about 5 ms to
-// opening a message, which buys the same letter face as the subject above it.
-// Other scripts fall back, glyph by glyph, to the system serif.
+// reading serif travels inside it as data: URLs, whatever the reading font:
+// it is the default, the fallback behind a chosen family that isn't
+// installed (see bodyFont.ts), and the face mail written here names. That is
+// the Latin subset of Charis SIL in four styles, about 92 KB of WOFF2 (124 KB
+// as base64) that every message document carries. Measured in Chromium, it
+// adds about 5 ms to opening a message, which buys the same letter face as
+// the subject above it; a face that isn't used is never decoded. Other
+// scripts fall back, glyph by glyph, to the system serif.
 const LATIN_RANGE =
   "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, " +
   "U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD";
@@ -63,12 +65,15 @@ const SERIF_FACES = (
 export interface BodyFont {
   /** A `font-family` value, with any family name already quoted and escaped. */
   family: string;
-  /** @font-face rules that travel inside the frame (data: URLs), or "". */
+  /**
+   * @font-face rules that travel inside the frame (data: URLs) besides
+   * Charis SIL's, which it always carries; or "".
+   */
   faces: string;
 }
 
-/** The reading serif, Charis SIL, carried inside the frame. */
-export const DEFAULT_BODY_FONT: BodyFont = { family: SERIF_STACK, faces: SERIF_FACES };
+/** The reading serif, Charis SIL. */
+export const DEFAULT_BODY_FONT: BodyFont = { family: SERIF_STACK, faces: "" };
 
 interface Palette {
   text: string;
@@ -157,6 +162,7 @@ function baseCss(
          }`
       : "";
   return `
+    ${SERIF_FACES}
     ${font.faces}
     :root { color-scheme: light; }
     html { background: ${background}; overflow-y: hidden; }
