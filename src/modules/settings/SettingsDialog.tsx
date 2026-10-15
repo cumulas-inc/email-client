@@ -1,4 +1,4 @@
-import { AppWindow, Info, Mail, SlidersHorizontal, UserRound } from "lucide-react";
+import { AppWindow, Info, Mail, Signature, SlidersHorizontal, UserRound } from "lucide-react";
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
 import { type SettingsSection, useAppStore } from "../../app/store";
@@ -13,6 +13,7 @@ import { AccountsSection } from "./sections/AccountsSection";
 import { GeneralSection } from "./sections/GeneralSection";
 import { MailSection } from "./sections/MailSection";
 import { MicrosoftSection } from "./sections/MicrosoftSection";
+import { SignaturesSection } from "./sections/SignaturesSection";
 import { SaveIndicator } from "./SettingsLayout";
 
 import "./settings.css";
@@ -23,6 +24,7 @@ const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode }[] = [
   { id: "accounts", label: "Accounts", icon: <UserRound {...ICON} /> },
   { id: "general", label: "General", icon: <SlidersHorizontal {...ICON} /> },
   { id: "mail", label: "Mail", icon: <Mail {...ICON} /> },
+  { id: "signatures", label: "Signatures", icon: <Signature {...ICON} /> },
   { id: "microsoft", label: "Microsoft app registration", icon: <AppWindow {...ICON} /> },
   { id: "about", label: "About", icon: <Info {...ICON} /> },
 ];
@@ -128,6 +130,7 @@ function SettingsBody({
           {section === "accounts" && <AccountsSection onRemove={onRemoveAccount} />}
           {section === "general" && <GeneralSection />}
           {section === "mail" && <MailSection />}
+          {section === "signatures" && <SignaturesSection />}
           {section === "microsoft" && <MicrosoftSection />}
           {section === "about" && <AboutSection />}
         </div>

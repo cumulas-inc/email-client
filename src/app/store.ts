@@ -4,7 +4,8 @@ import type { EmailAddress } from "../api/types";
 
 export type Module = "mail" | "calendar" | "people" | "tasks";
 
-export type SettingsSection = "accounts" | "general" | "mail" | "microsoft" | "about";
+export type SettingsSection =
+  "accounts" | "general" | "mail" | "signatures" | "microsoft" | "about";
 
 /** A request to show an event in Calendar (a reminder was clicked). */
 export interface CalendarRequest {

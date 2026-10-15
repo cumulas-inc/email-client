@@ -9,6 +9,7 @@ import type { ImapAccountUpdate, Settings } from "../../api/types";
 import { type SettingsSection, useAppStore } from "../../app/store";
 import { useToasts } from "../../components/toast";
 import { renderWithBackend } from "../../test/render";
+import { editFrame, loadFrame } from "../mail/testUtils";
 import { AddAccountDialog } from "./AddAccountDialog";
 import { useAddAccountRequest } from "./addAccountStore";
 import { resetSaveStatus } from "./saveStatus";
@@ -785,5 +786,150 @@ describe("About", () => {
     expect(await screen.findByText(/No keyring service was found/)).toHaveTextContent(
       "Install GNOME Keyring or KWallet.",
     );
+  });
+});
+
+describe("Signatures", () => {
+  function group(name: string) {
+    return screen.getByRole("region", { name: new RegExp(`^${name}`) });
+  }
+
+  it("sits between Mail and Microsoft app registration", async () => {
+    const user = userEvent.setup();
+    openAt("mail");
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Mail" })).toHaveFocus());
+    await user.keyboard("{ArrowDown}");
+    expect(useAppStore.getState().settingsOpen).toBe("signatures");
+    await user.keyboard("{ArrowDown}");
+    expect(useAppStore.getState().settingsOpen).toBe("microsoft");
+  });
+
+  it("shows the organization's signature, and the person's own for the others", async () => {
+    openAt("signatures");
+    const work = await screen.findByRole("region", {
+      name: "Alex Morgan alex.morgan@acme.example",
+    });
+    expect(group("Alex Morgan")).toBe(work);
+    const preview = await within(work).findByTitle("Your organization's signature");
+    expect(preview.getAttribute("srcdoc")).toContain("Engineering Manager, Atlas");
+    expect(work).toHaveTextContent(
+      "Set by your organization with Cumulas Signatures. Added to new messages and replies. " +
+        "You can change it in any message before you send.",
+    );
+    // The organization's replaces the own one: nothing to edit here.
+    expect(within(work).queryByTitle("Signature")).not.toBeInTheDocument();
+    expect(within(work).queryByText(/Couldn't check for updates/)).not.toBeInTheDocument();
+
+    const home = group("Alex \\(Personal\\)");
+    expect(await within(home).findByTitle("Signature")).toBeInTheDocument();
+    expect(
+      within(home).getByRole("checkbox", { name: "Add it to replies and forwards" }),
+    ).toBeChecked();
+  });
+
+  it("saves the own signature as you type, and the replies choice at once", async () => {
+    const user = userEvent.setup();
+    const { backend } = openAt("signatures");
+    const update = vi.spyOn(backend, "updateOwnSignature");
+    const home = await screen.findByRole("region", { name: /^Alex \(Personal\)/ });
+    const doc = await loadFrame((await within(home).findByTitle("Signature")) as HTMLIFrameElement);
+    expect(doc.body.innerHTML).toBe("<div>Alex Morgan</div><div>+1 (206) 555-0199</div>");
+    expect(doc.defaultView!.document.body.getAttribute("data-placeholder")).toBe("Add a signature");
+
+    editFrame(doc, "<div>Alex</div>");
+    editFrame(doc, "<div>Alex M.</div>");
+    // After a pause, once.
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update).toHaveBeenLastCalledWith("acct-home", "<div>Alex M.</div>", true);
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+
+    await user.click(
+      within(home).getByRole("checkbox", { name: "Add it to replies and forwards" }),
+    );
+    expect(update).toHaveBeenLastCalledWith("acct-home", "<div>Alex M.</div>", false);
+    expect((await backend.getAccountSignature("acct-home")).ownOnReplies).toBe(false);
+
+    // Leaving the editor saves without waiting.
+    editFrame(doc, "<div>Alex Morgan</div>");
+    act(() => void doc.body.dispatchEvent(new doc.defaultView!.FocusEvent("blur")));
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith("acct-home", "<div>Alex Morgan</div>", false),
+    );
+    expect(update).toHaveBeenCalledTimes(3);
+  });
+
+  it("saves an edit still waiting when Settings closes", async () => {
+    const user = userEvent.setup();
+    const { backend } = openAt("signatures");
+    const update = vi.spyOn(backend, "updateOwnSignature");
+    const home = await screen.findByRole("region", { name: /^Alex \(Personal\)/ });
+    const doc = await loadFrame((await within(home).findByTitle("Signature")) as HTMLIFrameElement);
+    editFrame(doc, "<div>Bye</div>");
+    await user.click(within(settingsDialog()).getByRole("button", { name: "Close" }));
+    expect(update).toHaveBeenCalledWith("acct-home", "<div>Bye</div>", true);
+  });
+
+  it("explains an organization that hasn't allowed Cumulas Mail, and offers the own signature", async () => {
+    openAt("signatures", new MockBackend({ signature: "notAllowed" }));
+    const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
+    expect(
+      await within(work).findByText(
+        "Your organization uses Cumulas Signatures but hasn't allowed Cumulas Mail yet. Ask your IT admin to allow it, and your signature will appear here.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(work).getByTitle("Signature")).toBeInTheDocument();
+  });
+
+  it("says when the organization signs on send", async () => {
+    openAt("signatures", new MockBackend({ signature: "addedOnSend" }));
+    const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
+    expect(
+      await within(work).findByText(
+        "Your organization adds your signature when you send, so Cumulas Mail doesn't add one.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(work).queryByTitle("Signature")).not.toBeInTheDocument();
+  });
+
+  it("shows the last version when the organization couldn't be asked", async () => {
+    openAt("signatures", new MockBackend({ signature: "stale" }));
+    const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
+    expect(
+      await within(work).findByText("Couldn't check for updates; showing the last version."),
+    ).toBeInTheDocument();
+    expect(within(work).getByTitle("Your organization's signature")).toBeInTheDocument();
+  });
+
+  it("asks organizations again when their answer is old, quietly", async () => {
+    const backend = new MockBackend();
+    const sam = await backend.addMicrosoftAccount("sam@contoso.example");
+    const original = backend.checkOrganizationSignature.bind(backend);
+    let answer!: () => void;
+    const asked = new Promise<void>((resolve) => (answer = resolve));
+    const check = vi
+      .spyOn(backend, "checkOrganizationSignature")
+      .mockImplementation(async (accountId) => {
+        await asked;
+        return original(accountId);
+      });
+    openAt("signatures", backend);
+    const contoso = await screen.findByRole("region", { name: /^sam/ });
+    // Not asked yet: it says so while it asks.
+    expect(
+      await within(contoso).findByText("Checking for your organization's signature…"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(check).toHaveBeenCalledWith(sam.id));
+    answer();
+    await waitFor(() =>
+      expect(
+        within(contoso).queryByText("Checking for your organization's signature…"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(check).toHaveBeenCalledWith(sam.id);
+    // Contoso doesn't use Cumulas Signatures: the own signature applies.
+    expect(within(contoso).getByTitle("Signature")).toBeInTheDocument();
+    // Acme answered five minutes ago; IMAP accounts are never asked.
+    expect(check).not.toHaveBeenCalledWith("acct-work");
+    expect(check).not.toHaveBeenCalledWith("acct-home");
   });
 });
