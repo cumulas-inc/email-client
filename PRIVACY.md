@@ -3,8 +3,8 @@
 Cumulas Mail is a desktop app. It keeps your mail on your computer and talks
 to your mail providers directly. This page says what it keeps, what it sends
 where, and what passes through the one service Cumulas runs for it: the push
-service at `sync.cumulas.co`, which tells the app when new mail arrives in a
-Microsoft account.
+service at `sync.cumulas.co`, which tells the app when the Inbox or the
+calendar of a Microsoft account changes.
 
 Cumulas Mail has no telemetry, no analytics, no crash reporting and no
 advertising, and you don't need a Cumulas account.
@@ -15,19 +15,52 @@ _Last updated: October 15, 2026._
 
 - **A copy of your mail, calendar, contacts and tasks**, so that lists and
   search work instantly and offline. It's in a database in the app's data
-  folder (`~/.local/share/co.cumulas.Mail/`, or the Flatpak's own data folder),
-  along with your settings.
-- **Attachments you open**, in the app's cache folder.
-- **Passwords and sign-in tokens**, in your desktop's keyring (GNOME Keyring,
-  KWallet, or the Flatpak secret portal), never in the app's own files.
+  folder, `~/.local/share/co.cumulas.Mail/`, along with your settings.
+- **Attachments you open**, in the app's cache folder,
+  `~/.cache/co.cumulas.Mail/`.
+- **Passwords and sign-in tokens**, in your desktop's keyring (GNOME Keyring
+  or KWallet), never in the app's database.
 - **An installation ID**: a random string made once, which the push service
   uses to tell this installation's connections apart. It says nothing about
   you or your computer.
-- If you choose to start the app at login, an autostart entry (on Flatpak,
-  your desktop writes it for the app).
+- If you choose to start the app at login, an autostart entry,
+  `~/.config/autostart/co.cumulas.Mail.desktop`.
 
-Removing an account deletes its data from the database. Uninstalling the app
-and deleting its data folder removes everything else.
+The Flatpak keeps its data and cache folders in `~/.var/app/co.cumulas.Mail/`
+instead. It keeps passwords and sign-in tokens there too, encrypted, in a
+keyring file in its data folder (`~/.var/app/co.cumulas.Mail/data/keyrings/`);
+the key to that file is kept by the Secret portal, in your desktop's keyring.
+Its autostart entry is the same file as above, which your desktop writes for
+it.
+
+## Removing your data
+
+Removing an account in Settings deletes its data from the database, its
+password or sign-in tokens from the keyring, and its subscriptions at
+Microsoft (when the app can't reach Microsoft, those expire within three
+days). Attachments you opened stay in the cache folder.
+
+To remove everything from your computer, remove your accounts first. Then
+uninstall the app and delete:
+
+- the data folder, `~/.local/share/co.cumulas.Mail/`;
+- the cache folder, `~/.cache/co.cumulas.Mail/`, with the attachments you
+  opened;
+- `~/.config/autostart/co.cumulas.Mail.desktop`, if you started the app at
+  login.
+
+For the Flatpak, `flatpak uninstall --delete-data co.cumulas.Mail` deletes
+`~/.var/app/co.cumulas.Mail/`, with the database, the cache and the keyring
+file. If you started it at login, also delete
+`~/.config/autostart/co.cumulas.Mail.desktop`. The Secret portal's key for the
+app stays in your desktop's keyring; without the keyring file, it unlocks
+nothing.
+
+Accounts you don't remove before uninstalling leave their password or sign-in
+tokens in your desktop's keyring (except in the Flatpak, where they go with
+the keyring file). Their subscriptions at Microsoft expire within three days;
+until then, Microsoft keeps sending notifications to the push service, which
+drops them.
 
 ## What the app sends, and to whom
 
@@ -48,7 +81,7 @@ you allow them, because loading them can tell senders when and where you
 read their message.
 
 **To the Cumulas push service, for Microsoft accounts.** Microsoft can only
-tell an app about new mail by sending a notification to a public web address,
+tell an app about changes by sending a notification to a public web address,
 which an app on your computer doesn't have. So, while the app runs:
 
 1. The app signs in to the push service with a token Microsoft issues for it.
@@ -65,8 +98,8 @@ which an app on your computer doesn't have. So, while the app runs:
 What passes through, and what's kept:
 
 - Microsoft's notifications carry no content, but they do name the user, the
-  organization and the message. The service reads them in memory and passes
-  on, or keeps, nothing but the subscription ID and the kind of change.
+  organization and the message or event. The service reads them in memory and
+  passes on, or keeps, nothing but the subscription ID and the kind of change.
 - Nothing is written to disk. While your app is connected, the service holds
   in memory scrambled values (HMACs, made with a key only the service has)
   that stand for your channel, installation, user and organization, your IP
@@ -99,8 +132,8 @@ Removing an account also deletes its subscriptions at Microsoft.
 By default, closing the window keeps the app running so that new mail still
 raises a notification. This only keeps the connections above open; it sends
 nothing more. You can change it, and starting at login, in **Settings →
-General → Background**, and quit at any time with **Ctrl+Q** or from the app
-menu.
+General → Background**, and quit at any time with **Quit** in the main menu or
+the tray icon's menu.
 
 ## Changes and questions
 

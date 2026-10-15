@@ -92,8 +92,9 @@ this sends where.
 - `window.rs`, `lib.rs`: one instance per user (tauri-plugin-single-instance,
   registered first); `--background` (start at login) creates no window;
   closing the window hides it while running in the background is on and
-  allowed (the first time, a notification says so); Ctrl+Q, the tray's Quit
-  and `quit_app` exit, shutting push down.
+  allowed (the first time, a notification says so); Quit in the main menu
+  (`quit_app`) or the tray's menu exits, shutting push down. Ctrl+Q is Mail's
+  Mark as read, as in Outlook.
 - `tray.rs`: a tray icon only where the libayatana-appindicator library loads
   and a StatusNotifier host owns `org.kde.StatusNotifierWatcher` (followed as
   it comes and goes). Its menu opens the app, starts a message, checks mail,
@@ -114,7 +115,8 @@ this sends where.
   that blocks remote images and styles unless the user allows them (tracking
   pixels are blocked by default).
 - Passwords and refresh tokens are kept in the Secret Service through `oo7`
-  (the XDG secret portal inside Flatpak), never in SQLite.
+  (inside Flatpak, in `oo7`'s encrypted keyring file in the app's data folder,
+  keyed by the Secret portal), never in SQLite.
 - Plain-text IMAP/SMTP connections are refused except to `localhost`
   (e.g. Proton Mail Bridge).
 - Microsoft sign-in uses the system browser (authorization code + PKCE with a
@@ -132,12 +134,12 @@ when it is blocked the app shows an admin-consent link to forward to IT. See
 
 ## Data on disk
 
-| What               | Where                                                            |
-| ------------------ | ---------------------------------------------------------------- |
-| Cache database     | `$XDG_DATA_HOME/co.cumulas.Mail/mail.db`                         |
-| Opened attachments | `$XDG_CACHE_HOME/co.cumulas.Mail/attachments/`                   |
-| Passwords, tokens  | Secret Service (GNOME Keyring, KWallet) or Flatpak secret portal |
-| Start at login     | `$XDG_CONFIG_HOME/autostart/co.cumulas.Mail.desktop` (native)    |
+| What               | Where                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------- |
+| Cache database     | `$XDG_DATA_HOME/co.cumulas.Mail/mail.db`                                                                 |
+| Opened attachments | `$XDG_CACHE_HOME/co.cumulas.Mail/attachments/`                                                           |
+| Passwords, tokens  | Secret Service (GNOME Keyring, KWallet); Flatpak: `$XDG_DATA_HOME/keyrings/`, keyed by the Secret portal |
+| Start at login     | `~/.config/autostart/co.cumulas.Mail.desktop` (Flatpak: written by the Background portal)                |
 
 ## Adding a provider
 

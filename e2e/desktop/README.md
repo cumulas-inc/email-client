@@ -12,9 +12,11 @@ would, with `WM_DELETE_WINDOW`) and, with the app running in the background,
 checks the desktop side against a fake notification server
 (`fake_notifications.py`, on the test's session bus): mail delivered over SMTP
 raises a notification within seconds (IMAP IDLE), clicking it shows the window
-on the message, its Mark as read and Archive buttons work without the window,
-and a notification goes once its message is read elsewhere. Finally it
-restarts the app to check that the account, cache and keyring password persist.
+on the message (where Ctrl+U and Ctrl+Q mark it unread and read, as in
+Outlook, without quitting), its Mark as read and Archive buttons work without
+the window, and a notification goes once its message is read elsewhere.
+Finally it restarts the app to check that the account, cache and keyring
+password persist.
 
 Without a StatusNotifier host on the test's bus, the app shows no tray icon;
 starting without crashing with libayatana-appindicator installed is part of the
@@ -26,5 +28,10 @@ reads its menu over dbusmenu and clicks Quit, and the app exits cleanly.
 sudo apt install webkit2gtk-driver xvfb gnome-keyring libsecret-tools dbus-x11 openjdk-21-jre-headless
 cargo install tauri-driver --locked
 python3 -m pip install -r e2e/desktop/requirements.txt
-e2e/desktop/run.sh   # screenshots in e2e/.output/desktop/
+e2e/desktop/run.sh   # screenshots and logs in e2e/.output/desktop/
 ```
+
+The tests start the app through `app.sh`, which adds its output to `app.log`
+there (tauri-driver drops the app's stdout, where it logs). `tauri-driver.log`
+and `greenmail.log` sit next to it. CI uploads the folder as the `desktop-e2e`
+artifact.

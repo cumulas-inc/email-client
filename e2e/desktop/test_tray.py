@@ -7,16 +7,17 @@ the same session bus and display.
 """
 
 import asyncio
-import os
 import subprocess
 import time
+from pathlib import Path
 
 from dbus_next import Message, MessageType, Variant
 from dbus_next.aio import MessageBus
 from dbus_next.constants import PropertyAccess
 from dbus_next.service import ServiceInterface, dbus_property, method, signal
 
-APP = os.environ["CUMULAS_APP"]
+# The app, through app.sh, which keeps its output.
+APP = str(Path(__file__).with_name("app.sh"))
 WATCHER = "org.kde.StatusNotifierWatcher"
 
 
@@ -107,7 +108,7 @@ async def find_item(bus, path: str):
 
 
 async def run() -> None:
-    app = subprocess.Popen([APP], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    app = subprocess.Popen([APP])
     try:
         # The host comes up after the app, which follows it.
         await asyncio.sleep(3)

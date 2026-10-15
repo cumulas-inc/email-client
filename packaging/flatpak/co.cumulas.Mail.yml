@@ -1,6 +1,8 @@
-# Flatpak manifest for local and CI builds (`sources: dir`). For the Flathub
-# submission, copy this to the flathub/co.cumulas.Mail repository and replace
-# the `dir` source with a `git` source pinned to a release tag and commit.
+# Flatpak manifest for local and CI builds (`sources: dir`). It isn't the
+# Flathub manifest, and must not be copied into the Flathub submission: it was
+# written with an AI agent, and Flathub's Generative AI policy forbids
+# AI-generated or AI-assisted content in manifests. A person writes that one
+# (see README.md, "Submitting to Flathub").
 #
 # Rust crates and npm packages are vendored by cargo-sources.json and
 # node-sources.json (generate with ./generate-sources.sh) because Flathub
@@ -25,9 +27,10 @@ finish-args:
   - --talk-name=org.kde.StatusNotifierWatcher
   # Notifications go through the Notification portal, running in the
   # background and starting at login through the Background portal, and
-  # passwords and tokens through the Secret portal; files use the
-  # FileChooser portal and links the OpenURI portal. So no notification
-  # server, keyring, autostart folder or filesystem access is needed.
+  # passwords and tokens are kept in a keyring file in the app's data
+  # folder, with a key from the Secret portal; files use the FileChooser
+  # portal and links the OpenURI portal. So no notification server,
+  # keyring, autostart folder or filesystem access is needed.
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin

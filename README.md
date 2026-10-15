@@ -21,7 +21,7 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   bottom or off), rich-text compose with attachments,
   reply/reply all/forward, flag, archive, move (drag and drop), undo, instant
   offline search, and the keyboard shortcuts people switching from other mail
-  clients expect (Ctrl+R, Ctrl+Shift+R, Ctrl+F, Q to mark read…).
+  clients expect (Ctrl+R, Ctrl+Shift+R, Ctrl+F, Ctrl+Q or Q to mark read…).
 - **New mail within seconds**: IMAP accounts keep a connection open (IMAP
   IDLE, and NOTIFY where the server offers it); Microsoft accounts get
   Microsoft's change notifications through the Cumulas push service
@@ -29,7 +29,8 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   30 seconds without it. Desktop notifications with Mark as read and Archive
   buttons; a click opens the message.
 - **Runs in the background**: closing the window keeps the app running for
-  notifications (Ctrl+Q quits), with an optional tray icon and start at login.
+  notifications, with an optional tray icon and start at login. Quit is in the
+  main menu and the tray icon's menu.
 - **Calendar**: day, work week, week and month views, all-day and multi-day
   events, meeting invitations (accept / tentative / decline), Teams meetings
   for Microsoft accounts.
@@ -42,8 +43,9 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   and task list.
 - **Privacy and security**: remote images and tracking pixels blocked by
   default; message HTML sanitized and shown in a sandbox without scripts;
-  passwords and tokens kept in the system keyring (Secret portal in Flatpak);
-  no telemetry. The [privacy policy](PRIVACY.md) says what goes where.
+  passwords and tokens kept in the system keyring (in Flatpak, encrypted in the
+  app's folder with a key from the Secret portal); no telemetry. The
+  [privacy policy](PRIVACY.md) says what goes where.
 
 ## Development
 
@@ -88,7 +90,13 @@ CI runs all of these, plus a Flatpak build.
 - Register the Microsoft Entra application, complete publisher verification
   and test against real Microsoft 365 and Outlook.com accounts.
 - Make the repository or the screenshots public for the Flathub listing.
-
+- Submit to Flathub by hand, following
+  [Submitting to Flathub](packaging/flatpak/README.md#submitting-to-flathub).
+  Flathub's Generative AI policy needs a person to write the Flathub manifest,
+  the submission to disclose the AI-generated code, docs, packaging and
+  artwork, and no AI agent to open the pull request or write its text. Even
+  then, reviewers decide at their discretion and may reject the app because an
+  AI agent wrote all of it.
 - Deploy the Cumulas push service at `sync.cumulas.co` and set up its scope
   on the Entra registration ([steps](docs/microsoft-365.md#instant-updates-the-cumulas-push-service));
   until then Microsoft accounts check the Inbox every 30 seconds.

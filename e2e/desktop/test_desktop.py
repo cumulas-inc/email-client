@@ -21,13 +21,15 @@ from Xlib import X, display, protocol
 
 from selenium import webdriver
 from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.options import ArgOptions
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support.select import Select
 
-APP = os.environ["CUMULAS_APP"]
+# The app, through app.sh, which keeps its output (tauri-driver drops it).
+APP = str(Path(__file__).with_name("app.sh"))
 OUT = Path(os.environ.get("E2E_OUTPUT", "e2e/.output"))
 IMAP_PORT = int(os.environ.get("IMAP_PORT", "3143"))
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "3025"))
@@ -89,6 +91,11 @@ def type_into(element: WebElement, text: str) -> None:
     element.send_keys(Keys.CONTROL, "a")
     element.send_keys(Keys.BACKSPACE)
     element.send_keys(text)
+
+
+def ctrl(driver, key: str) -> None:
+    """Presses Ctrl and `key` where the focus is."""
+    ActionChains(driver).key_down(Keys.CONTROL).send_keys(key).key_up(Keys.CONTROL).perform()
 
 
 def quote(s: str) -> str:
@@ -319,11 +326,14 @@ def new_mail_notification(notifications: FakeNotificationServer, subject: str) -
 def background_and_notifications(driver, notifications: FakeNotificationServer) -> None:
     run = uuid.uuid4().hex[:6]
 
-    # Closing the window keeps the app running, and says so once.
+    # Closing the window keeps the app running, and says so once. With no
+    # tray here, quitting is in the main menu (Ctrl+Q is Mark as read).
     close_window()
-    notifications.wait_for(
+    notice = notifications.wait_for(
         lambda n: n["summary"] == "Still running in the background", what="the background notice"
     )
+    assert "Quit in the main menu" in notice["body"], notice["body"]
+    assert "Ctrl+Q" not in notice["body"], notice["body"]
     assert driver.title is not None  # still running
 
     # New mail arrives over IMAP IDLE (the periodic sync is minutes away) and
@@ -347,6 +357,22 @@ def background_and_notifications(driver, notifications: FakeNotificationServer) 
     wait_for(
         lambda: "\\Seen" in (alice_flags(first) or ""), timeout=20, what="read on the server"
     )
+
+    # Ctrl+U marks it unread, and Ctrl+Q read again, as in Outlook, without
+    # quitting.
+    by_text(driver, first, "h1").click()
+    ctrl(driver, "u")
+    wait_for(
+        lambda: "\\Seen" not in (alice_flags(first) or "\\Seen"),
+        timeout=20,
+        what="unread on the server",
+    )
+    ctrl(driver, "q")
+    wait_for(
+        lambda: "\\Seen" in (alice_flags(first) or ""), timeout=20, what="read again on the server"
+    )
+    time.sleep(1)
+    assert window_shown(), "Ctrl+Q closed the app"
 
     # "Mark as read" works without the window.
     close_window()

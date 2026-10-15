@@ -23,19 +23,21 @@
       <li>Quick search across all your mail, even offline</li>
       <li>Meeting invitations: accept, tentatively accept or decline</li>
       <li>Remote images blocked by default to stop email tracking</li>
-      <li>Passwords and sign-ins kept in your system keyring</li>
+      <li>Passwords and sign-ins protected by your system keyring</li>
     </ul>
     <p>
       To show new mail as it arrives, IMAP accounts keep a connection open to their mail
       server. For Microsoft accounts, Microsoft notifies the Cumulas push service
-      (sync.cumulas.co) when the Inbox changes, and the service passes that on to the app;
-      it never receives a token for the mailbox, and notifications carry no message content.
+      (sync.cumulas.co) when the Inbox or calendar changes, and the service passes that on to
+      the app; it never receives a token for the mailbox, and notifications carry no message
+      or event content.
       The push service can be turned off in Settings, and the Inbox is then checked every 30
       seconds. Cumulas Mail has no telemetry.
     </p>
     <p>
       Closing the window keeps Cumulas Mail running in the background so that new mail still
-      shows up, and it can start at login; both can be changed in Settings, and Ctrl+Q quits.
+      shows up, and it can start at login; both can be changed in Settings. To quit, choose
+      Quit in the main menu or the tray icon's menu.
     </p>
     <p>
       Cumulas Mail is an independent project and is not affiliated with or endorsed by
