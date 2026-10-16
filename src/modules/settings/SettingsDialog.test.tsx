@@ -936,6 +936,36 @@ describe("Signatures", () => {
     expect(useToasts.getState().toasts).toHaveLength(1);
   });
 
+  it("says once, in Settings, when a save fails after another section opened", async () => {
+    const user = userEvent.setup();
+    const { backend } = openAt("signatures");
+    const update = vi.spyOn(backend, "updateOwnSignature");
+    let home = await screen.findByRole("region", { name: /^Alex \(Personal\)/ });
+    let doc = await loadFrame((await within(home).findByTitle("Signature")) as HTMLIFrameElement);
+    const huge = `<div>${"x".repeat(512 * 1024)}</div>`;
+    editFrame(doc, huge);
+    await user.click(screen.getByRole("tab", { name: "General" }));
+    expect(update).toHaveBeenCalledWith("acct-home", huge, true);
+    // Settings is still open: its header says it, and no toast says it again.
+    expect(await within(settingsDialog()).findByRole("alert")).toHaveTextContent(
+      "Couldn't save: That signature is too large.",
+    );
+    expect(useToasts.getState().toasts).toEqual([]);
+
+    // Back in Signatures, the edit is there, and goes again.
+    await user.click(screen.getByRole("tab", { name: "Signatures" }));
+    home = await screen.findByRole("region", { name: /^Alex \(Personal\)/ });
+    doc = await loadFrame((await within(home).findByTitle("Signature")) as HTMLIFrameElement);
+    expect(doc.body.innerHTML).toBe(huge);
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    editFrame(doc, "<div>Alex</div>");
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith("acct-home", "<div>Alex</div>", true),
+    );
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    expect(useToasts.getState().toasts).toEqual([]);
+  });
+
   it("says when Cumulas Mail isn't allowed the company signature, and offers the own one", async () => {
     openAt("signatures", new MockBackend({ signature: "notAllowed" }));
     const work = await screen.findByRole("region", { name: /^Alex Morgan/ });

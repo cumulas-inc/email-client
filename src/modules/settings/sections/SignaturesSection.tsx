@@ -228,7 +228,6 @@ function OwnSignature({ signature, email }: { signature: AccountSignature; email
   const latest = useRef(start);
   const pending = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const shown = useRef(false);
 
   const flush = useCallback(() => {
     clearTimeout(timer.current);
@@ -241,9 +240,10 @@ function OwnSignature({ signature, email }: { signature: AccountSignature; email
         if (unsaved.get(accountId) === edit) unsaved.delete(accountId);
       },
       (e: unknown) => {
-        // A failure shows next to the title while the editor is there;
-        // once it's gone, app-wide.
-        if (shown.current) return;
+        // A failure shows next to the title while Settings is open, in
+        // this section or another (one toast too would say it twice);
+        // once it's closed, app-wide.
+        if (useAppStore.getState().settingsOpen) return;
         useToasts.getState().push({
           kind: "error",
           message: `Couldn't save the signature for ${email}. ${errorMessage(e)}`,
@@ -257,14 +257,12 @@ function OwnSignature({ signature, email }: { signature: AccountSignature; email
   }, [accountId, email, mutateAsync]);
 
   useEffect(() => {
-    shown.current = true;
     // An edit whose save failed goes again, once the dialog has settled.
     if (unsaved.has(accountId)) {
       pending.current = true;
       timer.current = setTimeout(flush, 0);
     }
     return () => {
-      shown.current = false;
       // Closing Settings mid-pause still saves.
       flush();
     };
