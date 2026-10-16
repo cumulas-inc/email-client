@@ -452,15 +452,37 @@
   text-overflow: ellipsis;
 }
 
-/* "4 results for “atlas”", under the title. */
+/* "4 results for “atlas”", under the title and the filter, on a line of its
+   own: what it says changes (the servers' progress comes and goes) without
+   moving the filter, or the list under it. */
 .mail-list__subtitle {
+  display: flex;
+  flex-basis: 100%;
+  gap: var(--space-2);
+  align-items: center;
   min-width: 0;
-  overflow: hidden;
-  margin-top: 1px;
+  margin-top: -5px;
   color: var(--fg-tertiary);
   font-size: var(--text-sm);
   white-space: nowrap;
+}
+
+/* The count gives way first, so the servers' progress stays in view. */
+.mail-list__count {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.mail-list__busy {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+.mail-list__busy > svg {
+  color: var(--brand-text);
 }
 
 /* The folder's account, next to its name. */
@@ -624,7 +646,7 @@
 
 /* --- Search: the servers' progress and failures ------------------------------------ */
 
-/* "Searching your whole mailbox…" above the results found so far. */
+/* "Searching your whole mailbox…" above an empty state. */
 .mail-search-status {
   display: flex;
   align-items: center;
@@ -660,7 +682,7 @@
   max-width: 420px;
 }
 
-/* An account whose server couldn't be searched: the results stay above. */
+/* An account whose server couldn't be searched, above the results. */
 .mail-search-notes {
   display: flex;
   flex-direction: column;

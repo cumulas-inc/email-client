@@ -464,18 +464,28 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   const resultsWord = resultCount === 1 ? "result" : "results";
   const subtitle =
     searching && results.data && items.length > 0 ? (
-      <span
-        className="mail-list__subtitle"
-        title={
-          filtered
-            ? `${exactCount(items.length)} ${filterWord} of ${exactCount(resultCount)} ${resultsWord}`
-            : `${exactCount(items.length)} results`
-        }
-      >
-        {filtered
-          ? `${formatCount(items.length)} ${filterWord} of ${formatCount(resultCount)} ${resultsWord}`
-          : `${formatCount(items.length)} ${items.length === 1 ? "result" : "results"}`}{" "}
-        for “<bdi>{query}</bdi>”
+      <span className="mail-list__subtitle">
+        <span
+          className="mail-list__count"
+          title={
+            filtered
+              ? `${exactCount(items.length)} ${filterWord} of ${exactCount(resultCount)} ${resultsWord}`
+              : `${exactCount(items.length)} results`
+          }
+        >
+          {filtered
+            ? `${formatCount(items.length)} ${filterWord} of ${formatCount(resultCount)} ${resultsWord}`
+            : `${formatCount(items.length)} ${items.length === 1 ? "result" : "results"}`}{" "}
+          for “<bdi>{query}</bdi>”
+        </span>
+        {/* Here rather than above the list, so the rows don't move when
+            the servers answer. */}
+        {serverBusy && (
+          <span className="mail-list__busy">
+            <LoaderCircle size={12} className="spin" aria-hidden="true" />
+            Searching your whole mailbox…
+          </span>
+        )}
       </span>
     ) : null;
 
@@ -682,7 +692,8 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   } else {
     body = (
       <>
-        {searching && searchStatus}
+        {/* Above the results, however many: what wasn't searched shows. */}
+        {searching && failures}
         <div
           ref={listRef}
           role="listbox"
@@ -749,7 +760,6 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
           )}
         </div>
         {searching && showMore}
-        {searching && failures}
       </>
     );
   }
@@ -766,7 +776,6 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
               <h2 className="pane-title mail-list__title" dir="auto" title={titleHint}>
                 {title}
               </h2>
-              {subtitle}
             </div>
             {titleAccount && (
               <span
@@ -798,6 +807,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
                 </button>
               ))}
             </div>
+            {subtitle}
           </div>
           {checkMode && (
             <SelectionBar ids={selectedIds} actions={actions} folders={folders} messages={items} />

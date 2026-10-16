@@ -866,6 +866,32 @@ describe("Search", () => {
     expect(failureRow()).not.toBeInTheDocument();
   });
 
+  it("shows the servers' progress in the title, and an account not searched above the results", async () => {
+    const backend = new MockBackend();
+    backend.failServerSearch("acct-home", {
+      code: "network",
+      message: "Could not reach imap.morgan-family.example.",
+    });
+    const many = await backend.searchMessages("alex");
+    expect(many.length).toBeGreaterThan(20);
+    const resume = backend.pauseServerSearch();
+    await renderMail({ backend });
+    await setSearch("alex");
+    const listbox = await screen.findByRole("listbox", { name: "Search results" });
+    await waitFor(() => expect(results()).toHaveLength(many.length));
+    // Beside the count, so the rows don't move when it goes.
+    const subtitle = document.querySelector(".mail-list__subtitle")!;
+    await waitFor(() => expect(subtitle).toHaveTextContent(/Searching your whole mailbox…$/));
+    expect(listbox.previousElementSibling).toBeNull();
+
+    resume();
+    await waitFor(() => expect(subtitle).not.toHaveTextContent("Searching"));
+    // However long the list, the account that wasn't searched is above it.
+    const note = await waitFor(() => failureRow()!);
+    expect(listbox.previousElementSibling).toContainElement(note);
+    expect(note).toHaveTextContent("Couldn't search Alex (Personal) on the server.");
+  });
+
   it("never shows the servers as busy for single letters typed over a longer search", async () => {
     const backend = new MockBackend();
     await renderMail({ backend });
