@@ -7,11 +7,13 @@
 // pressed inside never reach this document.
 //
 // The frame is sandboxed (no forms, popups, navigation of the app or
-// downloads), but unlike a message's it has allow-scripts: WebKitGTK calls
+// downloads). Like a message's frame it has allow-scripts: WebKitGTK calls
 // no event listener at all in a document that may not run scripts, even
 // this component's, so without it edits, focus and keys would go unheard.
-// No script can run in it all the same: its Content Security Policy allows
-// none, from anywhere, on top of the app's own.
+// Unlike a message's frame, which is an opaque origin with a small bridge
+// script, it keeps allow-same-origin, so this component can edit it in
+// place. No script can run in it all the same: its Content Security Policy
+// allows none, and the app's own policy applies too.
 //
 // Read-only, the same frame shows a signature exactly as the composer
 // does (an organization's, in Settings), without editing.

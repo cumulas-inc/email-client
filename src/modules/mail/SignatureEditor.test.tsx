@@ -275,7 +275,7 @@ describe("SignatureEditor", () => {
 });
 
 describe("buildSignatureSrcDoc", () => {
-  it("sets the own signature like the letter, and leaves an organization's neutral", () => {
+  it("sets the own signature like the letter, and an organization's at the font's own leading", () => {
     const options = {
       appearance: "plain" as const,
       font: DEFAULT_BODY_FONT,
