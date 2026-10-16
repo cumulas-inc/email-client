@@ -473,7 +473,7 @@ describe("the demo's search", () => {
 
     const paused = backend.pauseServerSearch();
     const fourth = backend.searchServer("s-3", "venue", "acct-work");
-    await backend.cancelServerSearch("s-2"); // Not the current one: nothing happens.
+    await backend.cancelServerSearch("s-2"); // Ended already: nothing happens.
     await backend.cancelServerSearch("s-3");
     paused();
     expect(await fourth).toMatchObject({ status: "cancelled" });
@@ -483,6 +483,27 @@ describe("the demo's search", () => {
       status: "done",
       messageIds: [],
       hasMore: false,
+    });
+  });
+
+  it("cancels a late call for an ended search without replacing the newer one", async () => {
+    const backend = new MockBackend();
+    await backend.searchServer("s-1", "northwind", "acct-work");
+    const resume = backend.pauseServerSearch();
+    const newer = backend.searchServer("s-2", "venue", "acct-work");
+    // A call for the first search arriving after the second started (as the
+    // app's commands can), and one canceled before it started.
+    const late = backend.searchServer("s-1", "offsite", "acct-home");
+    await backend.cancelServerSearch("s-0");
+    const early = backend.searchServer("s-0", "offsite", "acct-home");
+    resume();
+    expect(await late).toMatchObject({ status: "cancelled", messageIds: [] });
+    expect(await early).toMatchObject({ status: "cancelled", messageIds: [] });
+    expect(await newer).toMatchObject({ status: "done", added: 1 });
+    // An empty query is done at once and leaves the search alone.
+    expect(await backend.searchServer("s-9", "  ", "acct-work")).toMatchObject({ status: "done" });
+    expect(await backend.searchServer("s-2", "venue", "acct-work")).toMatchObject({
+      status: "done",
     });
   });
 

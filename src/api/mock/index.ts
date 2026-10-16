@@ -155,6 +155,8 @@ const LOCAL_SEARCH_LIMIT = 200;
 const MAX_INCLUDED_IDS = 1000;
 /** Like the core: a server search's page, per account. */
 const SERVER_SEARCH_PAGE = 50;
+/** Like the core: how many ended search ids are remembered. */
+const RETIRED_SEARCHES = 32;
 
 // The demo's text size (see setZoom). CSS zoom on the root scales the page,
 // but media queries and viewport units go on measuring the whole window,
@@ -382,6 +384,11 @@ export class MockBackend implements Backend {
    * canceling the old one. Per account, the matches its next page takes from.
    */
   private serverSearch: { id: string; rest: Map<string, string[]> } | null = null;
+  /**
+   * Ids of searches that ended, like the core's: a call for one that comes
+   * late is canceled instead of replacing the search that followed it.
+   */
+  private retiredSearches: string[] = [];
   /** Holds server searches while set (pauseServerSearch). */
   private serverSearchGate: Promise<void> | null = null;
   /** How each account's server search fails, when it does (failServerSearch). */
@@ -1031,8 +1038,6 @@ export class MockBackend implements Backend {
   ): Promise<ServerSearchResult> {
     if (!searchId || searchId.length > 100) fail("invalidInput", "Invalid search.");
     this.account(accountId);
-    if (this.serverSearch?.id !== searchId) this.serverSearch = { id: searchId, rest: new Map() };
-    const search = this.serverSearch;
     const answer = (
       status: ServerSearchStatus,
       result: Partial<ServerSearchResult> = {},
@@ -1046,6 +1051,15 @@ export class MockBackend implements Backend {
       error: null,
       ...result,
     });
+    const query = parseSearch(text);
+    // Like the core, before the search is started: it cancels nothing.
+    if (isEmptySearch(query)) return answer("done");
+    if (this.retiredSearches.includes(searchId)) return answer("cancelled");
+    if (this.serverSearch?.id !== searchId) {
+      this.retireServerSearch();
+      this.serverSearch = { id: searchId, rest: new Map() };
+    }
+    const search = this.serverSearch;
 
     if (this.serverSearchLatency > 0) {
       await new Promise((r) => setTimeout(r, this.serverSearchLatency));
@@ -1061,13 +1075,10 @@ export class MockBackend implements Backend {
       if (!rest) return answer("done");
       matches = rest;
     } else {
-      const query = parseSearch(text);
-      matches = isEmptySearch(query)
-        ? []
-        : [...this.state.messages, ...(this.state.serverMessages ?? [])]
-            .filter((m) => m.accountId === accountId && matchesSearch(query, m, { infix: false }))
-            .sort(searchOrder)
-            .map((m) => m.id);
+      matches = [...this.state.messages, ...(this.state.serverMessages ?? [])]
+        .filter((m) => m.accountId === accountId && matchesSearch(query, m, { infix: false }))
+        .sort(searchOrder)
+        .map((m) => m.id);
     }
     const page = matches.slice(0, SERVER_SEARCH_PAGE);
     const rest = matches.slice(SERVER_SEARCH_PAGE);
@@ -1093,7 +1104,21 @@ export class MockBackend implements Backend {
   }
 
   async cancelServerSearch(searchId: string) {
-    if (this.serverSearch?.id === searchId) this.serverSearch = null;
+    if (this.serverSearch?.id === searchId) this.retireServerSearch();
+    // Canceled before it started: it never will.
+    else this.rememberRetiredSearch(searchId);
+  }
+
+  private retireServerSearch() {
+    if (!this.serverSearch) return;
+    this.rememberRetiredSearch(this.serverSearch.id);
+    this.serverSearch = null;
+  }
+
+  private rememberRetiredSearch(searchId: string) {
+    if (this.retiredSearches.includes(searchId)) return;
+    if (this.retiredSearches.length === RETIRED_SEARCHES) this.retiredSearches.shift();
+    this.retiredSearches.push(searchId);
   }
 
   /** Holds server searches until the returned function is called (tests). */
