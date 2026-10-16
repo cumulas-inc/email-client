@@ -93,7 +93,7 @@ jobs:
       - uses: ./.github/actions/setup-flatpak-builder
         with:
           free-disk-space: "false"
-          packages: ostree
+          packages: ostree shellcheck
       - name: ShellCheck
         run: shellcheck -x packaging/flatpak/*.sh packaging/flatpak/repo/*.sh
       - name: Mirror, prune, sign, assemble and install, with fake builds
