@@ -29,6 +29,8 @@
 // - Its listeners are the window's, capturing, and added before any other:
 //   they hear every event first, so nothing can keep one from them or act on
 //   one before they have.
+// - The status line shows where the link under the pointer leads, and
+//   follows along when an address changes there.
 // - A link clicked with the pointer goes where it led when the pointer went
 //   down on it (what the status line then shows), and only if it still
 //   leads there; changed in between, it goes nowhere. One activated without
@@ -68,6 +70,7 @@
   const byName = Document.prototype.getElementsByName.bind(doc);
   const style = window.getComputedStyle.bind(window);
   const Observer = window.ResizeObserver;
+  const Mutations = window.MutationObserver;
   const decode = decodeURIComponent;
   const stringify = JSON.stringify;
   const slice = method(String.prototype.slice);
@@ -95,32 +98,47 @@
   // this never ran, the app couldn't size the frame and it scrolls instead.
   root.setAttribute("data-bridge", "");
 
-  /** The link at or around an event's target, as the reader follows them. */
-  const linkOf = (e) => {
+  /** The link at or around `node`, as the reader follows them. */
+  const linkAt = (node) => {
     // closest checks that it's called on an element, and throws if not.
     try {
-      return closest(targetOf(e), "a[href], area[href]");
+      return closest(node, "a[href], area[href]");
     } catch {
       return null;
     }
   };
+  const linkOf = (e) => linkAt(targetOf(e));
   const hrefOf = (link) => attribute(link, "href");
 
   // Where the link under the pointer really goes, for the reader's status line.
   let hovered = null;
+  // What the pointer is over, while it's in the frame.
+  let under = null;
   const hover = (href) => {
     if (href === hovered) return;
     hovered = href;
     post({ type: "hover", href });
   };
-  first("mouseover", (e) => {
-    if (!e.isTrusted) return;
-    const link = linkOf(e);
+  const pointAt = (node) => {
+    under = node;
+    const link = linkAt(node);
     hover(link ? hrefOf(link) : null);
+  };
+  first("mouseover", (e) => {
+    if (e.isTrusted) pointAt(targetOf(e));
   });
   first("mouseout", (e) => {
-    if (e.isTrusted && !relatedTargetOf(e)) hover(null);
+    if (!e.isTrusted || relatedTargetOf(e)) return;
+    under = null;
+    hover(null);
   });
+  // An address changed under the pointer (or one made there) shows at once,
+  // not only once the pointer goes down.
+  if (typeof Mutations === "function") {
+    new Mutations(() => {
+      if (under) pointAt(under);
+    }).observe(root, { subtree: true, attributes: true, attributeFilter: ["href"] });
+  }
 
   // The link the pointer last went down on, and where it led then. Pointer
   // events come before the mouse's (pointerdown before mousedown).
@@ -128,7 +146,8 @@
   const PRESS = typeof window.PointerEvent === "function" ? "pointerdown" : "mousedown";
   first(PRESS, (e) => {
     if (!e.isTrusted) return;
-    const link = linkOf(e);
+    under = targetOf(e);
+    const link = linkAt(under);
     const href = link ? hrefOf(link) : null;
     pressed = { link, href };
     // The status line shows where a click now goes.

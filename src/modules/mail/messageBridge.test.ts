@@ -215,18 +215,18 @@ describe("message bridge", () => {
     press(swap);
     expect(click(swap).defaultPrevented).toBe(true);
     await settle();
-    // The status line showed one address, the link now has another: nothing opens.
-    expect(messages).toEqual([hover("https://example.org/shown")]);
+    // The status line showed one address and then the link's new one, but
+    // the press was on the first: nothing opens.
+    expect(messages).toEqual([hover("https://example.org/shown"), hover("https://evil.example/")]);
 
-    // Pressed again, the status line shows where it now leads, and that opens.
+    // Pressed again, it opens where it now leads.
     press(swap);
     click(swap);
     // Pressed on one link and let go on another, nothing opens either.
     press(other);
     click(swap);
     await settle();
-    expect(messages.slice(1)).toEqual([
-      hover("https://evil.example/"),
+    expect(messages.slice(2)).toEqual([
       link("https://evil.example/"),
       hover("https://example.org/other"),
     ]);
@@ -236,6 +236,52 @@ describe("message bridge", () => {
     click(other, { detail: 0 });
     await settle();
     expect(messages).toEqual([link("https://example.org/other")]);
+  });
+
+  it("keeps the status line on where the link under the pointer leads as that changes", async () => {
+    const { frame, doc, messages } = await load(
+      '<p><a id="swap" href="https://example.org/shown"><b>Swap</b></a> ' +
+        '<a id="other" href="https://example.org/other">Other</a> <a id="bare"><i>Bare</i></a></p>',
+    );
+    messages.length = 0;
+    const { point, leave } = person(frame);
+    const swap = doc.getElementById("swap")!;
+    const other = doc.getElementById("other")!;
+    const bare = doc.getElementById("bare")!;
+
+    // A script in the frame, had one run, changing addresses after the
+    // status line showed them.
+    point(swap.firstElementChild!);
+    await settle();
+    swap.setAttribute("href", "https://evil.example/");
+    await settle();
+    // Another link changing changes nothing on it.
+    other.setAttribute("href", "https://evil.example/other");
+    await settle();
+    // No longer a link, nothing to show; a link again, where it leads.
+    swap.removeAttribute("href");
+    await settle();
+    swap.setAttribute("href", "https://evil.example/again");
+    await settle();
+    // A link made under the pointer of what wasn't one.
+    point(bare.firstElementChild!);
+    await settle();
+    bare.setAttribute("href", "https://evil.example/bare");
+    await settle();
+    // Out of the frame, the status line stays clear.
+    leave(bare.firstElementChild!, null);
+    await settle();
+    bare.setAttribute("href", "https://evil.example/later");
+    await settle();
+    expect(messages).toEqual([
+      hover("https://example.org/shown"),
+      hover("https://evil.example/"),
+      hover(null),
+      hover("https://evil.example/again"),
+      hover(null),
+      hover("https://evil.example/bare"),
+      hover(null),
+    ]);
   });
 
   it("knows a link for what it is, whichever window made it", async () => {
