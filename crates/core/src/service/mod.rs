@@ -437,7 +437,6 @@ impl CoreService {
         self.store.get_account(account_id)?;
         // Before the data goes, so no sync writes to it meanwhile.
         self.push.stop(Some(&[account_id.to_owned()])).await;
-        self.push.forget_status(account_id);
         // While the sign-in to do it with is still there.
         self.drop_push_subscriptions(account_id).await;
         self.forget_providers(Some(account_id)).await;
@@ -449,6 +448,9 @@ impl CoreService {
             self.restart_push(account_id).await;
             return Err(e);
         }
+        // Only now: an account that stays keeps what its push status
+        // remembers, such as a refused consent not to ask for again.
+        self.push.forget_status(account_id);
         {
             // Under the account's lock, which a refresh saving the refresh
             // token Microsoft rotated also takes: none ending meanwhile puts

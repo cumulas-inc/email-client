@@ -2438,6 +2438,48 @@ async fn a_sign_in_ending_as_its_account_is_removed_keeps_no_sign_in() {
     assert_eq!(kept, None);
 }
 
+#[tokio::test]
+async fn a_sign_in_finding_its_account_removed_keeps_no_sign_in() {
+    let keyring = Arc::new(GatedKeyring::new());
+    // Writes go straight through.
+    keyring.gate.add_permits(16);
+    let (service, connector, account) = signed_in_service(&keyring).await;
+    *connector.sign_in.lock().unwrap() = Some(SignInResult {
+        email: "adele@contoso.com".into(),
+        display_name: "Adele".into(),
+        tenant_id: "11111111-2222-3333-4444-555555555555".into(),
+        user_id: "33333333-0000-0000-0000-00000000000a".into(),
+        access_token: "access".into(),
+        refresh_token: "refresh-new".into(),
+        expires_in: std::time::Duration::from_secs(3600),
+        consent_refused: None,
+    });
+    // A removal holds the account's lock, deleting its secrets, when the
+    // sign-in, having updated the account, comes to save its refresh token.
+    let removing = secrets::lock_account(&account.id).await;
+    let signing_in = tokio::spawn({
+        let service = Arc::clone(&service);
+        async move { service.add_microsoft_account(&|_| Ok(()), None).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    service.store().delete_account(&account.id).unwrap();
+    keyring
+        .values
+        .delete(&keys::refresh_token(&account.id))
+        .await
+        .unwrap();
+    drop(removing);
+    // The sign-in finds the account gone and keeps nothing.
+    let error = signing_in.await.unwrap().unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+    let kept = keyring
+        .values
+        .get(&keys::refresh_token(&account.id))
+        .await
+        .unwrap();
+    assert_eq!(kept, None);
+}
+
 // --- reminders ------------------------------------------------------------------
 
 use crate::model::{Calendar, Event, ResponseStatus, Snooze};
