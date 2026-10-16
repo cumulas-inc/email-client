@@ -271,10 +271,10 @@ Once, in this order, by an owner of the repository and of cumulas.co's DNS:
    ruleset → New tag ruleset. Name it `Release tags`, set Enforcement status
    to Active, add the target pattern `v*`, tick **Restrict creations**,
    **Restrict updates** and **Restrict deletions**, and add the Repository
-   admin and Maintain roles to the bypass list. Then only maintainers can push, move or
-   delete the tags that publish and that may use the signing key. The
-   environment trusts the default branch too: keep `main` protected, with
-   changes through reviewed pull requests.
+   admin and Maintain roles to the bypass list. Then only maintainers can
+   push, move or delete the tags that publish and that may use the signing
+   key. The environment trusts the default branch too: keep `main` protected,
+   with changes through reviewed pull requests.
 4. **Commit the public key**, `packaging/flatpak/repo/cumulas-flatpak.gpg`, in
    a pull request: its dry run checks the file. Publishing fails while the file
    is missing, empty or doesn't match the secret.

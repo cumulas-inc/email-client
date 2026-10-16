@@ -1,10 +1,11 @@
 # Builds Cumulas Mail for x86_64 and aarch64 and publishes it to the
 # self-hosted Flatpak repository at https://flatpak.cumulas.co (GitHub Pages),
-# branch "stable". Release tags (vMAJOR.MINOR.PATCH) publish. Pull requests that touch the
-# packaging, and manual runs unless asked to publish, are dry runs: the same
-# steps, signed with a throwaway key, and nothing deployed. Every run
-# installs the result from a local copy of the site before anything is
-# deployed. See packaging/flatpak/README.md, "Self-hosted repository".
+# branch "stable". Release tags (vMAJOR.MINOR.PATCH) publish. Pull requests
+# that touch the packaging, and manual runs unless asked to publish, are dry
+# runs: the same steps, signed with a throwaway key, and nothing deployed.
+# Every run installs the result from a local copy of the site before anything
+# is deployed, and a publish checks the live site after. See
+# packaging/flatpak/README.md, "Self-hosted repository".
 #
 # The signing key is a secret of the flatpak-signing environment, whose
 # deployment rules let only the default branch and release tags use it: the
@@ -33,8 +34,9 @@ permissions:
   contents: read
 
 # One publish at a time: each one adds to the history the one before
-# deployed. A publish waiting here is replaced by a newer one (GitHub keeps
-# one pending run per group); run it again if it should still go out.
+# deployed, and waits until the live site serves it. A publish waiting here
+# is replaced by a newer one (GitHub keeps one pending run per group); only
+# the newest release tag can publish anyway.
 concurrency:
   group: flatpak-repo-${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && 'publish' || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
