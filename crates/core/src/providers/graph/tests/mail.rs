@@ -119,6 +119,8 @@ async fn folders_are_listed_recursively_with_roles() {
     let by_remote: HashMap<&str, &Folder> =
         folders.iter().map(|f| (f.remote_id.as_str(), f)).collect();
     assert_eq!(folders.len(), 9);
+    // Remembered, for looking up where messages moved.
+    assert_eq!(provider.folder_ids.lock().unwrap().len(), 9);
 
     let inbox = by_remote["AAMkInbox"];
     assert_eq!(inbox.id, local_id(ACCOUNT, EntityKind::Folder, "AAMkInbox"));
@@ -424,6 +426,106 @@ async fn delta_removals_that_moved_are_reported_as_moves() {
     assert!(url.starts_with("/me/messages/moved?$select="), "{url}");
     assert!(url.ends_with(",parentFolderId"), "{url}");
     assert_eq!(lookups[0]["headers"]["Prefer"], PREFER_IMMUTABLE_ID);
+}
+
+/// A moved message's folder named another way than the folder list names
+/// it (as searches guard against too): looked up, and mapped to the folder.
+#[tokio::test]
+async fn moves_to_folders_named_another_way_are_moves() {
+    let (server, provider) = setup().await;
+    *provider.folder_ids.lock().unwrap() = ["AAMkInbox", "AAMkArchive"]
+        .map(String::from)
+        .into_iter()
+        .collect();
+    let ids: Vec<String> = ["moved", "back", "elsewhere"].map(String::from).to_vec();
+    Mock::given(method("GET"))
+        .and(query_param("$deltatoken", "token-1"))
+        .respond_with(ok_json(removals(&server, &ids)))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(batch_responder(|r| {
+            let url = r["url"].as_str().unwrap();
+            if let Some(folder) = url.strip_prefix("/me/mailFolders/") {
+                return match folder.split('?').next().unwrap() {
+                    "archive-alias" => (200, json!({ "id": "AAMkArchive" })),
+                    "inbox-alias" => (200, json!({ "id": "AAMkInbox" })),
+                    other => (200, json!({ "id": other })),
+                };
+            }
+            let id = url
+                .trim_start_matches("/me/messages/")
+                .split('?')
+                .next()
+                .unwrap();
+            let folder = match id {
+                "moved" => "archive-alias",
+                "back" => "inbox-alias",
+                _ => "AAMkNotStored",
+            };
+            (
+                200,
+                json!({
+                    "id": id,
+                    "subject": format!("Message {id}"),
+                    "receivedDateTime": "2026-10-12T08:15:00Z",
+                    "isRead": true,
+                    "parentFolderId": folder,
+                }),
+            )
+        }))
+        .mount(&server)
+        .await;
+    let state = format!(
+        "{}/me/mailFolders('AAMkInbox')/messages/delta?%24deltatoken=token-1",
+        server.uri()
+    );
+    let batch = provider
+        .sync_messages(&inbox(), Some(&state), window(10))
+        .await
+        .unwrap();
+    let moved: Vec<(&str, String)> = batch
+        .moved_out
+        .iter()
+        .map(|m| (m.remote_id.as_str(), m.folder_id.clone()))
+        .collect();
+    assert_eq!(
+        moved,
+        [
+            (
+                "moved",
+                local_id(ACCOUNT, EntityKind::Folder, "AAMkArchive")
+            ),
+            // Not stored: the store removes it.
+            (
+                "elsewhere",
+                local_id(ACCOUNT, EntityKind::Folder, "AAMkNotStored")
+            ),
+        ]
+    );
+    let [back] = &batch.upserts[..] else {
+        panic!("{:?}", batch.upserts);
+    };
+    assert_eq!(
+        (back.remote_id.as_str(), &back.folder_id),
+        ("back", &inbox().id)
+    );
+    assert!(batch.removed_remote_ids.is_empty());
+    // One lookup of each folder the list doesn't name, in one batch.
+    let lookups = batched_requests(&server).await;
+    let folders: Vec<&str> = lookups
+        .iter()
+        .filter_map(|r| r["url"].as_str()?.strip_prefix("/me/mailFolders/"))
+        .collect();
+    assert_eq!(
+        folders,
+        [
+            "AAMkNotStored?$select=id",
+            "archive-alias?$select=id",
+            "inbox-alias?$select=id"
+        ]
+    );
 }
 
 #[tokio::test]

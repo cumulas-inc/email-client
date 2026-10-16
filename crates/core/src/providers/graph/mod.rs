@@ -18,7 +18,8 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use tokio::sync::OnceCell;
@@ -41,6 +42,10 @@ pub struct GraphProvider {
     /// Time`), read once. Dates without a time (all-day events, task due
     /// dates) are anchored to it so Outlook shows them on the intended day.
     time_zone: OnceCell<String>,
+    /// The ids of the mail folders last listed, which the store has: a
+    /// moved message's `parentFolderId` that isn't one of them is looked up
+    /// in case it names one of them another way.
+    folder_ids: Mutex<HashSet<String>>,
 }
 
 impl GraphProvider {
@@ -59,6 +64,7 @@ impl GraphProvider {
             account_id: account_id.into(),
             client: GraphClient::new(base_url.into(), tokens),
             time_zone: OnceCell::new(),
+            folder_ids: Mutex::default(),
         }
     }
 

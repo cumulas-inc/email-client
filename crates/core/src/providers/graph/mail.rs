@@ -501,8 +501,9 @@ impl GraphProvider {
             }
         };
         let mut removed = Vec::new();
+        let mut found: Vec<(String, GraphMessage)> = Vec::new();
         for (i, id) in lookups.into_iter().enumerate() {
-            let found = responses
+            let message = responses
                 .remove(&i.to_string())
                 .filter(|r| {
                     if !r.is_success() && r.status() != StatusCode::NOT_FOUND {
@@ -511,12 +512,33 @@ impl GraphProvider {
                     r.is_success()
                 })
                 .and_then(|r| r.json::<GraphMessage>().ok());
-            let Some(message) = found else {
-                removed.push(id);
-                continue;
-            };
-            let in_folder = match message.parent_folder_id.as_deref() {
-                Some(parent) if parent == folder.remote_id => folder.id.clone(),
+            match message {
+                Some(message) => found.push((id, message)),
+                None => removed.push(id),
+            }
+        }
+        // As a search does (see `search_page`): folders the store has, named
+        // another way, are mapped to the ids it knows them by. Before the
+        // folders were first listed, there is nothing to map to.
+        let mut known = self.folder_ids.lock().unwrap().clone();
+        let listed = !known.is_empty();
+        known.insert(folder.remote_id.clone());
+        let mut unknown: Vec<&str> = found
+            .iter()
+            .filter_map(|(_, m)| m.parent_folder_id.as_deref())
+            .filter(|id| listed && !known.contains(*id))
+            .collect();
+        unknown.sort_unstable();
+        unknown.dedup();
+        let known_ids: HashSet<&str> = known.iter().map(String::as_str).collect();
+        let aliases = self.stored_folder_aliases(&unknown, &known_ids).await;
+        for (id, message) in found {
+            let parent = message
+                .parent_folder_id
+                .as_ref()
+                .map(|p| aliases.get(p).unwrap_or(p));
+            let in_folder = match parent {
+                Some(parent) if *parent == folder.remote_id => folder.id.clone(),
                 Some(parent) => local_id(&self.account_id, EntityKind::Folder, parent),
                 None => {
                     removed.push(id);
@@ -949,6 +971,8 @@ impl MailProvider for GraphProvider {
         }
 
         let roles = self.well_known_folders().await?;
+        // The store takes this list as it is.
+        *self.folder_ids.lock().unwrap() = folders.iter().map(|f| f.id.clone()).collect();
         Ok(folders
             .into_iter()
             .map(|f| Folder {
