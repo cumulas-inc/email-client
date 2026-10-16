@@ -298,7 +298,7 @@ any other, and shows in its folder's list too. The sync window's pruning
 the server reports deletes them, and so does opening one the server no longer
 has. A sync that sees one takes it over. Otherwise they go 14 days after a
 search last found them or they were last opened, and beyond 2,000 per account
-(after each sync). Read and flag changes made elsewhere reach them when a
+(after each sync of the account, even one that fails). Read and flag changes made elsewhere reach them when a
 search next finds them.
 
 **In the UI** (`modules/mail/serverSearch.ts`, `MessageList.tsx`): the local

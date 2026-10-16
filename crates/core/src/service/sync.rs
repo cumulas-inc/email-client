@@ -68,6 +68,10 @@ impl CoreService {
         let account = self.store.get_account(account_id)?;
 
         let result = self.run_sync(&account).await;
+        // Whatever became of the sync: a folder that keeps failing, or an
+        // account whose sign-in expired, must not keep search results past
+        // their time.
+        self.prune_search_results(account_id);
         if let Err(e) = &result
             && is_server_busy(e)
         {
@@ -122,7 +126,6 @@ impl CoreService {
         self.progress(account, "Connecting…");
         let providers = self.providers_for(&account.id).await?;
         self.sync_mail(account, &providers).await?;
-        self.prune_search_results(&account.id);
         // Calendar, contacts and tasks failures should not hide mail errors and
         // vice versa, but one failing module must not stop the others.
         let mut first_error: Option<Error> = None;

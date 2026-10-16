@@ -25,7 +25,8 @@ pub const MAX_INCLUDED_IDS: usize = 1000;
 pub const SERVER_SEARCH_PAGE: u32 = 50;
 /// How long a server may take for one page.
 pub const SERVER_SEARCH_TIMEOUT: Duration = Duration::from_secs(45);
-/// Search results not returned or opened for this long go, after a sync.
+/// Search results not returned or opened for this long go at the next sync
+/// of their account, whether or not it succeeds.
 pub const SEARCH_RESULT_TTL_DAYS: i64 = 14;
 /// Search results kept per account at most, the most recently seen.
 pub const MAX_SEARCH_ROWS_PER_ACCOUNT: u32 = 2000;
@@ -218,7 +219,7 @@ impl CoreService {
         }
     }
 
-    /// Bounds the search results kept for an account (after a sync).
+    /// Bounds the search results kept for an account (after each sync).
     pub(super) fn prune_search_results(&self, account_id: &str) {
         let older_than = Utc::now() - chrono::Duration::days(SEARCH_RESULT_TTL_DAYS);
         match self

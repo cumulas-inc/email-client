@@ -35,6 +35,8 @@ pub(crate) struct FakeServer {
     pub fail_sync: bool,
     /// Every message sync fails with this.
     pub failure: Option<Error>,
+    /// Syncs of this folder (by remote id) fail.
+    pub failing_folder: Option<String>,
     /// How often folder counts were asked for.
     pub count_requests: usize,
     /// How often the Inbox's messages were asked for.
@@ -165,6 +167,9 @@ impl MailProvider for FakeMail {
         }
         if let Some(e) = &server.failure {
             return Err(e.clone());
+        }
+        if server.failing_folder.as_ref() == Some(&folder.remote_id) {
+            return Err(Error::provider("This folder can't be synced."));
         }
         let upserts = server
             .messages
@@ -1803,6 +1808,37 @@ async fn stale_search_results_are_pruned_after_sync() {
     assert!(h.service.store().get_message_summary(&fresh).is_ok());
     let inbox_after = inbox(&h, &account);
     assert_eq!(inbox_before.total_count, inbox_after.total_count);
+}
+
+#[tokio::test]
+async fn search_results_are_pruned_even_when_the_sync_fails() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let stale = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
+    h.service
+        .search_server("s", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    h.service
+        .store()
+        .execute_for_tests("UPDATE messages SET search_seen_at = 0 WHERE search_only = 1");
+    // One folder keeps failing while the others sync.
+    h.server.lock().unwrap().failing_folder = Some("Archive".into());
+    assert!(h.service.sync_account(&account.id).await.is_err());
+    assert!(h.service.store().get_message_summary(&stale).is_err());
+
+    // Nor does a sign-in that expired keep them.
+    h.service
+        .search_server("t", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    h.service
+        .store()
+        .execute_for_tests("UPDATE messages SET search_seen_at = 0 WHERE search_only = 1");
+    h.server.lock().unwrap().fail_sync = true;
+    let error = h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::AuthRequired);
+    assert!(h.service.store().get_message_summary(&stale).is_err());
 }
 
 /// A service with background work and a scripted push watcher.
