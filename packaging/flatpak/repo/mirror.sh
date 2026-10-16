@@ -62,7 +62,7 @@ case "$summary_status" in
     if [ "$config_status" != 404 ]; then
       die "$url/summary answers 404 but $url/config answers $config_status: that isn't an unpublished repository. Check the site before publishing."
     fi
-    notice "Nothing is published at $url yet (404): starting a new repository."
+    warn "Nothing is published at $url yet (404): starting a new repository. Expected until the first publish; after that, check GitHub Pages and its custom domain."
     start_empty
     exit 0
     ;;

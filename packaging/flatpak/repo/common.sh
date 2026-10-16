@@ -40,14 +40,6 @@ warn() {
   fi
 }
 
-notice() {
-  if [ "${GITHUB_ACTIONS:-}" = true ]; then
-    printf '::notice::%s\n' "$*" >&2
-  else
-    printf 'note: %s\n' "$*" >&2
-  fi
-}
-
 die() {
   if [ "${GITHUB_ACTIONS:-}" = true ]; then
     printf '::error::%s\n' "$*" >&2
