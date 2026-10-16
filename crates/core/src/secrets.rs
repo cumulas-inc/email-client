@@ -5,9 +5,10 @@
 //! Flatpak sandbox. Nothing secret is ever written to the SQLite database.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use async_trait::async_trait;
+use tokio::sync::OwnedMutexGuard;
 
 use crate::error::{Error, ErrorCode, Result};
 
@@ -30,6 +31,34 @@ pub mod keys {
     pub fn refresh_token(account_id: &str) -> String {
         format!("account:{account_id}:refresh-token")
     }
+}
+
+/// Each account's sign-in lock, while anyone holds or waits for it.
+static ACCOUNT_LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// Locks the account's stored sign-in, for everything in the app that
+/// replaces or deletes it: a refresh token Microsoft rotated, compared with
+/// the one redeemed and saved; a new sign-in's, saved; and the account's
+/// secrets, deleted when it's removed. Each reads what it needs and writes
+/// under the lock, so none undoes another: no refresh token is ever left
+/// for an account that was removed. Held only around those secret store
+/// calls, never across a request to Microsoft. One per account id in the
+/// process, as the keyring is.
+pub(crate) async fn lock_account(account_id: &str) -> OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = ACCOUNT_LOCKS.lock().unwrap();
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        match locks.get(account_id).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(account_id.to_owned(), Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    lock.lock_owned().await
 }
 
 /// Secret Service / Flatpak portal backed store.
@@ -123,6 +152,24 @@ impl SecretStore for MemorySecretStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn an_account_lock_is_one_per_account() {
+        let held = lock_account("lock-a").await;
+        // Another account's isn't held back...
+        drop(lock_account("lock-b").await);
+        // ...the same account's is, until it's released.
+        let waiting = tokio::spawn(async { drop(lock_account("lock-a").await) });
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert!(!waiting.is_finished());
+        drop(held);
+        waiting.await.unwrap();
+        // Then neither is kept.
+        let locks = ACCOUNT_LOCKS.lock().unwrap();
+        for id in ["lock-a", "lock-b"] {
+            assert!(locks.get(id).is_none_or(|lock| lock.strong_count() == 0));
+        }
+    }
 
     #[tokio::test]
     async fn memory_store_round_trips() {

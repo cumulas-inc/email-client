@@ -27,7 +27,7 @@ use url::Url;
 use super::{ApiTokenError, ApiTokens, SyncTokenError, SyncTokens, TokenSource};
 use crate::error::{Error, ErrorCode, Result};
 use crate::html::escape_html;
-use crate::secrets::{SecretStore, keys};
+use crate::secrets::{self, SecretStore, keys};
 
 /// Delegated Graph permissions requested at sign-in. All of them can be
 /// granted by users themselves (no admin consent needed by default).
@@ -512,10 +512,12 @@ impl MicrosoftTokenSource {
         // gone meanwhile, the account was removed while this request ran and
         // its sign-in mustn't come back; when another took its place, the
         // person signed in again (or another refresh rotated it), and that
-        // one stays.
+        // one stays. Under the account's lock, which removing it and signing
+        // in also take, so neither comes between the comparison and the save.
         if let Some(rotated) = tokens.refresh_token.as_deref()
             && rotated != refresh_token
         {
+            let _sign_in = secrets::lock_account(&self.account_id).await;
             match self.secrets.get(&key).await {
                 Ok(Some(current)) if current == refresh_token => {
                     if let Err(e) = self.secrets.set(&key, rotated).await {

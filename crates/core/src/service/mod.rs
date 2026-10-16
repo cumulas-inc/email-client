@@ -36,7 +36,7 @@ use crate::model::{
 use crate::providers::imap::ImapCredentials;
 use crate::push::PushStatus;
 use crate::push::hub::PushHub;
-use crate::secrets::{SecretStore, keys};
+use crate::secrets::{self, SecretStore, keys};
 use crate::store::Store;
 
 /// Receives notifications for the UI and the desktop.
@@ -359,9 +359,16 @@ impl CoreService {
                 account
             }
         };
-        self.secrets
-            .set(&keys::refresh_token(&account.id), &result.refresh_token)
-            .await?;
+        {
+            // Under the account's lock, which removing it also takes: the
+            // removal deletes what's saved here, or this finds the account
+            // gone and saves nothing.
+            let _sign_in = secrets::lock_account(&account.id).await;
+            self.store.get_account(&account.id)?;
+            self.secrets
+                .set(&keys::refresh_token(&account.id), &result.refresh_token)
+                .await?;
+        }
         self.push
             .set_consent_refusal(&account.id, result.consent_refused.clone());
         self.forget_providers(Some(&account.id)).await;
@@ -441,12 +448,18 @@ impl CoreService {
             self.signatures.restore(account_id);
             return Err(e);
         }
-        for key in [
-            keys::imap_password(account_id),
-            keys::refresh_token(account_id),
-        ] {
-            if let Err(e) = self.secrets.delete(&key).await {
-                tracing::warn!("could not delete secret {key}: {e}");
+        {
+            // Under the account's lock, which a refresh saving the refresh
+            // token Microsoft rotated also takes: none ending meanwhile puts
+            // one back.
+            let _sign_in = secrets::lock_account(account_id).await;
+            for key in [
+                keys::imap_password(account_id),
+                keys::refresh_token(account_id),
+            ] {
+                if let Err(e) = self.secrets.delete(&key).await {
+                    tracing::warn!("could not delete secret {key}: {e}");
+                }
             }
         }
         self.sync_status.lock().unwrap().remove(account_id);

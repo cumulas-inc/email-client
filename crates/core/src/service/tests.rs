@@ -2252,6 +2252,169 @@ async fn a_silent_graph_holds_up_removing_an_account_five_seconds_at_most() {
     silent.abort();
 }
 
+/// A keyring whose writes of a refresh token wait until the test lets them
+/// through.
+struct GatedKeyring {
+    values: MemorySecretStore,
+    /// Told when a write reaches the gate.
+    writing: tokio::sync::Notify,
+    gate: tokio::sync::Semaphore,
+}
+
+impl GatedKeyring {
+    fn new() -> Self {
+        Self {
+            values: MemorySecretStore::default(),
+            writing: tokio::sync::Notify::new(),
+            gate: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl SecretStore for GatedKeyring {
+    async fn get(&self, key: &str) -> Result<Option<String>> {
+        self.values.get(key).await
+    }
+
+    async fn set(&self, key: &str, value: &str) -> Result<()> {
+        if key.ends_with(":refresh-token") {
+            self.writing.notify_one();
+            self.gate.acquire().await.unwrap().forget();
+        }
+        self.values.set(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.values.delete(key).await
+    }
+}
+
+/// A service on `keyring` with a Microsoft account signed in as
+/// `refresh-0`.
+async fn signed_in_service(
+    keyring: &Arc<GatedKeyring>,
+) -> (Arc<CoreService>, Arc<FakeConnector>, Account) {
+    let connector = Arc::new(FakeConnector::new(Arc::default(), false));
+    let service = Arc::new(CoreService::new(
+        Arc::new(Store::open_in_memory().unwrap()),
+        keyring.clone(),
+        connector.clone(),
+        Arc::new(NullSink),
+    ));
+    let account = Account {
+        id: Uuid::new_v4().to_string(),
+        kind: AccountKind::Microsoft,
+        display_name: "Adele".into(),
+        email: "adele@contoso.com".into(),
+        color: "#0b7a75".into(),
+        settings: AccountSettings::Microsoft(MicrosoftSettings {
+            tenant_id: "11111111-2222-3333-4444-555555555555".into(),
+            user_id: "33333333-0000-0000-0000-00000000000a".into(),
+        }),
+        created_at: Utc::now(),
+        last_synced_at: None,
+        sync_error: None,
+    };
+    service.store().insert_account(&account).unwrap();
+    keyring
+        .values
+        .set(&keys::refresh_token(&account.id), "refresh-0")
+        .await
+        .unwrap();
+    (service, connector, account)
+}
+
+/// Removes the account while `saving` is held at the gate saving a refresh
+/// token, then lets it through; returns the refresh token kept after.
+async fn remove_while_saving<T: Send + 'static>(
+    keyring: &Arc<GatedKeyring>,
+    service: &Arc<CoreService>,
+    account: &Account,
+    saving: tokio::task::JoinHandle<T>,
+) -> (T, Option<String>) {
+    keyring.writing.notified().await;
+    let removing = tokio::spawn({
+        let service = Arc::clone(service);
+        let id = account.id.clone();
+        async move { service.remove_account(&id).await }
+    });
+    // Without the account's lock, the removal would be done by now.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    keyring.gate.add_permits(1);
+    let saved = saving.await.unwrap();
+    removing.await.unwrap().unwrap();
+    assert!(service.list_accounts().unwrap().is_empty());
+    let kept = keyring
+        .values
+        .get(&keys::refresh_token(&account.id))
+        .await
+        .unwrap();
+    (saved, kept)
+}
+
+#[tokio::test]
+async fn a_refresh_ending_as_its_account_is_removed_keeps_no_sign_in() {
+    use crate::auth::TokenSource;
+    use crate::auth::microsoft::{MicrosoftAuthConfig, MicrosoftTokenSource};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Microsoft rotates the refresh token.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token_type": "Bearer",
+            "expires_in": 3599,
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+        })))
+        .mount(&server)
+        .await;
+    let keyring = Arc::new(GatedKeyring::new());
+    let (service, _, account) = signed_in_service(&keyring).await;
+    let tokens = Arc::new(MicrosoftTokenSource::new(
+        MicrosoftAuthConfig {
+            client_id: "client".into(),
+            tenant: "common".into(),
+            authority_host: server.uri(),
+            consent_scopes: Vec::new(),
+        },
+        account.id.clone(),
+        keyring.clone(),
+    ));
+    // The refresh has found refresh-0 still kept, and is saving refresh-1,
+    // when the account is removed.
+    let refreshing = tokio::spawn(async move { tokens.access_token().await });
+    let (token, kept) = remove_while_saving(&keyring, &service, &account, refreshing).await;
+    assert_eq!(token.unwrap(), "access-1");
+    assert_eq!(kept, None);
+}
+
+#[tokio::test]
+async fn a_sign_in_ending_as_its_account_is_removed_keeps_no_sign_in() {
+    let keyring = Arc::new(GatedKeyring::new());
+    let (service, connector, account) = signed_in_service(&keyring).await;
+    // Signing in again, as the same person...
+    *connector.sign_in.lock().unwrap() = Some(SignInResult {
+        email: "adele@contoso.com".into(),
+        display_name: "Adele".into(),
+        tenant_id: "11111111-2222-3333-4444-555555555555".into(),
+        user_id: "33333333-0000-0000-0000-00000000000a".into(),
+        access_token: "access".into(),
+        refresh_token: "refresh-new".into(),
+        expires_in: std::time::Duration::from_secs(3600),
+        consent_refused: None,
+    });
+    // ...is saving the new refresh token when the account is removed.
+    let signing_in = tokio::spawn({
+        let service = Arc::clone(&service);
+        async move { service.add_microsoft_account(&|_| Ok(()), None).await }
+    });
+    let (_, kept) = remove_while_saving(&keyring, &service, &account, signing_in).await;
+    assert_eq!(kept, None);
+}
+
 // --- reminders ------------------------------------------------------------------
 
 use crate::model::{Calendar, Event, ResponseStatus, Snooze};
