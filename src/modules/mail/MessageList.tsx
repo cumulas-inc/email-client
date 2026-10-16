@@ -748,7 +748,9 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
             <EmptyState
               icon={<LoaderCircle size={40} strokeWidth={1.5} className="spin" />}
               title="Searching your whole mailbox…"
-              description={resultsStale ? undefined : `Nothing on this device matches “${query}”.`}
+              description={
+                resultsStale ? undefined : `Nothing on this computer matches “${query}”.`
+              }
               action={failures}
             />,
           )
@@ -762,7 +764,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
             title="No results"
             description={
               failures
-                ? `We didn't find anything for “${query}” on this device.`
+                ? `We didn't find anything for “${query}” on this computer.`
                 : `We didn't find anything for “${query}”. Try other words, or from:, subject: or has:attachment.`
             }
             action={failures}

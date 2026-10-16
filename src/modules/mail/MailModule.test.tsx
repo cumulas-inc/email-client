@@ -821,7 +821,7 @@ describe("Search", () => {
       await screen.findByText("Searching your whole mailbox…", { selector: ".empty-state__title" }),
     ).toBeInTheDocument();
     expect(
-      await screen.findByText("Nothing on this device matches “invoice”."),
+      await screen.findByText("Nothing on this computer matches “invoice”."),
     ).toBeInTheDocument();
     expect(announced()).toBe("Searching your whole mailbox…");
 
@@ -874,7 +874,7 @@ describe("Search", () => {
     await setSearch("zebras");
     expect(await screen.findByText("No results")).toBeInTheDocument();
     expect(
-      screen.getByText("We didn't find anything for “zebras” on this device."),
+      screen.getByText("We didn't find anything for “zebras” on this computer."),
     ).toBeInTheDocument();
     expect(failureRow()).toBeInTheDocument();
 
