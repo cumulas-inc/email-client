@@ -97,6 +97,19 @@
   </keywords>
 
   <releases>
+    <release version="0.2.0" date="2026-10-16">
+      <description>
+        <p>Search now covers your whole mailbox.</p>
+        <ul>
+          <li>Search finds mail on your computer instantly, then searches every folder on your mail server, however old the messages are</li>
+          <li>Messages found on the server open, move and flag like any other</li>
+          <li>Narrow a search with from:, to:, cc:, subject:, body:, has:attachment or "exact phrases"; part of a word finds subjects and senders too</li>
+          <li>When the Unread or Flagged filter hides results, the list says so and offers to show them all</li>
+          <li>Searching no longer pauses the window, and first syncs of large mailboxes are much faster</li>
+          <li>Messages moved between folders on Microsoft 365 no longer go missing until the next full sync</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-16">
       <description>
         <p>The first release of Cumulas Mail.</p>
