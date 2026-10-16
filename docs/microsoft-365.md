@@ -78,7 +78,12 @@ built-in one (see
 [Using your organization's own registration](#using-your-organizations-own-registration-it-admins)).
 
 The published registration was set up as follows; another registration needs
-the same steps.
+the same steps. For company signatures, a build with another registration also
+needs its client ID authorized on Cumulas Signatures' shared app and allowed
+on the server (see
+[Setting it up](#setting-it-up-signature-service-operators)); until it is, its
+work accounts show company signatures as not allowed. Build it with
+`CUMULAS_SIGNATURE_CLIENT_ID=none` to leave them out instead.
 
 1. In the [Microsoft Entra admin center](https://entra.microsoft.com), go to
    **App registrations → New registration**.
@@ -345,7 +350,9 @@ variables change that:
 Both are read at build time (`CUMULAS_SIGNATURE_CLIENT_ID=<id> cargo build
 --release ...`, or the Flatpak manifest's `build-options.env`, where the
 client ID is empty, so the published one applies) and at run time, which
-takes precedence:
+takes precedence. A client ID from the build goes with the build's address: a
+run pointed at another service leaves it out, so give that run the service's
+client ID too:
 `flatpak run --env=CUMULAS_SIGNATURE_URL=https://signature.example.org --env=CUMULAS_SIGNATURE_CLIENT_ID=<its client ID> co.cumulas.Mail`,
 or `flatpak run --env=CUMULAS_SIGNATURE_CLIENT_ID=none co.cumulas.Mail` to
 turn company signatures off for that run.
