@@ -71,8 +71,15 @@ export const tauriBackend: Backend = {
 
   listFolders: (accountId) => invoke("list_folders", { accountId: accountId ?? null }),
   listMessages: (folderId, query) => invoke("list_messages", { folderId, query }),
-  searchMessages: (text, accountId) =>
-    invoke("search_messages", { text, accountId: accountId ?? null }),
+  searchMessages: (text, accountId, includeIds) =>
+    invoke("search_messages", {
+      text,
+      accountId: accountId ?? null,
+      includeIds: includeIds ?? [],
+    }),
+  searchServer: (searchId, text, accountId, more) =>
+    invoke("search_server", { searchId, text, accountId, more: more ?? false }),
+  cancelServerSearch: (searchId) => invoke("cancel_server_search", { searchId }),
   getMessage: (messageId, allowRemote) =>
     invoke("get_message", { messageId, allowRemote: allowRemote ?? false }),
   setRead: (messageIds, read) => invoke("set_read", { messageIds, read }),

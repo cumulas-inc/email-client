@@ -245,10 +245,10 @@ interface MailSeed {
   conversationId?: string;
 }
 
-function messageFactory() {
+function messageFactory(prefix = "wm") {
   let seq = 0;
   return (accountId: string, seed: MailSeed): Message => {
-    const id = `wm-${++seq}`;
+    const id = `${prefix}-${++seq}`;
     const plain = (seed.text ?? seed.html ?? "")
       .replace(/<style[\s\S]*?<\/style>/g, "")
       .replace(/<[^>]+>/g, " ")
@@ -1024,14 +1024,37 @@ function mail(rng: Rng, people: Person[]): Message[] {
   return out;
 }
 
+/**
+ * Years of order confirmations that only the server has: a server search for
+ * "purchase order" finds more than a page of them (50), and more than two.
+ */
+function serverMail(): Message[] {
+  const make = messageFactory("ws");
+  const erp: EmailAddress = {
+    name: "Northwind ERP (no reply)",
+    address: "erp-noreply@northwindindustriesholdings.example",
+  };
+  return Array.from({ length: 130 }, (_, i) => {
+    const order = `4500${String(118_200 + i * 7)}`;
+    return make(LONG, {
+      folderId: L.archive,
+      from: erp,
+      subject: `Purchase order ${order} confirmed`,
+      text: `Purchase order ${order} was confirmed by the supplier. Delivery is scheduled within 14 days.`,
+      received: at(-400 - i * 6, 7 + (i % 10), (i * 13) % 60),
+    });
+  });
+}
+
 /** Sets each folder's server-only counts so its totals match what the server reports. */
 function setServerCounts(state: MockState): void {
   state.remoteCounts = {};
+  const all = [...state.messages, ...(state.serverMessages ?? [])];
   for (const [folderId, target] of Object.entries(SERVER_COUNTS)) {
-    const local = state.messages.filter((m) => m.folderId === folderId);
+    const known = all.filter((m) => m.folderId === folderId);
     state.remoteCounts[folderId] = {
-      unread: Math.max(0, target.unread - local.filter((m) => !m.isRead).length),
-      total: Math.max(0, target.total - local.length),
+      unread: Math.max(0, target.unread - known.filter((m) => !m.isRead).length),
+      total: Math.max(0, target.total - known.length),
     };
   }
 }
@@ -1617,6 +1640,7 @@ export function createWorstState(): MockState {
     contacts: contacts(seeded(4), people),
     taskLists,
     tasks,
+    serverMessages: serverMail(),
   };
   setServerCounts(state);
   recount(state);

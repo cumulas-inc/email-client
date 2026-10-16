@@ -34,6 +34,8 @@ export function createBackend(): Backend {
   const signature = params.get("signature") as DemoSignature | null;
   return new MockBackend({
     latency: 80,
+    // About as long as a real server takes to search a mailbox.
+    serverSearchLatency: 900,
     empty: params.has("empty"),
     worst: params.has("worst"),
     push: push && DEMO_PUSH.includes(push) ? push : undefined,

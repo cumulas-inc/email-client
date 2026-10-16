@@ -25,6 +25,7 @@ import type {
   PushStatus,
   RemindersChangedEvent,
   ReplyKind,
+  ServerSearchResult,
   Settings,
   SnoozeFor,
   SyncStatus,
@@ -111,7 +112,30 @@ export interface Backend {
   // Mail
   listFolders(accountId?: string): Promise<Folder[]>;
   listMessages(folderId: string, query: MessageQuery): Promise<MessagePage>;
-  searchMessages(text: string, accountId?: string): Promise<MessageSummary[]>;
+  /**
+   * Local search, instant: messages on this device matching `text` (word
+   * prefixes; from:, to:, cc:, subject:, body:, has:attachment), plus
+   * `includeIds` (ids server searches found). Newest first.
+   */
+  searchMessages(
+    text: string,
+    accountId?: string,
+    includeIds?: string[],
+  ): Promise<MessageSummary[]>;
+  /**
+   * Searches one account's whole mailbox on its server (first page, or the next
+   * with `more`) and stores what it finds. A new `searchId` cancels the previous
+   * search; its pending calls resolve with status "cancelled". Never rejects for
+   * the server: status "failed" carries the error.
+   */
+  searchServer(
+    searchId: string,
+    text: string,
+    accountId: string,
+    more?: boolean,
+  ): Promise<ServerSearchResult>;
+  /** Cancels the search if it is the current one. */
+  cancelServerSearch(searchId: string): Promise<void>;
   getMessage(messageId: string, allowRemote?: boolean): Promise<Message>;
   setRead(messageIds: string[], read: boolean): Promise<void>;
   setFlagged(messageIds: string[], flagged: boolean): Promise<void>;
