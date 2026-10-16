@@ -507,6 +507,27 @@ describe("the demo's search", () => {
     });
   });
 
+  it("searches a message's text here once it was opened, and the server all of it", async () => {
+    const backend = new MockBackend();
+    const checklist = "Atlas launch checklist — final review today";
+    // "retention" is only in its text, past its preview.
+    expect(await backend.searchMessages("retention")).toEqual([]);
+    const server = await backend.searchServer("s-1", "retention", "acct-work");
+    expect(server).toMatchObject({ status: "done", added: 0 });
+    const included = await backend.searchMessages("retention", undefined, server.messageIds);
+    expect(subjects(included)).toEqual([checklist]);
+    await backend.getMessage(server.messageIds[0]!);
+    expect(subjects(await backend.searchMessages("retention"))).toEqual([checklist]);
+  });
+
+  it("matches inside words on an IMAP server, by the start of words on Graph", async () => {
+    const backend = new MockBackend();
+    const home = await backend.searchServer("s-1", "fari phot", "acct-home");
+    const found = await backend.searchMessages("", undefined, home.messageIds);
+    expect(subjects(found)).toEqual(["Safari photos from Etosha"]);
+    expect((await backend.searchServer("s-2", "nvoice", "acct-work")).messageIds).toEqual([]);
+  });
+
   it("fails server searches the demo is asked to, and those of an account whose sync fails", async () => {
     const failing = new MockBackend({ searchFail: true });
     expect(await failing.searchServer("s-1", "zebras", "acct-home")).toMatchObject({

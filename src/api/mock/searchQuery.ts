@@ -228,13 +228,15 @@ export interface MatchOptions {
    * senders (3 characters or more); a server search doesn't.
    */
   infix: boolean;
+  /** Match anywhere in each field, as IMAP's SEARCH does (substrings). */
+  substrings?: boolean;
 }
 
 /** Whether the message matches every part of the query. */
 export function matchesSearch(
   query: SearchQuery,
   message: Message,
-  { infix }: MatchOptions,
+  { infix, substrings = false }: MatchOptions,
 ): boolean {
   if (query.hasAttachment && !message.hasAttachments) return false;
   const subject = message.subject;
@@ -244,8 +246,8 @@ export function matchesSearch(
     to: message.to.map(addressText).join(" "),
     cc: message.cc.map(addressText).join(" "),
     subject,
-    // The demo treats every body as already fetched (the app indexes a body
-    // once it was opened, the preview until then).
+    // The text of an opened message; callers pass others without it, as
+    // the app indexes their preview until then.
     body: message.bodyText ?? message.preview,
   };
   return query.terms.every((term) => {
@@ -253,6 +255,7 @@ export function matchesSearch(
       term.field === "any"
         ? (["subject", "from", "to", "cc", "body"] as const)
         : ([term.field] as const);
+    if (substrings) return fields.some((f) => normalize(text[f]).includes(normalize(term.text)));
     const words = tokens(term.text);
     if (fields.some((f) => tokensMatch(words, tokens(text[f]), term.phrase))) return true;
     if (!infix || Array.from(term.text).length < 3) return false;

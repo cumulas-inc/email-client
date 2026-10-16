@@ -393,6 +393,8 @@ export class MockBackend implements Backend {
   private retiredSearches: string[] = [];
   /** Holds server searches while set (pauseServerSearch). */
   private serverSearchGate: Promise<void> | null = null;
+  /** Messages opened: local search looks in their text, in the others' previews. */
+  private opened = new Set<string>();
   /** How each account's server search fails, when it does (failServerSearch). */
   private serverSearchFailures = new Map<string, BackendError>();
 
@@ -1021,10 +1023,13 @@ export class MockBackend implements Backend {
     await this.delay();
     const query = parseSearch(text);
     const inAccount = (m: Message) => !accountId || m.accountId === accountId;
+    // As the app's index: a message's text once it was opened, its preview
+    // before.
+    const indexed = (m: Message) => (this.opened.has(m.id) ? m : { ...m, bodyText: null });
     const found = isEmptySearch(query)
       ? []
       : this.state.messages
-          .filter((m) => inAccount(m) && matchesSearch(query, m, { infix: true }))
+          .filter((m) => inAccount(m) && matchesSearch(query, indexed(m), { infix: true }))
           .sort(searchOrder)
           .slice(0, LOCAL_SEARCH_LIMIT);
     const ids = new Set(found.map((m) => m.id));
@@ -1040,9 +1045,9 @@ export class MockBackend implements Backend {
 
   /**
    * Like the core: searches one account's mail on its "server" (what is on
-   * the device and `serverMessages`, matched as Graph does, without the
-   * local index's matches inside words), a page at a time, and brings what
-   * it finds onto the device.
+   * the device and `serverMessages`, matched as Graph does by the start of
+   * words, or as IMAP does anywhere in them), a page at a time, and brings
+   * what it finds onto the device.
    */
   async searchServer(
     searchId: string,
@@ -1089,8 +1094,10 @@ export class MockBackend implements Backend {
       if (!rest) return answer("done");
       matches = rest;
     } else {
+      // Graph matches words by their start; IMAP's SEARCH, anywhere.
+      const options = { infix: false, substrings: this.account(accountId).kind === "imap" };
       matches = [...this.state.messages, ...(this.state.serverMessages ?? [])]
-        .filter((m) => m.accountId === accountId && matchesSearch(query, m, { infix: false }))
+        .filter((m) => m.accountId === accountId && matchesSearch(query, m, options))
         .sort(searchOrder)
         .map((m) => m.id);
     }
@@ -1155,6 +1162,7 @@ export class MockBackend implements Backend {
   async getMessage(messageId: string, allowRemote = false) {
     await this.delay();
     const m = clone(this.message(messageId));
+    this.opened.add(messageId);
     const allow = allowRemote || this.settings.remoteContent === "allow";
     if (m.bodyHtml && !allow && REMOTE_IMG.test(m.bodyHtml)) {
       m.bodyHtml = m.bodyHtml.replace(REMOTE_IMG, "");
