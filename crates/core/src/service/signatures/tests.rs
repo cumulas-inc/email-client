@@ -1162,6 +1162,38 @@ async fn a_wait_asked_for_while_the_clock_was_ahead_holds_nothing_back() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_wait_asked_for_just_before_the_clock_was_set_back_holds() {
+    let s = setup();
+    let account = work_account(&s);
+    // The clock was set back a second (synchronized) since.
+    let ahead = epoch() + Duration::seconds(1);
+    let stored = StoredOrganizationSignature {
+        scope: Some(SCOPE.into()),
+        state: OrganizationSignatureState::Ready,
+        html: Some("<p>Org</p>".into()),
+        checked_at: Some(ahead),
+        attempted_at: Some(ahead),
+        stale: true,
+        retry_at: Some(ahead + Duration::hours(1)),
+        ..Default::default()
+    };
+    s.service
+        .store()
+        .save_organization_signature(&account.id, &stored)
+        .unwrap();
+    s.organization
+        .answer(signature("<p>Org</p>", true, "\"1\""));
+    let checked = s
+        .service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap()
+        .organization;
+    assert_eq!(s.organization.calls(), 0);
+    assert!(checked.stale);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_computer_that_slept_checks_when_it_wakes() {
     let s = setup();
     let account = work_account(&s);
@@ -1445,4 +1477,64 @@ fn the_next_check_follows_what_was_said() {
     for (asked, retry) in [(false, false), (true, false), (true, true)] {
         assert_eq!(next_check(&busy_ahead, asked, retry, now), now);
     }
+}
+
+#[test]
+fn a_clock_set_back_a_little_keeps_every_wait() {
+    use OrganizationSignatureState as State;
+    let now = epoch();
+    let kept_at = |ahead: Duration, state| StoredOrganizationSignature {
+        scope: Some(SCOPE.into()),
+        state,
+        checked_at: Some(now + ahead),
+        attempted_at: Some(now + ahead),
+        ..Default::default()
+    };
+    // Kept a second, or a minute, before the clock was set back as much
+    // (as when it's synchronized): every wait counts from then.
+    for ahead in [Duration::seconds(1), Duration::minutes(1)] {
+        let at = now + ahead;
+        for asked in [false, true] {
+            for state in [State::NotUsed, State::NotAllowed] {
+                assert_eq!(
+                    next_check(&kept_at(ahead, state), asked, false, now),
+                    at + Duration::hours(24)
+                );
+            }
+        }
+        assert_eq!(
+            next_check(&kept_at(ahead, State::Ready), true, false, now),
+            at + Duration::hours(6)
+        );
+        let failed = StoredOrganizationSignature {
+            stale: true,
+            ..kept_at(ahead, State::Ready)
+        };
+        assert_eq!(
+            next_check(&failed, true, false, now),
+            at + Duration::minutes(30)
+        );
+        let busy = StoredOrganizationSignature {
+            retry_at: Some(at + Duration::hours(2)),
+            ..failed
+        };
+        for (asked, retry) in [(false, false), (true, false), (true, true)] {
+            assert_eq!(
+                next_check(&busy, asked, retry, now),
+                at + Duration::hours(2)
+            );
+        }
+    }
+    // More than a minute ahead: kept while the clock was ahead.
+    let ahead = Duration::minutes(1) + Duration::seconds(1);
+    assert_eq!(
+        next_check(&kept_at(ahead, State::NotUsed), true, false, now),
+        now
+    );
+    let busy = StoredOrganizationSignature {
+        stale: true,
+        retry_at: Some(now + ahead + Duration::hours(2)),
+        ..kept_at(ahead, State::Ready)
+    };
+    assert_eq!(next_check(&busy, true, false, now), now);
 }

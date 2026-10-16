@@ -18,7 +18,8 @@
 //! soon as the network is back). Signing in asks at once, whatever was
 //! said. Times go by the wall clock, which keeps counting while the
 //! computer sleeps; the scheduler looks at it at least every minute. A time
-//! kept while the clock was ahead makes the check due at once.
+//! kept while the clock was more than a minute ahead makes the check due at
+//! once.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,6 +61,10 @@ pub(crate) const RETRY_AFTER_FAILURE: Duration = Duration::minutes(30);
 const MIN_RETRY_AFTER: Duration = Duration::minutes(1);
 /// A check that ended less than this long ago isn't repeated.
 pub(crate) const MIN_INTERVAL: StdDuration = StdDuration::from_secs(60);
+/// A kept time later than now by more than this was kept while the clock
+/// was ahead; one less so is the clock set back a little (as when it's
+/// synchronized), which changes nothing.
+const CLOCK_SLACK: Duration = Duration::minutes(1);
 /// Starting a message waits this long at most for a first check.
 pub(crate) const COMPOSE_WAIT: StdDuration = StdDuration::from_secs(4);
 /// Starting a message checks again, in the background, when the
@@ -397,11 +402,12 @@ pub(crate) fn next_check(
     now: DateTime<Utc>,
 ) -> DateTime<Utc> {
     use OrganizationSignatureState as State;
-    // A time after now was kept while the clock was ahead: what's due
-    // after it is due now (the check keeps the right time), rather than
-    // once the clock has caught up.
+    // A time kept while the clock was ahead: what's due after it is due
+    // now (the check keeps the right time), rather than once the clock has
+    // caught up.
     let since = |at: Option<DateTime<Utc>>, every: Duration| {
-        at.filter(|at| *at <= now).map_or(now, |at| at + every)
+        at.filter(|at| !kept_ahead(*at, now))
+            .map_or(now, |at| at + every)
     };
     let retry_at = retry_at(o, now);
     let due = if o.stale {
@@ -427,11 +433,17 @@ pub(crate) fn next_check(
 }
 
 /// When the service said to ask again, if it did; not when it said so
-/// while the clock was ahead (its check is after now), since how long it
-/// asked to wait from now can't be told.
+/// while the clock was ahead (its check is well after now), since how long
+/// it asked to wait from now can't be told.
 fn retry_at(o: &StoredOrganizationSignature, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     o.retry_at
-        .filter(|_| o.attempted_at.is_none_or(|at| at <= now))
+        .filter(|_| o.attempted_at.is_none_or(|at| !kept_ahead(at, now)))
+}
+
+/// Whether `at` was kept while the clock was ahead: more than
+/// [`CLOCK_SLACK`] after `now`.
+fn kept_ahead(at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    at > now + CLOCK_SLACK
 }
 
 /// The signature a message starts with. While the organization signs the
