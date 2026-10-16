@@ -652,7 +652,8 @@ pub struct TaskPatch {
 #[serde(rename_all = "camelCase")]
 pub enum OrganizationSignatureState {
     /// IMAP, a personal Microsoft account, an account without a tenant, or
-    /// an app built without the signature service's client ID.
+    /// company signatures are off for this build or run (see
+    /// [`crate::signatures::config::signature_client_id`]).
     Unsupported,
     /// Supported, but not checked yet.
     Unchecked,
