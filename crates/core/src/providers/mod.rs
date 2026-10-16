@@ -56,13 +56,16 @@ pub struct MessageBatch {
     pub flag_updates: Vec<FlagUpdate>,
     /// Remote ids of messages that disappeared from the folder.
     pub removed_remote_ids: Vec<String>,
-    /// When set, the complete list of remote ids currently in the folder: any
-    /// stored message of the folder not listed is removed. Lets providers that
-    /// cannot report deletions (IMAP without QRESYNC) reconcile cheaply.
+    /// When set, the complete list of remote ids currently in the folder
+    /// within the sync window: any stored message of the folder not listed is
+    /// removed, but for messages server search fetched from outside it. Lets
+    /// providers that cannot report deletions (IMAP without QRESYNC)
+    /// reconcile cheaply.
     pub retain_only: Option<Vec<String>>,
     /// When true, `upserts` is the complete content of the folder within the
     /// sync window and anything else stored locally for it must be dropped
-    /// (e.g. IMAP UIDVALIDITY changed or a Graph delta token expired).
+    /// (e.g. IMAP UIDVALIDITY changed or a Graph delta token expired), but
+    /// for messages server search fetched from outside the window.
     pub full_resync: bool,
     /// Opaque provider cursor to pass to the next sync of this folder
     /// (Graph `@odata.deltaLink`, IMAP `uidvalidity:uidnext:modseq`, ...).
@@ -74,6 +77,9 @@ pub struct MessageBatch {
     /// destination isn't stored is removed; others are ignored (never
     /// inserted).
     pub moved_out: Vec<MessageSummary>,
+    /// With `full_resync`: the folder's remote ids were reassigned (IMAP
+    /// UIDVALIDITY changed), so rows server search fetched go too.
+    pub ids_reassigned: bool,
 }
 
 /// A folder's message counts as the server reports them.

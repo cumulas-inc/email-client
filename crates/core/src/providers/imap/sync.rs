@@ -89,7 +89,13 @@ pub(super) async fn sync_folder(
         .filter(|c| c.uid_validity == info.uid_validity)
     {
         Some(previous) => incremental_sync(session, &target, &info, previous, window).await,
-        None => full_sync(session, &target, &info, window).await,
+        None => {
+            let mut batch = full_sync(session, &target, &info, window).await?;
+            // Synced before under other UIDs: the ids of rows server search
+            // fetched, made of the old ones, are stale too.
+            batch.ids_reassigned = state.is_some();
+            Ok(batch)
+        }
     }
 }
 

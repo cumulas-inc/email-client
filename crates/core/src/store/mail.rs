@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Row, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,15 @@ const FOLDER_COLUMNS: &str =
 const SUMMARY_COLUMNS: &str = "id, account_id, folder_id, remote_id, conversation_id, subject, \
      from_name, from_address, to_json, cc_json, preview, received_at, is_read, is_flagged, \
      is_draft, has_attachments, importance";
+
+/// What [`Store::upsert_search_results`] stored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchUpsert {
+    /// Local ids of the messages stored, in the order given.
+    pub ids: Vec<String>,
+    /// How many of them weren't stored before.
+    pub added: u32,
+}
 
 /// Change to a folder's unread count caused by a local operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,10 +213,23 @@ struct Previous {
     folder_id: String,
 }
 
+/// How [`upsert_summary`] treats a row server search fetched.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// A sync, which takes it over: it is in the window now.
+    Sync,
+    /// It stays a search result.
+    Keep,
+}
+
 /// Inserts or updates the summary columns of a message, leaving any fetched
 /// body untouched. Returns the read state and folder stored before, `None`
 /// for a new message. The index follows the text that changed.
-fn upsert_summary(tx: &Transaction<'_>, m: &MessageSummary) -> rusqlite::Result<Option<Previous>> {
+fn upsert_summary(
+    tx: &Transaction<'_>,
+    m: &MessageSummary,
+    origin: Origin,
+) -> rusqlite::Result<Option<Previous>> {
     let to = to_json(&m.to);
     let cc = to_json(&m.cc);
     let from_name = m.from.as_ref().and_then(|f| f.name.clone());
@@ -249,7 +272,11 @@ fn upsert_summary(tx: &Transaction<'_>, m: &MessageSummary) -> rusqlite::Result<
                preview = COALESCE(NULLIF(excluded.preview, ''), messages.preview),
                received_at = excluded.received_at, is_read = excluded.is_read,
                is_flagged = excluded.is_flagged, is_draft = excluded.is_draft,
-               has_attachments = excluded.has_attachments, importance = excluded.importance"
+               has_attachments = excluded.has_attachments, importance = excluded.importance{}",
+            match origin {
+                Origin::Sync => ", search_only = 0, search_seen_at = NULL",
+                Origin::Keep => "",
+            }
         ),
         params![
             m.id,
@@ -365,7 +392,7 @@ fn move_out(
             .optional()?
             .is_some();
         if destination_stored {
-            upsert_summary(tx, m)?;
+            upsert_summary(tx, m, Origin::Keep)?;
             outcome.moved_out.push(m.id.clone());
             if !outcome.moved_to.contains(&m.folder_id) {
                 outcome.moved_to.push(m.folder_id.clone());
@@ -560,9 +587,13 @@ impl Store {
         let mut outcome = BatchOutcome::default();
         if batch.full_resync {
             let keep: HashSet<&str> = batch.upserts.iter().map(|m| m.id.as_str()).collect();
+            // Rows server search fetched are outside the window, so missing
+            // from it, unless their ids no longer mean anything.
             let existing: Vec<String> = {
-                let mut stmt = tx.prepare("SELECT id FROM messages WHERE folder_id = ?1")?;
-                stmt.query_map([&folder.id], |r| r.get(0))?
+                let mut stmt = tx.prepare(
+                    "SELECT id FROM messages WHERE folder_id = ?1 AND (search_only = 0 OR ?2)",
+                )?;
+                stmt.query_map(params![folder.id, batch.ids_reassigned], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?
             };
             let stale: Vec<String> = existing
@@ -578,7 +609,9 @@ impl Store {
             .collect();
         if let Some(retain) = &batch.retain_only {
             let keep: HashSet<&str> = retain.iter().map(String::as_str).collect();
-            let mut stmt = tx.prepare("SELECT id, remote_id FROM messages WHERE folder_id = ?1")?;
+            let mut stmt = tx.prepare(
+                "SELECT id, remote_id FROM messages WHERE folder_id = ?1 AND search_only = 0",
+            )?;
             let rows = stmt.query_map([&folder.id], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;
@@ -596,7 +629,7 @@ impl Store {
             .extend(delete_rows_in_folder(&tx, &removed, &folder.id)?);
         move_out(&tx, folder, &batch.moved_out, &mut outcome)?;
         for m in &batch.upserts {
-            let Some(previous) = upsert_summary(&tx, m)? else {
+            let Some(previous) = upsert_summary(&tx, m, Origin::Sync)? else {
                 outcome.inserted.push(m.clone());
                 continue;
             };
@@ -911,6 +944,96 @@ impl Store {
         delete_message_rows(&tx, ids)?;
         tx.commit()?;
         Ok(())
+    }
+
+    // --- rows server search fetched -----------------------------------------
+
+    /// Stores what a server search found in an account: messages not stored
+    /// yet as search results (indexed, outside the sync window, so window
+    /// pruning leaves them alone), and search results again, as they are
+    /// now. Messages a sync stored are left to it. Those in folders that
+    /// aren't stored are skipped. Folder counts are left alone: the server's
+    /// already include them. Returns the ids stored, in input order.
+    pub fn upsert_search_results(
+        &self,
+        account_id: &str,
+        messages: &[MessageSummary],
+        now: DateTime<Utc>,
+    ) -> Result<SearchUpsert> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut result = SearchUpsert::default();
+        for m in messages {
+            let folder_stored = tx
+                .query_row(
+                    "SELECT 1 FROM folders WHERE id = ?1 AND account_id = ?2",
+                    params![m.folder_id, account_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if m.account_id != account_id || !folder_stored {
+                continue;
+            }
+            let search_only: Option<bool> = tx
+                .query_row(
+                    "SELECT search_only FROM messages WHERE id = ?1",
+                    [&m.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if search_only != Some(false) {
+                upsert_summary(&tx, m, Origin::Keep)?;
+                tx.execute(
+                    "UPDATE messages SET search_only = 1, search_seen_at = ?2 WHERE id = ?1",
+                    params![m.id, ts(&now)],
+                )?;
+            }
+            if search_only.is_none() {
+                result.added += 1;
+            }
+            if !result.ids.contains(&m.id) {
+                result.ids.push(m.id.clone());
+            }
+        }
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Notes that a search result was opened: it is kept longer.
+    pub fn touch_search_result(&self, id: &str, now: DateTime<Utc>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE messages SET search_seen_at = ?2 WHERE id = ?1 AND search_only = 1",
+            params![id, ts(&now)],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes an account's search results not found or opened since
+    /// `older_than`, then the least recently seen beyond `keep_at_most`.
+    /// Folder counts are left alone (the server's never counted them out).
+    /// Returns how many went.
+    pub fn prune_search_results(
+        &self,
+        account_id: &str,
+        older_than: DateTime<Utc>,
+        keep_at_most: u32,
+    ) -> Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut deleted = tx.execute(
+            "DELETE FROM messages WHERE account_id = ?1 AND search_only = 1
+               AND (search_seen_at IS NULL OR search_seen_at < ?2)",
+            params![account_id, ts(&older_than)],
+        )?;
+        deleted += tx.execute(
+            "DELETE FROM messages WHERE id IN (
+               SELECT id FROM messages WHERE account_id = ?1 AND search_only = 1
+               ORDER BY search_seen_at DESC, received_at DESC, id LIMIT -1 OFFSET ?2)",
+            params![account_id, keep_at_most],
+        )?;
+        tx.commit()?;
+        Ok(deleted)
     }
 
     /// Recipient autocomplete: contacts first, then people the user has
@@ -1421,6 +1544,269 @@ mod tests {
         assert_eq!(folder_of(&store, &m.id), None);
         assert_eq!(search(&store, "pineapple").unwrap().len(), 1);
         assert_eq!(index_rows(&store), (1, 1));
+    }
+
+    /// `(search_only, search_seen_at)` of a stored message.
+    fn search_state(store: &Store, id: &str) -> Option<(bool, Option<i64>)> {
+        store
+            .conn()
+            .query_row(
+                "SELECT search_only, search_seen_at FROM messages WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn counts(store: &Store, folder: &Folder) -> (u32, u32) {
+        let f = store.get_folder(&folder.id).unwrap();
+        (f.unread_count, f.total_count)
+    }
+
+    /// An old message server search found in `folder`.
+    fn old_message(folder: &Folder, remote: &str, subject: &str) -> MessageSummary {
+        MessageSummary {
+            received_at: Utc::now() - Duration::days(400),
+            ..message(folder, remote, subject, false)
+        }
+    }
+
+    #[test]
+    fn search_results_are_inserted_search_only_and_indexed() {
+        let (store, inbox, archive) = setup();
+        let now = Utc::now();
+        let old = old_message(&archive, "old", "Northwind invoice 2023-118");
+        let older = old_message(&inbox, "older", "Kickoff notes");
+        let stored = store
+            .upsert_search_results("a", &[old.clone(), older.clone(), old.clone()], now)
+            .unwrap();
+        assert_eq!(
+            stored,
+            SearchUpsert {
+                ids: vec![old.id.clone(), older.id.clone()],
+                added: 2,
+            }
+        );
+        assert_eq!(search_state(&store, &old.id), Some((true, Some(ts(&now)))));
+        assert_eq!(search(&store, "northwind").unwrap()[0].id, old.id);
+        assert_eq!(search(&store, "2023-118").unwrap().len(), 1);
+        // The server's counts already include them.
+        assert_eq!(counts(&store, &archive), (1, 2));
+        // They are real messages of their folder.
+        assert_eq!(
+            store
+                .list_messages(&archive.id, &MessageQuery::default())
+                .unwrap()
+                .total,
+            1
+        );
+
+        // Found again, changed and moved: updated, still a search result.
+        let later = now + Duration::minutes(5);
+        let moved = MessageSummary {
+            folder_id: inbox.id.clone(),
+            subject: "Northwind invoice 2023-118 (paid)".into(),
+            is_read: true,
+            ..old.clone()
+        };
+        let again = store.upsert_search_results("a", &[moved], later).unwrap();
+        assert_eq!(again.added, 0);
+        assert_eq!(
+            search_state(&store, &old.id),
+            Some((true, Some(ts(&later))))
+        );
+        let stored = store.get_message_summary(&old.id).unwrap();
+        assert_eq!((stored.folder_id, stored.is_read), (inbox.id.clone(), true));
+        assert_eq!(search(&store, "paid").unwrap().len(), 1);
+
+        // Opened: seen now.
+        let opened = later + Duration::minutes(5);
+        store.touch_search_result(&old.id, opened).unwrap();
+        assert_eq!(
+            search_state(&store, &old.id),
+            Some((true, Some(ts(&opened))))
+        );
+    }
+
+    #[test]
+    fn search_upsert_leaves_synced_rows_alone() {
+        let (store, inbox, _) = setup();
+        let synced = message(&inbox, "1", "Quarterly report", false);
+        apply(&store, &inbox, upserts(&[&synced]));
+        let found = MessageSummary {
+            subject: "Something else".into(),
+            is_read: true,
+            ..synced.clone()
+        };
+        let stored = store
+            .upsert_search_results("a", &[found], Utc::now())
+            .unwrap();
+        assert_eq!(stored.ids, [synced.id.as_str()]);
+        assert_eq!(stored.added, 0);
+        let row = store.get_message_summary(&synced.id).unwrap();
+        assert_eq!(
+            (row.subject.as_str(), row.is_read),
+            ("Quarterly report", false)
+        );
+        assert_eq!(search_state(&store, &synced.id), Some((false, None)));
+        // Opening a synced message doesn't make it one.
+        store.touch_search_result(&synced.id, Utc::now()).unwrap();
+        assert_eq!(search_state(&store, &synced.id), Some((false, None)));
+    }
+
+    #[test]
+    fn search_results_in_unknown_folders_are_skipped() {
+        let (store, inbox, _) = setup();
+        let hidden = folder("a", "[Gmail]/All Mail", FolderRole::Other);
+        let other_account = folder("b", "INBOX", FolderRole::Inbox);
+        let kept = old_message(&inbox, "kept", "Kept");
+        let stored = store
+            .upsert_search_results(
+                "a",
+                &[
+                    old_message(&hidden, "hidden", "Hidden"),
+                    kept.clone(),
+                    old_message(&other_account, "other", "Other"),
+                ],
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(stored.ids, [kept.id.as_str()]);
+        assert_eq!(stored.added, 1);
+        assert_eq!(index_rows(&store), (1, 1));
+    }
+
+    #[test]
+    fn full_resync_and_retain_only_keep_search_results() {
+        let (store, inbox, _) = setup();
+        let synced = message(&inbox, "1", "One", false);
+        apply(&store, &inbox, upserts(&[&synced]));
+        let found = old_message(&inbox, "old", "Old");
+        store
+            .upsert_search_results("a", std::slice::from_ref(&found), Utc::now())
+            .unwrap();
+        // A window that no longer has the synced one, never had the old one.
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                full_resync: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome.removed, [synced.id.as_str()]);
+        assert!(search_state(&store, &found.id).is_some());
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                retain_only: Some(vec![]),
+                ..Default::default()
+            },
+        );
+        assert!(outcome.removed.is_empty());
+        assert!(search_state(&store, &found.id).is_some());
+    }
+
+    #[test]
+    fn explicit_removals_and_ids_reassigned_drop_them() {
+        let (store, inbox, archive) = setup();
+        let deleted = old_message(&inbox, "deleted", "Deleted");
+        let renumbered = old_message(&archive, "renumbered", "Renumbered");
+        store
+            .upsert_search_results("a", &[deleted.clone(), renumbered.clone()], Utc::now())
+            .unwrap();
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                removed_remote_ids: vec!["deleted".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome.removed, [deleted.id.as_str()]);
+        let outcome = apply(
+            &store,
+            &archive,
+            MessageBatch {
+                full_resync: true,
+                ids_reassigned: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome.removed, [renumbered.id.as_str()]);
+        assert_eq!(index_rows(&store), (0, 0));
+    }
+
+    #[test]
+    fn a_sync_adopts_a_search_result() {
+        let (store, inbox, _) = setup();
+        let found = message(&inbox, "1", "One", false);
+        let stored = store
+            .upsert_search_results("a", std::slice::from_ref(&found), Utc::now())
+            .unwrap();
+        assert_eq!(stored.added, 1);
+        let outcome = apply(&store, &inbox, upserts(&[&found]));
+        assert!(outcome.inserted.is_empty(), "not new mail");
+        assert_eq!(search_state(&store, &found.id), Some((false, None)));
+        // Synced now: it goes when it leaves the window.
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                full_resync: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome.removed, [found.id.as_str()]);
+    }
+
+    #[test]
+    fn prune_search_results_by_age_and_cap() {
+        let (store, inbox, archive) = setup();
+        store.insert_account(&imap_account("b")).unwrap();
+        let other = folder("b", "INBOX", FolderRole::Inbox);
+        store
+            .replace_folders("b", std::slice::from_ref(&other))
+            .unwrap();
+        let synced = message(&inbox, "synced", "Synced", false);
+        apply(&store, &inbox, upserts(&[&synced]));
+        let now = Utc::now();
+        let found = |folder: &Folder, remote: &str, days_ago: i64| {
+            let m = old_message(folder, remote, remote);
+            store
+                .upsert_search_results(
+                    &folder.account_id,
+                    std::slice::from_ref(&m),
+                    now - Duration::days(days_ago),
+                )
+                .unwrap();
+            m.id
+        };
+        let stale = found(&inbox, "stale", 20);
+        let older = found(&archive, "older", 3);
+        let newer = found(&archive, "newer", 1);
+        let elsewhere = found(&other, "elsewhere", 30);
+        let before = (counts(&store, &inbox), counts(&store, &archive));
+
+        let pruned = store
+            .prune_search_results("a", now - Duration::days(14), 1)
+            .unwrap();
+        assert_eq!(pruned, 2);
+        assert!(search_state(&store, &stale).is_none());
+        assert!(search_state(&store, &older).is_none());
+        assert!(search_state(&store, &newer).is_some());
+        assert!(search_state(&store, &synced.id).is_some());
+        assert!(search_state(&store, &elsewhere).is_some(), "other account");
+        assert_eq!((counts(&store, &inbox), counts(&store, &archive)), before);
+        assert_eq!(index_rows(&store), (3, 3));
+        assert_eq!(
+            store
+                .prune_search_results("a", now - Duration::days(14), 1)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
