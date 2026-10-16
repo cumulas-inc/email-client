@@ -116,34 +116,118 @@ fn format_addresses(addresses: &[EmailAddress]) -> String {
         .join(" ")
 }
 
-fn index_message(tx: &Transaction<'_>, m: &MessageSummary, body: &str) -> rusqlite::Result<()> {
-    tx.execute("DELETE FROM messages_fts WHERE message_id = ?1", [&m.id])?;
+/// Finds a message's index rows by the rowid they share; see
+/// [`index_message`].
+const DELETE_FTS_ROW: &str = "DELETE FROM messages_fts WHERE rowid = ?1";
+const DELETE_INFIX_ROW: &str = "DELETE FROM messages_infix WHERE rowid = ?1";
+const SELECT_FTS_BODY: &str = "SELECT body FROM messages_fts WHERE rowid = ?1";
+const INSERT_FTS_ROW: &str = "INSERT INTO messages_fts \
+     (rowid, subject, sender, to_recipients, cc_recipients, body) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const INSERT_INFIX_ROW: &str = "INSERT INTO messages_infix (rowid, subject, sender) \
+     VALUES (?1, ?2, ?3)";
+
+/// (Re)writes a message's rows in the full-text indexes. Both use the rowid
+/// the message row keeps (`fts_rowid`, allocated here the first time), so
+/// they are replaced by rowid rather than found by scanning the index.
+/// `body` `None` keeps the body already indexed (a fetched one), or else
+/// indexes the preview. Removing the message removes its rows (trigger).
+fn index_message(
+    tx: &Transaction<'_>,
+    m: &MessageSummary,
+    body: Option<&str>,
+) -> rusqlite::Result<()> {
+    let stored: Option<i64> = tx
+        .query_row(
+            "SELECT fts_rowid FROM messages WHERE id = ?1",
+            [&m.id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let rowid = match stored {
+        Some(rowid) => rowid,
+        None => {
+            // Served by the unique index on `fts_rowid`.
+            let rowid: i64 = tx.query_row(
+                "SELECT IFNULL(MAX(fts_rowid), 0) + 1 FROM messages",
+                [],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "UPDATE messages SET fts_rowid = ?2 WHERE id = ?1",
+                params![m.id, rowid],
+            )?;
+            rowid
+        }
+    };
+    let kept: Option<String> = match body {
+        Some(_) => None,
+        None => tx
+            .query_row(SELECT_FTS_BODY, [rowid], |r| r.get(0))
+            .optional()?,
+    };
+    let body = body.or(kept.as_deref()).unwrap_or(&m.preview);
+    tx.execute(DELETE_FTS_ROW, [rowid])?;
+    tx.execute(DELETE_INFIX_ROW, [rowid])?;
     let sender = m
         .from
         .as_ref()
         .map(|f| format_addresses(std::slice::from_ref(f)))
         .unwrap_or_default();
-    let recipients = format!("{} {}", format_addresses(&m.to), format_addresses(&m.cc));
     tx.execute(
-        "INSERT INTO messages_fts (message_id, subject, sender, recipients, body)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![m.id, m.subject, sender, recipients, body],
+        INSERT_FTS_ROW,
+        params![
+            rowid,
+            m.subject,
+            sender,
+            format_addresses(&m.to),
+            format_addresses(&m.cc),
+            body
+        ],
     )?;
+    tx.execute(INSERT_INFIX_ROW, params![rowid, m.subject, sender])?;
     Ok(())
+}
+
+/// What [`upsert_summary`] found stored before.
+struct Previous {
+    is_read: bool,
+    folder_id: String,
 }
 
 /// Inserts or updates the summary columns of a message, leaving any fetched
 /// body untouched. Returns the read state and folder stored before, `None`
-/// for a new message.
-fn upsert_summary(
-    tx: &Transaction<'_>,
-    m: &MessageSummary,
-) -> rusqlite::Result<Option<(bool, String)>> {
+/// for a new message. The index follows the text that changed.
+fn upsert_summary(tx: &Transaction<'_>, m: &MessageSummary) -> rusqlite::Result<Option<Previous>> {
+    let to = to_json(&m.to);
+    let cc = to_json(&m.cc);
+    let from_name = m.from.as_ref().and_then(|f| f.name.clone());
+    let from_address = m.from.as_ref().map(|f| f.address.clone());
     let previous = tx
         .query_row(
-            "SELECT is_read, folder_id FROM messages WHERE id = ?1",
+            "SELECT is_read, folder_id, subject, from_name, from_address, to_json, cc_json,
+                    preview, content_json IS NOT NULL
+             FROM messages WHERE id = ?1",
             [&m.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                let text_changed = r.get::<_, String>(2)? != m.subject
+                    || r.get::<_, Option<String>>(3)? != from_name
+                    || r.get::<_, Option<String>>(4)? != from_address
+                    || r.get::<_, String>(5)? != to
+                    || r.get::<_, String>(6)? != cc;
+                // Without a fetched body, the preview is what's indexed.
+                let preview_changed = !r.get::<_, bool>(8)?
+                    && !m.preview.is_empty()
+                    && r.get::<_, String>(7)? != m.preview;
+                Ok((
+                    Previous {
+                        is_read: r.get(0)?,
+                        folder_id: r.get(1)?,
+                    },
+                    text_changed || preview_changed,
+                ))
+            },
         )
         .optional()?;
     tx.execute(
@@ -167,10 +251,10 @@ fn upsert_summary(
             m.remote_id,
             m.conversation_id,
             m.subject,
-            m.from.as_ref().and_then(|f| f.name.clone()),
-            m.from.as_ref().map(|f| f.address.clone()),
-            to_json(&m.to),
-            to_json(&m.cc),
+            from_name,
+            from_address,
+            to,
+            cc,
             m.preview,
             ts(&m.received_at),
             m.is_read,
@@ -180,10 +264,30 @@ fn upsert_summary(
             m.importance.as_str(),
         ],
     )?;
-    if previous.is_none() {
-        index_message(tx, m, &m.preview)?;
+    match previous {
+        None => {
+            index_message(tx, m, Some(&m.preview))?;
+            Ok(None)
+        }
+        Some((previous, changed)) => {
+            if changed {
+                reindex(tx, &m.id)?;
+            }
+            Ok(Some(previous))
+        }
     }
-    Ok(previous)
+}
+
+/// Indexes a stored message's text again, as it is stored now: its fetched
+/// body stays, or else its preview is indexed.
+fn reindex(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<()> {
+    let (summary, has_body) = tx.query_row(
+        &format!("SELECT {SUMMARY_COLUMNS}, content_json IS NOT NULL FROM messages WHERE id = ?1"),
+        [id],
+        |r| Ok((row_to_summary(r)?, r.get::<_, bool>(17)?)),
+    )?;
+    let preview = (!has_body).then_some(summary.preview.as_str());
+    index_message(tx, &summary, preview)
 }
 
 fn stored_read_state(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<bool>> {
@@ -197,7 +301,7 @@ fn stored_read_state(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<
 fn delete_message_rows(tx: &Transaction<'_>, ids: &[String]) -> rusqlite::Result<Vec<String>> {
     let mut deleted = Vec::new();
     for id in ids {
-        tx.execute("DELETE FROM messages_fts WHERE message_id = ?1", [id])?;
+        // The index rows go with it (trigger).
         if tx.execute("DELETE FROM messages WHERE id = ?1", [id])? > 0 {
             deleted.push(id.clone());
         }
@@ -232,11 +336,7 @@ impl Store {
                 .collect::<rusqlite::Result<_>>()?
         };
         for id in existing.iter().filter(|id| !keep.contains(id.as_str())) {
-            tx.execute(
-                "DELETE FROM messages_fts WHERE message_id IN
-                   (SELECT id FROM messages WHERE folder_id = ?1)",
-                [id],
-            )?;
+            // Its messages and their index rows go with it (cascade, trigger).
             tx.execute("DELETE FROM folders WHERE id = ?1", [id])?;
         }
         for f in folders {
@@ -402,14 +502,16 @@ impl Store {
         removed.dedup();
         outcome.removed.extend(delete_message_rows(&tx, &removed)?);
         for m in &batch.upserts {
-            let Some((was_read, was_in)) = upsert_summary(&tx, m)? else {
+            let Some(previous) = upsert_summary(&tx, m)? else {
                 outcome.inserted.push(m.clone());
                 continue;
             };
-            if was_in != m.folder_id && !outcome.moved_from.contains(&was_in) {
-                outcome.moved_from.push(was_in);
+            if previous.folder_id != m.folder_id
+                && !outcome.moved_from.contains(&previous.folder_id)
+            {
+                outcome.moved_from.push(previous.folder_id);
             }
-            match (was_read, m.is_read) {
+            match (previous.is_read, m.is_read) {
                 (false, true) => outcome.became_read.push(m.id.clone()),
                 (true, false) => outcome.became_unread.push(m.id.clone()),
                 _ => {}
@@ -483,7 +585,7 @@ impl Store {
             .collect::<Vec<_>>()
             .join(", ");
         let mut stmt = conn.prepare(&format!(
-            "SELECT {columns} FROM messages_fts f JOIN messages m ON m.id = f.message_id
+            "SELECT {columns} FROM messages_fts f JOIN messages m ON m.fts_rowid = f.rowid
              WHERE messages_fts MATCH ?1 AND (?2 IS NULL OR m.account_id = ?2)
              ORDER BY m.received_at DESC LIMIT ?3"
         ))?;
@@ -564,7 +666,7 @@ impl Store {
             (None, Some(html)) => html_to_text(html),
             (None, None) => summary.preview.clone(),
         };
-        index_message(&tx, &summary, &body)?;
+        index_message(&tx, &summary, Some(&body))?;
         tx.commit()?;
         Ok(())
     }
@@ -656,13 +758,10 @@ impl Store {
         match new_remote_id {
             Some(remote_id) => {
                 let new_id = local_id(&destination.account_id, EntityKind::Message, remote_id);
+                // Its index rows travel with it (`fts_rowid`).
                 tx.execute(
                     "UPDATE messages SET id = ?2, remote_id = ?3, folder_id = ?4 WHERE id = ?1",
                     params![id, new_id, remote_id, destination.id],
-                )?;
-                tx.execute(
-                    "UPDATE messages_fts SET message_id = ?2 WHERE message_id = ?1",
-                    params![id, new_id],
                 )?;
             }
             None => {
@@ -1147,5 +1246,164 @@ mod tests {
         let s = store.suggest_addresses("ada", 5).unwrap();
         assert_eq!(s[0].address, "ada@example.com");
         assert!(store.suggest_addresses("100%_", 5).unwrap().is_empty());
+    }
+
+    /// What SQLite plans for `sql`, every step's detail on its own line.
+    fn query_plan(store: &Store, sql: &str) -> String {
+        let conn = store.conn();
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let nulls = vec![rusqlite::types::Null; stmt.parameter_count()];
+        stmt.query_map(params_from_iter(nulls), |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n")
+    }
+
+    /// The statements that maintain the index find a message's rows by
+    /// rowid; finding them by an unindexed column scanned the whole index
+    /// for every message synced.
+    #[test]
+    fn index_rows_are_found_by_rowid() {
+        let (store, ..) = setup();
+        for sql in [DELETE_FTS_ROW, DELETE_INFIX_ROW, SELECT_FTS_BODY] {
+            let plan = query_plan(&store, sql);
+            assert!(plan.contains("VIRTUAL TABLE INDEX 0:="), "{sql}: {plan}");
+        }
+        let old = query_plan(&store, "DELETE FROM messages_fts WHERE subject = ?1");
+        assert!(!old.contains("INDEX 0:="), "{old}");
+        let next = query_plan(&store, "SELECT IFNULL(MAX(fts_rowid), 0) + 1 FROM messages");
+        assert!(next.contains("messages_fts_rowid"), "{next}");
+    }
+
+    fn index_rows(store: &Store) -> (i64, i64) {
+        store
+            .conn()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM messages_fts), (SELECT COUNT(*) FROM messages_infix)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn index_rows_follow_their_messages() {
+        let (store, inbox, archive) = setup();
+        let batch = MessageBatch {
+            upserts: vec![
+                message(&inbox, "1", "One", false),
+                message(&inbox, "2", "Two", false),
+                message(&inbox, "3", "Three", false),
+            ],
+            ..Default::default()
+        };
+        store.apply_message_batch(&inbox, &batch).unwrap();
+        store
+            .apply_message_batch(
+                &archive,
+                &MessageBatch {
+                    upserts: vec![message(&archive, "4", "Four", false)],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(index_rows(&store), (4, 4));
+        // Synced again unchanged: replaced, not added.
+        store.apply_message_batch(&inbox, &batch).unwrap();
+        assert_eq!(index_rows(&store), (4, 4));
+
+        store
+            .delete_messages(&[batch.upserts[0].id.clone()])
+            .unwrap();
+        assert_eq!(index_rows(&store), (3, 3));
+        // A folder that disappeared takes its messages' rows (cascade).
+        store
+            .replace_folders("a", std::slice::from_ref(&archive))
+            .unwrap();
+        assert_eq!(index_rows(&store), (1, 1));
+        store.delete_account("a").unwrap();
+        assert_eq!(index_rows(&store), (0, 0));
+    }
+
+    #[test]
+    fn reindexes_when_subject_or_recipients_change() {
+        let (store, inbox, _) = setup();
+        let found = |text: &str| store.search_messages(text, None, 10).unwrap().len();
+        let mut fetched = message(&inbox, "1", "Quarterly report", false);
+        let mut plain = message(&inbox, "2", "Lunch", false);
+        let sync = |upserts: Vec<MessageSummary>| {
+            store
+                .apply_message_batch(
+                    &inbox,
+                    &MessageBatch {
+                        upserts,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        };
+        sync(vec![fetched.clone(), plain.clone()]);
+        store
+            .save_message_content(
+                &fetched.id,
+                &MessageContent {
+                    body_text: Some("Pineapple pizza".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Renamed and readdressed elsewhere; previews left out keep theirs.
+        fetched.subject = "Annual report".into();
+        fetched.to = vec![EmailAddress::new(Some("Zed Shaw"), "zed@example.com")];
+        fetched.preview = String::new();
+        plain.preview = "tacos on friday".into();
+        sync(vec![fetched, plain]);
+        assert_eq!(found("annual"), 1);
+        assert_eq!(found("quarterly"), 0);
+        assert_eq!(found("zed"), 1);
+        // The fetched body is still indexed; the new preview replaced the old.
+        assert_eq!(found("pineapple"), 1);
+        assert_eq!(found("tacos"), 1);
+        assert_eq!(found("preview"), 0);
+        assert_eq!(index_rows(&store), (2, 2));
+    }
+
+    /// Indexes 10,000 messages in batches of 500, as a first sync of a big
+    /// mailbox does. With the index maintained by rowid each batch costs
+    /// about the same; by an unindexed column the cost grew with the index.
+    #[test]
+    #[ignore = "timing; run with --release --ignored"]
+    fn indexing_time_does_not_grow_with_the_index() {
+        let (store, inbox, _) = setup();
+        let mut times = Vec::new();
+        for batch in 0..20 {
+            let upserts = (0..500)
+                .map(|i| {
+                    let n = batch * 500 + i;
+                    message(
+                        &inbox,
+                        &format!("m{n}"),
+                        &format!("Subject {n}"),
+                        n % 2 == 0,
+                    )
+                })
+                .collect();
+            let started = std::time::Instant::now();
+            store
+                .apply_message_batch(
+                    &inbox,
+                    &MessageBatch {
+                        upserts,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            times.push(started.elapsed());
+            println!("batch {batch}: {:?}", started.elapsed());
+        }
+        println!("total: {:?}", times.iter().sum::<std::time::Duration>());
+        assert!(times[19] < times[0] * 3, "{times:?}");
     }
 }

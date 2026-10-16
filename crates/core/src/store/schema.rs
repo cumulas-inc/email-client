@@ -211,6 +211,65 @@ const MIGRATIONS: &[&str] = &[
         org_retry_at      INTEGER             -- not before (the service's Retry-After)
     );
     "#,
+    // 5: search. The full-text index keyed by a rowid the message row keeps,
+    // so a message's index rows are found without scanning the index (they
+    // were found by an unindexed column); To and Cc apart, for to: and cc:;
+    // a trigram index of subjects and senders, for matches inside words; and
+    // the rows server search fetched from outside the synced window.
+    r#"
+    ALTER TABLE messages ADD COLUMN fts_rowid INTEGER;
+    ALTER TABLE messages ADD COLUMN search_only INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN search_seen_at INTEGER;
+
+    -- The old index's body text (HTML already converted), latest row per message.
+    CREATE TEMP TABLE fts_v4 AS
+      SELECT message_id, body FROM messages_fts
+      WHERE rowid IN (SELECT MAX(rowid) FROM messages_fts GROUP BY message_id);
+    CREATE INDEX temp.fts_v4_id ON fts_v4(message_id);
+    DROP TABLE messages_fts;
+
+    -- A starting value, copied: stable from here on, unlike the rowid of a
+    -- table with a TEXT primary key, which VACUUM may renumber.
+    UPDATE messages SET fts_rowid = rowid;
+    CREATE UNIQUE INDEX messages_fts_rowid ON messages(fts_rowid);
+    CREATE INDEX messages_search_only ON messages(account_id, search_seen_at)
+      WHERE search_only = 1;
+
+    CREATE VIRTUAL TABLE messages_fts USING fts5(
+        subject, sender, to_recipients, cc_recipients, body,
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+    CREATE VIRTUAL TABLE messages_infix USING fts5(
+        subject, sender,
+        tokenize = 'trigram remove_diacritics 1'
+    );
+
+    INSERT INTO messages_fts (rowid, subject, sender, to_recipients, cc_recipients, body)
+    SELECT m.fts_rowid, m.subject,
+           TRIM(COALESCE(m.from_name, '') || ' ' || COALESCE(m.from_address, '')),
+           (SELECT COALESCE(group_concat(TRIM(COALESCE(json_extract(r.value, '$.name'), '')
+                     || ' ' || json_extract(r.value, '$.address')), ' '), '')
+              FROM json_each(CASE WHEN json_valid(m.to_json) THEN m.to_json ELSE '[]' END) r),
+           (SELECT COALESCE(group_concat(TRIM(COALESCE(json_extract(r.value, '$.name'), '')
+                     || ' ' || json_extract(r.value, '$.address')), ' '), '')
+              FROM json_each(CASE WHEN json_valid(m.cc_json) THEN m.cc_json ELSE '[]' END) r),
+           COALESCE((SELECT o.body FROM fts_v4 o WHERE o.message_id = m.id),
+                    m.body_text, m.preview)
+    FROM messages m;
+
+    INSERT INTO messages_infix (rowid, subject, sender)
+    SELECT fts_rowid, subject, TRIM(COALESCE(from_name, '') || ' ' || COALESCE(from_address, ''))
+    FROM messages;
+
+    DROP TABLE fts_v4;
+
+    -- FK cascades (account removed, folder gone) fire this too.
+    CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages
+    WHEN old.fts_rowid IS NOT NULL BEGIN
+        DELETE FROM messages_fts WHERE rowid = old.fts_rowid;
+        DELETE FROM messages_infix WHERE rowid = old.fts_rowid;
+    END;
+    "#,
 ];
 
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
@@ -317,7 +376,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version as usize, MIGRATIONS.len());
         let count: i64 = conn
             .query_row("SELECT count(*) FROM account_signatures", [], |r| r.get(0))
             .unwrap();
@@ -353,5 +412,139 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Ids of the messages whose rows in `table` match `query`.
+    fn matching(conn: &Connection, table: &str, query: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT id FROM messages WHERE fts_rowid IN
+                   (SELECT rowid FROM {table} WHERE {table} MATCH ?1)
+                 ORDER BY id"
+            ))
+            .unwrap();
+        stmt.query_map([query], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn the_search_migration_upgrades_a_database_from_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        {
+            // A database as the previous version left it: messages indexed
+            // by the old code (m1 twice, the second time with its fetched
+            // body), one never indexed, and an orphaned index row.
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..4] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 4).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO accounts VALUES ('a', 'imap', 'A', 'a@x', '#000', '{}', 0, NULL, NULL);
+                INSERT INTO folders (id, account_id, remote_id, name, role)
+                  VALUES ('f', 'a', 'INBOX', 'Inbox', 'inbox');
+                INSERT INTO messages (id, account_id, folder_id, remote_id, subject, from_name,
+                    from_address, to_json, cc_json, preview, received_at, is_read, is_flagged,
+                    is_draft, has_attachments, importance, content_json, body_html)
+                VALUES
+                  ('m1', 'a', 'f', '1', 'Quarterly report', 'Ada Lovelace', 'ada@example.com',
+                   '[{"name":"Adele Vance","address":"adele@contoso.com"}]', '[]',
+                   'numbers inside', 4, 0, 0, 0, 0, 'normal', '{}', '<p>Pineapple pizza</p>'),
+                  ('m2', 'a', 'f', '2', 'Your invoice', NULL, 'billing@example.com',
+                   '[{"name":null,"address":"me@example.com"}]', 'not json',
+                   'pay now', 3, 1, 0, 0, 0, 'normal', NULL, NULL),
+                  ('m3', 'a', 'f', '3', 'Lunch?', 'Bob', 'bob@example.com', '[]',
+                   '[{"name":"Dana Scully","address":"dana@example.com"}]',
+                   'tacos', 2, 1, 0, 0, 0, 'normal', NULL, NULL),
+                  ('m4', 'a', 'f', '4', 'Fruit', NULL, NULL, '[]', '[]',
+                   'kiwi season', 1, 1, 0, 0, 0, 'normal', NULL, NULL);
+                INSERT INTO messages_fts (message_id, subject, sender, recipients, body) VALUES
+                  ('m1', 'Quarterly report', 'Ada Lovelace ada@example.com',
+                   'Adele Vance adele@contoso.com ', 'numbers inside'),
+                  ('m1', 'Quarterly report', 'Ada Lovelace ada@example.com',
+                   'Adele Vance adele@contoso.com ', 'Pineapple pizza'),
+                  ('m2', 'Your invoice', 'billing@example.com', 'me@example.com ', 'pay now'),
+                  ('m3', 'Lunch?', 'Bob bob@example.com', ' Dana Scully dana@example.com', 'tacos'),
+                  ('gone', 'Orphan', 'x', 'y', 'orphan text');
+                "#,
+            )
+            .unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+
+        // The fetched body was kept (the latest row), else the preview.
+        assert_eq!(matching(&conn, "messages_fts", "body : pineapple"), ["m1"]);
+        assert!(matching(&conn, "messages_fts", "body : numbers").is_empty());
+        assert_eq!(matching(&conn, "messages_fts", "body : kiwi"), ["m4"]);
+        assert!(matching(&conn, "messages_fts", "orphan").is_empty());
+        // To and Cc apart, from the stored recipients.
+        assert_eq!(
+            matching(&conn, "messages_fts", "to_recipients : adele"),
+            ["m1"]
+        );
+        assert_eq!(
+            matching(&conn, "messages_fts", "to_recipients : me"),
+            ["m2"]
+        );
+        assert_eq!(
+            matching(&conn, "messages_fts", "cc_recipients : scully"),
+            ["m3"]
+        );
+        assert!(matching(&conn, "messages_fts", "to_recipients : dana").is_empty());
+        assert_eq!(matching(&conn, "messages_fts", "sender : lovelace"), ["m1"]);
+        // Inside words.
+        assert_eq!(
+            matching(&conn, "messages_infix", "subject : \"voic\""),
+            ["m2"]
+        );
+        assert_eq!(matching(&conn, "messages_infix", "\"illing@\""), ["m2"]);
+
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(DISTINCT fts_rowid) FROM messages WHERE fts_rowid IS NOT NULL"
+            ),
+            4
+        );
+        for table in ["messages_fts", "messages_infix"] {
+            assert_eq!(count(&conn, &format!("SELECT COUNT(*) FROM {table}")), 4);
+            assert_eq!(
+                count(
+                    &conn,
+                    &format!(
+                        "SELECT COUNT(*) FROM {table}
+                         WHERE rowid NOT IN (SELECT fts_rowid FROM messages)"
+                    )
+                ),
+                0,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM messages WHERE search_only = 1"),
+            0
+        );
+
+        // A folder removed takes its messages' index rows (cascade, trigger).
+        conn.execute("DELETE FROM folders WHERE id = 'f'", [])
+            .unwrap();
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM messages"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM messages_fts"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM messages_infix"), 0);
     }
 }

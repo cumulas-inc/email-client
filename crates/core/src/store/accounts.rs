@@ -97,17 +97,11 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Deletes the account and, through foreign keys, everything cached for it.
+    /// Deletes the account and, through foreign keys, everything cached for
+    /// it (the messages' index rows through a trigger).
     pub fn delete_account(&self, id: &str) -> Result<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        tx.execute(
-            "DELETE FROM messages_fts WHERE message_id IN
-               (SELECT id FROM messages WHERE account_id = ?1)",
-            [id],
-        )?;
-        tx.execute("DELETE FROM accounts WHERE id = ?1", [id])?;
-        tx.commit()?;
+        self.conn()
+            .execute("DELETE FROM accounts WHERE id = ?1", [id])?;
         Ok(())
     }
 
