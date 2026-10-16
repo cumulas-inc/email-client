@@ -55,10 +55,10 @@ React, packaged for Flathub as `co.cumulas.Mail`.
   Yahoo and Proton Mail Bridge. IMAP accounts get a local calendar, contacts
   and task list.
 - **Privacy and security**: remote images and tracking pixels blocked by
-  default; message HTML sanitized and shown in a sandbox without scripts;
-  passwords and tokens kept in the system keyring (in Flatpak, encrypted in the
-  app's folder with a key from the Secret portal); no telemetry. The
-  [privacy policy](PRIVACY.md) says what goes where.
+  default; message HTML sanitized and shown in an isolated frame that runs
+  none of its scripts; passwords and tokens kept in the system keyring (in
+  Flatpak, encrypted in the app's folder with a key from the Secret portal); no
+  telemetry. The [privacy policy](PRIVACY.md) says what goes where.
 
 ## Development
 
