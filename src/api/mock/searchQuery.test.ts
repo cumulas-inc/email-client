@@ -76,6 +76,17 @@ describe("parseSearch", () => {
     expect(emoji.terms).toEqual([]);
   });
 
+  it("takes whitespace to be what Rust takes it to be", () => {
+    // U+3000 and U+2028 are whitespace to both; U+FEFF only to JavaScript's
+    // trim(), so a phrase keeps it, as the core's does.
+    expect(parseSearch('"\u3000a\u2028b "').terms).toEqual([
+      { field: "any", text: "a b", phrase: true },
+    ]);
+    expect(parseSearch('"\ufeffmegan"').terms).toEqual([
+      { field: "any", text: "\ufeffmegan", phrase: true },
+    ]);
+  });
+
   it("never fails, whatever it is given", () => {
     for (const input of ['"', "\\", '\\"', "\u0000\u0007", "😀", "מה שלום", ":", "from::", '""']) {
       const query = parseSearch(input);

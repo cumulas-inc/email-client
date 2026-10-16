@@ -74,11 +74,12 @@ function words(run: string): string[] {
 
 /** A quoted phrase's text: no backslashes, single spaces, lowercased. */
 function phraseText(raw: string): string {
+  // Trimmed by hand: trim() also takes U+FEFF, which isn't whitespace to Rust.
   return Array.from(raw.replaceAll("\\", ""))
     .map((c) => (isSpace(c) ? " " : c))
     .join("")
     .replace(/ {2,}/g, " ")
-    .trim()
+    .replace(/^ | $/g, "")
     .toLowerCase();
 }
 
