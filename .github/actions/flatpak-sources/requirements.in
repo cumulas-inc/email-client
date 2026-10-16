@@ -1,7 +1,9 @@
 # The Python packages flatpak-builder-tools' Cargo and npm generators need
 # (generate-sources.sh). requirements.txt pins them, with their dependencies
-# and hashes:
-#   uv pip compile requirements.in --generate-hashes --python-version 3.13 -o requirements.txt
+# and hashes, for any Python from 3.10 on (--universal adds the dependencies
+# that only older Pythons need, such as typing-extensions before 3.13), so
+# that pip install --require-hashes works with whichever Python runs it:
+#   uv pip compile requirements.in --universal --generate-hashes --python-version 3.10 -o requirements.txt
 aiohttp
 tomlkit
 pyyaml
