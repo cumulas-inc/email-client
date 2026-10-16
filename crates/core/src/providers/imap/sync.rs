@@ -12,10 +12,10 @@ use chrono::{DateTime, Utc};
 
 use super::connection::{FetchedMessage, ImapSession, MailboxInfo};
 use super::mime::{self, PreviewPart};
-use super::{remote_id, uid_set};
+use super::{remote_id, remote_id_prefix, uid_set};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{EntityKind, Folder, MessageSummary, local_id};
-use crate::providers::{FlagUpdate, MessageBatch, SyncWindow};
+use crate::providers::{FlagUpdate, MessageBatch, NumberedIds, SyncWindow};
 
 /// Messages per summary `UID FETCH`, bounding response sizes.
 const FETCH_CHUNK: usize = 100;
@@ -162,6 +162,12 @@ async fn incremental_sync(
         newest_first(&mut new, window.max_messages);
         batch.upserts = fetch_summaries(session, target, &new).await?;
         batch.retain_only = Some(present.iter().map(|&uid| target.remote_id(uid)).collect());
+        // Every UID from `low` up was listed, so a search result among them
+        // that isn't was expunged.
+        batch.retain_covers = Some(NumberedIds {
+            prefix: remote_id_prefix(&target.folder.remote_id, target.uid_validity),
+            from: low.into(),
+        });
     }
 
     // Flag changes of the messages known before this sync.

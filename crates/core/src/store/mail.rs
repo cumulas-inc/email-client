@@ -673,15 +673,25 @@ impl Store {
             .collect();
         if let Some(retain) = &batch.retain_only {
             let keep: HashSet<&str> = retain.iter().map(String::as_str).collect();
-            let mut stmt = tx.prepare(
-                "SELECT id, remote_id FROM messages WHERE folder_id = ?1 AND search_only = 0",
-            )?;
+            let mut stmt =
+                tx.prepare("SELECT id, remote_id, search_only FROM messages WHERE folder_id = ?1")?;
             let rows = stmt.query_map([&folder.id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
             })?;
             for row in rows {
-                let (id, remote_id) = row?;
-                if !keep.contains(remote_id.as_str()) {
+                let (id, remote_id, search_only) = row?;
+                // Rows server search fetched from outside the list's reach
+                // aren't in it, though still on the server.
+                let covered = !search_only
+                    || batch
+                        .retain_covers
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(&remote_id));
+                if covered && !keep.contains(remote_id.as_str()) {
                     removed.push(id);
                 }
             }
@@ -1193,6 +1203,7 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use super::*;
+    use crate::providers::NumberedIds;
     use crate::store::test_support::imap_account;
 
     fn folder(account: &str, remote: &str, role: FolderRole) -> Folder {
@@ -1832,6 +1843,59 @@ mod tests {
         );
         assert!(outcome.removed.is_empty());
         assert!(search_state(&store, &found.id).is_some());
+    }
+
+    /// IMAP lists every UID from the window's lowest up: a search result
+    /// among them that isn't listed was expunged (new mail a search found
+    /// before the sync did, say); older ones are outside the list's reach.
+    #[test]
+    fn retain_only_judges_the_search_results_it_covers() {
+        let (store, inbox, _) = setup();
+        let remote = |uid: u32| format!("INBOX:7:{uid}");
+        let synced = message(&inbox, &remote(10), "Synced", false);
+        apply(&store, &inbox, upserts(&[&synced]));
+        let new = message(&inbox, &remote(12), "New zebracorn", false);
+        let kept_new = message(&inbox, &remote(13), "New and kept zebracorn", false);
+        let old = old_message(&inbox, &remote(3), "Old zebracorn");
+        store
+            .upsert_search_results(
+                "a",
+                &[new.clone(), kept_new.clone(), old.clone()],
+                Utc::now(),
+                &store.search_page_started(),
+            )
+            .unwrap();
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                retain_only: Some(vec![remote(10), remote(13)]),
+                retain_covers: Some(NumberedIds {
+                    prefix: "INBOX:7:".into(),
+                    from: 10,
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome.removed, [new.id.as_str()]);
+        for (m, there) in [
+            (&synced, true),
+            (&kept_new, true),
+            (&old, true),
+            (&new, false),
+        ] {
+            assert_eq!(folder_of(&store, &m.id).is_some(), there, "{}", m.subject);
+        }
+        // Without saying what it covers, a list leaves search results be.
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                retain_only: Some(vec![remote(10)]),
+                ..Default::default()
+            },
+        );
+        assert!(outcome.removed.is_empty());
     }
 
     #[test]

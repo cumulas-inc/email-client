@@ -294,9 +294,10 @@ the device's.
 local ids. The UI passes them to the local search (`includeIds`), so every
 result is a stored message in its folder, which opens, moves and flags like
 any other, and shows in its folder's list too. The sync window's pruning
-(Graph's full resync, IMAP's `retain_only`) leaves these rows alone; a removal
-the server reports deletes them, and so does opening one the server no longer
-has. A page stored after a change made here while the server answered (a
+(Graph's full resync, IMAP's `retain_only`) leaves these rows alone, but for
+IMAP UIDs the incremental sync lists (from the window's oldest up, where new
+mail a search found first sits); a removal the server reports deletes them,
+and so does opening one the server no longer has. A page stored after a change made here while the server answered (a
 deletion, a move, a flag) leaves that message as it is now. A sync that sees
 one takes it over. Otherwise they go 14 days after a
 search last found them or they were last opened, and beyond 2,000 per account

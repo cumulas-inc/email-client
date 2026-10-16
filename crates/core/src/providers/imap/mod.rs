@@ -167,7 +167,12 @@ pub async fn test_connection(credentials: &ImapCredentials) -> Result<()> {
 
 /// Builds the remote id of a message.
 fn remote_id(mailbox: &str, uid_validity: u32, uid: u32) -> String {
-    format!("{mailbox}{ID_SEPARATOR}{uid_validity}{ID_SEPARATOR}{uid}")
+    format!("{}{uid}", remote_id_prefix(mailbox, uid_validity))
+}
+
+/// What the remote ids of a mailbox's messages start with, before the UID.
+fn remote_id_prefix(mailbox: &str, uid_validity: u32) -> String {
+    format!("{mailbox}{ID_SEPARATOR}{uid_validity}{ID_SEPARATOR}")
 }
 
 /// A message's address on the server, parsed from its remote id.
@@ -558,6 +563,21 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn numbered_ids_cover_a_mailbox_s_uids_from_one_up() {
+        let from_5 = crate::providers::NumberedIds {
+            prefix: remote_id_prefix("INBOX", 7),
+            from: 5,
+        };
+        assert!(from_5.contains(&remote_id("INBOX", 7, 5)));
+        assert!(from_5.contains(&remote_id("INBOX", 7, 4_000_000_000)));
+        assert!(!from_5.contains(&remote_id("INBOX", 7, 4)));
+        assert!(!from_5.contains(&remote_id("INBOX", 8, 9)));
+        assert!(!from_5.contains(&remote_id("INBOX/Sub", 7, 9)));
+        assert!(!from_5.contains(&format!("{}+9", remote_id_prefix("INBOX", 7))));
+        assert!(!from_5.contains(&remote_id_prefix("INBOX", 7)));
     }
 
     #[test]

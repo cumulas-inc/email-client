@@ -59,10 +59,16 @@ pub struct MessageBatch {
     pub removed_remote_ids: Vec<String>,
     /// When set, the complete list of remote ids currently in the folder
     /// within the sync window: any stored message of the folder not listed is
-    /// removed, but for messages server search fetched from outside it. Lets
+    /// removed, but for messages server search fetched that `retain_covers`
+    /// doesn't name (from outside the window, as a rule). Lets
     /// providers that cannot report deletions (IMAP without QRESYNC)
     /// reconcile cheaply.
     pub retain_only: Option<Vec<String>>,
+    /// With `retain_only`: the remote ids it covers, so that messages server
+    /// search fetched among them are removed too when not listed (IMAP: the
+    /// folder's UIDs from the window's lowest up, which may hold new mail a
+    /// search found before the sync did). `None` covers none of them.
+    pub retain_covers: Option<NumberedIds>,
     /// When true, `upserts` is the complete content of the folder within the
     /// sync window and anything else stored locally for it must be dropped
     /// (e.g. IMAP UIDVALIDITY changed or a Graph delta token expired), but
@@ -81,6 +87,23 @@ pub struct MessageBatch {
     /// With `full_resync`: the folder's remote ids were reassigned (IMAP
     /// UIDVALIDITY changed), so rows server search fetched go too.
     pub ids_reassigned: bool,
+}
+
+/// The remote ids made of `prefix` and a number from `from` up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumberedIds {
+    pub prefix: String,
+    pub from: u64,
+}
+
+impl NumberedIds {
+    pub fn contains(&self, remote_id: &str) -> bool {
+        remote_id
+            .strip_prefix(self.prefix.as_str())
+            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|n| n.parse::<u64>().ok())
+            .is_some_and(|n| n >= self.from)
+    }
 }
 
 /// A folder's message counts as the server reports them.
