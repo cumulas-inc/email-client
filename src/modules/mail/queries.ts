@@ -133,11 +133,18 @@ export function fetchMessage(client: QueryClient, backend: Backend, messageId: s
   });
 }
 
-export function useSearch(text: string) {
+/**
+ * The messages on this device matching `text`, with `includeIds` (what the
+ * server searches found, stored on the device now) among them. `revision`
+ * changes whenever `includeIds` does (the search they came from and how
+ * many), so each list of hits is its own query; the last results stay on
+ * screen while the next ones load.
+ */
+export function useSearch(text: string, includeIds: string[], revision: string) {
   const backend = useBackend();
   return useQuery({
-    queryKey: qk.search(text),
-    queryFn: () => backend.searchMessages(text),
+    queryKey: qk.search(text, revision),
+    queryFn: () => backend.searchMessages(text, undefined, includeIds),
     enabled: text.length > 0,
     placeholderData: (previous) => previous,
   });

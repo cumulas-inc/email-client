@@ -30,7 +30,8 @@ export const qk = {
   messages: (folderId: string, filter: string) => ["mail", "messages", folderId, filter] as const,
   message: (messageId: string, allowRemote: boolean) =>
     ["mail", "message", messageId, allowRemote] as const,
-  search: (text: string) => ["mail", "search", text] as const,
+  /** `revision` names the server hits included (see useSearch). */
+  search: (text: string, revision: string) => ["mail", "search", text, revision] as const,
   suggestions: (text: string) => ["contacts", "suggest", text] as const,
 
   calendars: () => ["calendar", "calendars"] as const,

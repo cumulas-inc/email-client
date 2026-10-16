@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   Archive,
+  CircleAlert,
   Flag,
   FolderInput,
   Inbox,
+  LoaderCircle,
   Mail,
   MailOpen,
   SearchX,
@@ -14,6 +16,7 @@ import {
   type DragEvent,
   type KeyboardEvent,
   type MouseEvent,
+  type ReactNode,
   useEffect,
   useMemo,
   useRef,
@@ -41,6 +44,7 @@ import { ALL_INBOXES, type MailFilter, useMailStore } from "./mailStore";
 import { optionId } from "./dom";
 import { MessageRow, type RowHandlers } from "./MessageRow";
 import { useFolders, useMessageList, useSearch } from "./queries";
+import { MIN_SERVER_SEARCH_CHARS, useServerSearch } from "./serverSearch";
 
 const FILTERS: { value: MailFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -51,6 +55,8 @@ const FILTERS: { value: MailFilter; label: string }[] = [
 function matchesFilter(filter: MailFilter) {
   return (m: MessageSummary) => filter === "all" || (filter === "unread" ? !m.isRead : m.isFlagged);
 }
+
+const NO_IDS: string[] = [];
 
 function insertByDate(items: MessageSummary[], item: MessageSummary): MessageSummary[] {
   const index = items.findIndex((m) => m.receivedAt < item.receivedAt);
@@ -174,8 +180,12 @@ interface MessageListProps {
 
 export function MessageList({ actions, readingPane, onEditDraft }: MessageListProps) {
   const search = useAppStore((s) => s.search);
-  const searchText = useDebounced(search.trim(), 250);
-  const searching = search.trim().length > 0;
+  const query = search.trim();
+  const searching = query.length > 0;
+  // This device answers at once; the servers take seconds, so they are
+  // asked only once the typing has stopped.
+  const localText = useDebounced(query, 150);
+  const serverText = useDebounced(query, 600);
 
   const folderId = useMailStore((s) => s.folderId);
   const filter = useMailStore((s) => s.filter);
@@ -188,7 +198,20 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   const { data: folders = [] } = useFolders();
   const { data: accounts = [] } = useAccounts();
   const list = useMessageList(searching ? null : folderId, filter);
-  const results = useSearch(searching ? searchText : "");
+  // A text still changing would cancel the server search it started.
+  const server = useServerSearch(serverText === query ? query : "");
+  const serverWanted = localText.length >= MIN_SERVER_SEARCH_CHARS && accounts.length > 0;
+  // The server's hits for this text; never those of an older one.
+  const serverCurrent = serverWanted && server.text === localText;
+  const includeIds = serverCurrent ? server.ids : NO_IDS;
+  const results = useSearch(
+    searching ? localText : "",
+    includeIds,
+    includeIds.length > 0 ? `${server.searchId}:${includeIds.length}` : "local",
+  );
+  /** A server is still being asked for the first page for this text (or soon will be). */
+  const serverBusy =
+    serverWanted && (!serverCurrent || server.accounts.some((a) => a.status === "searching"));
 
   const fetched = useMemo(() => {
     // Unread and Flagged narrow search results too; the title says when
@@ -375,12 +398,21 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     }
   };
 
-  // Keep the active row visible and focused while the list has focus.
+  // Keep the active row visible and focused while the list has focus. Only
+  // a row that just became active (or just appeared) is scrolled to: rows
+  // arriving later, as search results stream in, leave the scroll alone.
+  const scrolledTo = useRef<string | null>(null);
   useEffect(() => {
-    if (!activeId) return;
+    if (!activeId) {
+      scrolledTo.current = null;
+      return;
+    }
     const el = document.getElementById(optionId(activeId));
     if (!el) return;
-    el.scrollIntoView?.({ block: "nearest" });
+    if (scrolledTo.current !== activeId) {
+      scrolledTo.current = activeId;
+      el.scrollIntoView?.({ block: "nearest" });
+    }
     const focused = document.activeElement;
     const inList = !!focused && (listRef.current?.contains(focused) || focused === document.body);
     if (inList && focused !== el) el.focus({ preventScroll: true });
@@ -440,7 +472,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
         {filtered
           ? `${formatCount(items.length)} ${filterWord} of ${formatCount(resultCount)} ${resultsWord}`
           : `${formatCount(items.length)} ${items.length === 1 ? "result" : "results"}`}{" "}
-        for “<bdi>{search.trim()}</bdi>”
+        for “<bdi>{query}</bdi>”
       </span>
     ) : null;
 
@@ -453,10 +485,89 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     return null;
   };
 
+  // --- search: the servers' progress, failures and more pages -----------------------
+
+  // Results shown aren't this text's yet, or lack the server's latest hits.
+  const resultsStale = searching && (localText !== query || results.isPlaceholderData);
+  const settled = searching && !serverBusy && !resultsStale;
+  const failedAccounts = serverCurrent
+    ? server.accounts.filter((a) => a.status === "failed" && accountById.has(a.accountId))
+    : [];
+  const moreToShow =
+    serverCurrent &&
+    !server.accounts.some((a) => a.status === "searching") &&
+    server.accounts.some((a) => a.hasMore || a.loadingMore);
+
+  const searchStatus = serverBusy ? (
+    <div className="mail-search-status">
+      <LoaderCircle size={14} className="spin" aria-hidden="true" />
+      Searching your whole mailbox…
+    </div>
+  ) : null;
+  const showMore = moreToShow ? (
+    <div className="mail-list__more">
+      {server.accounts.some((a) => a.loadingMore) ? (
+        <Spinner size={18} label="Loading more results" />
+      ) : (
+        <button type="button" className="btn btn--subtle btn--sm" onClick={server.showMore}>
+          Show more results
+        </button>
+      )}
+    </div>
+  ) : null;
+  const failures =
+    failedAccounts.length > 0 ? (
+      <div className="mail-search-notes">
+        {failedAccounts.map((a, i) => (
+          <div key={a.accountId} className="mail-search-error">
+            <CircleAlert size={16} aria-hidden="true" />
+            <p id={`mail-search-error-${i}`}>
+              Couldn't search <bdi>{accountName(a.accountId)}</bdi> on the server.{" "}
+              {a.error?.message}
+            </p>
+            <button
+              type="button"
+              className="btn btn--subtle btn--sm"
+              aria-describedby={`mail-search-error-${i}`}
+              onClick={() => server.retry(a.accountId)}
+            >
+              Try again
+            </button>
+          </div>
+        ))}
+      </div>
+    ) : null;
+
+  // Said once things settle, and while the servers are being asked.
+  let announcement = "";
+  if (serverBusy) announcement = "Searching your whole mailbox…";
+  else if (settled) {
+    const count =
+      resultCount === 0
+        ? "No results"
+        : filtered
+          ? items.length === 0
+            ? `No ${filterWord} results`
+            : `${exactCount(items.length)} ${filterWord} of ${exactCount(resultCount)} ${resultsWord}`
+          : `${exactCount(items.length)} ${items.length === 1 ? "result" : "results"}`;
+    announcement = [
+      `${count}.`,
+      ...failedAccounts.map((a) => `Couldn't search ${accountName(a.accountId)} on the server.`),
+    ].join(" ");
+  }
+
+  /** An empty state of the search, under the server's progress. */
+  const searchEmpty = (state: ReactNode, status: ReactNode = null) => (
+    <div className="mail-search-empty">
+      {status}
+      {state}
+    </div>
+  );
+
   // --- body -------------------------------------------------------------------------
 
   const loading = searching
-    ? results.isPending && searchText.length > 0
+    ? !results.data && !results.isError
     : folderId !== null && list.isPending;
   const error = searching ? results.error : list.error;
 
@@ -469,7 +580,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
         description="Choose a folder on the left to see its messages."
       />
     );
-  } else if (loading || (searching && searchText !== search.trim() && !results.data)) {
+  } else if (loading) {
     body = <PaneSpinner />;
   } else if (error) {
     body = (
@@ -491,26 +602,54 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     body = searching ? (
       resultCount > 0 && filter !== "all" ? (
         // Results the filter hides: say so, rather than "No results".
-        <EmptyState
-          icon={<SearchX size={40} strokeWidth={1.5} />}
-          title={filter === "unread" ? "No unread results" : "No flagged results"}
-          description={
-            resultCount === 1
-              ? `The only result for “${search.trim()}” isn't ${filterWord}.`
-              : `None of the ${formatCount(resultCount)} results for “${search.trim()}” are ${filterWord}.`
-          }
-          action={
-            <button type="button" className="btn btn--subtle" onClick={() => setFilter("all")}>
-              Show all results
-            </button>
-          }
-        />
+        searchEmpty(
+          <EmptyState
+            icon={<SearchX size={40} strokeWidth={1.5} />}
+            title={filter === "unread" ? "No unread results" : "No flagged results"}
+            description={
+              resultCount === 1
+                ? `The only result for “${query}” isn't ${filterWord}.`
+                : `None of the ${formatCount(resultCount)} results for “${query}” are ${filterWord}.`
+            }
+            action={
+              <>
+                <button type="button" className="btn btn--subtle" onClick={() => setFilter("all")}>
+                  Show all results
+                </button>
+                {showMore}
+                {failures}
+              </>
+            }
+          />,
+          searchStatus,
+        )
+      ) : !settled ? (
+        serverWanted ? (
+          // Never "No results" while a server may still find something.
+          searchEmpty(
+            <EmptyState
+              icon={<LoaderCircle size={40} strokeWidth={1.5} className="spin" />}
+              title="Searching your whole mailbox…"
+              description={resultsStale ? undefined : `Nothing on this device matches “${query}”.`}
+              action={failures}
+            />,
+          )
+        ) : (
+          <PaneSpinner />
+        )
       ) : (
-        <EmptyState
-          icon={<SearchX size={40} strokeWidth={1.5} />}
-          title="No results"
-          description={`We didn't find anything for “${search.trim()}”. Try different keywords.`}
-        />
+        searchEmpty(
+          <EmptyState
+            icon={<SearchX size={40} strokeWidth={1.5} />}
+            title="No results"
+            description={
+              failures
+                ? `We didn't find anything for “${query}” on this device.`
+                : `We didn't find anything for “${query}”. Try other words, or from:, subject: or has:attachment.`
+            }
+            action={failures}
+          />,
+        )
       )
     ) : filter !== "all" ? (
       <EmptyState
@@ -539,71 +678,76 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     );
   } else {
     body = (
-      <div
-        ref={listRef}
-        role="listbox"
-        aria-label={searching ? "Search results" : `Messages in ${title}`}
-        aria-multiselectable="true"
-        className="mail-list__items"
-        onKeyDown={onKeyDown}
-        onFocus={(e) => {
-          // Tabbing into the list lands on the active row (or the first).
-          if (e.target === e.currentTarget) {
-            const store = useMailStore.getState();
-            if (!store.activeId) store.moveActive(1);
-            else document.getElementById(optionId(store.activeId))?.focus();
-          }
-        }}
-        tabIndex={activeId && items.some((m) => m.id === activeId) ? -1 : 0}
-      >
-        {groups.map((group) => (
-          <div
-            key={group.label}
-            role="group"
-            aria-labelledby={`mail-group-${group.label.replace(/\W+/g, "-")}`}
-          >
+      <>
+        {searching && searchStatus}
+        <div
+          ref={listRef}
+          role="listbox"
+          aria-label={searching ? "Search results" : `Messages in ${title}`}
+          aria-multiselectable="true"
+          className="mail-list__items"
+          onKeyDown={onKeyDown}
+          onFocus={(e) => {
+            // Tabbing into the list lands on the active row (or the first).
+            if (e.target === e.currentTarget) {
+              const store = useMailStore.getState();
+              if (!store.activeId) store.moveActive(1);
+              else document.getElementById(optionId(store.activeId))?.focus();
+            }
+          }}
+          tabIndex={activeId && items.some((m) => m.id === activeId) ? -1 : 0}
+        >
+          {groups.map((group) => (
             <div
-              id={`mail-group-${group.label.replace(/\W+/g, "-")}`}
-              className="mail-group__header"
-              role="presentation"
+              key={group.label}
+              role="group"
+              aria-labelledby={`mail-group-${group.label.replace(/\W+/g, "-")}`}
             >
-              {group.label}
-            </div>
-            {group.items.map((m) => (
-              <MessageRow
-                key={m.id}
-                message={m}
-                selected={selectedSet.has(m.id)}
-                active={m.id === activeId}
-                checkMode={checkMode}
-                showRecipients={showRecipients}
-                context={contextFor(m)}
-                contextColor={
-                  searching || folderId === ALL_INBOXES
-                    ? (accountById.get(m.accountId)?.color ?? null)
-                    : null
-                }
-                handlers={handlers}
-              />
-            ))}
-          </div>
-        ))}
-        {!searching && (hasNextPage || isFetchingNextPage) && (
-          <div ref={sentinelRef} className="mail-list__more">
-            {isFetchingNextPage ? (
-              <Spinner size={18} label="Loading more messages" />
-            ) : (
-              <button
-                type="button"
-                className="btn btn--subtle btn--sm"
-                onClick={() => void fetchNextPage()}
+              <div
+                id={`mail-group-${group.label.replace(/\W+/g, "-")}`}
+                className="mail-group__header"
+                role="presentation"
               >
-                Load more messages
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+                {group.label}
+              </div>
+              {group.items.map((m) => (
+                <MessageRow
+                  key={m.id}
+                  message={m}
+                  selected={selectedSet.has(m.id)}
+                  active={m.id === activeId}
+                  checkMode={checkMode}
+                  showRecipients={showRecipients}
+                  context={contextFor(m)}
+                  contextColor={
+                    searching || folderId === ALL_INBOXES
+                      ? (accountById.get(m.accountId)?.color ?? null)
+                      : null
+                  }
+                  handlers={handlers}
+                />
+              ))}
+            </div>
+          ))}
+          {!searching && (hasNextPage || isFetchingNextPage) && (
+            <div ref={sentinelRef} className="mail-list__more">
+              {isFetchingNextPage ? (
+                <Spinner size={18} label="Loading more messages" />
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn--subtle btn--sm"
+                  onClick={() => void fetchNextPage()}
+                >
+                  Load more messages
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        {searching && showMore}
+        {searching && failures}
+      </>
     );
   }
 
@@ -660,6 +804,10 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
       <div ref={scrollRef} className="mail-list__scroll">
         {body}
       </div>
+      {/* Always there, so screen readers announce what changes in it. */}
+      <p className="visually-hidden" role="status">
+        {searching ? announcement : ""}
+      </p>
     </section>
   );
 }

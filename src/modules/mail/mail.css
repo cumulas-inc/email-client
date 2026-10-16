@@ -622,6 +622,80 @@
   padding: var(--space-3);
 }
 
+/* --- Search: the servers' progress and failures ------------------------------------ */
+
+/* "Searching your whole mailbox…" above the results found so far. */
+.mail-search-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 12px 6px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+}
+
+.mail-search-status > svg {
+  flex: none;
+  color: var(--brand-text);
+}
+
+/* An empty state under that line: it fills what is left, so nothing scrolls. */
+.mail-search-empty {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.mail-search-empty > .empty-state {
+  flex: 1;
+  height: auto;
+}
+
+.mail-search-empty .empty-state__action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: 420px;
+}
+
+/* An account whose server couldn't be searched: the results stay above. */
+.mail-search-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-1) 0 var(--space-2);
+}
+
+.mail-search-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 4px 8px var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--warning-subtle);
+  color: var(--fg-primary);
+  font-size: var(--text-sm);
+  text-align: start;
+}
+
+.mail-search-error > svg {
+  flex: none;
+  color: var(--warning);
+}
+
+.mail-search-error > p {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mail-search-error > .btn {
+  flex: none;
+}
+
 /* --- Message rows ------------------------------------------------------------------ */
 
 /* A row is a rounded tile. Selection changes are instant: they follow the

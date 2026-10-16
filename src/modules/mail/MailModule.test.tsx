@@ -707,6 +707,32 @@ async function expectResults(...names: RegExp[]) {
   });
 }
 
+/** What the message list's live region last said. */
+function announced() {
+  const list = screen.getByRole("region", { name: "Message list" });
+  return list.querySelector(":scope > p[role=status]")!.textContent;
+}
+
+/** Whether `text` was ever on the page, from now on. */
+function watchFor(text: string): () => boolean {
+  let seen = false;
+  const look = () => {
+    seen ||= document.body.textContent?.includes(text) ?? false;
+  };
+  const observer = new MutationObserver(look);
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  return () => {
+    look();
+    observer.disconnect();
+    return seen;
+  };
+}
+
+/** A search error row's text. */
+function failureRow() {
+  return screen.queryByText(/Couldn't search/, { selector: ".mail-search-error p" });
+}
+
 describe("Search", () => {
   it("finds by operator, by the start of words and inside subjects", async () => {
     const backend = new MockBackend();
@@ -762,6 +788,131 @@ describe("Search", () => {
     await setSearch("lisbon");
     expect(await screen.findByText("No flagged results")).toBeInTheDocument();
     expect(screen.getByText("The only result for “lisbon” isn't flagged.")).toBeInTheDocument();
+  });
+
+  it("searches the whole mailbox on the servers, and what it finds acts like any message", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const resume = backend.pauseServerSearch();
+    await renderMail({ backend });
+    const sawNoResults = watchFor("No results");
+
+    // Nothing on the device: the servers are being asked, and it says so.
+    await setSearch("invoice");
+    expect(
+      await screen.findByText("Searching your whole mailbox…", { selector: ".empty-state__title" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Nothing on this device matches “invoice”."),
+    ).toBeInTheDocument();
+    expect(announced()).toBe("Searching your whole mailbox…");
+
+    resume();
+    const results = await screen.findByRole("listbox", { name: "Search results" });
+    const hit = await within(results).findByRole("option", { name: /Northwind invoice 2023-118/ });
+    expect(hit.getAttribute("aria-label")).toMatch(/Archive · Alex Morgan$/);
+    await waitFor(() => expect(announced()).toBe("1 result."));
+    expect(screen.queryByText("Searching your whole mailbox…")).not.toBeInTheDocument();
+    expect(sawNoResults()).toBe(false);
+
+    // Opened, flagged and moved like any other message.
+    await openMessage(user, /Northwind invoice 2023-118/);
+    const frame = await screen.findByTitle(/^Message: Northwind invoice 2023-118/);
+    expect(frame.getAttribute("srcdoc")).toContain("Payment terms are 30 days");
+    const id = (await backend.searchMessages("invoice"))[0]!.id;
+    await user.click(within(row(/Northwind invoice/)).getByRole("button", { name: "Flag" }));
+    expect(row(/Northwind invoice/).getAttribute("aria-label")).toMatch(/Flagged/);
+    await waitFor(async () => expect((await backend.getMessage(id)).isFlagged).toBe(true));
+    await user.click(toolbarButton("Move to"));
+    await user.click(screen.getByRole("menuitem", { name: "Inbox" }));
+    await waitFor(() =>
+      expect(row(/Northwind invoice/).getAttribute("aria-label")).toMatch(/Inbox · Alex Morgan$/),
+    );
+    await waitFor(async () => expect((await backend.getMessage(id)).folderId).toBe("w-inbox"));
+  });
+
+  it("keeps what this device found when an account's server can't be searched", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    backend.failServerSearch("acct-home", {
+      code: "network",
+      message: "Could not reach imap.morgan-family.example.",
+    });
+    await renderMail({ backend });
+
+    await setSearch("lisbon");
+    expect(
+      await screen.findByText(/Couldn't search/, { selector: ".mail-search-error p" }),
+    ).toHaveTextContent(
+      "Couldn't search Alex (Personal) on the server. Could not reach imap.morgan-family.example.",
+    );
+    await expectResults(/Your trip to Lisbon/);
+    await waitFor(() =>
+      expect(announced()).toBe("1 result. Couldn't search Alex (Personal) on the server."),
+    );
+
+    // With nothing found, it says nothing was found on this device.
+    await setSearch("zebras");
+    expect(await screen.findByText("No results")).toBeInTheDocument();
+    expect(
+      screen.getByText("We didn't find anything for “zebras” on this device."),
+    ).toBeInTheDocument();
+    expect(failureRow()).toBeInTheDocument();
+
+    // Back online: trying again finds the photos only its server has.
+    backend.failServerSearch("acct-home", null);
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await expectResults(/Safari photos from Etosha.*Inbox · Alex \(Personal\)$/);
+    expect(failureRow()).not.toBeInTheDocument();
+  });
+
+  it("counts only the latest search when the text changes while the servers search", async () => {
+    const backend = new MockBackend();
+    const resume = backend.pauseServerSearch();
+    const searches: [id: string, text: string][] = [];
+    const canceled: string[] = [];
+    const searchServer = backend.searchServer.bind(backend);
+    backend.searchServer = (id, text, ...rest) => {
+      searches.push([id, text]);
+      return searchServer(id, text, ...rest);
+    };
+    const cancelServerSearch = backend.cancelServerSearch.bind(backend);
+    backend.cancelServerSearch = (id) => {
+      canceled.push(id);
+      return cancelServerSearch(id);
+    };
+    await renderMail({ backend });
+
+    await setSearch("offsite");
+    await waitFor(() => expect(searches.map(([, text]) => text)).toContain("offsite"));
+    const first = searches[0]![0];
+    await setSearch("offsite kickoff");
+    await waitFor(() => expect(searches.map(([, text]) => text)).toContain("offsite kickoff"));
+    expect(canceled).toContain(first);
+    resume();
+
+    await expectResults(/Kickoff notes from the 2022 offsite/);
+    // What only the first search would have found was neither shown nor stored.
+    expect(screen.queryByRole("option", { name: /Offsite venue options/ })).not.toBeInTheDocument();
+    expect(await backend.searchMessages("venue")).toEqual([]);
+  });
+
+  it("shows more results from the servers on request", async () => {
+    const user = userEvent.setup();
+    await renderMail({ backend: new MockBackend({ worst: true }) });
+    await setSearch('subject:"purchase order"');
+    await expectResults(...Array.from({ length: 50 }, () => /Purchase order 4500/));
+    await waitFor(() => expect(announced()).toBe("50 results."));
+    // A button after the list, not an option in it.
+    const listbox = screen.getByRole("listbox", { name: "Search results" });
+    expect(within(listbox).queryByRole("button", { name: "Show more results" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Show more results" }));
+    await expectResults(...Array.from({ length: 100 }, () => /Purchase order 4500/));
+    await user.click(screen.getByRole("button", { name: "Show more results" }));
+    await expectResults(...Array.from({ length: 130 }, () => /Purchase order 4500/));
+    expect(screen.queryByRole("button", { name: "Show more results" })).not.toBeInTheDocument();
+    await waitFor(() => expect(announced()).toBe("130 results."));
   });
 
   it("shows results with their folder and account", async () => {
