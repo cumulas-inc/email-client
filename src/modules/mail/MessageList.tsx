@@ -44,7 +44,7 @@ import { ALL_INBOXES, type MailFilter, useMailStore } from "./mailStore";
 import { optionId } from "./dom";
 import { MessageRow, type RowHandlers } from "./MessageRow";
 import { useFolders, useMessageList, useSearch } from "./queries";
-import { MIN_SERVER_SEARCH_CHARS, useServerSearch } from "./serverSearch";
+import { useServerSearch, wantsServerSearch } from "./serverSearch";
 
 const FILTERS: { value: MailFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -200,7 +200,10 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   const list = useMessageList(searching ? null : folderId, filter);
   // A text still changing would cancel the server search it started.
   const server = useServerSearch(serverText === query ? query : "");
-  const serverWanted = localText.length >= MIN_SERVER_SEARCH_CHARS && accounts.length > 0;
+  // Both the text the results are for and the one typed now: "l", typed
+  // over "lisbon", never shows the servers as busy for a moment.
+  const serverWanted =
+    wantsServerSearch(localText) && wantsServerSearch(query) && accounts.length > 0;
   // The server's hits for this text; never those of an older one.
   const serverCurrent = serverWanted && server.text === localText;
   const includeIds = serverCurrent ? server.ids : NO_IDS;

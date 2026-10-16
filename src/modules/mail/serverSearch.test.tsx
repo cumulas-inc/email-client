@@ -147,7 +147,7 @@ describe("useServerSearch", () => {
     ]);
   });
 
-  it("leaves short texts to this device, and cancels when the text clears or it unmounts", async () => {
+  it("leaves single letters to this device, and cancels when the text clears or it unmounts", async () => {
     const { result, rerender, unmount, searchServer, cancelServerSearch } = setup(
       () => new Promise<ServerSearchResult>(() => {}),
       "a",
@@ -157,6 +157,12 @@ describe("useServerSearch", () => {
     await act(async () => {});
     expect(searchServer).not.toHaveBeenCalled();
     expect(result.current).toMatchObject({ text: "a", searchId: null, searching: false });
+    // Nor for several single letters, or one after an operator.
+    for (const text of ["a b c", "from:a"]) {
+      rerender({ text });
+      await act(async () => {});
+      expect(searchServer).not.toHaveBeenCalled();
+    }
 
     rerender({ text: "ab" });
     await waitFor(() => expect(searchServer).toHaveBeenCalledTimes(2));

@@ -6,6 +6,7 @@ import {
   MAX_TERM_CHARS,
   type SearchQuery,
   isEmptySearch,
+  isNarrowEnoughForServers,
   matchesSearch,
   parseSearch,
 } from "./searchQuery";
@@ -59,6 +60,19 @@ const VECTORS: [input: string, terms: string[], hasAttachment: boolean][] = [
   ['"a\u0007b\tc\u0000"', ["A:ab c [p]"], false],
   ["a b c d e f g h i j k l m n o p q r", "abcdefghijklmnop".split("").map((c) => `A:${c}`), false],
 ];
+
+describe("isNarrowEnoughForServers", () => {
+  // As the core's single_letters_are_left_to_the_device.
+  it.each(["a", "a b c", "from:a", '"a"', "c++ x", "日"])("leaves %j to the device", (input) => {
+    expect(isNarrowEnoughForServers(parseSearch(input))).toBe(false);
+  });
+  it.each(["ab", "a ab", "from:al", '"a b"', "日本", "has:attachment"])(
+    "asks the servers for %j",
+    (input) => {
+      expect(isNarrowEnoughForServers(parseSearch(input))).toBe(true);
+    },
+  );
+});
 
 describe("parseSearch", () => {
   it.each(VECTORS)("parses %j like the core", (input, expected, hasAttachment) => {

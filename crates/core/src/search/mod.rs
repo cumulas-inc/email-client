@@ -54,6 +54,8 @@ pub const MAX_TERMS: usize = 16;
 pub const MAX_TERM_CHARS: usize = 128;
 /// Characters of the input read.
 pub const MAX_INPUT_CHARS: usize = 1024;
+/// Letters and digits one term at least needs for the servers to be asked.
+pub const MIN_SERVER_TERM_CHARS: usize = 2;
 
 /// Operator names, lowercased, before their `:`.
 const OPERATORS: &[&str] = &[
@@ -118,6 +120,17 @@ impl SearchQuery {
 
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty() && !self.has_attachment
+    }
+
+    /// Whether the servers are worth asking: some term has
+    /// [`MIN_SERVER_TERM_CHARS`] letters or digits, or it asks for
+    /// attachments. Single letters (`a b`, `from:a`) match most of a
+    /// mailbox, and every server would look through every folder for them.
+    pub fn is_narrow_enough_for_servers(&self) -> bool {
+        self.has_attachment
+            || self.terms.iter().any(|t| {
+                t.text.chars().filter(|c| c.is_alphanumeric()).count() >= MIN_SERVER_TERM_CHARS
+            })
     }
 
     /// Reads the value of operator `name` starting at `at`; returns where
@@ -368,6 +381,22 @@ mod tests {
         let long = SearchQuery::parse(&"İ".repeat(200));
         assert_eq!(long.terms[0].typed.chars().count(), MAX_TERM_CHARS);
         assert_eq!(long.terms[0].text.chars().count(), MAX_TERM_CHARS);
+    }
+
+    #[test]
+    fn single_letters_are_left_to_the_device() {
+        for input in ["a", "a b c", "from:a", "\"a\"", "c++ x", "日"] {
+            assert!(
+                !SearchQuery::parse(input).is_narrow_enough_for_servers(),
+                "{input:?}"
+            );
+        }
+        for input in ["ab", "a ab", "from:al", "\"a b\"", "日本", "has:attachment"] {
+            assert!(
+                SearchQuery::parse(input).is_narrow_enough_for_servers(),
+                "{input:?}"
+            );
+        }
     }
 
     #[test]

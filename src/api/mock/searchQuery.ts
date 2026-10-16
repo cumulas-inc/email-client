@@ -1,8 +1,9 @@
 // The search language, as the core parses it (crates/core/src/search), and
 // a matcher that finds what the core's full-text index finds: the demo
 // backend searches with these, so the UI is tested against the app's own
-// semantics. Keep both in step with the core; searchQuery.test.ts holds the
-// test vectors the core's tests share.
+// semantics. The UI parses with it too, to know when the servers are asked.
+// Keep both in step with the core; searchQuery.test.ts holds the test vectors
+// the core's tests share.
 
 import type { EmailAddress, Message } from "../types";
 
@@ -170,6 +171,24 @@ export function parseSearch(input: string): SearchQuery {
 
 export function isEmptySearch(query: SearchQuery): boolean {
   return query.terms.length === 0 && !query.hasAttachment;
+}
+
+/** Letters and digits one term at least needs for the servers to be asked. */
+export const MIN_SERVER_TERM_CHARS = 2;
+
+/**
+ * Whether the servers are worth asking, as the core decides: some term has two
+ * letters or digits, or it asks for attachments. Single letters ("a b",
+ * "from:a") match most of a mailbox, and every server would look through every
+ * folder for them.
+ */
+export function isNarrowEnoughForServers(query: SearchQuery): boolean {
+  return (
+    query.hasAttachment ||
+    query.terms.some(
+      (t) => Array.from(t.text).filter((c) => hasAlphanumeric(c)).length >= MIN_SERVER_TERM_CHARS,
+    )
+  );
 }
 
 // --- Matching -----------------------------------------------------------------

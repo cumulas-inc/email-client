@@ -101,7 +101,9 @@ impl CoreService {
     /// Searches one account's whole mailbox on its server: the first page,
     /// or with `more` the next one. Stores what it finds (search-only rows)
     /// and returns their local ids. Starting a search with a new
-    /// `search_id` cancels the previous search. Account failures are
+    /// `search_id` cancels the previous search. A query too broad for the
+    /// servers (see `SearchQuery::is_narrow_enough_for_servers`) is done at
+    /// once with nothing, as an empty one is. Account failures are
     /// reported in the result; it rejects only for an unknown account
     /// (NotFound) or an empty or over-long `search_id` (InvalidInput, 100
     /// chars at most).
@@ -126,7 +128,7 @@ impl CoreService {
             error,
         };
         let query = SearchQuery::parse(text);
-        if query.is_empty() {
+        if !query.is_narrow_enough_for_servers() {
             return Ok(answer(ServerSearchStatus::Done, None));
         }
         let (cancel, cursor) = {

@@ -9,11 +9,17 @@ import { useEffect, useMemo, useSyncExternalStore } from "react";
 import type { Backend } from "../../api/backend";
 import { useBackend } from "../../api/context";
 import { errorMessage, isBackendError } from "../../api/errors";
+import { isNarrowEnoughForServers, parseSearch } from "../../api/mock/searchQuery";
 import { useAccounts } from "../../api/queries";
 import type { BackendError, ServerSearchResult } from "../../api/types";
 
-/** Shorter searches stay on this device: a single letter matches most of a mailbox. */
-export const MIN_SERVER_SEARCH_CHARS = 2;
+/**
+ * Whether the servers are asked for `text`: not for single letters ("a b",
+ * "from:a"), which match most of a mailbox. The core decides the same way.
+ */
+export function wantsServerSearch(text: string): boolean {
+  return isNarrowEnoughForServers(parseSearch(text));
+}
 
 export interface AccountSearch {
   accountId: string;
@@ -103,7 +109,7 @@ class ServerSearchStore {
   /** Searches every account for `text`, canceling the search before. */
   start(text: string, accountIds: string[]): void {
     this.stop();
-    if (text.length < MIN_SERVER_SEARCH_CHARS || accountIds.length === 0) {
+    if (!wantsServerSearch(text) || accountIds.length === 0) {
       this.set({ text, searchId: null, accounts: [], ids: [] });
       return;
     }

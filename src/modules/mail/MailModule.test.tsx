@@ -866,6 +866,23 @@ describe("Search", () => {
     expect(failureRow()).not.toBeInTheDocument();
   });
 
+  it("never shows the servers as busy for single letters typed over a longer search", async () => {
+    const backend = new MockBackend();
+    await renderMail({ backend });
+    await setSearch("lisbon");
+    await expectResults(/Your trip to Lisbon/);
+    await waitFor(() => expect(announced()).toBe("1 result."));
+    const searchServer = vi.spyOn(backend, "searchServer");
+    const sawBusy = watchFor("Searching your whole mailbox…");
+
+    await setSearch("l");
+    await waitFor(() => expect(announced()).toMatch(/^\d+ results\.$/));
+    await setSearch("from:l");
+    await waitFor(() => expect(announced()).toMatch(/^\d+ results?\.$/));
+    expect(sawBusy()).toBe(false);
+    expect(searchServer).not.toHaveBeenCalled();
+  });
+
   it("counts only the latest search when the text changes while the servers search", async () => {
     const backend = new MockBackend();
     const resume = backend.pauseServerSearch();

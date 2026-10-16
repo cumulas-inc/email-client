@@ -31,7 +31,7 @@ import type {
 } from "../types";
 import { cleanFamily } from "../../lib/fonts";
 import { type MockState, createDemoState, recount } from "./data";
-import { isEmptySearch, matchesSearch, parseSearch } from "./searchQuery";
+import { isEmptySearch, isNarrowEnoughForServers, matchesSearch, parseSearch } from "./searchQuery";
 import { createWorstState } from "./worst";
 
 const DEFAULT_SETTINGS: Settings = {
@@ -1053,7 +1053,7 @@ export class MockBackend implements Backend {
     });
     const query = parseSearch(text);
     // Like the core, before the search is started: it cancels nothing.
-    if (isEmptySearch(query)) return answer("done");
+    if (!isNarrowEnoughForServers(query)) return answer("done");
     if (this.retiredSearches.includes(searchId)) return answer("cancelled");
     if (this.serverSearch?.id !== searchId) {
       this.retireServerSearch();

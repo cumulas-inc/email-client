@@ -1739,10 +1739,10 @@ async fn show_more_continues_from_the_cursor_and_stops() {
 }
 
 #[tokio::test]
-async fn an_empty_query_is_done_with_nothing() {
+async fn an_empty_or_too_broad_query_is_done_with_nothing() {
     let h = harness();
     let account = account_with_mail(&h).await;
-    for text in ["", "  ", "to:", "has:pdf"] {
+    for text in ["", "  ", "to:", "has:pdf", "a b", "from:a"] {
         let result = h
             .service
             .search_server("s", text, &account.id, false)
