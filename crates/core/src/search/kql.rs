@@ -96,6 +96,7 @@ mod tests {
             terms: vec![Term {
                 field: crate::search::Field::Any,
                 text: "c++".into(),
+                typed: "c++".into(),
                 phrase: false,
             }],
             has_attachment: false,

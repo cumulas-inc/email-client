@@ -147,6 +147,7 @@ mod tests {
             terms: vec![Term {
                 field: Field::Subject,
                 text: "say \"hi\"".into(),
+                typed: "say \"hi\"".into(),
                 phrase: true,
             }],
             has_attachment: false,

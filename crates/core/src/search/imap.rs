@@ -48,8 +48,10 @@ impl ImapCriteria {
                     Field::Subject => "SUBJECT",
                     Field::Body => "BODY",
                 };
-                // Literals can't carry NUL; line breaks never reach a term.
-                (key, term.text.replace(['\0', '\r', '\n'], " "))
+                // As typed: servers may ignore the case of ASCII letters
+                // only. Literals can't carry NUL; line breaks never reach a
+                // term.
+                (key, term.typed.replace(['\0', '\r', '\n'], " "))
             })
             .collect();
         Some(Self {
@@ -152,6 +154,18 @@ mod tests {
     }
 
     #[test]
+    fn strings_keep_the_case_they_were_typed_in() {
+        assert_eq!(
+            rendered("Invoice FROM:Megan", Literals::Sync),
+            ["TEXT \"Invoice\" FROM \"Megan\" UNDELETED"]
+        );
+        assert_eq!(
+            rendered("İstanbul", Literals::NonSync),
+            ["CHARSET UTF-8 TEXT {9+}\r\nİstanbul UNDELETED"]
+        );
+    }
+
+    #[test]
     fn non_ascii_strings_go_as_literals_with_a_charset() {
         assert_eq!(
             rendered("café", Literals::NonSync),
@@ -195,6 +209,7 @@ mod tests {
             terms: vec![Term {
                 field: Field::Body,
                 text: "x\0y\r\nz".into(),
+                typed: "x\0y\r\nz".into(),
                 phrase: true,
             }],
             has_attachment: false,

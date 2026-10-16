@@ -33,6 +33,10 @@ pub struct Term {
     pub field: Field,
     /// Lowercased; never contains `"` or `\`; at least one alphanumeric char.
     pub text: String,
+    /// `text` in the case it was typed in, for IMAP: a server may ignore
+    /// the case of ASCII letters only, and lowercasing respells some
+    /// letters ("İ" becomes "i" and a combining dot).
+    pub typed: String,
     /// Exact phrase (quoted): no prefix matching on the last word.
     pub phrase: bool,
 }
@@ -176,12 +180,13 @@ impl SearchQuery {
         }
     }
 
-    fn push(&mut self, field: Field, text: &str, phrase: bool) {
-        let text = cut(text.to_lowercase());
+    fn push(&mut self, field: Field, typed: &str, phrase: bool) {
+        let text = cut(typed.to_lowercase());
         if text.chars().any(char::is_alphanumeric) {
             self.terms.push(Term {
                 field,
                 text,
+                typed: cut(typed.to_owned()),
                 phrase,
             });
         }
@@ -341,6 +346,28 @@ mod tests {
                 "{input:?}"
             );
         }
+    }
+
+    #[test]
+    fn terms_keep_the_case_they_were_typed_in() {
+        let query = SearchQuery::parse("ÜBER from:İstanbul subject:\"Q3  Plan\"");
+        let typed: Vec<(&str, &str)> = query
+            .terms
+            .iter()
+            .map(|t| (t.text.as_str(), t.typed.as_str()))
+            .collect();
+        assert_eq!(
+            typed,
+            [
+                ("über", "ÜBER"),
+                ("i\u{307}stanbul", "İstanbul"),
+                ("q3 plan", "Q3 Plan")
+            ]
+        );
+        // Cut to as many chars as the text, each on its own.
+        let long = SearchQuery::parse(&"İ".repeat(200));
+        assert_eq!(long.terms[0].typed.chars().count(), MAX_TERM_CHARS);
+        assert_eq!(long.terms[0].text.chars().count(), MAX_TERM_CHARS);
     }
 
     #[test]
