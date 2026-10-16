@@ -2,7 +2,9 @@ name: Generate Flatpak sources
 description: >-
   Writes packaging/flatpak/cargo-sources.json and node-sources.json, the
   offline Cargo and npm sources Flatpak builds need, with
-  flatpak-builder-tools. Shared by ci.yml and flatpak-repo.yml.
+  flatpak-builder-tools at the commit generate-sources.sh pins and the Python
+  packages requirements.txt pins, with their hashes. Shared by ci.yml and
+  flatpak-repo.yml.
 runs:
   using: composite
   steps:
@@ -11,7 +13,8 @@ runs:
         python-version: "3.13"
     - name: Generate offline Cargo and npm sources
       shell: bash
+      env:
+        REQUIREMENTS: ${{ github.action_path }}/requirements.txt
       run: |
-        git clone --depth 1 https://github.com/flatpak/flatpak-builder-tools /tmp/flatpak-builder-tools
-        python -m pip install aiohttp tomlkit /tmp/flatpak-builder-tools/node
-        FLATPAK_BUILDER_TOOLS=/tmp/flatpak-builder-tools packaging/flatpak/generate-sources.sh
+        python3 -m pip install --require-hashes --only-binary :all: -r "$REQUIREMENTS"
+        FLATPAK_BUILDER_TOOLS="$RUNNER_TEMP/flatpak-builder-tools" packaging/flatpak/generate-sources.sh

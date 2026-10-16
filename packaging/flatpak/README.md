@@ -8,6 +8,8 @@ WebKitGTK 4.1 for Tauri).
 ```sh
 flatpak install flathub org.gnome.Sdk//50 org.gnome.Platform//50 \
   org.freedesktop.Sdk.Extension.rust-stable//25.08 org.freedesktop.Sdk.Extension.node22//25.08
+pip install --require-hashes --only-binary :all: \
+  -r ../../.github/actions/flatpak-sources/requirements.txt   # in a virtualenv
 ./generate-sources.sh
 ./fetch-shared-modules.sh   # the tray library's module
 flatpak-builder --user --install --force-clean build-dir co.cumulas.Mail.yml
@@ -18,6 +20,14 @@ flatpak run co.cumulas.Mail
 for libayatana-appindicator) is a git submodule in the Flathub repository; here
 `fetch-shared-modules.sh` fetches it next to the manifest (ignored by git), at
 the commit it pins.
+
+`generate-sources.sh` runs the generators of
+[flatpak-builder-tools](https://github.com/flatpak/flatpak-builder-tools) at the
+commit it pins, with the Python packages that
+`.github/actions/flatpak-sources/requirements.txt` pins with their hashes
+(regenerate it from `requirements.in` with the command at its top). To move to
+a newer flatpak-builder-tools, change the commit and compare the generated
+files.
 
 CI builds the same manifest on every pull request (see `.github/workflows/ci.yml`),
 with `build-repo.sh`; the [self-hosted repository](#self-hosted-repository-flatpakcumulasco)

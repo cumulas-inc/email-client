@@ -1,0 +1,7 @@
+# The Python packages flatpak-builder-tools' Cargo and npm generators need
+# (generate-sources.sh). requirements.txt pins them, with their dependencies
+# and hashes:
+#   uv pip compile requirements.in --generate-hashes --python-version 3.13 -o requirements.txt
+aiohttp
+tomlkit
+pyyaml
