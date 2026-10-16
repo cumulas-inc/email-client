@@ -170,12 +170,18 @@ impl CoreService {
         let page = match searched {
             Ok(Ok(page)) => page,
             Ok(Err(e)) => {
-                tracing::debug!("searching account {account_id} on the server failed: {e}");
+                // The server's reason may repeat the query: kept out of logs.
+                tracing::debug!(
+                    "searching account {account_id} on the server failed ({:?})",
+                    e.code
+                );
                 return Ok(failed(e));
             }
+            // Also when it asked to wait (throttled) for longer than this.
+            // The UI offers to try again.
             Err(_) => {
                 return Ok(failed(Error::network(
-                    "The server took too long to answer. Try again.",
+                    "The server didn't answer in time; it may be busy.",
                 )));
             }
         };

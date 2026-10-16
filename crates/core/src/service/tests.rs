@@ -1689,7 +1689,13 @@ async fn server_search_times_out() {
         .await
         .unwrap();
     assert_eq!(result.status, ServerSearchStatus::Failed);
-    assert_eq!(result.error.unwrap().code, ErrorCode::Network);
+    let error = result.error.unwrap();
+    assert_eq!(error.code, ErrorCode::Network);
+    // The UI's Try again button says the rest.
+    assert_eq!(
+        error.message,
+        "The server didn't answer in time; it may be busy."
+    );
     assert!(started.elapsed() >= SERVER_SEARCH_TIMEOUT);
     assert!(started.elapsed() < std::time::Duration::from_secs(46));
 }
