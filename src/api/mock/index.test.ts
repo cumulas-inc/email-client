@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
-import type { ActiveReminder, DataChangedEvent, RemindersChangedEvent } from "../types";
+import type {
+  ActiveReminder,
+  BackendError,
+  DataChangedEvent,
+  RemindersChangedEvent,
+} from "../types";
 import { MockBackend } from ".";
 
 function addStyle(css: string): CSSRule[] {
@@ -332,5 +337,190 @@ describe("the demo's signatures", () => {
     expect((await backend.getAccountSignature("acct-work")).organization.checkableAt).toBe(
       at(26 * 60_000),
     );
+  });
+});
+
+describe("the demo's search", () => {
+  const subjects = (messages: { subject: string }[]) => messages.map((m) => m.subject);
+
+  it("finds what the app's index finds: operators, prefixes and inside subjects", async () => {
+    const backend = new MockBackend();
+    const fromPriya = await backend.searchMessages("from:priya");
+    expect(fromPriya.length).toBeGreaterThan(1);
+    for (const m of fromPriya) expect(m.from?.name).toBe("Priya Raman");
+    expect(subjects(await backend.searchMessages("lisb"))).toEqual([
+      "Your trip to Lisbon: booking confirmed",
+    ]);
+    expect(subjects(await backend.searchMessages("isbo"))).toEqual([
+      "Your trip to Lisbon: booking confirmed",
+    ]);
+    expect(subjects(await backend.searchMessages('subject:"launch checklist"'))).toEqual([
+      "Atlas launch checklist — final review today",
+    ]);
+    // Newest first, and only the account asked about.
+    const atlas = await backend.searchMessages("atlas", "acct-work");
+    expect(atlas.map((m) => m.receivedAt)).toEqual(
+      atlas.map((m) => m.receivedAt).sort((a, b) => b.localeCompare(a)),
+    );
+    expect(await backend.searchMessages("atlas", "acct-home")).toEqual([]);
+    // Nothing to look for: nothing, not everything.
+    expect(await backend.searchMessages("*** ??")).toEqual([]);
+  });
+
+  it("adds the messages server searches found, once each", async () => {
+    const backend = new MockBackend();
+    const [lisbon] = await backend.searchMessages("lisbon");
+    const [sunday] = await backend.searchMessages("subject:sunday");
+    const found = await backend.searchMessages("lisbon", undefined, [
+      sunday!.id,
+      lisbon!.id,
+      "msg-gone",
+    ]);
+    expect(subjects(found)).toEqual(["Sunday lunch", "Your trip to Lisbon: booking confirmed"]);
+    // Even when the text finds nothing, but only in the account asked about.
+    expect(subjects(await backend.searchMessages("", undefined, [sunday!.id]))).toEqual([
+      "Sunday lunch",
+    ]);
+    expect(await backend.searchMessages("", "acct-work", [sunday!.id])).toEqual([]);
+  });
+
+  it("searches a whole mailbox on its server and stores what it finds", async () => {
+    const backend = new MockBackend();
+    const changes: DataChangedEvent[] = [];
+    backend.onDataChanged((e) => changes.push(e));
+    expect(await backend.searchMessages("invoice")).toEqual([]);
+    const archive = (await backend.listFolders()).find((f) => f.id === "w-archive")!;
+
+    const result = await backend.searchServer("s-1", "invoice", "acct-work");
+    expect(result).toMatchObject({
+      searchId: "s-1",
+      accountId: "acct-work",
+      status: "done",
+      added: 1,
+      hasMore: false,
+      error: null,
+    });
+    expect(result.messageIds).toHaveLength(1);
+    await Promise.resolve();
+    expect(changes).toEqual([{ kinds: ["mail"], accountId: "acct-work" }]);
+
+    // Stored: found locally, openable and listed in its folder, which
+    // counted it already.
+    const [invoice] = await backend.searchMessages("invoice", undefined, result.messageIds);
+    expect(invoice).toMatchObject({ subject: "Northwind invoice 2023-118", folderId: "w-archive" });
+    expect((await backend.getMessage(invoice!.id)).bodyText).toMatch(/invoice 2023-118/);
+    const listed = await backend.listMessages("w-archive", { offset: 0, limit: 50 });
+    expect(subjects(listed.items)).toContain("Northwind invoice 2023-118");
+    expect((await backend.listFolders()).find((f) => f.id === "w-archive")).toEqual(archive);
+
+    // Found again: nothing new, and no change to tell.
+    const again = await backend.searchServer("s-2", "invoice", "acct-work");
+    expect(again).toMatchObject({ status: "done", messageIds: result.messageIds, added: 0 });
+    await Promise.resolve();
+    expect(changes).toHaveLength(1);
+
+    // Like Graph: no matches inside words.
+    expect((await backend.searchServer("s-3", "nvoice", "acct-work")).messageIds).toEqual([]);
+    // Messages already on the device count too, but aren't added.
+    expect(await backend.searchServer("s-4", "lisbon", "acct-work")).toMatchObject({
+      messageIds: [expect.any(String)],
+      added: 0,
+    });
+    expect(await backend.searchServer("s-5", "*** ??", "acct-work")).toMatchObject({
+      status: "done",
+      messageIds: [],
+    });
+  });
+
+  it("pages through more than 50 matches", async () => {
+    const backend = new MockBackend({ worst: true });
+    const pages = [
+      await backend.searchServer("s-1", "purchase order", "acct-long"),
+      await backend.searchServer("s-1", "purchase order", "acct-long", true),
+      await backend.searchServer("s-1", "purchase order", "acct-long", true),
+      await backend.searchServer("s-1", "purchase order", "acct-long", true),
+    ];
+    expect(pages.map((p) => [p.messageIds.length, p.hasMore])).toEqual([
+      [50, true],
+      [50, true],
+      [expect.any(Number), false],
+      [0, false],
+    ]);
+    const all = pages.flatMap((p) => p.messageIds);
+    expect(new Set(all).size).toBe(all.length);
+    const found = await backend.searchMessages("", undefined, all);
+    expect(found.filter((m) => /^Purchase order 4500/.test(m.subject))).toHaveLength(130);
+    // Newest first across the pages.
+    const dates = all.map((id) => found.find((m) => m.id === id)!.receivedAt);
+    expect(dates).toEqual([...dates].sort((a, b) => b.localeCompare(a)));
+    // The worst case's archive still counts what its server reports.
+    const archive = (await backend.listFolders()).find((f) => f.id === "l-archive")!;
+    expect(archive.totalCount).toBe(251_877);
+  });
+
+  it("cancels a search when a newer one starts, or when asked, and stores nothing", async () => {
+    const backend = new MockBackend();
+    const resume = backend.pauseServerSearch();
+    const first = backend.searchServer("s-1", "offsite", "acct-work");
+    const second = backend.searchServer("s-2", "offsite kickoff", "acct-work");
+    const third = backend.searchServer("s-2", "offsite kickoff", "acct-home");
+    resume();
+    expect(await first).toMatchObject({ status: "cancelled", messageIds: [], added: 0 });
+    expect(await second).toMatchObject({ status: "done", added: 1 });
+    expect(await third).toMatchObject({ status: "done", messageIds: [] });
+    // The first search's own find, "Offsite venue options", is still only on the server.
+    expect(subjects(await backend.searchMessages("venue"))).toEqual([]);
+
+    const paused = backend.pauseServerSearch();
+    const fourth = backend.searchServer("s-3", "venue", "acct-work");
+    await backend.cancelServerSearch("s-2"); // Not the current one: nothing happens.
+    await backend.cancelServerSearch("s-3");
+    paused();
+    expect(await fourth).toMatchObject({ status: "cancelled" });
+    expect(subjects(await backend.searchMessages("venue"))).toEqual([]);
+    // Its pages are gone too.
+    expect(await backend.searchServer("s-4", "venue", "acct-work", true)).toMatchObject({
+      status: "done",
+      messageIds: [],
+      hasMore: false,
+    });
+  });
+
+  it("reports an account's failure in the result, and rejects only bad calls", async () => {
+    const backend = new MockBackend();
+    const offline: BackendError = {
+      code: "network",
+      message: "Could not reach imap.morgan-family.example.",
+    };
+    backend.failServerSearch("acct-home", offline);
+    const [home, work] = await Promise.all([
+      backend.searchServer("s-1", "zebras", "acct-home"),
+      backend.searchServer("s-1", "invoice", "acct-work"),
+    ]);
+    expect(home).toEqual({
+      searchId: "s-1",
+      accountId: "acct-home",
+      status: "failed",
+      messageIds: [],
+      added: 0,
+      hasMore: false,
+      error: offline,
+    });
+    expect(work).toMatchObject({ status: "done", added: 1 });
+
+    backend.failServerSearch("acct-home", null);
+    expect(await backend.searchServer("s-1", "zebras", "acct-home")).toMatchObject({
+      status: "done",
+      added: 1,
+    });
+    await expect(backend.searchServer("s-1", "zebras", "acct-gone")).rejects.toMatchObject({
+      code: "notFound",
+    });
+    await expect(backend.searchServer("", "zebras", "acct-home")).rejects.toMatchObject({
+      code: "invalidInput",
+    });
+    await expect(
+      backend.searchServer("s".repeat(101), "zebras", "acct-home"),
+    ).rejects.toMatchObject({ code: "invalidInput" });
   });
 });

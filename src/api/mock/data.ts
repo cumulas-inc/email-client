@@ -30,6 +30,12 @@ export interface MockState {
    * large mailboxes report: added to the counts `recount` derives.
    */
   remoteCounts?: Record<string, { unread: number; total: number }>;
+  /**
+   * Messages only the servers have, older than the synced window: a server
+   * search finds them and brings them onto the device (into `messages`).
+   * The folders' counts include them already, as the servers' counts do.
+   */
+  serverMessages?: Message[];
   /** Signatures the demo starts with; other accounts start without any. */
   signatures?: AccountSignature[];
 }
@@ -544,6 +550,88 @@ function olderWorkMessages(): Message[] {
   return out;
 }
 
+/**
+ * Mail from years back that only the servers still have: a server search
+ * finds it. Its words aren't in the synced mail, so it shows what searching
+ * the whole mailbox adds ("invoice", "offsite", "lease").
+ */
+function serverOnlyMessages(): Message[] {
+  const work = (seed: MessageSeed) => message(WORK, ME_WORK, seed);
+  const home = (seed: MessageSeed) => message(HOME, ME_HOME, seed);
+  return [
+    work({
+      folderId: "w-archive",
+      from: people.lucia,
+      subject: "Northwind invoice 2023-118",
+      html:
+        para(
+          "Hi Alex,",
+          "Please find attached our invoice 2023-118 for the brand refresh workshops in March. Payment terms are 30 days from the invoice date.",
+          "Thank you for a lovely project!",
+        ) + signature("Lucía Fernández", "Northwind Design Studio"),
+      received: at(-430, 16, 5),
+      attachments: [
+        { name: "Northwind-invoice-2023-118.pdf", contentType: "application/pdf", size: 96_412 },
+      ],
+    }),
+    work({
+      folderId: "w-archive",
+      from: people.dana,
+      cc: [people.priya, people.jonas],
+      subject: "Kickoff notes from the 2022 offsite",
+      html:
+        para("Team,", "Thanks for two great days. The decisions from the kickoff session:") +
+        "<ul><li>Atlas becomes the platform team's first priority</li><li>We move the weekly sync to Thursdays</li><li>Each team picks three bets for the year</li></ul>" +
+        signature("Dana"),
+      received: at(-1050, 18, 30),
+    }),
+    work({
+      folderId: "w-archive",
+      from: people.mei,
+      subject: "Offsite venue options",
+      html:
+        para(
+          "Three venues can take the whole team in October: the lake lodge, the old print works downtown and the vineyard. Prices and photos are in the sheet.",
+        ) + signature("Mei"),
+      received: at(-1090, 11, 20),
+    }),
+    work({
+      folderId: "w-sent",
+      from: ME_WORK,
+      to: [people.sam],
+      subject: "Re: Vendor shortlist for the data warehouse",
+      html: para(
+        "Sam, thanks for pulling this together. Let's invite the two cheapest vendors to demo, and ask the third for a reference customer first.",
+      ),
+      received: at(-700, 9, 48),
+    }),
+    home({
+      folderId: "h-archive",
+      from: { name: "Harborview Properties", address: "leasing@harborview.example" },
+      subject: "Your apartment lease renewal",
+      html: para(
+        "Dear Alex Morgan,",
+        "Your lease for apartment 4B ends on 31 August. The renewal agreement is attached; please sign and return it by 15 July.",
+        "Kind regards, Harborview Properties",
+      ),
+      received: at(-500, 10, 0),
+      attachments: [
+        { name: "Lease-renewal-4B.pdf", contentType: "application/pdf", size: 231_870 },
+      ],
+    }),
+    home({
+      folderId: "h-inbox",
+      from: people.ben,
+      subject: "Safari photos from Etosha",
+      html: para(
+        "The zebras at the waterhole were the highlight. Here are the best shots from the trip!",
+      ),
+      received: at(-800, 20, 12),
+      attachments: [{ name: "waterhole.jpg", contentType: "image/jpeg", size: 3_104_220 }],
+    }),
+  ];
+}
+
 function contact(
   accountId: string,
   id: string,
@@ -728,6 +816,8 @@ export function createDemoState(): MockState {
   ];
 
   const messages = [...workMessages(), ...homeMessages(), ...olderWorkMessages()];
+  // After the synced mail, so its ids stay as they were.
+  const serverMessages = serverOnlyMessages();
 
   const calendars: Calendar[] = [
     {
@@ -1193,6 +1283,7 @@ export function createDemoState(): MockState {
     taskLists,
     tasks,
     signatures: demoSignatures(),
+    serverMessages,
   };
   recount(state);
   return state;
@@ -1208,8 +1299,9 @@ function nextWeekday(weekday: number): number {
 
 /** Recomputes folder counts from the messages (plus any server-only ones). */
 export function recount(state: MockState): void {
+  const all = [...state.messages, ...(state.serverMessages ?? [])];
   for (const f of state.folders) {
-    const inFolder = state.messages.filter((m) => m.folderId === f.id);
+    const inFolder = all.filter((m) => m.folderId === f.id);
     const remote = state.remoteCounts?.[f.id];
     f.totalCount = inFolder.length + (remote?.total ?? 0);
     f.unreadCount = inFolder.filter((m) => !m.isRead).length + (remote?.unread ?? 0);

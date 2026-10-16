@@ -691,7 +691,42 @@ describe("Keyboard", () => {
   });
 });
 
+/** The search results' rows. */
+function results() {
+  return within(screen.getByRole("listbox", { name: "Search results" })).getAllByRole("option");
+}
+
+/** Waits until the search results are rows matching these names, in order. */
+async function expectResults(...names: RegExp[]) {
+  await waitFor(() => {
+    const options = results();
+    expect(options.map((o) => o.getAttribute("aria-label"))).toEqual(
+      names.map(() => expect.any(String)),
+    );
+    names.forEach((name, i) => expect(options[i]!.getAttribute("aria-label")).toMatch(name));
+  });
+}
+
 describe("Search", () => {
+  it("finds by operator, by the start of words and inside subjects", async () => {
+    const backend = new MockBackend();
+    const fromPriya = await backend.searchMessages("from:priya");
+    await renderMail({ backend });
+
+    await setSearch("from:priya");
+    await expectResults(
+      ...fromPriya.map((m) => new RegExp(m.subject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))),
+    );
+    results().forEach((o) => expect(o.getAttribute("aria-label")).toMatch(/Priya Raman/));
+
+    await setSearch('subject:"launch checklist"');
+    await expectResults(CHECKLIST);
+    await setSearch("lisb");
+    await expectResults(/Your trip to Lisbon/);
+    await setSearch("isbo");
+    await expectResults(/Your trip to Lisbon/);
+  });
+
   it("shows results with their folder and account", async () => {
     const user = userEvent.setup();
     await renderMail();
