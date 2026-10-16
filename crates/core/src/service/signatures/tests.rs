@@ -1102,6 +1102,66 @@ async fn a_check_that_failed_just_before_the_network_came_back_goes_again() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_answer_kept_while_the_clock_was_ahead_is_asked_again_at_once() {
+    let s = setup();
+    let account = work_account(&s);
+    // Kept while the clock was three days ahead; it's right now.
+    s.known_at(
+        &account,
+        OrganizationSignatureState::NotUsed,
+        false,
+        epoch() + Duration::days(3),
+    );
+    s.organization.answer(CheckOutcome::NotUsed { etag: None });
+    s.organization.answer(CheckOutcome::NotUsed { etag: None });
+    s.service.start_background();
+    sleep(16).await;
+    assert_eq!(s.organization.calls(), 1);
+    assert_eq!(
+        s.organization_state(&account).checked_at,
+        Some(epoch() + Duration::seconds(15))
+    );
+    // Then once a day again.
+    sleep(24 * 3600 - 60).await;
+    assert_eq!(s.organization.calls(), 1);
+    sleep(2 * 60).await;
+    assert_eq!(s.organization.calls(), 2);
+    s.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_asked_for_while_the_clock_was_ahead_holds_nothing_back() {
+    let s = setup();
+    let account = work_account(&s);
+    let ahead = epoch() + Duration::days(3);
+    let stored = StoredOrganizationSignature {
+        scope: Some(SCOPE.into()),
+        state: OrganizationSignatureState::Ready,
+        html: Some("<p>Org</p>".into()),
+        checked_at: Some(ahead),
+        attempted_at: Some(ahead),
+        stale: true,
+        // The service asked for an hour.
+        retry_at: Some(ahead + Duration::hours(1)),
+        ..Default::default()
+    };
+    s.service
+        .store()
+        .save_organization_signature(&account.id, &stored)
+        .unwrap();
+    s.organization
+        .answer(signature("<p>Org</p>", true, "\"1\""));
+    let checked = s
+        .service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap()
+        .organization;
+    assert_eq!(s.organization.calls(), 1);
+    assert!(!checked.stale);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_computer_that_slept_checks_when_it_wakes() {
     let s = setup();
     let account = work_account(&s);
@@ -1342,5 +1402,26 @@ fn the_next_check_follows_what_was_said() {
             next_check(&busy, asked, retry, now),
             now + Duration::hours(2)
         );
+    }
+
+    // Kept while the clock was two days ahead: due now, rather than once
+    // the clock has caught up.
+    for asked in [false, true] {
+        for state in [State::NotUsed, State::NotAllowed, State::Ready] {
+            assert_eq!(next_check(&answered(state, -48), asked, false, now), now);
+        }
+    }
+    let failed_ahead = StoredOrganizationSignature {
+        stale: true,
+        ..answered(State::NotUsed, -48)
+    };
+    assert_eq!(next_check(&failed_ahead, true, false, now), now);
+    let busy_ahead = StoredOrganizationSignature {
+        // Two hours after that check.
+        retry_at: Some(now + Duration::hours(50)),
+        ..failed_ahead
+    };
+    for (asked, retry) in [(false, false), (true, false), (true, true)] {
+        assert_eq!(next_check(&busy_ahead, asked, retry, now), now);
     }
 }

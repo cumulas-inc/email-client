@@ -17,7 +17,8 @@
 //! failed check goes again 30 minutes later (or when the service says, or as
 //! soon as the network is back). Signing in asks at once, whatever was
 //! said. Times go by the wall clock, which keeps counting while the
-//! computer sleeps; the scheduler looks at it at least every minute.
+//! computer sleeps; the scheduler looks at it at least every minute. A time
+//! kept while the clock was ahead makes the check due at once.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -389,13 +390,18 @@ pub(crate) fn next_check(
     now: DateTime<Utc>,
 ) -> DateTime<Utc> {
     use OrganizationSignatureState as State;
-    let since = |at: Option<DateTime<Utc>>, every: Duration| at.map_or(now, |at| at + every);
+    // A time after now was kept while the clock was ahead: what's due
+    // after it is due now (the check keeps the right time), rather than
+    // once the clock has caught up.
+    let since = |at: Option<DateTime<Utc>>, every: Duration| {
+        at.filter(|at| *at <= now).map_or(now, |at| at + every)
+    };
+    let retry_at = retry_at(o, now);
     let due = if o.stale {
         if !asked_this_run || retry_failed {
             now
         } else {
-            o.retry_at
-                .unwrap_or_else(|| since(o.attempted_at, RETRY_AFTER_FAILURE))
+            retry_at.unwrap_or_else(|| since(o.attempted_at, RETRY_AFTER_FAILURE))
         }
     } else {
         match o.state {
@@ -410,7 +416,15 @@ pub(crate) fn next_check(
         }
     };
     // Never before the service said.
-    o.retry_at.map_or(due, |at| due.max(at))
+    retry_at.map_or(due, |at| due.max(at))
+}
+
+/// When the service said to ask again, if it did; not when it said so
+/// while the clock was ahead (its check is after now), since how long it
+/// asked to wait from now can't be told.
+fn retry_at(o: &StoredOrganizationSignature, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    o.retry_at
+        .filter(|_| o.attempted_at.is_none_or(|at| at <= now))
 }
 
 /// The signature a message starts with. While the organization signs the
@@ -608,7 +622,8 @@ impl CoreService {
             self.store.account_signatures(account_id)?.organization,
             scope,
         );
-        Ok(stored.retry_at.is_none_or(|at| at <= self.signatures.now()))
+        let now = self.signatures.now();
+        Ok(retry_at(&stored, now).is_none_or(|at| at <= now))
     }
 
     /// Starts a check of the account's organization signature on its own
