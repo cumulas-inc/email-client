@@ -551,8 +551,8 @@ export interface AppInfo {
   syncServer: string;
   /**
    * Host of the service company signatures come from (normally
-   * signature.cumulas.co); null when this build has none, and company
-   * signatures are off.
+   * signature.cumulas.co); null when company signatures are off for this
+   * build or run.
    */
   signatureServer: string | null;
 }

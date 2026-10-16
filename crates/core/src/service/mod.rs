@@ -22,7 +22,8 @@ use uuid::Uuid;
 
 pub use alerts::{MAX_AGE_HOURS, MailAlert, SUMMARY_THRESHOLD};
 pub use connector::{
-    BUILTIN_MICROSOFT_CLIENT_ID, BrowserOpener, Connector, LiveConnector, ProviderSet, PushSource,
+    BrowserOpener, Connector, LiveConnector, PUBLISHED_MICROSOFT_CLIENT_ID, ProviderSet,
+    PushSource, builtin_microsoft_client_id,
 };
 pub use mail::Attachment;
 pub use targeted::SyncScope;

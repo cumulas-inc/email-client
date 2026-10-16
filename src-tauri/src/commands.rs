@@ -11,7 +11,7 @@ use cumulas_core::model::{
     Settings, Snooze, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::push::PushStatus;
-use cumulas_core::service::BUILTIN_MICROSOFT_CLIENT_ID;
+use cumulas_core::service::builtin_microsoft_client_id;
 use cumulas_core::{Error, Result};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -29,15 +29,17 @@ pub struct AppInfo {
     version: String,
     /// Passwords and tokens survive restarts (a Secret Service is available).
     persistent_secrets: bool,
-    /// A Microsoft client id was compiled in, so Microsoft sign-in works
-    /// without configuration.
+    /// A Microsoft client ID is built in (the published registration's,
+    /// unless the build named another or `none`), so Microsoft sign-in
+    /// works without configuration.
     microsoft_client_id_built_in: bool,
     /// The host of the push service Microsoft accounts use (normally
     /// `sync.cumulas.co`), for the privacy note.
     sync_server: String,
     /// The host of the service company signatures come from (normally
-    /// `signature.cumulas.co`); `None` when this build has none, and
-    /// company signatures are off.
+    /// `signature.cumulas.co`); `None` when company signatures are off
+    /// (`CUMULAS_SIGNATURE_CLIENT_ID` is `none`, or another service has no
+    /// client ID).
     signature_server: Option<String>,
 }
 
@@ -46,7 +48,7 @@ pub fn get_app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
     AppInfo {
         version: app.package_info().version.to_string(),
         persistent_secrets: state.persistent_secrets,
-        microsoft_client_id_built_in: BUILTIN_MICROSOFT_CLIENT_ID.is_some(),
+        microsoft_client_id_built_in: builtin_microsoft_client_id().is_some(),
         sync_server: cumulas_core::push::relay::sync_host(),
         signature_server: cumulas_core::signatures::config::signature_host(),
     }

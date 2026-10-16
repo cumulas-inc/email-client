@@ -82,19 +82,19 @@ rejection; know it before you start.
 Then, by hand:
 
 1. Make the screenshot URLs in the metainfo publicly reachable.
-2. Register the Microsoft Entra app (see `docs/microsoft-365.md`) and get
-   publisher verification.
-3. Tag a release, and write the manifest for Flathub yourself: a `git` source
-   pinned to the tag and commit, the generated `cargo-sources.json` and
-   `node-sources.json`, and the app's client ID in `CUMULAS_MS_CLIENT_ID`. It
-   needs Flathub's shared modules (for libayatana-appindicator) as a git
-   submodule: `git submodule add https://github.com/flathub/shared-modules`,
-   checked out at the commit `.github/workflows/ci.yml` pins.
-4. Open a pull request against
+2. Tag a release, and write the manifest for Flathub yourself: a `git` source
+   pinned to the tag and commit, and the generated `cargo-sources.json` and
+   `node-sources.json`. It needs no client IDs: the app has the published
+   Microsoft registration's and Cumulas Signatures' built in (see
+   `docs/microsoft-365.md`). It needs Flathub's shared modules (for
+   libayatana-appindicator) as a git submodule:
+   `git submodule add https://github.com/flathub/shared-modules`, checked out
+   at the commit `.github/workflows/ci.yml` pins.
+3. Open a pull request against
    [flathub/flathub](https://github.com/flathub/flathub) (branch `new-pr`) with
    the manifest, the two sources files and the submodule, and the AI
    disclosure in its description.
-5. To get the "verified" badge, publish the token Flathub gives you at
+4. To get the "verified" badge, publish the token Flathub gives you at
    `https://cumulas.co/.well-known/org.flathub.VerifiedApps.txt`.
 
 Before submitting, validate your manifest (in your flathub/flathub checkout)

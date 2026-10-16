@@ -1,7 +1,7 @@
 //! Builds protocol providers for accounts. Abstracted behind [`Connector`] so
 //! the service can be tested without network access.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -23,13 +23,61 @@ use crate::push::relay::{self, HttpRelay, Relay};
 use crate::push::supervisor::{MICROSOFT_POLL, UNSUPPORTED_POLL};
 use crate::secrets::{SecretStore, keys};
 use crate::signatures::client::SignatureClient;
-use crate::signatures::config::SignatureService;
+use crate::signatures::config::{NO_CLIENT_ID, SIGNATURE_CLIENT_ID_VAR, SignatureService, is_guid};
 use crate::signatures::{HttpOrganizationSignatures, OrganizationSignatures};
 use crate::store::Store;
 
-/// Client id baked in at build time (`CUMULAS_MS_CLIENT_ID=... cargo build`).
-/// Can be overridden in Settings.
-pub const BUILTIN_MICROSOFT_CLIENT_ID: Option<&str> = option_env!("CUMULAS_MS_CLIENT_ID");
+/// The Application (client) ID of Cumulas Mail's published Microsoft Entra
+/// app registration (any organization and personal accounts, from the
+/// verified publisher Cumulas Inc), built in unless the build names another
+/// or none (see [`builtin_microsoft_client_id`]). It isn't a secret: every
+/// sign-in shows it to Microsoft.
+pub const PUBLISHED_MICROSOFT_CLIENT_ID: &str = "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad";
+/// The variable that builds another registration's client ID in, or with
+/// `none` no client ID at all. Read at build time only: at run time,
+/// Settings → Microsoft app registration overrides it.
+pub const MICROSOFT_CLIENT_ID_VAR: &str = "CUMULAS_MS_CLIENT_ID";
+const BUILD_MICROSOFT_CLIENT_ID: Option<&str> = option_env!("CUMULAS_MS_CLIENT_ID");
+
+/// The client ID Microsoft sign-in uses unless Settings names another:
+/// `CUMULAS_MS_CLIENT_ID` at build time, else
+/// [`PUBLISHED_MICROSOFT_CLIENT_ID`]; `None` when the build said `none`,
+/// and people must then enter one in Settings before signing in. A value
+/// that isn't a GUID is ignored, with a warning.
+pub fn builtin_microsoft_client_id() -> Option<&'static str> {
+    // Worked out once, so that a bad value is warned about once rather than
+    // at every sign-in and token refresh.
+    static RESOLVED: LazyLock<Option<String>> =
+        LazyLock::new(|| resolve_builtin_microsoft_client_id(BUILD_MICROSOFT_CLIENT_ID));
+    RESOLVED.as_deref()
+}
+
+/// The client ID sign-in uses: the one entered in Settings (`setting`),
+/// else the built-in one; `None` when there's neither.
+fn microsoft_client_id(setting: Option<&str>, built_in: Option<&str>) -> Option<String> {
+    setting
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .or(built_in)
+        .map(str::to_owned)
+}
+
+fn resolve_builtin_microsoft_client_id(built_in: Option<&str>) -> Option<String> {
+    let Some(value) = built_in.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Some(PUBLISHED_MICROSOFT_CLIENT_ID.to_owned());
+    };
+    if value.eq_ignore_ascii_case(NO_CLIENT_ID) {
+        return None;
+    }
+    if is_guid(value) {
+        return Some(value.to_ascii_lowercase());
+    }
+    tracing::warn!(
+        "ignoring the Microsoft client ID from the build ({MICROSOFT_CLIENT_ID_VAR}): it must be \
+         a GUID (or `{NO_CLIENT_ID}`)"
+    );
+    Some(PUBLISHED_MICROSOFT_CLIENT_ID.to_owned())
+}
 
 /// The providers serving one account. IMAP accounts have no remote calendar,
 /// contacts or tasks; those are kept in the local store.
@@ -82,9 +130,9 @@ pub trait Connector: Send + Sync {
     ) -> Result<SignInResult>;
 
     /// Asks a Microsoft 365 work account's organization for its signature
-    /// (Cumulas Signatures); `None` when the app can't (it was built
-    /// without the service's client ID). Only asked for work and school
-    /// accounts.
+    /// (Cumulas Signatures); `None` when the app can't (company signatures
+    /// are off for this build or run, see [`SignatureService::configured`]).
+    /// Only asked for work and school accounts.
     fn organization_signatures(
         &self,
         _account: &Account,
@@ -101,7 +149,7 @@ pub struct LiveConnector {
     /// account.
     relay: OnceLock<Arc<dyn Relay>>,
     /// The signature service and its API's scope, read on first use; `None`
-    /// when the build has no client ID for it.
+    /// when company signatures are off.
     signatures: OnceLock<Option<(String, Arc<SignatureClient>)>>,
 }
 
@@ -147,19 +195,19 @@ impl LiveConnector {
 
     fn microsoft_config(&self) -> Result<MicrosoftAuthConfig> {
         let settings = self.store.get_settings()?;
-        let client_id = settings
-            .microsoft_client_id
-            .filter(|id| !id.trim().is_empty())
-            .or_else(|| BUILTIN_MICROSOFT_CLIENT_ID.map(str::to_owned))
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorCode::NotConfigured,
-                    "No Microsoft application (client) ID is configured. Add one under \
-                     Settings → Accounts → Microsoft app registration.",
-                )
-            })?;
+        let client_id = microsoft_client_id(
+            settings.microsoft_client_id.as_deref(),
+            builtin_microsoft_client_id(),
+        )
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::NotConfigured,
+                "No Microsoft application (client) ID is configured. Add one under \
+                 Settings → Accounts → Microsoft app registration.",
+            )
+        })?;
         Ok(MicrosoftAuthConfig::new(
-            client_id.trim(),
+            client_id,
             settings.microsoft_tenant.filter(|t| !t.trim().is_empty()),
         ))
     }
@@ -246,7 +294,8 @@ impl Connector for LiveConnector {
             .get_or_init(|| {
                 let Some(service) = SignatureService::configured() else {
                     tracing::info!(
-                        "company signatures are off: no client ID for the signature service"
+                        "company signatures are off: {SIGNATURE_CLIENT_ID_VAR} is `{NO_CLIENT_ID}`, \
+                         or names no client ID for the signature service"
                     );
                     return None;
                 };
@@ -271,5 +320,82 @@ impl Connector for LiveConnector {
             Arc::new(tokens),
             scope,
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ID: &str = "99999999-8888-7777-6666-555555555555";
+
+    #[test]
+    fn a_client_id_in_settings_comes_before_the_built_in_one() {
+        let published = Some(PUBLISHED_MICROSOFT_CLIENT_ID);
+        assert_eq!(
+            microsoft_client_id(Some(&format!(" {ID} ")), published).as_deref(),
+            Some(ID)
+        );
+        // An empty or blank entry in Settings leaves the built-in one.
+        for blank in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                microsoft_client_id(blank, published).as_deref(),
+                published,
+                "{blank:?}"
+            );
+        }
+        // A build with `none` and nothing in Settings: not configured.
+        assert_eq!(microsoft_client_id(Some(" "), None), None);
+        assert_eq!(microsoft_client_id(Some(ID), None).as_deref(), Some(ID));
+    }
+
+    #[test]
+    fn the_published_client_id_is_built_in_unless_the_build_names_another() {
+        let published = Some(PUBLISHED_MICROSOFT_CLIENT_ID);
+        // Not set, or set empty (as the Flatpak manifest does).
+        assert_eq!(
+            resolve_builtin_microsoft_client_id(None).as_deref(),
+            published
+        );
+        assert_eq!(
+            resolve_builtin_microsoft_client_id(Some("")).as_deref(),
+            published
+        );
+        assert_eq!(
+            resolve_builtin_microsoft_client_id(Some("  ")).as_deref(),
+            published
+        );
+        // Another registration's.
+        assert_eq!(
+            resolve_builtin_microsoft_client_id(Some(ID)).as_deref(),
+            Some(ID)
+        );
+        assert_eq!(
+            resolve_builtin_microsoft_client_id(Some(&format!(" {} ", ID.to_uppercase())))
+                .as_deref(),
+            Some(ID)
+        );
+        // None at all: people enter one in Settings.
+        for none in ["none", "NONE", " None "] {
+            assert_eq!(
+                resolve_builtin_microsoft_client_id(Some(none)),
+                None,
+                "{none}"
+            );
+        }
+        // Not a GUID: ignored, as if not set.
+        for junk in [
+            "not-a-guid",
+            "{x}",
+            "off",
+            "99999999888877776666555555555555",
+        ] {
+            assert_eq!(
+                resolve_builtin_microsoft_client_id(Some(junk)).as_deref(),
+                published,
+                "{junk}"
+            );
+        }
+        assert!(is_guid(PUBLISHED_MICROSOFT_CLIENT_ID));
     }
 }
