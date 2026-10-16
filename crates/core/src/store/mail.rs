@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Row, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +12,7 @@ use crate::model::{
     MessageQuery, MessageSummary, local_id,
 };
 use crate::providers::{MessageBatch, MessageContent};
+use crate::search::{SearchQuery, fts};
 
 const FOLDER_COLUMNS: &str =
     "id, account_id, remote_id, parent_id, name, role, unread_count, total_count";
@@ -309,16 +311,37 @@ fn delete_message_rows(tx: &Transaction<'_>, ids: &[String]) -> rusqlite::Result
     Ok(deleted)
 }
 
-/// Turns free text into an FTS5 query: every word becomes a quoted prefix
-/// term, so user input can never be interpreted as FTS syntax.
-fn fts_query(input: &str) -> Option<String> {
-    let terms: Vec<String> = input
-        .split_whitespace()
-        .map(|w| w.replace('"', ""))
-        .filter(|w| !w.is_empty())
-        .map(|w| format!("\"{w}\"*"))
-        .collect();
-    (!terms.is_empty()).then(|| terms.join(" "))
+/// `SUMMARY_COLUMNS` of the messages row aliased `m`.
+fn summary_columns_of_m() -> String {
+    SUMMARY_COLUMNS
+        .split(", ")
+        .map(|c| format!("m.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The local search: `conditions` from [`fts::plan`] (their parameters
+/// first), then the account (or NULL) and the limit.
+fn search_sql(conditions: &[String]) -> String {
+    let params: usize = conditions.iter().map(|c| c.matches('?').count()).sum();
+    format!(
+        "SELECT {} FROM messages m
+         WHERE {} AND (?{account} IS NULL OR m.account_id = ?{account})
+         ORDER BY m.received_at DESC, m.id LIMIT ?{limit}",
+        summary_columns_of_m(),
+        conditions.join(" AND "),
+        account = params + 1,
+        limit = params + 2,
+    )
+}
+
+/// The messages a JSON array of ids names, of the account (or any, NULL).
+fn include_sql() -> String {
+    format!(
+        "SELECT {} FROM messages m
+         WHERE m.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR m.account_id = ?2)",
+        summary_columns_of_m()
+    )
 }
 
 impl Store {
@@ -568,29 +591,40 @@ impl Store {
         Ok(MessagePage { items, total })
     }
 
-    /// Full-text search over subject, sender, recipients and body.
+    /// Messages matching `query` (at most `limit`, newest first), and the
+    /// messages `include_ids` names (server search found them; never cut by
+    /// `limit`), each once, newest first. Ids no longer stored drop out.
     pub fn search_messages(
         &self,
-        text: &str,
+        query: &SearchQuery,
         account_id: Option<&str>,
+        include_ids: &[String],
         limit: u32,
     ) -> Result<Vec<MessageSummary>> {
-        let Some(fts) = fts_query(text) else {
-            return Ok(Vec::new());
-        };
+        let plan = fts::plan(query);
         let conn = self.conn();
-        let columns = SUMMARY_COLUMNS
-            .split(", ")
-            .map(|c| format!("m.{c}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {columns} FROM messages_fts f JOIN messages m ON m.fts_rowid = f.rowid
-             WHERE messages_fts MATCH ?1 AND (?2 IS NULL OR m.account_id = ?2)
-             ORDER BY m.received_at DESC LIMIT ?3"
-        ))?;
-        let rows = stmt.query_map(params![fts, account_id, limit], row_to_summary)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut found: Vec<MessageSummary> = Vec::new();
+        if !plan.conditions.is_empty() {
+            let mut values: Vec<Value> = plan.params.into_iter().map(Value::from).collect();
+            values.push(account_id.map(str::to_owned).into());
+            values.push(limit.into());
+            let mut stmt = conn.prepare(&search_sql(&plan.conditions))?;
+            let rows = stmt.query_map(params_from_iter(values), row_to_summary)?;
+            found = rows.collect::<rusqlite::Result<_>>()?;
+        }
+        if !include_ids.is_empty() {
+            let mut stmt = conn.prepare(&include_sql())?;
+            let rows = stmt.query_map(params![to_json(include_ids), account_id], row_to_summary)?;
+            let mut seen: HashSet<String> = found.iter().map(|m| m.id.clone()).collect();
+            for row in rows {
+                let m = row?;
+                if seen.insert(m.id.clone()) {
+                    found.push(m);
+                }
+            }
+            found.sort_by(|a, b| b.received_at.cmp(&a.received_at).then(a.id.cmp(&b.id)));
+        }
+        Ok(found)
     }
 
     pub fn get_message_summary(&self, id: &str) -> Result<MessageSummary> {
@@ -882,6 +916,10 @@ mod tests {
         }
     }
 
+    fn search(store: &Store, text: &str) -> Result<Vec<MessageSummary>> {
+        store.search_messages(&SearchQuery::parse(text), None, &[], 10)
+    }
+
     fn setup() -> (Store, Folder, Folder) {
         let store = Store::open_in_memory().unwrap();
         store.insert_account(&imap_account("a")).unwrap();
@@ -991,7 +1029,7 @@ mod tests {
         assert_eq!(one.preview, "preview of One");
         let two = page.items.iter().find(|m| m.remote_id == "2").unwrap();
         assert!(two.is_read && two.is_flagged);
-        assert!(store.search_messages("three", None, 10).unwrap().is_empty());
+        assert!(search(&store, "three").unwrap().is_empty());
     }
 
     #[test]
@@ -1131,19 +1169,11 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(store.search_messages("quarter", None, 10).unwrap().len(), 1);
-        assert_eq!(
-            store.search_messages("lovelace", None, 10).unwrap().len(),
-            1
-        );
-        assert!(
-            store
-                .search_messages("pineapple", None, 10)
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(search(&store, "quarter").unwrap().len(), 1);
+        assert_eq!(search(&store, "lovelace").unwrap().len(), 1);
+        assert!(search(&store, "pineapple").unwrap().is_empty());
         // Hostile FTS syntax is treated as plain words.
-        assert!(store.search_messages("\"a\" OR NEAR(", None, 10).is_ok());
+        assert!(search(&store, "\"a\" OR NEAR(").is_ok());
 
         store
             .save_message_content(
@@ -1154,10 +1184,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(
-            store.search_messages("pineapple", None, 10).unwrap().len(),
-            1
-        );
+        assert_eq!(search(&store, "pineapple").unwrap().len(), 1);
         let content = store.get_message_content(&m.id).unwrap().unwrap();
         assert!(content.body_html.unwrap().contains("Pineapple"));
     }
@@ -1218,10 +1245,7 @@ mod tests {
             .unwrap();
         assert_eq!(moved.items.len(), 1);
         assert_eq!(moved.items[0].remote_id, "Archive:9");
-        assert_eq!(
-            store.search_messages("one", None, 10).unwrap()[0].id,
-            moved.items[0].id
-        );
+        assert_eq!(search(&store, "one").unwrap()[0].id, moved.items[0].id);
         assert_eq!(
             store
                 .list_messages(&inbox.id, &MessageQuery::default())
@@ -1326,10 +1350,165 @@ mod tests {
         assert_eq!(index_rows(&store), (0, 0));
     }
 
+    /// Messages to search: Ada's report with an attachment, Megan's invoice
+    /// and Lucía's lunch, newest first.
+    fn searchable(store: &Store, inbox: &Folder) -> [MessageSummary; 3] {
+        let mut report = message(inbox, "1", "Quarterly report", false);
+        report.cc = vec![EmailAddress::new(Some("Dana Scully"), "dana@example.com")];
+        report.has_attachments = true;
+        let mut invoice = message(inbox, "22", "Your Invoice for March", false);
+        invoice.from = Some(EmailAddress::new(Some("Megan Bowen"), "megan@contoso.com"));
+        invoice.to = vec![EmailAddress::new(None, "alex@example.com")];
+        invoice.preview = "Please pay by Friday".into();
+        let mut lunch = message(inbox, "333", "Lunch?", true);
+        lunch.from = Some(EmailAddress::new(Some("Lucía Pérez"), "lucia@example.com"));
+        let messages = [report, invoice, lunch];
+        store
+            .apply_message_batch(
+                inbox,
+                &MessageBatch {
+                    upserts: messages.to_vec(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        messages
+    }
+
+    #[test]
+    fn operators_prefix_and_infix_search() {
+        let (store, inbox, _) = setup();
+        let [report, invoice, lunch] = searchable(&store, &inbox);
+        let found = |text: &str| -> Vec<String> {
+            search(&store, text)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.subject)
+                .collect()
+        };
+        let only = |m: &MessageSummary| vec![m.subject.clone()];
+
+        assert_eq!(found("from:ada"), only(&report));
+        assert_eq!(found("FROM:Lovelace"), only(&report));
+        assert_eq!(found("from:megan@contoso"), only(&invoice));
+        assert_eq!(found("from:contoso.com"), only(&invoice));
+        assert_eq!(
+            found("to:me"),
+            [report.subject.clone(), lunch.subject.clone()]
+        );
+        assert_eq!(found("to:alex@example.com"), only(&invoice));
+        assert_eq!(found("cc:dana"), only(&report));
+        assert!(found("to:dana").is_empty());
+        assert_eq!(found("subject:\"quarterly report\""), only(&report));
+        assert_eq!(found("subject:quarterly"), only(&report));
+        assert!(found("subject:\"report quarterly\"").is_empty());
+        assert!(found("subject:ada").is_empty());
+        // Every word must match, wherever it is.
+        assert_eq!(found("from:megan march"), only(&invoice));
+        assert!(found("from:megan quarterly").is_empty());
+        assert_eq!(found("friday"), only(&invoice));
+        // Inside words, in subjects and senders, from three characters.
+        assert_eq!(found("voice"), only(&invoice));
+        assert_eq!(found("subject:arterly"), only(&report));
+        assert_eq!(found("ontoso"), only(&invoice));
+        assert!(found("vo").is_empty());
+        assert!(found("body:voice").is_empty());
+        // Accents don't matter.
+        assert_eq!(found("lucia perez"), only(&lunch));
+        assert_eq!(found("cía"), only(&lunch));
+        assert_eq!(found("has:attachment"), only(&report));
+        assert!(found("has:attachment lunch").is_empty());
+        assert_eq!(found("lovelace has:attachment"), only(&report));
+        // Nothing typed is FTS syntax, and nothing fails.
+        for hostile in [
+            "\"a\" OR NEAR(",
+            "*",
+            "}{",
+            "NOT",
+            "a AND",
+            "^start",
+            "col:umn",
+            "\u{0902}",
+            "body:\"\"",
+            "\\",
+        ] {
+            assert!(search(&store, hostile).is_ok(), "{hostile:?}");
+        }
+        assert!(found("").is_empty());
+    }
+
+    #[test]
+    fn include_ids_are_merged_deduplicated_and_never_cut() {
+        let (store, inbox, _) = setup();
+        let [report, invoice, lunch] = searchable(&store, &inbox);
+        let ids = |found: Vec<MessageSummary>| -> Vec<String> {
+            found.into_iter().map(|m| m.id).collect()
+        };
+        let query = SearchQuery::parse("ada");
+        // The limit keeps the newest match only.
+        assert_eq!(
+            ids(store.search_messages(&query, None, &[], 1).unwrap()),
+            [report.id.as_str()]
+        );
+        // Server hits join it, once each, newest first, past the limit;
+        // ids no longer stored drop out.
+        let include = [
+            lunch.id.clone(),
+            "gone".into(),
+            report.id.clone(),
+            invoice.id.clone(),
+        ];
+        assert_eq!(
+            ids(store.search_messages(&query, None, &include, 1).unwrap()),
+            [report.id.clone(), invoice.id.clone(), lunch.id.clone()]
+        );
+        // Without words to match, just them.
+        assert_eq!(
+            ids(store
+                .search_messages(&SearchQuery::default(), None, &include[..2], 1)
+                .unwrap()),
+            [lunch.id.as_str()]
+        );
+        // Only the account's.
+        assert_eq!(
+            ids(store
+                .search_messages(&query, Some("a"), &include, 5)
+                .unwrap())
+            .len(),
+            3
+        );
+        assert!(
+            store
+                .search_messages(&query, Some("b"), &include, 5)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Whether a plan reads every message row.
+    fn scans_messages(plan: &str) -> bool {
+        plan.lines()
+            .any(|l| l == "SCAN m" || l.starts_with("SCAN m "))
+    }
+
+    #[test]
+    fn local_search_uses_the_rowid_index() {
+        let (store, ..) = setup();
+        for text in ["invoice", "to:al", "from:megan subject:\"q3 plan\" to:al"] {
+            let plan = fts::plan(&SearchQuery::parse(text));
+            let steps = query_plan(&store, &search_sql(&plan.conditions));
+            assert!(steps.contains("messages_fts_rowid"), "{text}: {steps}");
+            assert!(!scans_messages(&steps), "{text}: {steps}");
+        }
+        let steps = query_plan(&store, &include_sql());
+        assert!(steps.contains("autoindex_messages"), "{steps}");
+        assert!(!scans_messages(&steps), "{steps}");
+    }
+
     #[test]
     fn reindexes_when_subject_or_recipients_change() {
         let (store, inbox, _) = setup();
-        let found = |text: &str| store.search_messages(text, None, 10).unwrap().len();
+        let found = |text: &str| search(&store, text).unwrap().len();
         let mut fetched = message(&inbox, "1", "Quarterly report", false);
         let mut plain = message(&inbox, "2", "Lunch", false);
         let sync = |upserts: Vec<MessageSummary>| {

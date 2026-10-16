@@ -8,6 +8,7 @@ pub mod model;
 pub mod providers;
 pub mod push;
 pub mod reminders;
+pub mod search;
 pub mod secrets;
 pub mod service;
 pub mod signatures;

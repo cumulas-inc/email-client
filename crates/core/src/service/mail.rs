@@ -58,14 +58,6 @@ impl CoreService {
         self.store.list_messages(folder_id, query)
     }
 
-    pub fn search_messages(
-        &self,
-        text: &str,
-        account_id: Option<&str>,
-    ) -> Result<Vec<MessageSummary>> {
-        self.store.search_messages(text, account_id, 200)
-    }
-
     pub fn suggest_addresses(&self, text: &str) -> Result<Vec<EmailAddress>> {
         if text.trim().is_empty() {
             return Ok(Vec::new());

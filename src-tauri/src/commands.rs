@@ -403,7 +403,9 @@ pub fn search_messages(
     text: String,
     account_id: Option<String>,
 ) -> Result<Vec<MessageSummary>> {
-    state.service.search_messages(&text, account_id.as_deref())
+    state
+        .service
+        .search_messages(&text, account_id.as_deref(), &[])
 }
 
 #[tauri::command]

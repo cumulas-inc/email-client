@@ -10,6 +10,7 @@ mod connector;
 mod mail;
 mod pim;
 mod reminders;
+mod search;
 mod signatures;
 mod sync;
 pub(crate) mod targeted;
@@ -26,6 +27,7 @@ pub use connector::{
     PushSource, builtin_microsoft_client_id,
 };
 pub use mail::Attachment;
+pub use search::{LOCAL_SEARCH_LIMIT, MAX_INCLUDED_IDS};
 pub use targeted::SyncScope;
 
 use crate::error::{Error, ErrorCode, Result};

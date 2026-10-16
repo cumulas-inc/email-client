@@ -711,7 +711,7 @@ async fn sync_failure_is_recorded_on_the_account() {
 async fn reading_a_message_fetches_sanitises_and_caches_it() {
     let h = harness();
     let account = account_with_mail(&h).await;
-    let id = h.service.search_messages("welcome", None).unwrap()[0]
+    let id = h.service.search_messages("welcome", None, &[]).unwrap()[0]
         .id
         .clone();
 
@@ -818,7 +818,7 @@ async fn flags_moves_and_deletes_go_to_server_then_store() {
 async fn sending_validates_recipients_and_links_replies() {
     let h = harness();
     let account = account_with_mail(&h).await;
-    let original = h.service.search_messages("invoice", None).unwrap()[0]
+    let original = h.service.search_messages("invoice", None, &[]).unwrap()[0]
         .id
         .clone();
     let mut message = OutgoingMessage {
