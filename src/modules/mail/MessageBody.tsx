@@ -2,8 +2,9 @@
 // defense in depth it is shown in an <iframe sandbox="allow-scripts">
 // without allow-same-origin: an opaque origin, which can't reach the app or
 // its IPC (no forms, popups or top navigation either), with a Content
-// Security Policy that only allows inline styles, data:/cid: images (unless
-// the user allowed remote content) and one script, the bridge.
+// Security Policy that allows only inline styles, data:/cid: images (and
+// remote ones once the user allows them), data: fonts (the reading face
+// travels inside the document) and one script, the bridge.
 //
 // WebKitGTK calls no event listener in a frame that may not run scripts,
 // this component's included, and an opaque frame can't be reached into, so
