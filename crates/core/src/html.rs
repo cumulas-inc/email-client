@@ -21,7 +21,7 @@ pub const MAX_SIGNATURE_BYTES: usize = 512 * 1024;
 /// The version of [`sanitize_signature_html`]. Raise it when what the
 /// sanitizer keeps changes: organization signatures kept by an earlier one
 /// are then fetched again in full, rather than kept on "not modified".
-pub const SIGNATURE_SANITIZER_VERSION: u32 = 1;
+pub const SIGNATURE_SANITIZER_VERSION: u32 = 2;
 
 /// Result of [`sanitize_email_html`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,9 +139,9 @@ const LAYOUT_ATTRIBUTES: &[&str] = &[
 /// `http`, `https`, `mailto` and `tel`. Relative URLs are resolved against
 /// `base`, or dropped without one. A declaration of a `style` attribute that
 /// loads something else, or could run code, goes; so does a `<style>` block
-/// with `@import`, `expression(`, `javascript:`, `behavior:`, `image-set(`
-/// (whose bare strings are image URLs that no rule here reads) or a `url()`
-/// other than `https:` or `data:`. Comments go too, and with them the
+/// with `@import`, `expression(`, `javascript:`, `behavior:`, `image-set(`,
+/// `image(`, `cross-fade(` or `src(` (whose bare strings are URLs that no
+/// rule here reads) or a `url()` other than `https:` or `data:`. Comments go too, and with them the
 /// conditional comments Outlook writes for its own font fallbacks (Word's
 /// `<!--[if mso]>` blocks), which nothing else reads.
 ///
@@ -236,10 +236,11 @@ fn is_signature_image(url: &Url) -> bool {
     }
 }
 
-/// What in CSS can run code, load another stylesheet, or load an image from
-/// a URL that isn't in a `url()`, once comments, escapes and whitespace are
-/// gone (see [`normalize_css`]). `image-set(` takes bare strings as image
-/// URLs; it also stands for `-webkit-image-set(`. Mail hardly ever uses it.
+/// What in CSS can run code, load another stylesheet, or load from a URL
+/// that isn't in a `url()`, once comments, escapes and whitespace are gone
+/// (see [`normalize_css`]). `image-set(`, `image(` and `cross-fade(` take
+/// bare strings as image URLs, and `src(` is `url()` for a string; each also
+/// stands for its `-webkit-` spelling. Mail hardly ever uses them.
 const UNSAFE_CSS: &[&str] = &[
     "@import",
     "expression(",
@@ -248,6 +249,9 @@ const UNSAFE_CSS: &[&str] = &[
     "behavior:",
     "-moz-binding",
     "image-set(",
+    "image(",
+    "cross-fade(",
+    "src(",
 ];
 
 /// A `style` attribute without the declarations that load from anywhere
@@ -781,7 +785,10 @@ mod tests {
                <td style="background: url(/relative.png)">h</td>
                <td style="background-image: image-set('http://cdn.example/i.png' 1x); color: teal">i</td>
                <td style="background: -webkit-image-set(&quot;https://cdn.example/i.png&quot; 1x); color: olive">j</td>
-               <td style="list-style-image: \69 mage-set('/relative-set.png'); color: maroon">k</td></tr></table>"#,
+               <td style="list-style-image: \69 mage-set('/relative-set.png'); color: maroon">k</td>
+               <td style="background-image: image('http://cdn.example/i.png'); color: purple">l</td>
+               <td style="background: -webkit-cross-fade('http://cdn.example/a.png', 'http://cdn.example/b.png', 50%); color: lime">m</td>
+               <td style="background-image: src('http://cdn.example/s.png'); color: gray">n</td></tr></table>"#,
         );
         assert!(
             out.contains(r#"style="color: red; font-size: 12px""#),
@@ -802,6 +809,10 @@ mod tests {
         assert!(out.contains(r#"style="color: teal""#), "{out}");
         assert!(out.contains(r#"style="color: olive""#), "{out}");
         assert!(out.contains(r#"style="color: maroon""#), "{out}");
+        // So are image()'s, cross-fade()'s and src()'s.
+        assert!(out.contains(r#"style="color: purple""#), "{out}");
+        assert!(out.contains(r#"style="color: lime""#), "{out}");
+        assert!(out.contains(r#"style="color: gray""#), "{out}");
         for gone in [
             "http://cdn",
             "data:text",
@@ -810,6 +821,9 @@ mod tests {
             "behavior",
             "relative",
             "image-set",
+            "image(",
+            "cross-fade",
+            "src(",
         ] {
             assert!(!out.contains(gone), "{gone} in {out}");
         }
@@ -842,6 +856,12 @@ mod tests {
             "p { background: image-set('/relative.png' 1x) }",
             "p { background: im\\61 ge-se\\74(\"http://cdn.example/bg.png\") }",
             "p { background: IMAGE-/**/SET('http://cdn.example/bg.png') }",
+            "p { background-image: image('http://cdn.example/bg.png') }",
+            "p { background-image: image(\"https://cdn.example/bg.png\", red) }",
+            "p { background: -webkit-cross-fade('a.png', 'b.png', 50%) }",
+            "p { background: cross-fade(url(https://cdn.example/a.png) 50%, 'b.png') }",
+            "p { background-image: src('http://cdn.example/bg.png') }",
+            r#"@font-face { font-family: X; src: s\72 c("/font.woff2") }"#,
         ] {
             let out = signature(&format!("<style>{css}</style><p>Ada</p>"));
             assert_eq!(out, "<p>Ada</p>", "{css}");

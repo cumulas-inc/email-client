@@ -258,10 +258,11 @@ For each work or school account, the app:
 
 Signatures are sanitized before use, like message bodies, but stricter:
 pictures and CSS backgrounds only over HTTPS or as `data:` images (no
-`image-set()`), links only to the web, email and phone numbers, and relative
+`image-set()`, `image()`, `cross-fade()` or `src()`, whose plain strings are
+addresses), links only to the web, email and phone numbers, and relative
 links resolved against the service. Kept signatures are sanitized again
 whenever they're read, so a stricter sanitizer in an update applies at once.
-The kept ETag starts with the sanitizer's version (`s1:`): an answer kept by
+The kept ETag starts with the sanitizer's version (`s2:`): an answer kept by
 another sanitizer is asked for without it, so it comes again in full. A check
 that fails keeps the last answer, marked stale, so a signature keeps working
 offline.

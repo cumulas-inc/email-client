@@ -21,7 +21,7 @@ pub struct StoredOrganizationSignature {
     pub html: Option<String>,
     pub on_replies: bool,
     /// The service's ETag for its last answer, after the version of the
-    /// sanitizer the answer went through (`s1:"…"`).
+    /// sanitizer the answer went through (`s2:"…"`).
     pub etag: Option<String>,
     /// The last answer.
     pub checked_at: Option<DateTime<Utc>>,
