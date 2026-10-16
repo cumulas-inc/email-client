@@ -774,13 +774,16 @@ describe("About", () => {
     // What company signatures send, and where.
     expect(screen.getByText("Company signatures")).toBeInTheDocument();
     // Microsoft hands out the token wherever the organization has added the
-    // service's app, which isn't only where it uses the service.
-    expect(screen.getByText(/asks Microsoft for a sign-in token/)).toHaveTextContent(
-      "For Microsoft 365 work and school accounts, Cumulas Mail asks Microsoft for a sign-in " +
-        "token for Cumulas Signatures. Microsoft gives one only if your organization has added " +
-        "the Cumulas Signatures app; the app then sends that token, which names you and your " +
-        "organization, to signature.cumulas.co to get your signature. No mail, contacts or " +
-        "recipients are sent.",
+    // service's app, which isn't only where it uses the service, and
+    // nowhere else.
+    expect(screen.getByText(/gives Cumulas Mail a sign-in token/)).toHaveTextContent(
+      "For work and school accounts, Microsoft gives Cumulas Mail a sign-in token for Cumulas " +
+        "Signatures only if your organization has added the Cumulas Signatures app in " +
+        "Microsoft 365. That includes organizations that use it now, used it before and kept " +
+        "the app, or where someone signed in to the service. Cumulas Mail then sends that " +
+        "token, which names you and your organization, to signature.cumulas.co to get your " +
+        "signature; no mail, contacts or recipients are sent. In other organizations " +
+        "Microsoft refuses and nothing is sent.",
     );
   });
 
