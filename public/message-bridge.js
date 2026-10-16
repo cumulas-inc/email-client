@@ -66,6 +66,7 @@
   const attribute = method(ElementProto.getAttribute);
   const scrollIntoView = method(ElementProto.scrollIntoView);
   const rectOf = method(ElementProto.getBoundingClientRect);
+  const contains = method(Node.prototype.contains);
   const byId = Document.prototype.getElementById.bind(doc);
   const byName = Document.prototype.getElementsByName.bind(doc);
   const style = window.getComputedStyle.bind(window);
@@ -132,12 +133,18 @@
     under = null;
     hover(null);
   });
-  // An address changed under the pointer (or one made there) shows at once,
-  // not only once the pointer goes down.
+  // An address changed under the pointer (or one made there, or the page
+  // rebuilt around it, its root included) shows at once, not only once the
+  // pointer goes down.
   if (typeof Mutations === "function") {
     new Mutations(() => {
-      if (under) pointAt(under);
-    }).observe(root, { subtree: true, attributes: true, attributeFilter: ["href"] });
+      if (under) pointAt(contains(doc, under) ? under : null);
+    }).observe(doc, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["href"],
+    });
   }
 
   // The link the pointer last went down on, and where it led then. Pointer

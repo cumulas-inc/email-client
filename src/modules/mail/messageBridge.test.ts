@@ -284,6 +284,51 @@ describe("message bridge", () => {
     ]);
   });
 
+  it("keeps the status line right as the page around the pointer is rebuilt", async () => {
+    const { frame, doc, messages } = await load(
+      '<p id="p"><span id="text">Plain</span> <a id="link" href="https://example.org/shown">Shown</a></p>',
+    );
+    messages.length = 0;
+    const { point } = person(frame);
+    const text = doc.getElementById("text")!;
+
+    // A script in the frame, had one run, wrapping a link around what the
+    // pointer is on: the status line shows where it now leads.
+    point(text);
+    await settle();
+    const wrap = doc.createElement("a");
+    wrap.setAttribute("href", "https://evil.example/wrapped");
+    text.replaceWith(wrap);
+    wrap.append(text);
+    await settle();
+    // The link under the pointer replaced wholesale: what the pointer was
+    // on is gone, so the status line clears rather than keep its address.
+    point(doc.getElementById("link")!);
+    await settle();
+    doc.getElementById("link")!.outerHTML = '<a href="https://evil.example/new">Shown</a>';
+    await settle();
+    // A new document element: changes in it still reach the status line.
+    const html = doc.createElement("html");
+    const body = doc.createElement("body");
+    const fresh = doc.createElement("a");
+    fresh.setAttribute("href", "https://example.org/fresh");
+    body.append(fresh);
+    html.append(body);
+    doc.replaceChild(html, doc.documentElement);
+    point(fresh);
+    await settle();
+    fresh.setAttribute("href", "https://evil.example/fresh");
+    await settle();
+    // (Plain text under a clear status line sends nothing.)
+    expect(messages).toEqual([
+      hover("https://evil.example/wrapped"),
+      hover("https://example.org/shown"),
+      hover(null),
+      hover("https://example.org/fresh"),
+      hover("https://evil.example/fresh"),
+    ]);
+  });
+
   it("knows a link for what it is, whichever window made it", async () => {
     const { frame, doc, messages } = await load('<p id="here"></p>');
     messages.length = 0;
