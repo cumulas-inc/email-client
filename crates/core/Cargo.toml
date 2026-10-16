@@ -49,6 +49,10 @@ mail-parser = "0.11"
 # HTML sanitizing for message bodies
 ammonia = "4"
 
+# Search queries: composing typed text (NFC) and telling combining marks
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
+icu_properties = "2"
+
 # Secrets (Secret Service / Flatpak secret portal)
 oo7 = { version = "0.6", default-features = false, features = ["tokio", "native_crypto"] }
 

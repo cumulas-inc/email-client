@@ -2190,6 +2190,27 @@ mod tests {
         assert!(content.body_html.unwrap().contains("Pineapple"));
     }
 
+    /// Words with combining marks are whole words, and accents typed on
+    /// their own find the composed letters mail is written in.
+    #[test]
+    fn search_finds_words_with_combining_marks() {
+        let (store, inbox, _) = setup();
+        let hindi = message(&inbox, "1", "हिन्दी पाठ्यक्रम", false);
+        let resume = message(&inbox, "2", "Résumé for Lucía", false);
+        apply(&store, &inbox, upserts(&[&hindi, &resume]));
+        let ids = |text: &str| -> Vec<String> {
+            search(&store, text)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.id)
+                .collect()
+        };
+        assert_eq!(ids("हिन्दी"), [hindi.id.as_str()]);
+        assert_eq!(ids("re\u{301}sume\u{301}"), [resume.id.as_str()]);
+        assert_eq!(ids("resume"), [resume.id.as_str()]);
+        assert_eq!(ids("subject:\"lucia\""), [resume.id.as_str()]);
+    }
+
     #[test]
     fn read_state_updates_unread_counts() {
         let (store, inbox, _) = setup();

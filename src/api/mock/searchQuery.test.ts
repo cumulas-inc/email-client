@@ -53,6 +53,10 @@ const VECTORS: [input: string, terms: string[], hasAttachment: boolean][] = [
   ['from:"Megan Bowen"', ["From:megan bowen [p]"], false],
   ["cc:x@y.z", ["Cc:x@y.z"], false],
   ["2023-118", ["A:2023-118"], false],
+  ["हिन्दी ಕನ್ನಡ", ["A:हिन्दी", "A:ಕನ್ನಡ"], false],
+  ["re\u0301sume\u0301", ["A:résumé"], false],
+  ["\u0301abc -\u0301x\u0301", ["A:abc", "A:x\u0301"], false],
+  ['"a\u0007b\tc\u0000"', ["A:ab c [p]"], false],
   ["a b c d e f g h i j k l m n o p q r", "abcdefghijklmnop".split("").map((c) => `A:${c}`), false],
 ];
 

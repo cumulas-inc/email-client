@@ -13,6 +13,10 @@ pub mod fts;
 pub mod imap;
 pub mod kql;
 
+use icu_normalizer::ComposingNormalizerBorrowed;
+use icu_properties::CodePointMapData;
+use icu_properties::props::{GeneralCategory, GeneralCategoryGroup};
+
 /// The part of a message a term must match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
@@ -65,9 +69,19 @@ fn is_word_joiner(c: char) -> bool {
     matches!(c, '@' | '.' | '_' | '-' | '\'' | '+')
 }
 
+/// A combining mark (`\p{M}`): a virama or vowel sign (as in "हिन्दी"), or
+/// an accent typed on its own. Part of the word it follows.
+fn is_mark(c: char) -> bool {
+    GeneralCategoryGroup::Mark.contains(CodePointMapData::<GeneralCategory>::new().get(c))
+}
+
 impl SearchQuery {
     pub fn parse(input: &str) -> Self {
-        let chars: Vec<char> = input
+        // Composed (NFC), as mail is: "é" typed as "e" and an accent is the
+        // same word.
+        let head: String = input.chars().take(MAX_INPUT_CHARS).collect();
+        let chars: Vec<char> = ComposingNormalizerBorrowed::new_nfc()
+            .normalize(&head)
             .chars()
             .take(MAX_INPUT_CHARS)
             .map(|c| match c {
@@ -125,7 +139,7 @@ impl SearchQuery {
             "body" => Field::Body,
             _ => {
                 let value = if quoted {
-                    phrase_text(&value)
+                    phrase_text(&value).to_lowercase()
                 } else {
                     value.to_lowercase()
                 };
@@ -147,25 +161,23 @@ impl SearchQuery {
     }
 
     fn add_phrase(&mut self, field: Field, text: &str) {
-        self.push(field, phrase_text(text), true);
+        self.push(field, &phrase_text(text), true);
     }
 
     /// Splits a bare run into words, each a term.
     fn add_words(&mut self, field: Field, run: &[char]) {
         let run: String = run.iter().collect();
-        for piece in run.split(|c: char| !(c.is_alphanumeric() || is_word_joiner(c))) {
-            self.push(
-                field,
-                piece.trim_matches(is_word_joiner).to_lowercase(),
-                false,
-            );
+        let in_word = |c: char| c.is_alphanumeric() || is_word_joiner(c) || is_mark(c);
+        for piece in run.split(|c: char| !in_word(c)) {
+            let word = piece
+                .trim_start_matches(|c: char| is_word_joiner(c) || is_mark(c))
+                .trim_end_matches(is_word_joiner);
+            self.push(field, word, false);
         }
     }
 
-    fn push(&mut self, field: Field, mut text: String, phrase: bool) {
-        if let Some((cut, _)) = text.char_indices().nth(MAX_TERM_CHARS) {
-            text.truncate(cut);
-        }
+    fn push(&mut self, field: Field, text: &str, phrase: bool) {
+        let text = cut(text.to_lowercase());
         if text.chars().any(char::is_alphanumeric) {
             self.terms.push(Term {
                 field,
@@ -174,6 +186,14 @@ impl SearchQuery {
             });
         }
     }
+}
+
+/// At most [`MAX_TERM_CHARS`] of `text`.
+fn cut(mut text: String) -> String {
+    if let Some((at, _)) = text.char_indices().nth(MAX_TERM_CHARS) {
+        text.truncate(at);
+    }
+    text
 }
 
 /// The phrase from `at` to the next `"` (or the end), and where parsing
@@ -189,14 +209,15 @@ fn phrase(chars: &[char], at: usize) -> (String, usize) {
     )
 }
 
-/// A phrase's text: without backslashes, whitespace runs as one space,
-/// trimmed and lowercased.
+/// A phrase's text: without backslashes or control characters, whitespace
+/// runs as one space, trimmed.
 fn phrase_text(raw: &str) -> String {
-    raw.replace('\\', "")
+    raw.chars()
+        .filter(|&c| c != '\\' && (c.is_whitespace() || !c.is_control()))
+        .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .to_lowercase()
 }
 
 /// Where a bare run starting at `at` ends: at whitespace or a `"`.
@@ -292,6 +313,15 @@ mod tests {
             ("from:\"Megan Bowen\"", &["From:megan bowen [p]"], false),
             ("cc:x@y.z", &["Cc:x@y.z"], false),
             ("2023-118", &["A:2023-118"], false),
+            // Combining marks stay in their word; typed accents compose.
+            ("हिन्दी ಕನ್ನಡ", &["A:हिन्दी", "A:ಕನ್ನಡ"], false),
+            ("re\u{301}sume\u{301}", &["A:résumé"], false),
+            (
+                "\u{301}abc -\u{301}x\u{301}",
+                &["A:abc", "A:x\u{301}"],
+                false,
+            ),
+            ("\"a\u{7}b\tc\u{0}\"", &["A:ab c [p]"], false),
             (
                 "a b c d e f g h i j k l m n o p q r",
                 &[

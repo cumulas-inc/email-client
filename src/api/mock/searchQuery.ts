@@ -34,9 +34,12 @@ const FIELDS: Record<string, SearchField> = {
 };
 const HAS = new Set(["has", "hasattachment", "hasattachments"]);
 
-// Rust's char::is_alphanumeric and char::is_whitespace.
+// Rust's char::is_alphanumeric, char::is_whitespace and char::is_control.
 const ALPHANUMERIC = /[\p{Alphabetic}\p{N}]/u;
 const WHITESPACE = /\p{White_Space}/u;
+const CONTROL = /\p{Cc}/u;
+/** Combining marks (viramas, vowel signs, accents typed on their own): part of the word before. */
+const MARK = /\p{M}/u;
 /** Kept inside words (addresses, "o'brien", "2023-118"), trimmed off their ends. */
 const WORD_CHARS = new Set(["@", ".", "_", "-", "'", "+"]);
 const ASCII_LETTER = /^[A-Za-z]$/;
@@ -58,24 +61,25 @@ function words(run: string): string[] {
     let start = 0;
     const chars = Array.from(piece);
     let end = chars.length;
-    while (start < end && WORD_CHARS.has(chars[start]!)) start++;
+    while (start < end && (WORD_CHARS.has(chars[start]!) || MARK.test(chars[start]!))) start++;
     while (end > start && WORD_CHARS.has(chars[end - 1]!)) end--;
     const word = chars.slice(start, end).join("");
     if (hasAlphanumeric(word)) out.push(word.toLowerCase());
     piece = "";
   };
   for (const c of run) {
-    if (ALPHANUMERIC.test(c) || WORD_CHARS.has(c)) piece += c;
+    if (ALPHANUMERIC.test(c) || WORD_CHARS.has(c) || MARK.test(c)) piece += c;
     else flush();
   }
   flush();
   return out;
 }
 
-/** A quoted phrase's text: no backslashes, single spaces, lowercased. */
+/** A quoted phrase's text: no backslashes or control characters, single spaces, lowercased. */
 function phraseText(raw: string): string {
   // Trimmed by hand: trim() also takes U+FEFF, which isn't whitespace to Rust.
   return Array.from(raw.replaceAll("\\", ""))
+    .filter((c) => isSpace(c) || !CONTROL.test(c))
     .map((c) => (isSpace(c) ? " " : c))
     .join("")
     .replace(/ {2,}/g, " ")
@@ -85,7 +89,9 @@ function phraseText(raw: string): string {
 
 /** Parses a search the way the core does; never fails. */
 export function parseSearch(input: string): SearchQuery {
-  const chars = Array.from(input)
+  // Composed (NFC), as mail is: "é" typed as "e" and an accent is the same word.
+  const head = Array.from(input).slice(0, MAX_INPUT_CHARS).join("").normalize("NFC");
+  const chars = Array.from(head)
     .slice(0, MAX_INPUT_CHARS)
     .map((c) => {
       if ("“”„‟″".includes(c)) return '"';
