@@ -191,6 +191,8 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   const results = useSearch(searching ? searchText : "");
 
   const fetched = useMemo(() => {
+    // Unread and Flagged narrow search results too; the title says when
+    // they hide some, and the empty state when they hide them all.
     if (searching) return (results.data ?? []).filter(matchesFilter(filter));
     const seen = new Set<string>();
     const out: MessageSummary[] = [];
@@ -420,11 +422,25 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     titleHint = folderPath(folders, folder);
     titleAccount = accounts.length > 1 ? (accountById.get(folder.accountId) ?? null) : null;
   }
+  // Every result, and how many of them the filter leaves listed.
+  const resultCount = results.data?.length ?? 0;
+  const filtered = filter !== "all" && items.length < resultCount;
+  const filterWord = filter === "unread" ? "unread" : "flagged";
+  const resultsWord = resultCount === 1 ? "result" : "results";
   const subtitle =
     searching && results.data && items.length > 0 ? (
-      <span className="mail-list__subtitle" title={`${exactCount(items.length)} results`}>
-        {formatCount(items.length)} {items.length === 1 ? "result" : "results"} for “
-        <bdi>{search.trim()}</bdi>”
+      <span
+        className="mail-list__subtitle"
+        title={
+          filtered
+            ? `${exactCount(items.length)} ${filterWord} of ${exactCount(resultCount)} ${resultsWord}`
+            : `${exactCount(items.length)} results`
+        }
+      >
+        {filtered
+          ? `${formatCount(items.length)} ${filterWord} of ${formatCount(resultCount)} ${resultsWord}`
+          : `${formatCount(items.length)} ${items.length === 1 ? "result" : "results"}`}{" "}
+        for “<bdi>{search.trim()}</bdi>”
       </span>
     ) : null;
 
@@ -473,11 +489,29 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     );
   } else if (items.length === 0) {
     body = searching ? (
-      <EmptyState
-        icon={<SearchX size={40} strokeWidth={1.5} />}
-        title="No results"
-        description={`We didn't find anything for “${search.trim()}”. Try different keywords.`}
-      />
+      resultCount > 0 && filter !== "all" ? (
+        // Results the filter hides: say so, rather than "No results".
+        <EmptyState
+          icon={<SearchX size={40} strokeWidth={1.5} />}
+          title={filter === "unread" ? "No unread results" : "No flagged results"}
+          description={
+            resultCount === 1
+              ? `The only result for “${search.trim()}” isn't ${filterWord}.`
+              : `None of the ${formatCount(resultCount)} results for “${search.trim()}” are ${filterWord}.`
+          }
+          action={
+            <button type="button" className="btn btn--subtle" onClick={() => setFilter("all")}>
+              Show all results
+            </button>
+          }
+        />
+      ) : (
+        <EmptyState
+          icon={<SearchX size={40} strokeWidth={1.5} />}
+          title="No results"
+          description={`We didn't find anything for “${search.trim()}”. Try different keywords.`}
+        />
+      )
     ) : filter !== "all" ? (
       <EmptyState
         icon={<Inbox size={40} strokeWidth={1.5} />}

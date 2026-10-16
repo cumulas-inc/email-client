@@ -727,6 +727,43 @@ describe("Search", () => {
     await expectResults(/Your trip to Lisbon/);
   });
 
+  it("says when Unread or Flagged hides results, and shows them all in one click", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const fromPriya = await backend.searchMessages("from:priya");
+    const unread = fromPriya.filter((m) => !m.isRead);
+    const fromJonas = await backend.searchMessages("from:jonas");
+    expect(unread.length).toBeGreaterThan(0);
+    expect(fromJonas.every((m) => m.isRead)).toBe(true);
+    await renderMail({ backend });
+    await user.click(screen.getByRole("button", { name: "Unread" }));
+    const list = screen.getByRole("region", { name: "Message list" });
+
+    // Some hidden: the title says how many are listed, of how many.
+    await setSearch("from:priya");
+    await expectResults(...unread.map(() => /^Unread/));
+    expect(
+      within(list).getByText(new RegExp(`^${unread.length} unread of ${fromPriya.length} results`)),
+    ).toHaveTextContent(`${unread.length} unread of ${fromPriya.length} results for “from:priya”`);
+
+    // All hidden: not "No results", but what the filter did.
+    await setSearch("from:jonas");
+    expect(await screen.findByText("No unread results")).toBeInTheDocument();
+    expect(
+      screen.getByText(`None of the ${fromJonas.length} results for “from:jonas” are unread.`),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No results")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show all results" }));
+    await expectResults(...fromJonas.map(() => /Jonas Becker/));
+    expect(useMailStore.getState().filter).toBe("all");
+    expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "Flagged" }));
+    await setSearch("lisbon");
+    expect(await screen.findByText("No flagged results")).toBeInTheDocument();
+    expect(screen.getByText("The only result for “lisbon” isn't flagged.")).toBeInTheDocument();
+  });
+
   it("shows results with their folder and account", async () => {
     const user = userEvent.setup();
     await renderMail();
