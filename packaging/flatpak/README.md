@@ -144,7 +144,8 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
   4. assembles the site (`repo/assemble-site.sh`);
   5. installs the app from a local copy of the site on both architectures, from
      the `.flatpakrepo` and from the `.flatpakref` (`repo/smoke-test.sh`);
-  6. and only then deploys the site to Pages.
+  6. and only then deploys the site to Pages, if the published repository is
+     still the one it mirrored.
 
   `repo/test.sh` runs steps 1–5 against fake builds, as part of every run.
 
@@ -327,10 +328,14 @@ failed jobs" reuses the builds for 3 days).
   means Pages or its custom domain is misconfigured: fix that before
   publishing again, or the older builds are lost for rollback (installed apps
   keep updating).
+- **The published repository changed since the run mirrored it**: something
+  was deployed in between (a run of another tag, or an older run re-run), and
+  deploying would drop it, so the deploy stops. Run the newest release tag's
+  workflow again, all jobs.
 - **GitHub Pages caches files for up to 10 minutes**: people may get the
   previous build for a few minutes after a publish, and a publish that starts
-  within minutes of the last one may mirror the cached copy and leave that
-  build out of the history (it's still installed and updated normally).
+  within minutes of the last one may mirror the cached copy. Its deploy then
+  finds the published repository changed and stops (above).
 - **A newer tag** waiting behind a running publish replaces an older waiting
   one (GitHub keeps one waiting run per group): run that one again if it
   should still go out.

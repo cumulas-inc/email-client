@@ -262,7 +262,7 @@ declare -A commits=()
 for round in 1 2 3 4 5; do
   dir="$work/round$round"
   mkdir -p "$dir"
-  if ! mirror "$dir/repo" "$live" 2>"$dir/mirror.log"; then
+  if ! summary=$(mirror "$dir/repo" "$live" 2>"$dir/mirror.log"); then
     fail "publish $round: mirror"
     cat "$dir/mirror.log" >&2
     break
@@ -271,9 +271,12 @@ for round in 1 2 3 4 5; do
   if [ "$round" = 1 ]; then
     check "publish 1: nothing published yet, so the mirror starts empty" \
       test -z "$(ostree --repo="$dir/repo" refs)"
+    check "publish 1: mirror.sh says there was no summary" test "$summary" = none
   else
     check "publish $round: the mirror has the last $mirrored build(s)" \
       test "$(ref_history "$dir/repo" "app/$APP_ID/$other/$BRANCH" | wc -l)" = "$mirrored"
+    check "publish $round: mirror.sh prints the SHA-256 of the summary it mirrored" \
+      test "$summary" = "$(sha256sum <"$work/www/live/repo/summary" | cut -d ' ' -f 1)"
   fi
 
   make_build "$dir/build-$native" "$native" "$round"
@@ -457,8 +460,13 @@ expect_failure "mirror: a server error, in a dry run" \
 unused_port=$(free_port)
 expect_failure "mirror: an unreachable host" \
   mirror "$work/mirror-unreachable" "http://127.0.0.1:$unused_port/repo"
-expect_success "mirror: an unreachable host, in a dry run, starts empty" \
-  mirror --dry-run "$work/mirror-unreachable-dry-run" "http://127.0.0.1:$unused_port/repo"
+if summary=$(mirror --dry-run "$work/mirror-unreachable-dry-run" \
+  "http://127.0.0.1:$unused_port/repo" 2>"$work/output"); then
+  check "mirror: an unreachable host, in a dry run, starts empty" test "$summary" = none
+else
+  fail "mirror: an unreachable host, in a dry run, starts empty"
+  cat "$work/output" >&2
+fi
 
 # --- Installing -----------------------------------------------------------------
 

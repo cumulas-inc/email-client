@@ -49,6 +49,7 @@ jobs:
     outputs:
       publish: ${{ steps.mode.outputs.publish }}
       label: ${{ steps.mode.outputs.label }}
+      repo-url: ${{ steps.mode.outputs.repo-url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,10 +80,14 @@ jobs:
               ;;
             *) publish=false ;;
           esac
-          echo "publish=$publish" >>"$GITHUB_OUTPUT"
-          echo "label=$label" >>"$GITHUB_OUTPUT"
+          . packaging/flatpak/repo/common.sh
+          {
+            echo "publish=$publish"
+            echo "label=$label"
+            echo "repo-url=$REPO_URL"
+          } >>"$GITHUB_OUTPUT"
           if [ "$publish" = true ]; then
-            echo "Publishing $label to https://flatpak.cumulas.co" >>"$GITHUB_STEP_SUMMARY"
+            echo "Publishing $label to $SITE_URL" >>"$GITHUB_STEP_SUMMARY"
           else
             echo "Dry run for $label: signed with a throwaway key, not deployed" >>"$GITHUB_STEP_SUMMARY"
           fi
@@ -206,6 +211,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: flatpak-signing
+    outputs:
+      mirrored-summary: ${{ steps.mirror.outputs.summary-sha256 }}
     env:
       PUBLISH: "true"
       LABEL: ${{ needs.mode.outputs.label }}
@@ -242,13 +249,15 @@ jobs:
           echo "SIGNING_KEY=$fingerprint" >>"$GITHUB_ENV"
           echo "SIGNING_PUBLIC_KEY=$PUBLIC_KEY" >>"$GITHUB_ENV"
       - &mirror
+        id: mirror
         name: Mirror the published repository
         run: |
           if [ "$PUBLISH" = true ]; then
-            packaging/flatpak/repo/mirror.sh repo
+            summary=$(packaging/flatpak/repo/mirror.sh repo)
           else
-            packaging/flatpak/repo/mirror.sh --dry-run repo
+            summary=$(packaging/flatpak/repo/mirror.sh --dry-run repo)
           fi
+          echo "summary-sha256=$summary" >>"$GITHUB_OUTPUT"
       - &add-builds
         name: Add the new builds
         run: |
@@ -371,5 +380,29 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # The site adds to the history this run mirrored. If anything was
+      # deployed since (a run of another tag, an older run re-run), deploying
+      # it would drop that. A new query string gets past Pages' cache.
+      - name: Check that the published repository hasn't changed since
+        env:
+          MIRRORED_SUMMARY: ${{ needs.publish.outputs.mirrored-summary }}
+          REPO_URL: ${{ needs.mode.outputs.repo-url }}
+        run: |
+          status=$(curl --silent --show-error --location --connect-timeout 20 --max-time 120 \
+            --retry 3 --retry-delay 5 --output "$RUNNER_TEMP/summary" --write-out '%{http_code}' \
+            "${REPO_URL}summary?run=$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT.$RANDOM")
+          case "$status" in
+            200) live=$(sha256sum "$RUNNER_TEMP/summary" | cut -d ' ' -f 1) ;;
+            404) live=none ;;
+            *)
+              echo "::error::${REPO_URL}summary answers HTTP $status; not deploying over it."
+              exit 1
+              ;;
+          esac
+          if [ -z "$MIRRORED_SUMMARY" ] || [ "$live" != "$MIRRORED_SUMMARY" ]; then
+            echo "::error::The published repository changed since this run mirrored it (summary ${MIRRORED_SUMMARY:-unknown}, now $live): deploying would drop what was published in between. Run the newest release tag's workflow again, all jobs."
+            exit 1
+          fi
+          echo "The published summary is still $live, the one this run added to."
       - id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

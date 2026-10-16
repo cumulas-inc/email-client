@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Copies the published repository, with the history it still has, into a new
-# local repository, so that new builds are added on top of it.
+# local repository, so that new builds are added on top of it. Prints the
+# SHA-256 of the summary it mirrored, or "none" when it started empty: the
+# deploy checks that the published summary is still that one, since
+# deploying on top of anything else would drop it.
 #
 # Usage: mirror.sh [--dry-run] [--gpg-import PUBLIC-KEY]... DEST [URL]
 #   DEST          the local repository to create; it must not exist
@@ -72,8 +75,9 @@ http_status() {
 }
 
 start_empty() {
-  ostree --repo="$dest" init --mode=archive
+  ostree --repo="$dest" init --mode=archive >&2
   log "Started an empty repository in $dest."
+  echo none
 }
 
 summary_status=$(http_status "$url/summary")
@@ -106,14 +110,14 @@ for key in "${keys[@]}"; do
   [ -s "$key" ] || die "$key doesn't exist or is empty."
 done
 
-ostree --repo="$dest" init --mode=archive
+ostree --repo="$dest" init --mode=archive >&2
 # The summary must be signed with one of the keys: it names each ref's
 # commit, and each commit names its parent by checksum, so nothing that
 # isn't signed can join the history a publish adds to and signs (say, from
 # someone serving the domain). The commits' own signatures aren't checked:
 # after a key rotation, the older builds keep the old key's.
 ostree --repo="$dest" remote add --set=gpg-verify=false --set=gpg-verify-summary=true \
-  published "$url"
+  published "$url" >&2
 import_args=()
 for key in "${keys[@]}"; do
   import_args+=(--keyring="$key")
@@ -126,9 +130,13 @@ if [ ${#refs[@]} = 0 ]; then
   die "$url has none of the refs these scripts publish ($MANAGED_REFS); refusing to replace it."
 fi
 log "Mirroring ${refs[*]} from $url"
-ostree --repo="$dest" pull --mirror --depth=-1 published "${refs[@]}" ||
+ostree --repo="$dest" pull --mirror --depth=-1 published "${refs[@]}" >&2 ||
   die "Mirroring $url failed; publishing would drop the published history. Run again, or check the site."
-ostree --repo="$dest" remote delete published
+# The summary the pull used, as ostree keeps it.
+summary="$dest/tmp/cache/summaries/published"
+[ -s "$summary" ] || die "Can't find the summary of $url that ostree mirrored ($summary)."
+summary_sha256=$(sha256sum "$summary" | cut -d ' ' -f 1)
+ostree --repo="$dest" remote delete published >&2
 ostree --repo="$dest" fsck --quiet >&2 || die "The mirror of $url is corrupt."
 
 # How many builds of each ref the published repository keeps: KEEP_BUILDS,
@@ -154,3 +162,6 @@ for ref in "${refs[@]}"; do
     if $dry_run; then warn "$message"; else die "$message"; fi
   fi
 done
+
+log "Mirrored $url, summary $summary_sha256"
+echo "$summary_sha256"
