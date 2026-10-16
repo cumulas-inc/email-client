@@ -94,7 +94,7 @@ cmd_import() {
   # outlives this script).
   secret=${FLATPAK_GPG_PRIVATE_KEY:-}
   unset FLATPAK_GPG_PRIVATE_KEY
-  [ -n "$secret" ] || die "The secret FLATPAK_GPG_PRIVATE_KEY is empty or not set."
+  [ -n "$secret" ] || die "The secret FLATPAK_GPG_PRIVATE_KEY is empty or not set. It's a secret of the flatpak-signing environment (packaging/flatpak/README.md, \"Setting it up\")."
   if [ "${GITHUB_ACTIONS:-}" = true ]; then
     # Secrets are masked in the log already; this also masks each line on
     # its own.

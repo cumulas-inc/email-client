@@ -125,7 +125,14 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
   only with **Publish** ticked.
 - **Dry runs**: pull requests that touch `packaging/flatpak/`,
   `.github/actions/` or the workflow, and manual runs without Publish, run the
-  same steps with a throwaway key and deploy nothing.
+  same steps with a throwaway key and deploy nothing. A manual dry run of the
+  default branch also checks the signing key: it imports the secret into a
+  scratch keyring, checks it against the committed public key with a test
+  signature, and removes it, signing nothing.
+- **The signing key** is a secret of the `flatpak-signing` environment, which
+  only the default branch and release tags can use: the job that signs a
+  publish and the key check above. Pull requests, other branches and dry runs
+  never get it.
 - **Each run** builds both architectures (`build-repo.sh`), then:
   1. mirrors the published repository with its history (`repo/mirror.sh`);
   2. adds the new builds on top of it, signed (`repo/add-builds.sh`);
@@ -191,7 +198,8 @@ Once, in this order, by an owner of the repository and of cumulas.co's DNS:
 
    ```sh
    export GNUPGHOME="$(mktemp -d)"
-   gpg --batch --passphrase '' --quick-generate-key 'Cumulas Flatpak repository' rsa4096 sign never
+   gpg --batch --passphrase '' --quick-generate-key \
+     'Cumulas Flatpak Repository <flatpak@cumulas.co>' rsa4096 sign never
    gpg --export >packaging/flatpak/repo/cumulas-flatpak.gpg
    gpg --armor --export-secret-keys >cumulas-flatpak-private.asc
    ```
@@ -203,36 +211,63 @@ Once, in this order, by an owner of the repository and of cumulas.co's DNS:
    `$GNUPGHOME/openpgp-revocs.d/` in a password manager or offline, then delete
    them and `$GNUPGHOME`.
 
-2. **Store the private key** as the Actions secret `FLATPAK_GPG_PRIVATE_KEY`:
-   repository Settings → Secrets and variables → Actions → New repository
-   secret, with the whole `.asc` file as the value, or:
+2. **Create the `flatpak-signing` environment, and store the private key in
+   it**: repository Settings → Environments → New environment,
+   `flatpak-signing`. Under Deployment branches and tags, choose **Selected
+   branches and tags** and add two rules: the branch `main`, and the tag
+   `v*.*.*`. Then Environment secrets → Add environment secret:
+   `FLATPAK_GPG_PRIVATE_KEY`, with the whole `.asc` file as the value, or:
 
    ```sh
-   gh secret set FLATPAK_GPG_PRIVATE_KEY --repo cumulas-inc/email-client <cumulas-flatpak-private.asc
+   gh secret set FLATPAK_GPG_PRIVATE_KEY --env flatpak-signing \
+     --repo cumulas-inc/email-client <cumulas-flatpak-private.asc
    ```
 
-   Whoever can push workflows to this repository can use it, so keep write
-   access to maintainers.
+   Only jobs that name the environment get its secret, and GitHub runs them
+   only for the default branch and release tags, whatever a pull request or
+   another branch's workflow says.
 
-3. **Commit the public key**, `packaging/flatpak/repo/cumulas-flatpak.gpg`, in
+   > **You already have a repository secret `FLATPAK_GPG_PRIVATE_KEY`: move
+   > it.** GitHub never shows a secret's value, so add the environment secret
+   > from your saved `cumulas-flatpak-private.asc` as above, then delete the
+   > repository secret: Settings → Secrets and variables → Actions →
+   > Repository secrets, or
+   > `gh secret delete FLATPAK_GPG_PRIVATE_KEY --repo cumulas-inc/email-client`.
+   > The workflow reads only the environment's, and a repository secret left
+   > behind is readable by any workflow run that anyone with write access can
+   > start.
+
+3. **Protect release tags**: repository Settings → Rules → Rulesets → New
+   ruleset → New tag ruleset. Name it `Release tags`, set Enforcement status
+   to Active, add the target pattern `v*`, tick **Restrict creations**,
+   **Restrict updates** and **Restrict deletions**, and add the Repository
+   admin and Maintain roles to the bypass list. Then only maintainers can push, move or
+   delete the tags that publish and that may use the signing key. The
+   environment trusts the default branch too: keep `main` protected, with
+   changes through reviewed pull requests.
+4. **Commit the public key**, `packaging/flatpak/repo/cumulas-flatpak.gpg`, in
    a pull request: its dry run checks the file. Publishing fails while the file
    is missing, empty or doesn't match the secret.
-4. **Verify cumulas.co for GitHub Pages** for the organization, so that no
+5. **Verify cumulas.co for GitHub Pages** for the organization, so that no
    other GitHub account can serve flatpak.cumulas.co (say, while Pages is off
    here): organization Settings → Pages → Add a domain → `cumulas.co`, add the
    TXT record it shows (`_github-pages-challenge-cumulas-inc.cumulas.co`) and
    click Verify.
-5. **DNS**: a CNAME record from `flatpak.cumulas.co` to `cumulas-inc.github.io`.
-6. **Pages**: repository Settings → Pages → Build and deployment → Source:
+6. **DNS**: a CNAME record from `flatpak.cumulas.co` to `cumulas-inc.github.io`.
+7. **Pages**: repository Settings → Pages → Build and deployment → Source:
    **GitHub Actions**. Custom domain: `flatpak.cumulas.co`, Save; once the DNS
    check passes and the certificate is issued, tick **Enforce HTTPS**. With
    GitHub Actions as the source, this setting is the custom domain: the site
    has no `CNAME` file.
-7. **Let tags deploy**: repository Settings → Environments → `github-pages` →
-   Deployment branches and tags → add a tag rule, `v*`. Pages allows the
+8. **Let tags deploy**: repository Settings → Environments → `github-pages` →
+   Deployment branches and tags → add a tag rule, `v*.*.*`. Pages allows the
    default branch only at first, which would block every tag's deploy.
-8. **Try it**: run the workflow without Publish (a dry run), then push the next
-   release tag. Check <https://flatpak.cumulas.co> and install from it.
+9. **Check the key, then try it**: Actions → Flatpak repository → Run
+   workflow, on `main`, without Publish. That dry run's "Check the signing
+   key" job tells you whether the secret in `flatpak-signing` is the committed
+   key and signs as clients will verify, before a tag depends on it (run it
+   again whenever you change the secret). Then push the next release tag.
+   Check <https://flatpak.cumulas.co> and install from it.
 
 ### Rotating the signing key
 
@@ -241,8 +276,8 @@ new key: each of them has to import it, so plan for it.
 
 1. Generate a new key as in [Setting it up](#setting-it-up), step 1.
 2. Commit the new `cumulas-flatpak.gpg` in a pull request, and when it's merged,
-   replace the `FLATPAK_GPG_PRIVATE_KEY` secret. (Publishing fails while the
-   two don't match.)
+   replace the `FLATPAK_GPG_PRIVATE_KEY` secret of the `flatpak-signing`
+   environment. (Publishing fails while the two don't match.)
 3. Publish. From then on the summary and new builds are signed with the new
    key, and new installs get it from the `.flatpakrepo` and `.flatpakref`.
 4. Tell people (release notes, cumulas.co): until they import the new key,
