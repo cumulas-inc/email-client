@@ -395,6 +395,8 @@ export class MockBackend implements Backend {
   private serverSearchGate: Promise<void> | null = null;
   /** Messages opened: local search looks in their text, in the others' previews. */
   private opened = new Set<string>();
+  /** Messages deleted on the server unbeknownst to the app (removeFromServer). */
+  private goneFromServer = new Set<string>();
   /** How each account's server search fails, when it does (failServerSearch). */
   private serverSearchFailures = new Map<string, BackendError>();
 
@@ -1153,6 +1155,14 @@ export class MockBackend implements Backend {
     };
   }
 
+  /**
+   * Deletes a message on the "server" behind the app's back (tests): as in
+   * the core, opening it then removes it here and fails with notFound.
+   */
+  removeFromServer(messageId: string): void {
+    this.goneFromServer.add(messageId);
+  }
+
   /** Makes the account's server searches fail with `error`, or succeed again with null. */
   failServerSearch(accountId: string, error: BackendError | null): void {
     if (error) this.serverSearchFailures.set(accountId, error);
@@ -1161,6 +1171,12 @@ export class MockBackend implements Backend {
 
   async getMessage(messageId: string, allowRemote = false) {
     await this.delay();
+    if (this.goneFromServer.delete(messageId)) {
+      const gone = this.message(messageId);
+      this.state.messages = this.state.messages.filter((m) => m.id !== messageId);
+      this.emit(["mail"], gone.accountId);
+      fail("notFound", "This message is no longer on the server.");
+    }
     const m = clone(this.message(messageId));
     this.opened.add(messageId);
     const allow = allowRemote || this.settings.remoteContent === "allow";

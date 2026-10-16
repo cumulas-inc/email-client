@@ -928,6 +928,26 @@ describe("Search", () => {
     expect(searchServer).not.toHaveBeenCalled();
   });
 
+  it("says a message found on the server is no longer there when it went, and drops it", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const { client } = await renderMail({ backend });
+    // As the app does when the backend says mail changed.
+    backend.onDataChanged(() => void client.invalidateQueries({ queryKey: ["mail"] }));
+    await setSearch("invoice");
+    await expectResults(/Northwind invoice 2023-118/);
+    const [found] = await backend.searchMessages("invoice");
+    backend.removeFromServer(found!.id);
+
+    await user.click(row(/Northwind invoice 2023-118/));
+    expect(await screen.findByText("Couldn't open this message")).toBeInTheDocument();
+    expect(screen.getByText("This message is no longer on the server.")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole("option", { name: /Northwind invoice/ })).not.toBeInTheDocument(),
+    );
+    expect(await backend.searchMessages("invoice")).toEqual([]);
+  });
+
   it("counts only the latest search when the text changes while the servers search", async () => {
     const backend = new MockBackend();
     const resume = backend.pauseServerSearch();

@@ -48,6 +48,7 @@ use cumulas_core::secrets::MemorySecretStore;
 use cumulas_core::service::{EventSink, LiveConnector, MailAlert};
 use cumulas_core::store::Store;
 use cumulas_core::{CoreService, ErrorCode};
+use futures::TryStreamExt;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -931,16 +932,52 @@ async fn core_server_search_end_to_end() {
     assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
     assert!(service.store().get_message_summary(&invoice.id).is_err());
 
-    // Acting on a search result works like on any message.
+    // Acting on a search result works like on any message, also once it
+    // moved (to a new UID).
+    let inbox = service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Inbox)
+        .unwrap()
+        .unwrap();
     service
-        .set_flagged(std::slice::from_ref(&notes.id), true)
+        .move_messages(std::slice::from_ref(&notes.id), &inbox.id)
+        .await
+        .expect("move");
+    let moved = local(&[]);
+    let [moved] = &moved[..] else {
+        panic!("{moved:?}");
+    };
+    assert_eq!(
+        (moved.subject.as_str(), &moved.folder_id),
+        ("Archived zebracorn notes", &inbox.id)
+    );
+    assert_ne!(moved.id, notes.id);
+    service
+        .set_flagged(std::slice::from_ref(&moved.id), true)
         .await
         .expect("flag");
     service
-        .delete_messages(std::slice::from_ref(&notes.id))
+        .set_read(std::slice::from_ref(&moved.id), false)
+        .await
+        .expect("mark unread");
+    let mut other = config.other_device(&credentials).await;
+    other.select("INBOX").await.expect("select");
+    let fetched: Vec<_> = other
+        .uid_fetch(uid_of(moved).to_string(), "FLAGS")
+        .await
+        .expect("fetch")
+        .try_collect()
+        .await
+        .expect("flags");
+    let flags: Vec<String> = fetched[0].flags().map(|f| format!("{f:?}")).collect();
+    assert!(flags.contains(&"Flagged".to_owned()), "{flags:?}");
+    assert!(!flags.contains(&"Seen".to_owned()), "{flags:?}");
+    let _ = other.logout().await;
+    service
+        .delete_messages(std::slice::from_ref(&moved.id))
         .await
         .expect("delete");
-    assert!(local(&[]).is_empty());
+    assert!(local(&[]).iter().all(|m| m.folder_id != inbox.id));
     let again = service
         .search_server("e2e-again", "zebracorn", &account.id, false)
         .await
