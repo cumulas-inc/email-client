@@ -1,6 +1,7 @@
 """End-to-end test of the real desktop app (Tauri + Rust core) through
 tauri-driver: add an IMAP account, read mail (following, pointing at and
-pressing shortcuts in a message, whose own script never runs), send mail,
+pressing shortcuts in a message, whose own script never runs; pointing at a
+link again in a reading font chosen in Settings), send mail,
 set up a signature and send it, edited; then, with the window
 closed to the background, get notified of new mail (pushed over IMAP IDLE),
 open a message from its notification, use its buttons, and see notifications
@@ -221,6 +222,7 @@ def first_run(driver) -> None:
         shot(driver, "03-reading")
 
         reader_links(driver)
+        reading_font(driver)
 
         # Attachment metadata comes from the real MIME structure.
         by_text(driver, "Signed contract").click()
@@ -288,6 +290,12 @@ def in_frame(driver, frame: WebElement, fn):
         driver.switch_to.default_content()
 
 
+def reader_status(driver) -> str | None:
+    """The address in the reader's status line, if it shows one."""
+    shown = [e for e in driver.find_elements(By.CSS_SELECTOR, ".mail-reader__status") if e.is_displayed()]
+    return shown[0].get_attribute("textContent") if shown else None
+
+
 def composer(driver) -> WebElement | None:
     return next((e for e in driver.find_elements(By.CSS_SELECTOR, ".mail-compose") if e.is_displayed()), None)
 
@@ -341,17 +349,16 @@ def reader_links(driver) -> None:
     )
     assert payload is None, payload
 
-    def status() -> str | None:
-        shown = [e for e in driver.find_elements(By.CSS_SELECTOR, ".mail-reader__status") if e.is_displayed()]
-        return shown[0].get_attribute("textContent") if shown else None
-
     # Pointing at a link shows where it really goes, whatever its text says.
     in_frame(
         driver,
         frame,
         lambda: ActionChains(driver).move_to_element(driver.find_element(By.ID, "spoof")).perform(),
     )
-    wait_for(lambda: status() == "https://evil.example/login", what="the link's address in the status line")
+    wait_for(
+        lambda: reader_status(driver) == "https://evil.example/login",
+        what="the link's address in the status line",
+    )
     shot(driver, "03a-link-address")
 
     # A web link opens in the browser.
@@ -407,6 +414,53 @@ def reader_links(driver) -> None:
         m["type"] == "link" and m["href"].startswith("javascript:") for m in messages[before:]
     ), messages[before:]
     assert opened() == ["https://example.com/report"], opened()
+
+
+def reading_font(driver) -> None:
+    """Settings → General: messages read in the interface font (the bundled
+    Inter, which the message's frame carries). The frame keeps its document
+    while the reader changes around it, so pointing at a link shows its
+    address, and keeps showing it."""
+    ctrl(driver, ",")
+    button(driver, "General").click()
+    picker = wait_for(
+        lambda: next(
+            (
+                e
+                for e in driver.find_elements(By.CSS_SELECTOR, ".settings input[role='combobox']")
+                if e.get_attribute("value") == "Charis SIL (default)"
+            ),
+            None,
+        ),
+        what="the reading font",
+    )
+    picker.click()
+    by_text(driver, "Same as interface font").click()
+    wait_for(
+        lambda: invoke(driver, "get_settings")["readingFont"]["kind"] == "interface",
+        what="the reading font saved",
+    )
+    button(driver, "Close").click()
+
+    def in_interface_font() -> WebElement | None:
+        frame = reader_frame(driver)
+        return frame if "Inter Variable" in (frame.get_attribute("srcdoc") or "") else None
+
+    frame = wait_for(in_interface_font, what="the message in the interface font")
+    document = frame.get_attribute("srcdoc")
+    in_frame(
+        driver,
+        frame,
+        lambda: ActionChains(driver).move_to_element(driver.find_element(By.ID, "spoof")).perform(),
+    )
+    wait_for(
+        lambda: reader_status(driver) == "https://evil.example/login",
+        what="the link's address in the status line, in the interface font",
+    )
+    time.sleep(1)
+    assert reader_status(driver) == "https://evil.example/login", reader_status(driver)
+    assert frame.get_attribute("srcdoc") == document, "the message's frame was given a new document"
+    shot(driver, "03d-link-address-reading-font")
 
 
 # --- signatures ------------------------------------------------------------------
