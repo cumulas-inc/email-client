@@ -251,10 +251,9 @@ function OwnSignature({ signature, email }: { signature: AccountSignature; email
     const edit = latest.current;
     unsaved.set(accountId, edit);
     const failed = (e: unknown) => `Couldn't save the signature for ${email}. ${errorMessage(e)}`;
-    trackSave(mutateAsync({ accountId, ...edit }), (e) =>
-      // Out of Signatures, it says which account's.
-      useAppStore.getState().settingsOpen === "signatures" ? undefined : failed(e),
-    ).then(
+    // It says which account's: the header keeps it as other sections open,
+    // and Signatures lists every account.
+    trackSave(mutateAsync({ accountId, ...edit }), failed).then(
       () => {
         if (unsaved.get(accountId) === edit) unsaved.delete(accountId);
       },

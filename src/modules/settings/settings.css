@@ -958,8 +958,11 @@
 }
 
 .save-indicator--error {
+  min-width: 0;
   color: var(--danger);
   white-space: normal;
+  /* It can name an account, and addresses don't break on their own. */
+  overflow-wrap: anywhere;
 }
 
 .settings-group {
