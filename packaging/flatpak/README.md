@@ -9,16 +9,18 @@ WebKitGTK 4.1 for Tauri).
 flatpak install flathub org.gnome.Sdk//50 org.gnome.Platform//50 \
   org.freedesktop.Sdk.Extension.rust-stable//25.08 org.freedesktop.Sdk.Extension.node22//25.08
 ./generate-sources.sh
-git clone https://github.com/flathub/shared-modules   # the tray library's module
+./fetch-shared-modules.sh   # the tray library's module
 flatpak-builder --user --install --force-clean build-dir co.cumulas.Mail.yml
 flatpak run co.cumulas.Mail
 ```
 
 `shared-modules/` (Flathub's [shared modules](https://github.com/flathub/shared-modules),
 for libayatana-appindicator) is a git submodule in the Flathub repository; here
-it's cloned next to the manifest and ignored by git. CI clones a pinned commit.
+`fetch-shared-modules.sh` fetches it next to the manifest (ignored by git), at
+the commit it pins.
 
-CI builds the same manifest on every pull request (see `.github/workflows/ci.yml`).
+CI builds the same manifest on every pull request (see `.github/workflows/ci.yml`),
+with `build-repo.sh`.
 
 ## Sandbox permissions
 
@@ -89,7 +91,7 @@ Then, by hand:
    `docs/microsoft-365.md`). It needs Flathub's shared modules (for
    libayatana-appindicator) as a git submodule:
    `git submodule add https://github.com/flathub/shared-modules`, checked out
-   at the commit `.github/workflows/ci.yml` pins.
+   at the commit `fetch-shared-modules.sh` pins.
 3. Open a pull request against
    [flathub/flathub](https://github.com/flathub/flathub) (branch `new-pr`) with
    the manifest, the two sources files and the submodule, and the AI

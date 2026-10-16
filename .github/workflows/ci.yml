@@ -96,14 +96,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Generate offline Cargo and npm sources
-        run: |
-          git clone --depth 1 https://github.com/flatpak/flatpak-builder-tools /tmp/flatpak-builder-tools
-          python -m pip install aiohttp tomlkit /tmp/flatpak-builder-tools/node
-          FLATPAK_BUILDER_TOOLS=/tmp/flatpak-builder-tools packaging/flatpak/generate-sources.sh
+      # Shared with flatpak-repo.yml, which publishes the same build.
+      - uses: ./.github/actions/flatpak-sources
       - uses: actions/upload-artifact@v4
         with:
           name: flatpak-sources
@@ -113,39 +107,23 @@ jobs:
     name: Flatpak build
     needs: flatpak-sources
     runs-on: ubuntu-24.04
+    # The setup, the shared modules and the build flags are shared with
+    # flatpak-repo.yml, which publishes the same build.
     steps:
-      # The GNOME SDK, the Rust and Node extensions and a release build of the
-      # app need more disk than the runner has free by default.
-      - name: Free disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          sudo docker image prune --all --force >/dev/null || true
-          df -h /
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: flatpak-sources
           path: packaging/flatpak
+      # Frees disk space, installs flatpak-builder, adds Flathub.
+      - uses: ./.github/actions/setup-flatpak-builder
       # Flathub's shared modules (libayatana-appindicator for the tray), a git
-      # submodule in the Flathub repository; pinned here.
+      # submodule in the Flathub repository; pinned in the script.
       - name: Fetch Flathub shared modules
-        run: |
-          git init -q packaging/flatpak/shared-modules
-          git -C packaging/flatpak/shared-modules fetch -q --depth 1 \
-            https://github.com/flathub/shared-modules cb9ec602a1ece1c76d5a4f8aa1d87c4a6bf99c3e
-          git -C packaging/flatpak/shared-modules checkout -q FETCH_HEAD
-      - name: Install Flatpak tooling
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
-          # Ubuntu 24.04 restricts the unprivileged user namespaces bubblewrap needs.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+        run: packaging/flatpak/fetch-shared-modules.sh
       - name: Build
         run: |
-          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse --force-clean \
-            --repo=repo build-dir packaging/flatpak/co.cumulas.Mail.yml 2>&1 | tee flatpak-build.log
+          packaging/flatpak/build-repo.sh repo 2>&1 | tee flatpak-build.log
           flatpak build-bundle repo cumulas-mail.flatpak co.cumulas.Mail
           df -h /
       - uses: actions/upload-artifact@v4
