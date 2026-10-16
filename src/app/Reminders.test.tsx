@@ -13,6 +13,7 @@ import { useToasts } from "../components/toast";
 import { setLocaleForTesting } from "../lib/datetime";
 import { resetMailStore, useMailStore } from "../modules/mail/mailStore";
 import { useTasksStore } from "../modules/tasks/store";
+import { loadLazyModules } from "../test/lazyModules";
 import { App } from "./App";
 import { useReminderAnnouncer } from "./reminders";
 import { useAppStore } from "./store";
@@ -31,6 +32,7 @@ const row = (title: string) =>
   within(panel()).getByRole("button", { name: title }).closest("li") as HTMLElement;
 
 beforeAll(() => setLocaleForTesting("en-US"));
+beforeAll(loadLazyModules, 60_000);
 
 beforeEach(() => {
   // Only the clock: timers stay real for the queries and user events.
@@ -238,7 +240,9 @@ describe("the Reminders panel", () => {
 
     await user.keyboard("{Escape}");
     act(() => useAppStore.getState().setModule("calendar"));
-    const heading = await screen.findByRole("heading", { level: 1 });
+    // Calendar's first render takes about a second here, longer on a busy
+    // CI runner, so this wait gets more than the usual 4 s.
+    const heading = await screen.findByRole("heading", { level: 1 }, { timeout: 10_000 });
     expect(heading).toHaveTextContent("October 12 – 16, 2026");
     await user.click(await bell());
     expect(panel()).toHaveFocus();
