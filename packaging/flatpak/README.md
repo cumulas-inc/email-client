@@ -20,7 +20,8 @@ for libayatana-appindicator) is a git submodule in the Flathub repository; here
 the commit it pins.
 
 CI builds the same manifest on every pull request (see `.github/workflows/ci.yml`),
-with `build-repo.sh`.
+with `build-repo.sh`; the [self-hosted repository](#self-hosted-repository-flatpakcumulasco)
+is built the same way.
 
 ## Sandbox permissions
 
@@ -106,3 +107,185 @@ and the metainfo (here):
 flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest co.cumulas.Mail.yml
 flatpak run --command=flatpak-builder-lint org.flatpak.Builder appstream co.cumulas.Mail.metainfo.xml
 ```
+
+## Self-hosted repository (flatpak.cumulas.co)
+
+`.github/workflows/flatpak-repo.yml` publishes Cumulas Mail to its own Flatpak
+repository at <https://flatpak.cumulas.co>, served by GitHub Pages: this
+manifest built for x86_64 and aarch64, branch `stable`, signed with the
+Cumulas key. Flathub's Generative AI policy covers submissions to Flathub, not
+this repository, so it uses `co.cumulas.Mail.yml` as it is.
+
+### What's published, and when
+
+- **Every `v*` tag** publishes. Add the release to
+  `co.cumulas.Mail.metainfo.xml` first: software centers show its version and
+  notes, and the workflow warns when they don't match the tag. A manual run
+  (Actions → Flatpak repository → Run workflow) publishes the default branch
+  only with **Publish** ticked.
+- **Dry runs**: pull requests that touch `packaging/flatpak/`,
+  `.github/actions/` or the workflow, and manual runs without Publish, run the
+  same steps with a throwaway key and deploy nothing.
+- **Each run** builds both architectures (`build-repo.sh`), then:
+  1. mirrors the published repository with its history (`repo/mirror.sh`);
+  2. adds the new builds on top of it, signed (`repo/add-builds.sh`);
+  3. generates the appstream data software centers read and static deltas,
+     prunes old builds and signs the summary (`repo/update-repo.sh`);
+  4. assembles the site (`repo/assemble-site.sh`);
+  5. installs the app from a local copy of the site on both architectures, from
+     the `.flatpakrepo` and from the `.flatpakref` (`repo/smoke-test.sh`);
+  6. and only then deploys the site to Pages.
+
+  `repo/test.sh` runs steps 1–5 against fake builds, as part of every run.
+
+- **Kept**: the last 3 builds of each architecture (`KEEP_BUILDS` in
+  `repo/common.sh`), so people can go back to an earlier one:
+  `flatpak remote-info --log cumulas co.cumulas.Mail` lists them and
+  `flatpak update --commit=COMMIT co.cumulas.Mail` installs one. Debug info
+  (`.Debug`) isn't published, to stay well under GitHub Pages' 1 GB limit.
+
+| On the site                  | What it is                                   |
+| ---------------------------- | -------------------------------------------- |
+| `repo/`                      | The Flatpak (ostree) repository              |
+| `cumulas.flatpakrepo`        | Adds the remote (`flatpak remote-add`)       |
+| `co.cumulas.Mail.flatpakref` | Installs the app in one click                |
+| `cumulas-flatpak.gpg`        | The public key the repository is signed with |
+| `index.html`, `logo.svg`     | The install page (`repo/index.html`)         |
+
+### Installing
+
+People open <https://flatpak.cumulas.co> and click Install, which opens
+`co.cumulas.Mail.flatpakref` in their software center, or run:
+
+```sh
+flatpak remote-add --if-not-exists cumulas https://flatpak.cumulas.co/cumulas.flatpakrepo
+flatpak install cumulas co.cumulas.Mail
+```
+
+The GNOME runtime comes from Flathub. The `.flatpakref` names it
+(`RuntimeRepo`), so Flatpak offers to add Flathub when it's missing; the
+`.flatpakrepo` names it too, but Flatpak reads that key from `.flatpakref`
+files only, so the commands need Flathub set up already. Most distributions do
+that with Flatpak; otherwise:
+
+```sh
+flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+```
+
+### Alongside Flathub
+
+If Flathub accepts the app, both will offer `co.cumulas.Mail`, branch
+`stable`, as separate remotes (`cumulas` and `flathub`) with separate builds
+and keys: Flathub builds from the manifest a person writes for it, this
+repository from `co.cumulas.Mail.yml`. People install from one or the other
+(`flatpak install` asks which remote when both have the app), and updates come
+from the remote it was installed from (`flatpak info co.cumulas.Mail` shows it
+as the origin). To switch, uninstall and install from the other remote; the
+app's data in `~/.var/app/co.cumulas.Mail` stays.
+
+### Setting it up
+
+Once, in this order, by an owner of the repository and of cumulas.co's DNS:
+
+1. **Generate the signing key** on a trusted computer:
+
+   ```sh
+   export GNUPGHOME="$(mktemp -d)"
+   gpg --batch --passphrase '' --quick-generate-key 'Cumulas Flatpak repository' rsa4096 sign never
+   gpg --export >packaging/flatpak/repo/cumulas-flatpak.gpg
+   gpg --armor --export-secret-keys >cumulas-flatpak-private.asc
+   ```
+
+   No passphrase, since the workflow can't type one: the secret store protects
+   it. No expiry, since an expired key stops updates for everyone (if you set
+   one, extend it and commit the public key again before it lapses). Keep
+   `cumulas-flatpak-private.asc` and the revocation certificate in
+   `$GNUPGHOME/openpgp-revocs.d/` in a password manager or offline, then delete
+   them and `$GNUPGHOME`.
+
+2. **Store the private key** as the Actions secret `FLATPAK_GPG_PRIVATE_KEY`:
+   repository Settings → Secrets and variables → Actions → New repository
+   secret, with the whole `.asc` file as the value, or:
+
+   ```sh
+   gh secret set FLATPAK_GPG_PRIVATE_KEY --repo cumulas-inc/email-client <cumulas-flatpak-private.asc
+   ```
+
+   Whoever can push workflows to this repository can use it, so keep write
+   access to maintainers.
+
+3. **Commit the public key**, `packaging/flatpak/repo/cumulas-flatpak.gpg`, in
+   a pull request: its dry run checks the file. Publishing fails while the file
+   is missing, empty or doesn't match the secret.
+4. **Verify cumulas.co for GitHub Pages** for the organization, so that no
+   other GitHub account can serve flatpak.cumulas.co (say, while Pages is off
+   here): organization Settings → Pages → Add a domain → `cumulas.co`, add the
+   TXT record it shows (`_github-pages-challenge-cumulas-inc.cumulas.co`) and
+   click Verify.
+5. **DNS**: a CNAME record from `flatpak.cumulas.co` to `cumulas-inc.github.io`.
+6. **Pages**: repository Settings → Pages → Build and deployment → Source:
+   **GitHub Actions**. Custom domain: `flatpak.cumulas.co`, Save; once the DNS
+   check passes and the certificate is issued, tick **Enforce HTTPS**. With
+   GitHub Actions as the source, this setting is the custom domain: the site
+   has no `CNAME` file.
+7. **Let tags deploy**: repository Settings → Environments → `github-pages` →
+   Deployment branches and tags → add a tag rule, `v*`. Pages allows the
+   default branch only at first, which would block every tag's deploy.
+8. **Try it**: run the workflow without Publish (a dry run), then push the next
+   release tag. Check <https://flatpak.cumulas.co> and install from it.
+
+### Rotating the signing key
+
+Rotate it if it may have leaked, or to replace it. Flatpak can't hand people a
+new key: each of them has to import it, so plan for it.
+
+1. Generate a new key as in [Setting it up](#setting-it-up), step 1.
+2. Commit the new `cumulas-flatpak.gpg` in a pull request, and when it's merged,
+   replace the `FLATPAK_GPG_PRIVATE_KEY` secret. (Publishing fails while the
+   two don't match.)
+3. Publish. From then on the summary and new builds are signed with the new
+   key, and new installs get it from the `.flatpakrepo` and `.flatpakref`.
+4. Tell people (release notes, cumulas.co): until they import the new key,
+   updates from this repository fail with a GPG signature error, in software
+   centers too. To import it, checking its fingerprint against the one on
+   <https://flatpak.cumulas.co>:
+
+   ```sh
+   curl -fsSLO https://flatpak.cumulas.co/cumulas-flatpak.gpg
+   gpg --show-keys cumulas-flatpak.gpg
+   flatpak remote-modify --gpg-import=cumulas-flatpak.gpg cumulas   # add --user for a per-user remote
+   ```
+
+   That adds the new key to the old one. If the old key leaked, remove and add
+   the remote instead, so it's trusted no more (installed apps stay):
+
+   ```sh
+   flatpak remote-delete --force cumulas
+   flatpak remote-add cumulas https://flatpak.cumulas.co/cumulas.flatpakrepo
+   ```
+
+The builds signed with the old key leave the repository after 3 more
+publishes. Publishing doesn't check old signatures, so a rotation doesn't
+block it.
+
+### When a publish fails
+
+Nothing is deployed until every step has passed, the install tests included,
+so the site stays as it was. Fix the cause and run the workflow again ("Re-run
+failed jobs" reuses the builds for 3 days).
+
+- **The published repository can't be read** (DNS, TLS, an HTTP error, a
+  missing object): the publish stops rather than drop the published history.
+  Check the site.
+- **It answers 404**: that means nothing is published yet, so the publish
+  starts a new repository, with a warning. After the first publish, a 404
+  means Pages or its custom domain is misconfigured: fix that before
+  publishing again, or the older builds are lost for rollback (installed apps
+  keep updating).
+- **GitHub Pages caches files for up to 10 minutes**: people may get the
+  previous build for a few minutes after a publish, and a publish that starts
+  within minutes of the last one may mirror the cached copy and leave that
+  build out of the history (it's still installed and updated normally).
+- **A newer tag** waiting behind a running publish replaces an older waiting
+  one (GitHub keeps one waiting run per group): run that one again if it
+  should still go out.

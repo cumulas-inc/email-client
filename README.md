@@ -3,7 +3,7 @@
 A fast, focused mail, calendar, contacts and tasks app for Linux. It works
 with **Microsoft 365 and Outlook.com** accounts (through Microsoft Graph) and
 any **IMAP/SMTP** account. Built with [Tauri 2](https://tauri.app) (Rust) and
-React, packaged for Flathub as `co.cumulas.Mail`.
+React, packaged with Flatpak as `co.cumulas.Mail`.
 
 > Status: early development. Everything below works against test servers;
 > Microsoft 365 has been tested against a mock Graph server only (see
@@ -14,6 +14,21 @@ React, packaged for Flathub as `co.cumulas.Mail`.
 | Calendar                                                  | Tasks                                                | Dark mode                                     |
 | --------------------------------------------------------- | ---------------------------------------------------- | --------------------------------------------- |
 | ![Calendar](docs/screenshots/calendar-workweek-light.png) | ![Tasks](docs/screenshots/tasks-scheduled-light.png) | ![Mail, dark](docs/screenshots/mail-dark.png) |
+
+## Install
+
+Releases of Cumulas Mail are published as a Flatpak at **<https://flatpak.cumulas.co>**,
+for x86_64 and aarch64: open that page and click Install, or run:
+
+```sh
+flatpak remote-add --if-not-exists cumulas https://flatpak.cumulas.co/cumulas.flatpakrepo
+flatpak install cumulas co.cumulas.Mail
+```
+
+The builds come from this repository's release tags, built and signed by its
+GitHub Actions workflow; the GNOME runtime comes from Flathub. A submission to
+Flathub itself is planned; whether it's listed there is up to Flathub's
+reviewers. See [Self-hosted repository](packaging/flatpak/README.md#self-hosted-repository-flatpakcumulasco).
 
 ## Features
 
@@ -99,13 +114,15 @@ CI runs all of these, plus a Flatpak build.
 - [Privacy policy](PRIVACY.md)
 - [Architecture](docs/architecture.md)
 - [Microsoft 365: permissions, admin consent, app registration](docs/microsoft-365.md)
-- [Flatpak packaging and Flathub submission](packaging/flatpak/README.md)
+- [Flatpak packaging, the flatpak.cumulas.co repository and Flathub submission](packaging/flatpak/README.md)
 
 ## Before release
 
 - Test sign-in, instant updates and company signatures against real
   Microsoft 365 and Outlook.com accounts.
 - Make the repository or the screenshots public for the Flathub listing.
+- Set up the [self-hosted Flatpak repository](packaging/flatpak/README.md#setting-it-up)
+  (signing key, DNS, GitHub Pages) before the first release tag.
 - Submit to Flathub by hand, following
   [Submitting to Flathub](packaging/flatpak/README.md#submitting-to-flathub).
   Flathub's Generative AI policy needs a person to write the Flathub manifest,
