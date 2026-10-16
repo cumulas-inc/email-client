@@ -1,0 +1,116 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('48d31887-5fad-4d73-a9f5-3c356e68a038')/calendars('AAMkCal')/calendarView",
+  "value": [
+    {
+      "@odata.etag": "W/\"ZlnW4RIAV06KYYwlrfNZvQAAKGWwbw==\"",
+      "id": "AAMkEvent-standup",
+      "subject": "Team stand-up",
+      "bodyPreview": "Daily sync.",
+      "body": {
+        "contentType": "html",
+        "content": "<html><body><p>Daily sync.</p></body></html>"
+      },
+      "start": { "dateTime": "2026-10-15T08:30:00.0000000", "timeZone": "UTC" },
+      "end": { "dateTime": "2026-10-15T08:45:00.0000000", "timeZone": "UTC" },
+      "isAllDay": false,
+      "isCancelled": false,
+      "isReminderOn": true,
+      "reminderMinutesBeforeStart": 10,
+      "showAs": "busy",
+      "type": "occurrence",
+      "responseStatus": { "response": "accepted", "time": "2026-10-01T09:00:00Z" },
+      "location": {
+        "displayName": "Room 4.12",
+        "locationType": "default",
+        "uniqueIdType": "unknown"
+      },
+      "organizer": {
+        "emailAddress": { "name": "Megan Bowen", "address": "MeganB@contoso.com" }
+      },
+      "attendees": [
+        {
+          "type": "required",
+          "status": { "response": "accepted", "time": "2026-10-01T09:00:00Z" },
+          "emailAddress": { "name": "Adele Vance", "address": "AdeleV@contoso.com" }
+        },
+        {
+          "type": "optional",
+          "status": { "response": "tentativelyAccepted", "time": "2026-10-01T09:00:00Z" },
+          "emailAddress": { "name": "Alex Wilber", "address": "AlexW@contoso.com" }
+        },
+        {
+          "type": "resource",
+          "status": { "response": "none", "time": "0001-01-01T00:00:00Z" },
+          "emailAddress": { "name": "Room 4.12", "address": "room412@contoso.com" }
+        }
+      ],
+      "isOnlineMeeting": true,
+      "onlineMeetingUrl": null,
+      "onlineMeeting": {
+        "joinUrl": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_example%40thread.v2/0"
+      }
+    },
+    {
+      "@odata.etag": "W/\"ZlnW4RIAV06KYYwlrfNZvQAAKGWwcA==\"",
+      "id": "AAMkEvent-offsite",
+      "subject": "Offsite",
+      "bodyPreview": "",
+      "body": { "contentType": "html", "content": "" },
+      "start": { "dateTime": "2026-10-19T22:00:00.0000000", "timeZone": "UTC" },
+      "end": { "dateTime": "2026-10-21T22:00:00.0000000", "timeZone": "UTC" },
+      "isAllDay": true,
+      "isCancelled": false,
+      "isReminderOn": false,
+      "reminderMinutesBeforeStart": 1080,
+      "showAs": "workingElsewhere",
+      "type": "singleInstance",
+      "responseStatus": { "response": "organizer", "time": "0001-01-01T00:00:00Z" },
+      "location": { "displayName": "" },
+      "organizer": {
+        "emailAddress": { "name": "Adele Vance", "address": "AdeleV@contoso.com" }
+      },
+      "attendees": [],
+      "isOnlineMeeting": false,
+      "onlineMeeting": null
+    },
+    {
+      "@odata.etag": "W/\"ZlnW4RIAV06KYYwlrfNZvQAAKGWwcQ==\"",
+      "id": "AAMkEvent-holiday",
+      "subject": "Holiday",
+      "start": { "dateTime": "2026-10-24T00:00:00.0000000", "timeZone": "UTC" },
+      "end": { "dateTime": "2026-10-25T00:00:00.0000000", "timeZone": "UTC" },
+      "isAllDay": true,
+      "showAs": "oof",
+      "type": "singleInstance",
+      "responseStatus": { "response": "none", "time": "0001-01-01T00:00:00Z" }
+    },
+    {
+      "@odata.etag": "W/\"ZlnW4RIAV06KYYwlrfNZvQAAKGWwcg==\"",
+      "id": "AAMkEvent-cancelled",
+      "subject": "Canceled: Budget review",
+      "bodyPreview": "Moved to next week",
+      "body": { "contentType": "text", "content": "Moved to next week <sorry>" },
+      "start": { "dateTime": "2026-10-16T13:00:00.0000000", "timeZone": "UTC" },
+      "end": { "dateTime": "2026-10-16T14:00:00.0000000", "timeZone": "UTC" },
+      "isAllDay": false,
+      "isCancelled": true,
+      "isReminderOn": true,
+      "reminderMinutesBeforeStart": 15,
+      "showAs": "unknown",
+      "type": "exception",
+      "responseStatus": { "response": "notResponded", "time": "0001-01-01T00:00:00Z" },
+      "organizer": {
+        "emailAddress": { "name": "Lee Gu", "address": "LeeG@contoso.com" }
+      },
+      "attendees": [],
+      "isOnlineMeeting": false,
+      "onlineMeetingUrl": "https://meet.example.com/legacy",
+      "onlineMeeting": null
+    },
+    {
+      "id": "AAMkEvent-broken",
+      "subject": "No times",
+      "isAllDay": false
+    }
+  ]
+}

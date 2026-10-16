@@ -1,0 +1,1984 @@
+/* Settings dialog and add-account flow. Tokens only; see styles/tokens.css.
+
+   Settings borrows the app's own layout: a white navigation column, then
+   the warm canvas with each group of settings on a floating card. The
+   add-account steps are choice tiles and plain forms on the dialog. */
+
+/* Lucide's default 2px stroke reads heavy next to Inter; 1.75 for 16px and
+   up, as in the rest of the app. Small (14px) icons and explicit widths keep
+   theirs. */
+:is(.settings, .add-account, .remove-account)
+  svg.lucide[stroke-width="2"]:not([width="12"], [width="14"]) {
+  stroke-width: 1.75;
+}
+
+/* --- Dialog bodies that manage their own padding and scrolling ------------- */
+
+.dialog__body:has(> .add-account),
+.dialog__body:has(> .settings) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* --- Add account ----------------------------------------------------------- */
+
+.add-account,
+.add-account__step {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.add-account__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-2) var(--space-6) var(--space-4);
+  overflow-y: auto;
+  /* Long forms fade out at the edges instead of being cut off. */
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--space-2),
+    #000 calc(100% - var(--space-4)),
+    transparent
+  );
+}
+
+.add-account__footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-6) var(--space-6);
+}
+
+.add-account__back {
+  margin-right: auto;
+  padding-left: var(--space-2);
+}
+
+.add-account__lead {
+  color: var(--fg-secondary);
+}
+
+.step-intro {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.step-intro__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-lg);
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+}
+
+.step-intro__text {
+  color: var(--fg-secondary);
+  text-wrap: pretty;
+}
+
+.secure-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.secure-note svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--success);
+}
+
+/* --- Account kind choices (dialog tiles and welcome tiles) ----------------- */
+
+.kind-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.kind-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 14px var(--space-3) 14px var(--space-4);
+  border: none;
+  border-radius: var(--radius-card);
+  background: var(--bg-surface-raised);
+  box-shadow: inset 0 0 0 1px var(--border-control);
+  color: var(--fg-primary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease),
+    transform var(--duration-press) var(--ease-out);
+}
+
+.kind-option:hover {
+  background: var(--bg-hover);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.kind-option:active {
+  background: var(--bg-pressed);
+  transform: scale(0.99);
+}
+
+.kind-option:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.kind-option__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-lg);
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+}
+
+.kind-option__text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.kind-option__title {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  line-height: 1.3;
+}
+
+.kind-option__description {
+  color: var(--fg-secondary);
+  text-wrap: pretty;
+}
+
+.kind-option__examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: 6px;
+}
+
+.kind-option__example {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+.kind-option__arrow {
+  display: inline-flex;
+  flex: none;
+  color: var(--fg-tertiary);
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.kind-option:hover .kind-option__arrow {
+  color: var(--brand-text);
+}
+
+/* Side by side on the welcome screen. */
+.kind-options--cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.kind-options--cards .kind-option {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-5) 18px;
+}
+
+.kind-options--cards .kind-option__icon {
+  width: 46px;
+  height: 46px;
+  border-radius: var(--radius-card);
+}
+
+.kind-options--cards .kind-option__text {
+  gap: 6px;
+}
+
+.kind-options--cards .kind-option__title {
+  font-size: 16px;
+}
+
+.kind-options--cards .kind-option__examples {
+  margin-top: auto;
+  padding-top: var(--space-2);
+}
+
+.kind-options--cards .kind-option__arrow {
+  position: absolute;
+  top: var(--space-5);
+  right: var(--space-5);
+}
+
+@media (max-width: 680px) {
+  .kind-options--cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* --- Fields ---------------------------------------------------------------- */
+
+.add-account .field,
+.settings .field {
+  gap: 6px;
+}
+
+.input-wrap {
+  position: relative;
+  display: flex;
+}
+
+.input-wrap--trailing .input {
+  padding-right: 36px;
+}
+
+.input-wrap__button {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  translate: 0 -50%;
+}
+
+.form-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.form-error svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.mono-input {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.mono-input::placeholder {
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+}
+
+.input::placeholder {
+  color: var(--fg-tertiary);
+}
+
+/* --- Callouts -------------------------------------------------------------- */
+
+.callout {
+  display: flex;
+  gap: 10px;
+  padding: var(--space-3) 14px;
+  border-radius: var(--radius-lg);
+  color: var(--fg-primary);
+  text-align: left;
+}
+
+/* Tips sit quietly on a recessed panel; warnings and errors take a tint. */
+.callout--info {
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.callout--warning {
+  background: var(--warning-subtle);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 20%, transparent);
+}
+
+.callout--danger {
+  background: var(--danger-subtle);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 20%, transparent);
+}
+
+.callout__icon {
+  display: inline-flex;
+  flex: none;
+  margin-top: 1px;
+}
+
+.callout--info .callout__icon {
+  color: var(--brand-text);
+}
+
+.callout--warning .callout__icon {
+  color: var(--warning);
+}
+
+.callout--danger .callout__icon {
+  color: var(--danger);
+}
+
+.callout__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.callout__title {
+  font-weight: var(--weight-semibold);
+}
+
+.callout__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--fg-secondary);
+}
+
+.callout__technical {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+  overflow-wrap: anywhere;
+}
+
+.callout__action {
+  margin-top: 6px;
+}
+
+/* --- Waiting and problem screens ------------------------------------------- */
+
+.result-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-4) var(--space-2);
+  text-align: center;
+}
+
+.result-panel--start {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 14px;
+  row-gap: var(--space-4);
+  padding: var(--space-2) 0 0;
+  text-align: left;
+}
+
+.result-panel__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 60px;
+  height: 60px;
+  border-radius: var(--radius-round);
+}
+
+.result-panel--start .result-panel__icon {
+  width: 46px;
+  height: 46px;
+}
+
+.result-panel--start .result-panel__icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.result-panel__icon--brand {
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+}
+
+.result-panel__icon--neutral {
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-secondary);
+}
+
+.result-panel__icon--warning {
+  background: var(--warning-subtle);
+  color: var(--warning);
+}
+
+.result-panel__icon--danger {
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.result-panel__icon .spinner {
+  color: var(--brand-text);
+}
+
+/* Read, not operated: the serif, like dialog and empty-state titles. */
+.result-panel__title {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+.result-panel__title:focus {
+  outline: none;
+}
+
+.result-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 420px;
+  color: var(--fg-secondary);
+  text-wrap: pretty;
+  /* An organization's domain or an error can be one long word. */
+  overflow-wrap: anywhere;
+}
+
+.result-panel--start .result-panel__body {
+  grid-column: 1 / -1;
+  max-width: none;
+  color: var(--fg-primary);
+}
+
+.result-panel__detail {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* A real sequence, so it's numbered. */
+.consent-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.consent-steps li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  counter-increment: step;
+}
+
+.consent-steps li::before {
+  content: counter(step);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-round);
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+}
+
+.consent-link {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.consent-link__row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.consent-link__input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  text-overflow: ellipsis;
+}
+
+.consent-alt {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.consent-alt svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--brand-text);
+}
+
+.consent-email {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.consent-email__hint {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+/* "What Cumulas Mail asks for": a quiet disclosure. */
+.permissions {
+  width: 100%;
+  border-radius: var(--radius-lg);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  text-align: left;
+}
+
+.permissions summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 38px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-lg);
+  color: var(--fg-primary);
+  font-weight: var(--weight-medium);
+  list-style: none;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease);
+}
+
+.permissions summary::-webkit-details-marker {
+  display: none;
+}
+
+.permissions summary::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin: 0 4px 0 3px;
+  border-right: 1.5px solid var(--fg-secondary);
+  border-bottom: 1.5px solid var(--fg-secondary);
+  rotate: -45deg;
+  transition: rotate var(--duration-normal) var(--ease-in-out);
+}
+
+.permissions[open] summary::before {
+  rotate: 45deg;
+}
+
+.permissions summary:hover {
+  background: var(--bg-hover);
+}
+
+.permissions summary:focus-visible {
+  outline-offset: 0;
+}
+
+.permissions[open] {
+  padding-bottom: var(--space-3);
+}
+
+.permissions > :not(summary) {
+  margin: var(--space-1) var(--space-3) 0 34px;
+}
+
+.permissions__intro {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.permission-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--fg-primary);
+  text-align: left;
+}
+
+.permission-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.permission-list__check {
+  flex: none;
+  margin-top: 3px;
+  color: var(--success);
+}
+
+.permission-list__scopes {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+}
+
+/* --- IMAP form ------------------------------------------------------------- */
+
+.imap-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.imap-form__problem:focus {
+  outline: none;
+}
+
+/* The provider tip's live region stays in the page so new tips are
+   announced, but while it's empty it takes no gap in the form. */
+.imap-form__preset:empty {
+  position: absolute;
+}
+
+.advanced {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.advanced__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: calc(100% + 2 * var(--space-2));
+  min-height: 36px;
+  margin: var(--space-2) calc(-1 * var(--space-2)) 0;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease);
+}
+
+.advanced__toggle:hover {
+  background: var(--bg-hover);
+}
+
+.advanced__chevron {
+  flex: none;
+  color: var(--fg-secondary);
+  transition: rotate var(--duration-normal) var(--ease-in-out);
+}
+
+.advanced--open .advanced__chevron {
+  rotate: 90deg;
+}
+
+/* The title never wraps; a long server summary gives way instead. */
+.advanced__title {
+  flex: none;
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+.advanced__summary {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.advanced__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-2) 0 var(--space-1);
+}
+
+.advanced__reset {
+  align-self: flex-start;
+}
+
+/* Incoming and outgoing server: a recessed panel each. */
+.server-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-3) 14px 14px;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+/* Inside the panel, not cut into its border. */
+.server-group__title {
+  float: left;
+  width: 100%;
+  padding: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-primary);
+}
+
+.server-group__title + * {
+  clear: both;
+}
+
+.server-group__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 124px;
+  align-items: start;
+  gap: var(--space-2);
+}
+
+.server-group__warning {
+  font-size: var(--text-sm);
+}
+
+/* --- Settings dialog ------------------------------------------------------- */
+
+.settings {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  /* As tall as the dialog may be (100vh - 48px) under its 56px header. */
+  height: min(640px, calc(100vh - 104px));
+  padding: var(--space-1) 10px 10px 10px;
+}
+
+@media (max-width: 900px) {
+  .settings {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+}
+
+.settings__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1) var(--space-3) var(--space-3) 6px;
+  overflow-y: auto;
+}
+
+/* Navigation tiles, like the folder list: a teal tint marks the section. */
+.settings__tab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-weight: var(--weight-medium);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.settings__tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.settings__tab[aria-selected="true"] {
+  background: var(--bg-selected);
+  color: var(--brand-text);
+  font-weight: var(--weight-semibold);
+}
+
+.settings__tab[aria-selected="true"]:hover {
+  background: var(--bg-selected-hover);
+}
+
+.settings__tab-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--fg-tertiary);
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.settings__tab:hover .settings__tab-icon {
+  color: var(--fg-secondary);
+}
+
+.settings__tab[aria-selected="true"] .settings__tab-icon {
+  color: var(--brand-text);
+}
+
+.settings__tab-label {
+  min-width: 0;
+  line-height: 1.3;
+}
+
+/* The canvas, recessed into the dialog; cards float on it as in the app. */
+.settings__panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--bg-app);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.settings__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 60px;
+  padding: var(--space-5) var(--space-6) 0;
+}
+
+.settings__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-3) var(--space-6) var(--space-6);
+  overflow-y: auto;
+  /* Content fades out under the title and at the panel's foot instead of
+     being cut off mid-line. Both fades sit in the padding, so nothing is
+     faded once it's scrolled into place. */
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--space-3),
+    #000 calc(100% - var(--space-5)),
+    transparent
+  );
+}
+
+/* Text straight on the canvas: secondary at least, for contrast. */
+.settings-intro {
+  max-width: 60ch;
+  color: var(--fg-secondary);
+  text-wrap: pretty;
+}
+
+.settings__content > .callout--info {
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.settings-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.save-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+.save-indicator__saving,
+.save-indicator__saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: opacity var(--duration-normal) var(--ease-out);
+}
+
+/* Saves on this computer usually finish at once: "Saving…" only shows up
+   for a slow one, instead of flashing before every "Saved". */
+.save-indicator__saving {
+  transition-delay: 300ms;
+}
+
+.save-indicator__saved {
+  gap: var(--space-1);
+  color: var(--success);
+}
+
+@starting-style {
+  .save-indicator__saving,
+  .save-indicator__saved {
+    opacity: 0;
+  }
+}
+
+.save-indicator--error {
+  min-width: 0;
+  color: var(--danger);
+  white-space: normal;
+  /* It can name an account, and addresses don't break on their own. */
+  overflow-wrap: anywhere;
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Group labels operate, so they stay in the sans. */
+.settings-group__title {
+  padding: 0 var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.01em;
+  color: var(--fg-secondary);
+}
+
+.settings-group__description {
+  padding: 0 var(--space-1);
+  color: var(--fg-secondary);
+}
+
+.settings-card {
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
+/* When the text would get narrower than 200px (a small window at a larger
+   text size), the control moves under it. */
+.setting-row {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px var(--space-6);
+  min-height: 60px;
+  padding: var(--space-3) var(--space-4);
+}
+
+/* Hairlines between rows, inset from the card's edges. */
+.setting-row + .setting-row::before,
+.about-row + .about-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: var(--space-4);
+  left: var(--space-4);
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+.setting-row > .switch {
+  flex: 1;
+}
+
+.setting-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.setting-row__label {
+  font-weight: var(--weight-medium);
+}
+
+.setting-row__description {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--fg-secondary);
+}
+
+.setting-row__control {
+  flex: none;
+}
+
+.setting-row--stacked {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: var(--space-3);
+  padding-bottom: var(--space-4);
+}
+
+.setting-row--stacked > .setting-row__text {
+  flex: none;
+}
+
+.setting-select {
+  width: auto;
+  min-width: 190px;
+}
+
+/* Remote content: three choice tiles with a radio mark. */
+.radio-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: 11px var(--space-3);
+  border-radius: var(--radius-lg);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
+}
+
+.radio-card:hover {
+  background: var(--bg-hover);
+  box-shadow: inset 0 0 0 1px var(--border-control);
+}
+
+.radio-card--selected,
+.radio-card--selected:hover {
+  background: var(--bg-selected);
+  box-shadow: inset 0 0 0 1.5px var(--brand);
+}
+
+.radio-card:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.radio-card input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  border-radius: var(--radius-round);
+  background: var(--bg-input);
+  box-shadow: inset 0 0 0 1.5px var(--border-strong);
+  appearance: none;
+  cursor: pointer;
+  transition: box-shadow var(--duration-fast) var(--ease);
+}
+
+.radio-card input:checked {
+  background: var(--on-brand);
+  box-shadow: inset 0 0 0 5px var(--brand);
+}
+
+.radio-card input:focus-visible {
+  outline: none;
+}
+
+.radio-card__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.radio-card__label {
+  font-weight: var(--weight-semibold);
+}
+
+.radio-card__description {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--fg-secondary);
+}
+
+.privacy-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  max-width: 72ch;
+  margin-top: var(--space-1);
+}
+
+.privacy-note svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--success);
+}
+
+/* --- Signatures ------------------------------------------------------------ */
+
+/* Each account's group is headed by its color, name and address. */
+.signature-account {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.signature-account__dot {
+  flex: none;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-round);
+  background: var(--account-color);
+}
+
+.signature-account__name,
+.signature-account__email {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.signature-account__name {
+  flex: none;
+  max-width: 50%;
+}
+
+.signature-account__email {
+  min-width: 0;
+  color: var(--fg-tertiary);
+  font-weight: var(--weight-regular);
+}
+
+.signature-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+/* The own signature, edited like a field. */
+.signature-field {
+  padding: 10px 12px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  cursor: text;
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
+}
+
+.signature-field:hover {
+  border-color: var(--border-strong);
+}
+
+.signature-field:has(.signature-editor[data-focused]) {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-subtle);
+}
+
+.signature-replies {
+  align-self: flex-start;
+}
+
+/* The organization's, as it will look, on a recessed panel. */
+.signature-preview {
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+/* In the dark theme, one with its own colors is a light sheet already. */
+.signature-preview--paper {
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.signature-caption {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  max-width: 72ch;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+.signature-caption svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--brand-text);
+}
+
+.signature-caption--quiet {
+  padding-left: 24px;
+  color: var(--fg-tertiary);
+}
+
+.signature-checking {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+}
+
+/* --- Appearance: type preview and font pickers ------------------------------ */
+
+/* A few lines of a message, on a recessed panel between the theme and the
+   font rows, so it stays in view while a font list is open below. */
+.type-preview {
+  margin: 2px var(--space-4) var(--space-3);
+  padding: 10px var(--space-4) var(--space-4);
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+/* Inter's alternates mean other things in other families. */
+.type-preview[data-custom-sans] {
+  font-feature-settings: normal;
+}
+
+.type-preview__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0 calc(var(--space-2) * -1) 6px 0;
+}
+
+.type-preview__caption {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+}
+
+.type-preview__from {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  height: 1.4em;
+  margin-bottom: 2px;
+  overflow: hidden;
+  font-family: var(--preview-sans);
+}
+
+.type-preview__sender {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.type-preview__time {
+  flex: none;
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.type-preview__subject,
+.type-preview__body {
+  font-family: var(--preview-serif);
+  font-feature-settings: normal;
+  color: var(--fg-primary);
+}
+
+/* One line of subject and two of text, whatever the font: the preview
+   keeps its height while a font list is open below it, so the list (and
+   the option under the pointer) doesn't move. */
+.type-preview__subject {
+  height: 1.3em;
+  margin-bottom: 6px;
+  overflow: hidden;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.type-preview__body {
+  display: -webkit-box;
+  height: 3.2em;
+  max-width: 62ch;
+  overflow: hidden;
+  font-size: 15.5px;
+  line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.font-picker {
+  position: relative;
+  width: 240px;
+}
+
+/* Reads like a select until it's focused for typing. */
+.font-picker__input {
+  padding-right: 32px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.font-picker__input:focus {
+  cursor: text;
+}
+
+.font-picker__chevron {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  color: var(--fg-tertiary);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+/* In the top layer where popovers are supported; FontPicker places it. */
+.font-picker__popup {
+  position: fixed;
+  inset: auto;
+  z-index: 100;
+  margin: 0;
+  padding: var(--space-1);
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-raised);
+  color: var(--fg-primary);
+  box-shadow: var(--shadow-md);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  transform-origin: top center;
+  transition: opacity 150ms var(--ease-out);
+}
+
+.font-picker__popup[data-side="top"] {
+  transform-origin: bottom center;
+}
+
+@starting-style {
+  .font-picker__popup {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .font-picker__popup {
+    transition:
+      opacity 150ms var(--ease-out),
+      transform 150ms var(--ease-out);
+  }
+
+  @starting-style {
+    .font-picker__popup {
+      transform: scale(0.97);
+    }
+  }
+}
+
+.font-picker__option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-2) 0 10px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  cursor: pointer;
+  /* Keeps a face with tall ascenders inside its row. (Only the rows near
+     the view are rendered, so only their fonts load; skipping their paint
+     as well left rows blank while scrolling in WebKitGTK.) */
+  contain: paint;
+}
+
+.font-picker__option[aria-selected="true"] {
+  background: var(--bg-selected);
+}
+
+.font-picker__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.font-picker__check {
+  flex: none;
+  color: var(--brand-text);
+  visibility: hidden;
+}
+
+.font-picker__option[data-current] .font-picker__check {
+  visibility: visible;
+}
+
+.font-picker__group {
+  padding: 10px 10px var(--space-1);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-tertiary);
+}
+
+.font-picker__group--rule {
+  margin-top: var(--space-1);
+  box-shadow: inset 0 1px 0 var(--border-subtle);
+}
+
+.font-picker__note {
+  padding: var(--space-2) 10px;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.font-picker__note:empty {
+  display: none;
+}
+
+/* --- Accounts -------------------------------------------------------------- */
+
+.account-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.account-item {
+  /* Room above an account that's scrolled into view as it opens. */
+  scroll-margin: var(--space-3);
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
+/* The badge sits beside the name and address, not adrift in the middle
+   when an open account's name wraps; the actions stay centered. */
+.account-item__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: 72px;
+  padding: var(--space-3) var(--space-3) var(--space-3) 14px;
+}
+
+.account-item__header > .account-badge {
+  margin-top: 3px;
+}
+
+.account-item__identity {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Top-aligned, so the badge stays on the first line when the name wraps. */
+.account-item__line {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.account-item__name {
+  overflow: hidden;
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.account-item__email {
+  overflow: hidden;
+  color: var(--fg-secondary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* One line each in the list; the open account shows its name and address
+   in full. */
+.account-item--expanded .account-item__name,
+.account-item--expanded .account-item__email {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.account-item__status {
+  margin-top: 3px;
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.account-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.account-status__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+  background: var(--success);
+}
+
+.account-status--error {
+  color: var(--danger);
+  font-weight: var(--weight-medium);
+}
+
+.account-item__actions {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  gap: var(--space-2);
+}
+
+.account-item__toggle svg {
+  transition: rotate var(--duration-normal) var(--ease-in-out);
+}
+
+.account-item--expanded .account-item__toggle svg {
+  rotate: 180deg;
+}
+
+.account-item__error {
+  margin: calc(-1 * var(--space-1)) var(--space-3) var(--space-3) calc(14px + 36px + var(--space-3));
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--danger-subtle);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+/* Rows with hairlines between them, like the setting cards. */
+.account-item__body {
+  display: flex;
+  flex-direction: column;
+  margin: 0 var(--space-4);
+  padding-bottom: var(--space-1);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.account-item__body > .callout {
+  margin-top: var(--space-4);
+}
+
+.account-item__problem:focus {
+  outline: none;
+}
+
+.account-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 14px 0;
+}
+
+.account-field + .account-field {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.account-field__label,
+.account-field > .field__label {
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  color: var(--fg-primary);
+}
+
+.account-field__hint {
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.account-field .input {
+  max-width: 360px;
+}
+
+.account-field--row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+}
+
+/* The text takes the line and wraps; its button stays on the right unless
+   the card gets truly narrow. */
+.account-field__text {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.account-field__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.imap-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-1);
+}
+
+.imap-editor__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.imap-editor .input {
+  max-width: none;
+}
+
+.imap-editor .input-wrap {
+  max-width: 360px;
+}
+
+.imap-editor__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.server-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: 10px var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  font-size: var(--text-sm);
+}
+
+.server-summary dt {
+  color: var(--fg-secondary);
+}
+
+.server-summary dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.kind-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+/* --- Microsoft app registration ------------------------------------------- */
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.settings-form .field {
+  max-width: 460px;
+}
+
+.settings-form__note {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+/* --- About ----------------------------------------------------------------- */
+
+.about-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--space-2) 0 var(--space-1);
+  text-align: center;
+}
+
+/* The mark on a tile, as it sits on the desktop. */
+.about-hero__mark {
+  display: grid;
+  place-items: center;
+  width: 80px;
+  height: 80px;
+  margin-bottom: var(--space-3);
+  border-radius: 20px;
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.about-hero__name {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.about-hero__version {
+  margin-top: 6px;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg-secondary);
+}
+
+.about-hero__tagline {
+  margin-top: var(--space-2);
+  color: var(--fg-secondary);
+}
+
+.about-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: 14px var(--space-4);
+}
+
+.about-row__icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--brand-text);
+}
+
+.about-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--fg-secondary);
+}
+
+.about-row__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  line-height: 1.4;
+  color: var(--fg-primary);
+}
+
+.about-license-id {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--fg-secondary);
+}
+
+.about-row__action {
+  flex: none;
+  align-self: center;
+}
+
+.about-trademarks {
+  padding: 0 var(--space-1);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--fg-secondary);
+}
+
+/* --- Remove account -------------------------------------------------------- */
+
+.remove-account {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Addresses can be one long word; break it rather than run off the dialog. */
+.remove-account__address {
+  overflow-wrap: anywhere;
+}
+
+.remove-account__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--fg-secondary);
+}
+
+/* --- Reduced motion -------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .kind-option:active {
+    transform: none;
+  }
+
+  .account-item__toggle svg,
+  .advanced__chevron,
+  .permissions summary::before {
+    transition: none;
+  }
+}
+
+/* --- Notifications, background and sync --------------------------------------- */
+
+/* A choice that only applies when the one above is on. */
+.setting-row--nested {
+  padding-left: calc(var(--space-4) + var(--space-6));
+}
+
+/* A second line under a switch's description: a status, or a warning. */
+.setting-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: var(--space-1);
+  color: var(--fg-secondary);
+}
+
+.setting-note--warning {
+  color: var(--fg-primary);
+}
+
+.setting-note svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.setting-note--warning svg {
+  color: var(--warning);
+}
+
+.privacy-note--inline {
+  max-width: 64ch;
+  margin-top: 0;
+}
+
+.privacy-note--inline svg {
+  margin-top: 2px;
+}
+
+/* A link that does something in the app (opens the browser). */
+.link-button {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-link);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  text-decoration-thickness: 2px;
+}
+
+.link-button:focus-visible {
+  border-radius: 2px;
+  outline-offset: 2px;
+}
+
+/* Settings → Accounts: how new mail reaches the account. */
+.push-field__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+}
+
+.push-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.push-status__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+  background: var(--fg-tertiary);
+}
+
+.push-status--ok .push-status__dot {
+  background: var(--success);
+}
+
+.push-status--attention {
+  color: var(--fg-primary);
+}
+
+.push-status--attention .push-status__dot {
+  background: var(--warning);
+}

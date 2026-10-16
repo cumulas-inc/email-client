@@ -1,0 +1,963 @@
+/* Contacts: address books in the sidebar, the list card, then the contact's
+   details card. Rows are rounded tiles; selection is a teal tint. */
+
+/* --- Sidebar: address books ------------------------------------------------ */
+
+.people-books {
+  padding: var(--space-1) var(--space-2) var(--space-2);
+}
+
+.people-books__label {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  margin-top: var(--space-1);
+  padding: 0 var(--space-2);
+  color: var(--fg-tertiary);
+  font-size: 11.5px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.01em;
+}
+
+.people-books__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* An address book: badge, name, address and count. */
+.people-book {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-content: center;
+  align-items: center;
+  column-gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 5px var(--space-2) 5px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-primary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.people-book:hover {
+  background: var(--bg-hover);
+}
+
+.people-book[aria-current="true"] {
+  background: var(--bg-selected);
+  color: var(--brand-text);
+}
+
+.people-book[aria-current="true"]:hover {
+  background: var(--bg-selected-hover);
+}
+
+.people-book__mark {
+  display: grid;
+  grid-row: 1 / 3;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  /* White on the account color: every color in the palette is dark enough. */
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.people-book__name {
+  grid-column: 2;
+  overflow: hidden;
+  /* Chromium and WebKit only know the prefixed keyword. */
+  text-align: -webkit-match-parent;
+  text-align: match-parent;
+  font-size: 12.5px;
+  font-weight: var(--weight-bold);
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people-book__email {
+  grid-column: 2;
+  grid-row: 2;
+  overflow: hidden;
+  color: var(--fg-tertiary);
+  font-size: 11.5px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people-book[aria-current="true"] .people-book__email {
+  color: var(--fg-secondary);
+}
+
+.people-book__count {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.people-book[aria-current="true"] .people-book__count {
+  color: var(--brand-text);
+  font-weight: var(--weight-bold);
+}
+
+/* "All contacts" is a single line, like a folder. */
+.people-book--all {
+  min-height: 36px;
+}
+
+.people-book--all .people-book__mark,
+.people-book--all .people-book__count {
+  grid-row: 1;
+}
+
+.people-book--all .people-book__name {
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+}
+
+.people-book--all[aria-current="true"] .people-book__name {
+  font-weight: var(--weight-semibold);
+}
+
+.people-book__mark--all {
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  color: var(--fg-secondary);
+}
+
+.people-book[aria-current="true"] .people-book__mark--all {
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--brand-subtle-hover);
+  color: var(--brand-text);
+}
+
+/* --- List card ------------------------------------------------------------- */
+
+.people__list-pane {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: clamp(280px, 25vw, 360px);
+}
+
+/* A small window at a larger text size (see app.css): the details keep
+   room for a name and an address. */
+@media (max-width: 900px) {
+  .people__list-pane {
+    width: 248px;
+  }
+}
+
+.people__list-head {
+  padding: var(--space-3) var(--space-3) 0;
+}
+
+.people__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 14px 4px 6px 6px;
+}
+
+.people__title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.people__count {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  color: var(--fg-tertiary);
+}
+
+/* The address book on show, when it isn't all of them. */
+.people__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 22px;
+  margin-left: auto;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-round);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-secondary);
+  font-size: 11.5px;
+  font-weight: var(--weight-semibold);
+}
+
+.people__chip-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 2.5px;
+}
+
+.people__chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people__search-note {
+  overflow: hidden;
+  padding: 0 6px var(--space-1);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people__list-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Empty-state copy breaks into even lines, without a lone last word, and a
+   searched-for address wraps instead of running off the card. */
+.people .empty-state__description {
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+.people__empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.people-list {
+  flex: 1;
+  padding: 0 var(--space-2) var(--space-2);
+  overflow-y: auto;
+  outline: none;
+}
+
+/* Letter headers stay put while their group scrolls past. */
+.people-list__letter {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 30px;
+  padding: 8px 10px 0;
+  background: var(--bg-surface);
+  color: var(--fg-tertiary);
+  font-size: 11.5px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.01em;
+}
+
+.people-list__letter::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+/* No transitions here: the selection follows the arrow keys and should
+   answer at once. */
+.people-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 52px;
+  padding: var(--space-2) 10px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  scroll-margin-top: 34px;
+}
+
+.people-row + .people-row {
+  margin-top: 1px;
+}
+
+.people-row:hover {
+  background: var(--bg-hover);
+}
+
+.people-row[aria-selected="true"] {
+  background: var(--bg-selected);
+  box-shadow: inset 0 0 0 1px var(--brand-subtle-hover);
+}
+
+.people-row[aria-selected="true"]:hover {
+  background: var(--bg-selected-hover);
+}
+
+.people-list:focus-visible .people-row[aria-selected="true"] {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.people-row__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Fixed line boxes: 19 + 17 + 16 padding = the 52px a one-line row has, so
+   every row is the same height. Right-to-left names keep the row's
+   alignment; their own direction comes from dir="auto". */
+.people-row__name,
+.people-row__secondary {
+  overflow: hidden;
+  text-align: -webkit-match-parent;
+  text-align: match-parent;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people-row__name {
+  font-weight: var(--weight-medium);
+  line-height: 19px;
+}
+
+.people-row__secondary {
+  color: var(--fg-tertiary);
+  font-size: 12.5px;
+  line-height: 17px;
+}
+
+.people-row[aria-selected="true"] .people-row__secondary {
+  color: var(--fg-secondary);
+}
+
+/* --- Details card ---------------------------------------------------------- */
+
+.people__details-pane {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  container-type: inline-size;
+}
+
+.people-details {
+  max-width: 720px;
+  padding: 36px 40px 40px;
+}
+
+/* Top-aligned: a name can run to several lines, and the avatar stays by its
+   first one instead of drifting to the middle. */
+.people-details__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.people-details__identity {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.people-details__identity > .selectable {
+  max-width: 100%;
+}
+
+/* The name reads like a heading on a calling card. It is never cut short:
+   this is the one place the whole name and title can be read, so long ones
+   wrap, and a long name sets a size smaller. */
+.people-details__name {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+  text-wrap: balance;
+}
+
+.people-details__name--long {
+  font-size: 21px;
+  line-height: 1.25;
+}
+
+.people-details__subtitle {
+  margin-top: 4px;
+  color: var(--fg-secondary);
+  font-size: 14px;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+.people-details__name,
+.people-details__subtitle {
+  overflow-wrap: anywhere;
+}
+
+/* The account the contact is saved in. */
+.people-details__account {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 9px 0 8px;
+  border-radius: 7px;
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.people-details__account-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 2.5px;
+}
+
+.people-details__account-email {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Email, Edit and Delete share one outlined group, like Reply / Reply all /
+   Forward next to a sender. */
+/* The 1px padding keeps hover and press fills inside the outline instead of
+   painting over it. */
+.people-actions {
+  display: inline-flex;
+  max-width: 100%;
+  margin-top: 22px;
+  padding: 1px;
+  border-radius: 9px;
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-control);
+}
+
+.people-actions__btn {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 13px 0 11px;
+  border: none;
+  background: transparent;
+  color: var(--fg-primary);
+  font-size: 13px;
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+/* Pressing shrinks the label and icon, not the segment, so the group's
+   outline and dividers stay put. */
+.people-actions__face {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: transform var(--duration-press) var(--ease-out);
+}
+
+.people-actions__btn:first-child {
+  border-radius: 8px 0 0 8px;
+}
+
+.people-actions__btn:last-child {
+  border-radius: 0 8px 8px 0;
+}
+
+.people-actions__btn + .people-actions__btn {
+  box-shadow: -1px 0 0 var(--border-default);
+}
+
+.people-actions__btn svg {
+  flex-shrink: 0;
+  color: var(--fg-secondary);
+}
+
+.people-actions__btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.people-actions__btn:active:not(:disabled) {
+  background: var(--bg-pressed);
+}
+
+.people-actions__btn:active:not(:disabled) .people-actions__face {
+  transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .people-actions__btn:active:not(:disabled) .people-actions__face {
+    transform: none;
+  }
+}
+
+.people-actions__btn:focus-visible {
+  outline-offset: -2px;
+}
+
+.people-actions__btn--primary,
+.people-actions__btn--primary svg {
+  color: var(--brand-text);
+}
+
+/* Delete turns red under the pointer, as Delete does in Calendar and Tasks,
+   and asks before it deletes anything. */
+.people-actions__btn--danger:hover:not(:disabled) {
+  background: var(--danger-subtle);
+}
+
+.people-actions__btn--danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-subtle), var(--danger) 10%);
+}
+
+.people-actions__btn--danger:hover:not(:disabled),
+.people-actions__btn--danger:hover:not(:disabled) svg {
+  color: var(--danger);
+}
+
+.people-actions__btn:disabled,
+.people-actions__btn:disabled svg {
+  color: var(--fg-disabled);
+  cursor: default;
+}
+
+/* Label/value rows separated by hairlines. */
+.people-info {
+  margin-top: 28px;
+}
+
+.people-fields {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.people-field {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  align-items: start;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.people-field__label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  color: var(--fg-secondary);
+  font-size: 13px;
+}
+
+.people-field__icon {
+  display: inline-flex;
+  color: var(--fg-tertiary);
+}
+
+.people-field__value {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 44px;
+  margin: 0;
+}
+
+.people-field__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.people-field__multiline {
+  max-width: 64ch;
+  padding: 12px 0;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.people .people-field__copy {
+  color: var(--fg-tertiary);
+}
+
+/* Copy buttons show on the row they belong to, where a mouse can see them. */
+@media (hover: hover) and (pointer: fine) {
+  .people .people-field__copy {
+    opacity: 0;
+    transition:
+      opacity var(--duration-fast) var(--ease),
+      background var(--duration-fast) var(--ease),
+      color var(--duration-fast) var(--ease);
+  }
+
+  .people-field:hover .people-field__copy,
+  .people .people-field__copy:focus-visible {
+    opacity: 1;
+  }
+}
+
+.people-link {
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg-link);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.people-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.people-info__empty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--fg-secondary);
+}
+
+@container (max-width: 520px) {
+  .people-details {
+    padding: 24px 22px 28px;
+  }
+
+  .people-details__header {
+    align-items: flex-start;
+    gap: 16px;
+  }
+
+  .people-field {
+    grid-template-columns: 112px minmax(0, 1fr);
+  }
+
+  /* Notes and addresses get the card's full width under their label rather
+     than a narrow column beside it. */
+  .people-field--block {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .people-field--block .people-field__label {
+    min-height: 0;
+    padding-top: 12px;
+  }
+
+  .people-field--block .people-field__multiline {
+    padding-top: 6px;
+  }
+}
+
+/* A small window at a larger text size (see app.css): the avatar sits
+   above the name, and each label above its value. (A media query: WebKit
+   measures containers in zoomed pixels.) */
+@media (max-width: 900px) {
+  .people-details__header {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  /* As wide as the card, not as the account address, so a long one is cut
+     short and the name wraps within the card. */
+  .people-details__identity {
+    align-self: stretch;
+  }
+
+  .people-field {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .people-field__label {
+    min-height: 0;
+    padding-top: 12px;
+  }
+
+  .people-field__value {
+    min-height: 36px;
+  }
+}
+
+/* --- Delete confirmation ----------------------------------------------------- */
+
+/* The account address moves to the next line whole when it fits there, and
+   only wraps inside (after its "@") when it is longer than a line. */
+.people-confirm__account {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* --- Editor dialog --------------------------------------------------------- */
+
+/* The form is taller than most windows and scrolls under the buttons; a
+   hairline shows where it goes under. (The subtle border is tuned for
+   cards and disappears on a raised dialog in dark mode.) */
+.people .dialog:has(.people-form) .dialog__footer {
+  border-top: 1px solid var(--border-default);
+}
+
+.people-form__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px var(--space-4);
+}
+
+.people-form__full {
+  grid-column: 1 / -1;
+}
+
+/* Which account a new contact goes to: one tile per account. */
+.people-form__accounts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-2);
+}
+
+.people-form__account-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 50px;
+  padding: var(--space-2) var(--space-3) var(--space-2) 10px;
+  border-radius: var(--radius-lg);
+  box-shadow: inset 0 0 0 1px var(--border-control);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
+}
+
+.people-form__account-tile:hover {
+  background: var(--bg-hover);
+}
+
+.people-form__account-tile:has(:checked) {
+  background: var(--brand-subtle);
+  box-shadow: inset 0 0 0 1.5px var(--brand);
+}
+
+.people-form__account-tile:has(:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.people-form__account-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.people-form__account-mark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.people-form__account-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.people-form__account-name,
+.people-form__account-email {
+  overflow: hidden;
+  text-align: -webkit-match-parent;
+  text-align: match-parent;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people-form__account-name {
+  font-weight: var(--weight-semibold);
+}
+
+.people-form__account-tile:has(:checked) .people-form__account-name {
+  color: var(--brand-text);
+}
+
+.people-form__account-email {
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
+/* Editing: the account can't change, so it's a quiet line. */
+.people-form__account {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
+.people-form__account strong {
+  overflow: hidden;
+  color: var(--fg-primary);
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people-form__account-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 2.5px;
+}
+
+/* The name fields, with a preview of the contact's avatar. */
+.people-form__identity {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.people-form__identity > .avatar,
+.people-form__avatar-empty {
+  margin-top: 21px;
+}
+
+.people-form__avatar-empty {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+  border-radius: var(--radius-round);
+  box-shadow: inset 0 0 0 1.5px var(--border-default);
+  color: var(--fg-tertiary);
+}
+
+.people-form__names {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px var(--space-4);
+  min-width: 0;
+}
+
+.people-form__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.people-form__group > legend {
+  margin-bottom: var(--space-1);
+  padding: 0;
+}
+
+.people-form__row-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.people-form__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.people .people-form__row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.people .people-form__kind {
+  flex-shrink: 0;
+  width: 112px;
+}
+
+.people .people-form__add {
+  align-self: flex-start;
+  margin-left: -4px;
+  color: var(--brand-text);
+}
+
+.people .people-form__add:hover:not(:disabled) {
+  color: var(--brand-text);
+}
+
+.people-form__alert {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.people .people-form__address {
+  min-height: 76px;
+}
+
+/* The listbox shows focus on its selected row instead of around itself. */
+.people-list:focus-visible {
+  outline: none;
+}

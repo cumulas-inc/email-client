@@ -1,0 +1,351 @@
+/* --- Avatar ---------------------------------------------------------------- */
+
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: var(--radius-round);
+  background: var(--avatar-bg);
+  color: var(--avatar-fg);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.01em;
+}
+
+/* The signed-in person: tinted with the account's color, which also reads
+   well in dark mode because the ink mixes toward the text color. */
+.avatar--account {
+  --avatar-bg: color-mix(in srgb, var(--account-color) 20%, var(--bg-surface));
+  --avatar-fg: color-mix(in srgb, var(--account-color) 70%, var(--fg-primary));
+}
+
+.avatar--teal {
+  --avatar-bg: var(--avatar-teal-bg);
+  --avatar-fg: var(--avatar-teal-fg);
+}
+
+.avatar--rose {
+  --avatar-bg: var(--avatar-rose-bg);
+  --avatar-fg: var(--avatar-rose-fg);
+}
+
+.avatar--sky {
+  --avatar-bg: var(--avatar-sky-bg);
+  --avatar-fg: var(--avatar-sky-fg);
+}
+
+.avatar--amber {
+  --avatar-bg: var(--avatar-amber-bg);
+  --avatar-fg: var(--avatar-amber-fg);
+}
+
+.avatar--violet {
+  --avatar-bg: var(--avatar-violet-bg);
+  --avatar-fg: var(--avatar-violet-fg);
+}
+
+.avatar--green {
+  --avatar-bg: var(--avatar-green-bg);
+  --avatar-fg: var(--avatar-green-fg);
+}
+
+.avatar--orange {
+  --avatar-bg: var(--avatar-orange-bg);
+  --avatar-fg: var(--avatar-orange-fg);
+}
+
+.avatar--slate {
+  --avatar-bg: var(--avatar-slate-bg);
+  --avatar-fg: var(--avatar-slate-fg);
+}
+
+.account-badge {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  background: var(--account-color);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  /* White on the account color: every color in the palette is dark enough. */
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+/* --- Dialog ---------------------------------------------------------------- */
+
+.dialog {
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: none;
+  border-radius: 14px;
+  background: var(--bg-surface-raised);
+  color: var(--fg-primary);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.dialog[open] {
+  display: flex;
+  flex-direction: column;
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 200ms var(--ease-out);
+}
+
+@starting-style {
+  .dialog[open] {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+.dialog::backdrop {
+  background: var(--bg-overlay);
+  transition: opacity 200ms var(--ease-out);
+}
+
+@starting-style {
+  .dialog[open]::backdrop {
+    opacity: 0;
+  }
+}
+
+.dialog__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-4) var(--space-2) var(--space-6);
+}
+
+.dialog__title {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: var(--text-xl);
+  font-weight: 700;
+}
+
+.dialog__body {
+  padding: var(--space-2) var(--space-6) var(--space-4);
+  overflow-y: auto;
+}
+
+.dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-6) var(--space-6);
+}
+
+/* --- Menu ------------------------------------------------------------------ */
+
+.menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  z-index: 100;
+  max-width: min(420px, calc(100vw - 32px));
+  min-width: 200px;
+  padding: var(--space-1);
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-md);
+  transform-origin: top left;
+  transition:
+    opacity 150ms var(--ease-out),
+    transform 150ms var(--ease-out);
+}
+
+/* Menus grow out of the button that opened them. */
+@starting-style {
+  .menu {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+.menu--start {
+  left: 0;
+}
+
+.menu--end {
+  right: 0;
+  transform-origin: top right;
+}
+
+/* Placed over the window by the component (see Menu's `fixed`). */
+.menu--fixed {
+  position: fixed;
+  z-index: 1000;
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu__item:hover:not(:disabled),
+.menu__item:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.menu__item:disabled {
+  color: var(--fg-disabled);
+  cursor: default;
+}
+
+.menu__item--danger {
+  color: var(--danger);
+}
+
+.menu__icon {
+  display: inline-flex;
+  width: 16px;
+  color: var(--fg-secondary);
+}
+
+.menu__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu__shortcut {
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+}
+
+.menu__separator {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background: var(--border-subtle);
+}
+
+/* --- Toasts ---------------------------------------------------------------- */
+
+.toaster {
+  /* A popover in the top layer, so toasts show above open dialogs too. */
+  position: fixed;
+  inset: auto auto var(--space-4) 50%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  overflow: visible;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast {
+  overflow-wrap: anywhere;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 320px;
+  max-width: 560px;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-lg);
+  pointer-events: auto;
+  transition:
+    opacity 300ms var(--ease-out),
+    transform 300ms var(--ease-out);
+}
+
+/* Toasts rise from the edge they live on. */
+@starting-style {
+  .toast {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+.toast--success > svg:first-child {
+  color: var(--success);
+}
+
+.toast--error > svg:first-child {
+  color: var(--danger);
+}
+
+.toast--info > svg:first-child {
+  color: var(--brand-text);
+}
+
+.toast__message {
+  flex: 1;
+}
+
+/* --- Empty state & spinner ------------------------------------------------- */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 100%;
+  padding: var(--space-8);
+  text-align: center;
+  color: var(--fg-secondary);
+}
+
+.empty-state__icon {
+  color: var(--fg-tertiary);
+  margin-bottom: var(--space-2);
+}
+
+.empty-state__title {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--fg-primary);
+}
+
+.empty-state__description {
+  max-width: 360px;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+.empty-state__action {
+  margin-top: var(--space-3);
+}
+
+.spinner {
+  display: inline-flex;
+  color: var(--brand-text);
+}
+
+.pane-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 120px;
+}

@@ -1,0 +1,315 @@
+/* Design tokens. Components use these variables only — never raw colors —
+   so light/dark themes and future accent colors stay consistent.
+
+   The look: warm neutral canvas, content on rounded cards, a deep teal
+   accent, Inter for the interface and Charis SIL (a Charter serif) for what
+   people read — subjects, headings and message text. */
+
+:root {
+  color-scheme: light;
+
+  /* Typography. Inter's optical sizes switch to the display cut by itself
+     at large sizes. Both families ship with the app (see main.tsx). */
+  --font-sans: "Inter Variable", "Inter", "Cantarell", "Noto Sans", system-ui, sans-serif;
+  --font-serif: "Charis SIL", "Charter", "Bitstream Charter", Georgia, serif;
+  --font-mono: "JetBrains Mono", "Source Code Pro", ui-monospace, monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13.5px;
+  --text-lg: 15px;
+  --text-xl: 19px;
+  --text-2xl: 24px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 650;
+
+  /* Spacing (4px grid) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Shape & motion */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-card: 12px;
+  --radius-round: 999px;
+  --duration-fast: 100ms;
+  --duration-press: 160ms;
+  --duration-normal: 180ms;
+  /* Color and hover changes. */
+  --ease: cubic-bezier(0.33, 0, 0.67, 1);
+  /* Things appearing: starts fast, so it answers the click at once. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  /* Things moving on screen. */
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+  /* Layout: cards float on the canvas with a small gap between them. */
+  --header-height: 48px;
+  --canvas-padding: 12px;
+  --pane-gap: 10px;
+  --sidebar-width: 260px;
+  --list-width: 400px;
+
+  /* Accent: Cumulas teal */
+  --brand: #0b7a75;
+  --brand-hover: #096560;
+  --brand-pressed: #07524e;
+  --brand-text: #0a6f6a;
+  --brand-subtle: #e3f1ee;
+  --brand-subtle-hover: #c9e5e0;
+  --on-brand: #ffffff;
+
+  /* Neutrals */
+  --bg-app: #efede8;
+  --bg-app-glow: #f5f4f0;
+  --bg-surface: #ffffff;
+  --bg-surface-raised: #ffffff;
+  --bg-sidebar: #ffffff;
+  --bg-field: #f5f4f1;
+  /* A raised tile on a sunken track (the chosen segment), and a recessed panel. */
+  --bg-tile: #ffffff;
+  --bg-sunken: #f5f4f1;
+  --bg-hover: #f2f0eb;
+  --bg-pressed: #e9e6e0;
+  --bg-selected: #e3f1ee;
+  --bg-selected-hover: #d5ebe6;
+  --bg-input: #ffffff;
+  --bg-overlay: rgba(29, 28, 26, 0.36);
+
+  --fg-primary: #1d1c1a;
+  --fg-secondary: #57534c;
+  --fg-tertiary: #716c63;
+  --fg-disabled: #b3aea5;
+  --fg-link: #0a6f6a;
+
+  --border-subtle: #efece6;
+  --border-default: #e1ddd5;
+  --border-control: #d8d4cb;
+  --border-strong: #8f897e;
+  --focus-ring: #0b7a75;
+
+  /* Status */
+  --danger: #c23a2c;
+  --danger-hover: #a8301f;
+  --on-danger: #ffffff;
+  --danger-subtle: #fbe8e4;
+  --warning: #a8560e;
+  --warning-subtle: #fcf0e2;
+  --success: #2d7a3a;
+  --success-subtle: #e5f2e3;
+  --flag: #c4581f;
+  --flag-subtle: #fcebdd;
+  --star: #a87a0a;
+  --star-text: #82620e;
+  --star-subtle: #faf1d9;
+  --star-border: #ecdcae;
+  --unread: #0b7a75;
+  --now: #d8463a;
+
+  /* Logo */
+  --logo-front-top: #149189;
+  --logo-front-bottom: #0a6c67;
+  --logo-back: #93d9cf;
+
+  /* Avatars: soft background, strong initials */
+  --avatar-rose-bg: #f7e1e4;
+  --avatar-rose-fg: #962a40;
+  --avatar-slate-bg: #ebe7e0;
+  --avatar-slate-fg: #57514a;
+  --avatar-violet-bg: #ece5f6;
+  --avatar-violet-fg: #5b3b92;
+  --avatar-amber-bg: #f6ead1;
+  --avatar-amber-fg: #7d550c;
+  --avatar-green-bg: #e1efdf;
+  --avatar-green-fg: #2d6631;
+  --avatar-sky-bg: #e0edf6;
+  --avatar-sky-fg: #22618a;
+  --avatar-orange-bg: #f9e4d5;
+  --avatar-orange-fg: #93461a;
+  --avatar-teal-bg: #dcefeb;
+  --avatar-teal-fg: #0b6863;
+
+  --shadow-card:
+    0 0 0 1px rgba(60, 50, 35, 0.07), 0 1px 2px rgba(60, 50, 35, 0.05),
+    0 8px 24px -12px rgba(60, 50, 35, 0.14);
+  --shadow-sm: 0 0 0 1px rgba(60, 50, 35, 0.08), 0 1px 3px rgba(60, 50, 35, 0.1);
+  --shadow-md: 0 0 0 1px rgba(60, 50, 35, 0.08), 0 8px 20px -6px rgba(60, 50, 35, 0.2);
+  --shadow-lg: 0 0 0 1px rgba(60, 50, 35, 0.08), 0 24px 56px -16px rgba(60, 50, 35, 0.32);
+  --shadow-button: 0 1px 2px rgba(6, 70, 66, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --brand: #168078;
+    --brand-hover: #1c9087;
+    --brand-pressed: #126a63;
+    --brand-text: #5cc6bb;
+    --brand-subtle: #1a3532;
+    --brand-subtle-hover: #23524c;
+    --on-brand: #ffffff;
+
+    --bg-app: #181715;
+    --bg-app-glow: #1c1b19;
+    --bg-surface: #22211e;
+    --bg-surface-raised: #2a2926;
+    --bg-sidebar: #22211e;
+    --bg-field: #2a2926;
+    --bg-tile: #34322e;
+    --bg-sunken: #1d1c1a;
+    --bg-hover: #2c2a27;
+    --bg-pressed: #34322e;
+    --bg-selected: #1a3532;
+    --bg-selected-hover: #20403c;
+    --bg-input: #2a2926;
+    --bg-overlay: rgba(0, 0, 0, 0.55);
+
+    --fg-primary: #edebe6;
+    --fg-secondary: #bbb6ac;
+    --fg-tertiary: #9a948a;
+    --fg-disabled: #5f5a53;
+    --fg-link: #5cc6bb;
+
+    --border-subtle: #35322d;
+    --border-default: #3a3732;
+    --border-control: #4a463f;
+    --border-strong: #807a70;
+    --focus-ring: #5cc6bb;
+
+    --danger: #ec6e5f;
+    --danger-hover: #f2867a;
+    --on-danger: #1f0b08;
+    --danger-subtle: #3d2320;
+    --warning: #eba25c;
+    --warning-subtle: #3a2a1a;
+    --success: #7cc489;
+    --success-subtle: #1f3122;
+    --flag: #ef8a4f;
+    --flag-subtle: #3b2a1e;
+    --star: #e0b445;
+    --star-text: #e9c27a;
+    --star-subtle: #3a3020;
+    --star-border: #54452a;
+    --unread: #3fb3a8;
+    --now: #f06a5d;
+
+    --logo-front-top: #33b3a8;
+    --logo-front-bottom: #178a82;
+    --logo-back: #2f5f5a;
+
+    --avatar-rose-bg: #3d2328;
+    --avatar-rose-fg: #f2aab7;
+    --avatar-slate-bg: #34312c;
+    --avatar-slate-fg: #cdc6bb;
+    --avatar-violet-bg: #32293f;
+    --avatar-violet-fg: #c9b3ef;
+    --avatar-amber-bg: #3a3020;
+    --avatar-amber-fg: #e9c27a;
+    --avatar-green-bg: #253325;
+    --avatar-green-fg: #a5d3a2;
+    --avatar-sky-bg: #1f2f3b;
+    --avatar-sky-fg: #9ccbea;
+    --avatar-orange-bg: #3c2a1f;
+    --avatar-orange-fg: #f1b287;
+    --avatar-teal-bg: #1b3532;
+    --avatar-teal-fg: #8edbd1;
+
+    --shadow-card:
+      0 0 0 1px rgba(255, 255, 255, 0.055), 0 1px 2px rgba(0, 0, 0, 0.3),
+      0 10px 28px -12px rgba(0, 0, 0, 0.55);
+    --shadow-sm: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 1px 3px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 20px -6px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 24px 56px -16px rgba(0, 0, 0, 0.7);
+    --shadow-button: 0 1px 2px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --brand: #168078;
+  --brand-hover: #1c9087;
+  --brand-pressed: #126a63;
+  --brand-text: #5cc6bb;
+  --brand-subtle: #1a3532;
+  --brand-subtle-hover: #23524c;
+  --on-brand: #ffffff;
+
+  --bg-app: #181715;
+  --bg-app-glow: #1c1b19;
+  --bg-surface: #22211e;
+  --bg-surface-raised: #2a2926;
+  --bg-sidebar: #22211e;
+  --bg-field: #2a2926;
+  --bg-tile: #34322e;
+  --bg-sunken: #1d1c1a;
+  --bg-hover: #2c2a27;
+  --bg-pressed: #34322e;
+  --bg-selected: #1a3532;
+  --bg-selected-hover: #20403c;
+  --bg-input: #2a2926;
+  --bg-overlay: rgba(0, 0, 0, 0.55);
+
+  --fg-primary: #edebe6;
+  --fg-secondary: #bbb6ac;
+  --fg-tertiary: #9a948a;
+  --fg-disabled: #5f5a53;
+  --fg-link: #5cc6bb;
+
+  --border-subtle: #35322d;
+  --border-default: #3a3732;
+  --border-control: #4a463f;
+  --border-strong: #807a70;
+  --focus-ring: #5cc6bb;
+
+  --danger: #ec6e5f;
+  --danger-hover: #f2867a;
+  --on-danger: #1f0b08;
+  --danger-subtle: #3d2320;
+  --warning: #eba25c;
+  --warning-subtle: #3a2a1a;
+  --success: #7cc489;
+  --success-subtle: #1f3122;
+  --flag: #ef8a4f;
+  --flag-subtle: #3b2a1e;
+  --star: #e0b445;
+  --star-text: #e9c27a;
+  --star-subtle: #3a3020;
+  --star-border: #54452a;
+  --unread: #3fb3a8;
+  --now: #f06a5d;
+
+  --logo-front-top: #33b3a8;
+  --logo-front-bottom: #178a82;
+  --logo-back: #2f5f5a;
+
+  --avatar-rose-bg: #3d2328;
+  --avatar-rose-fg: #f2aab7;
+  --avatar-slate-bg: #34312c;
+  --avatar-slate-fg: #cdc6bb;
+  --avatar-violet-bg: #32293f;
+  --avatar-violet-fg: #c9b3ef;
+  --avatar-amber-bg: #3a3020;
+  --avatar-amber-fg: #e9c27a;
+  --avatar-green-bg: #253325;
+  --avatar-green-fg: #a5d3a2;
+  --avatar-sky-bg: #1f2f3b;
+  --avatar-sky-fg: #9ccbea;
+  --avatar-orange-bg: #3c2a1f;
+  --avatar-orange-fg: #f1b287;
+  --avatar-teal-bg: #1b3532;
+  --avatar-teal-fg: #8edbd1;
+
+  --shadow-card:
+    0 0 0 1px rgba(255, 255, 255, 0.055), 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px -12px rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 20px -6px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 24px 56px -16px rgba(0, 0, 0, 0.7);
+  --shadow-button: 0 1px 2px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}

@@ -1,0 +1,149 @@
+import { act, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
+import { describe, expect, it } from "vitest";
+
+import { MockBackend } from "../../api/mock";
+import { qk } from "../../api/queries";
+import type { Settings } from "../../api/types";
+import { SANS_STACK, SERIF_STACK } from "../../lib/fonts";
+import { renderWithBackend } from "../../test/render";
+import { bodyFont, useBodyFont } from "./bodyFont";
+import { type BodyFont, buildSrcDoc, DEFAULT_BODY_FONT } from "./bodyHtml";
+import { MessageBody } from "./MessageBody";
+
+const fonts = (interfaceFont: Settings["interfaceFont"], readingFont: Settings["readingFont"]) => ({
+  interfaceFont,
+  readingFont,
+});
+
+describe("the message frame's font", () => {
+  it("carries Charis SIL inside the frame by default", () => {
+    expect(bodyFont(undefined, null)).toBe(DEFAULT_BODY_FONT);
+    expect(bodyFont(fonts({ kind: "system" }, { kind: "default" }), null)).toBe(DEFAULT_BODY_FONT);
+    const doc = buildSrcDoc("<p>Hi</p>", { allowRemote: false, appearance: "plain" });
+    expect(doc).toContain('@font-face { font-family: "Charis SIL"');
+    expect(doc).toContain("src: url(data:");
+    expect(doc).toContain(`font-family: ${SERIF_STACK};`);
+  });
+
+  it("names a chosen family in front of Charis SIL, which still travels in the frame", () => {
+    // If Literata isn't installed, or lacks a letter, the frame falls back to
+    // the bundled Charis SIL as the rest of the app does.
+    const font = bodyFont(fonts({ kind: "default" }, { kind: "family", family: "Literata" }), null);
+    expect(font).toEqual({ family: `"Literata", ${SERIF_STACK}`, faces: "" });
+    const doc = buildSrcDoc("<p>Hi</p>", { allowRemote: false, appearance: "plain", font: font! });
+    expect(doc).toContain('@font-face { font-family: "Charis SIL"');
+    expect(doc).toContain(`font-family: "Literata", ${SERIF_STACK};`);
+  });
+
+  it("follows the interface font, waiting for Inter's faces when Inter is the font or its fallback", () => {
+    const system = bodyFont(fonts({ kind: "system" }, { kind: "interface" }), null);
+    expect(system).toEqual({ family: `system-ui, ${SANS_STACK}`, faces: "" });
+
+    const inter = fonts({ kind: "default" }, { kind: "interface" });
+    expect(bodyFont(inter, null)).toBeNull();
+    expect(bodyFont(inter, "@font-face {}")).toEqual({
+      family: SANS_STACK,
+      faces: "@font-face {}",
+    });
+
+    // A chosen interface family that isn't installed falls back to Inter.
+    const chosen = fonts({ kind: "family", family: "Cantarell" }, { kind: "interface" });
+    expect(bodyFont(chosen, null)).toBeNull();
+    expect(bodyFont(chosen, "@font-face {}")).toEqual({
+      family: `"Cantarell", ${SANS_STACK}`,
+      faces: "@font-face {}",
+    });
+  });
+
+  it("keeps a hostile family name from closing the frame's style sheet", () => {
+    const hostile = '</style><script>alert(1)</script><style>"';
+    const font = bodyFont(fonts({ kind: "default" }, { kind: "family", family: hostile }), null);
+    const doc = buildSrcDoc("<p>Hi</p>", { allowRemote: false, appearance: "plain", font: font! });
+    expect(doc).not.toContain("<script>");
+    expect(doc.match(/<\/style>/g)).toHaveLength(1);
+    expect(doc).toContain('font-family: "\\3c /style\\3e \\3c script\\3e alert(1)');
+  });
+});
+
+describe("useBodyFont", () => {
+  it("gives the same font from render to render, until the settings change it", async () => {
+    const backend = new MockBackend();
+    const settings = {
+      ...(await backend.getSettings()),
+      readingFont: { kind: "family", family: "Literata" } as const,
+    };
+    await backend.updateSettings(settings);
+    const seen: (BodyFont | null)[] = [];
+    let renderAgain = () => {};
+    function Reader() {
+      const [, setRenders] = useState(0);
+      renderAgain = () => setRenders((n) => n + 1);
+      seen.push(useBodyFont());
+      return null;
+    }
+    const { client } = renderWithBackend(<Reader />, { backend });
+    await waitFor(() => expect(seen.at(-1)?.family).toBe(`"Literata", ${SERIF_STACK}`));
+    const font = seen.at(-1);
+    const from = seen.length;
+    act(() => renderAgain());
+    act(() => renderAgain());
+    expect(seen.length).toBeGreaterThan(from);
+    // A frame's document is built from it: a new one would reload the frame.
+    expect(seen.slice(from).every((f) => f === font)).toBe(true);
+
+    act(() => {
+      client.setQueryData(qk.settings(), {
+        ...settings,
+        readingFont: { kind: "family", family: "Gelasio" },
+      });
+    });
+    await waitFor(() =>
+      expect(seen.at(-1)).toEqual({ family: `"Gelasio", ${SERIF_STACK}`, faces: "" }),
+    );
+  });
+});
+
+describe("MessageBody", () => {
+  async function renderBody(patch: Partial<Settings>) {
+    const backend = new MockBackend();
+    await backend.updateSettings({ ...(await backend.getSettings()), ...patch });
+    renderWithBackend(
+      <MessageBody
+        html='<p>Hello</p><p style="font-family: Arial">Own font</p>'
+        allowRemote={false}
+        appearance="plain"
+        title="Message: Hello"
+        onLink={() => {}}
+      />,
+      { backend },
+    );
+  }
+
+  const srcdoc = () => screen.getByTitle("Message: Hello").getAttribute("srcdoc") ?? "";
+
+  it("sets text in the reading font, leaving the mail's own fonts alone", async () => {
+    await renderBody({ readingFont: { kind: "family", family: "Literata" } });
+    await waitFor(() => expect(srcdoc()).toContain(`font-family: "Literata", ${SERIF_STACK};`));
+    expect(srcdoc()).toContain('@font-face { font-family: "Charis SIL"');
+    expect(srcdoc()).not.toContain('@font-face { font-family: "Inter Variable"');
+    expect(srcdoc()).toContain('<p style="font-family: Arial">Own font</p>');
+  });
+
+  it("brings Inter into the frame when messages read in the bundled interface font", async () => {
+    await renderBody({ readingFont: { kind: "interface" } });
+    await waitFor(() => expect(srcdoc()).toContain('@font-face { font-family: "Inter Variable"'));
+    expect(srcdoc()).toContain(`font-family: ${SANS_STACK};`);
+    // Charis SIL stays for mail that names it (mail written here does).
+    expect(srcdoc()).toContain('@font-face { font-family: "Charis SIL"');
+  });
+
+  it("brings Inter in behind a chosen interface family, in case it isn't installed", async () => {
+    await renderBody({
+      interfaceFont: { kind: "family", family: "Fira Sans" },
+      readingFont: { kind: "interface" },
+    });
+    await waitFor(() => expect(srcdoc()).toContain(`font-family: "Fira Sans", ${SANS_STACK};`));
+    expect(srcdoc()).toContain('@font-face { font-family: "Inter Variable"');
+  });
+});

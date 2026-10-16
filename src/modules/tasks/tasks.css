@@ -1,0 +1,1202 @@
+/* Tasks: the lists in the sidebar card, the open list in the main card and
+   the selected task in a details card. */
+
+.tasks {
+  /* On a wide card the tasks keep to a column of this width. */
+  --tasks-measure: 820px;
+}
+
+/* --- Sidebar: smart lists, then each account's lists ---------------------------- */
+
+.tasks-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  outline: none;
+}
+
+.tasks-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+/* Hover eases in; selecting (arrow keys, clicks) changes at once. */
+.tasks-nav__item:hover:not([aria-selected="true"]) {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.tasks-nav__item[aria-selected="true"] {
+  background: var(--bg-selected);
+  color: var(--brand-text);
+  font-weight: var(--weight-semibold);
+}
+
+.tasks-nav__item[aria-selected="true"]:hover {
+  background: var(--bg-selected-hover);
+}
+
+.tasks-nav__icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--fg-tertiary);
+}
+
+.tasks-nav__item[aria-selected="true"] .tasks-nav__icon,
+.tasks-nav__item[aria-selected="true"] .tasks-nav__count {
+  color: var(--brand-text);
+}
+
+.tasks-nav__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-nav__count {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg-tertiary);
+}
+
+.tasks-nav__group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 10px;
+}
+
+.tasks-nav__group--smart {
+  margin-top: 0;
+}
+
+/* "Smart lists", like Mail's "Favorites" and Contacts' "Address books". */
+.tasks-nav__section {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 var(--space-2);
+  color: var(--fg-tertiary);
+  font-size: 11.5px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.01em;
+}
+
+.tasks-nav__account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  margin-bottom: 1px;
+  padding: 0 var(--space-2) 0 10px;
+}
+
+.tasks-nav__account-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.tasks-nav__account-name,
+.tasks-nav__account-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-nav__account-name {
+  font-size: 12.5px;
+  font-weight: var(--weight-bold);
+}
+
+.tasks-nav__account-email {
+  font-size: 11.5px;
+  color: var(--fg-tertiary);
+}
+
+/* --- Main card ----------------------------------------------------------------------- */
+
+.tasks__main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  container: tasks-main / inline-size;
+  /* Side padding that centers the task column on a wide card. Rows are tiles
+     8px in; the search and "New task" fields sit 4px further in. */
+  --tasks-gutter: max(var(--space-2), calc((100% - var(--tasks-measure)) / 2));
+  --tasks-inset: calc(var(--tasks-gutter) + 4px);
+}
+
+/* The search spans the top of the card, 12px in, as in Mail and Contacts, so
+   Ctrl+K lands in the same place everywhere. The title row sits under it. On
+   a wide card both keep to the task column. */
+.tasks-header {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-3) var(--tasks-inset) 0;
+}
+
+/* The title lines up with the tasks' check circles. */
+.tasks-header__titles {
+  min-width: 0;
+  padding: 14px 4px 10px var(--space-2);
+}
+
+/* A long list name wraps to a second line before it is clamped. */
+.tasks-header__title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+.tasks-header__subtitle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 5px;
+  font-size: 12.5px;
+  color: var(--fg-secondary);
+}
+
+.tasks-header__dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 2.5px;
+}
+
+/* A long name and a long address share the line, so both still show. */
+.tasks-header__subtitle-name,
+.tasks-header__subtitle-email {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-header__subtitle-name {
+  max-width: 60%;
+}
+
+.tasks-header__subtitle-sep {
+  flex-shrink: 0;
+  margin: 0 -2px;
+  color: var(--fg-tertiary);
+}
+
+/* "New task": a field that sits where the next task will appear. */
+/* Lined up with the search above it; the plus lines up with the check circles. */
+.tasks-add {
+  padding: 0 var(--tasks-inset) var(--space-2);
+}
+
+.tasks-add__field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 42px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-lg);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  cursor: text;
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
+}
+
+.tasks-add__field:hover {
+  box-shadow: inset 0 0 0 1px var(--border-default);
+}
+
+.tasks-add__field:focus-within {
+  background: var(--bg-input);
+  box-shadow:
+    inset 0 0 0 1px var(--brand),
+    0 0 0 3px var(--brand-subtle);
+}
+
+.tasks-add__field:has(:disabled) {
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  cursor: default;
+}
+
+.tasks-add__icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  justify-content: center;
+  width: 18px;
+  color: var(--brand-text);
+}
+
+.tasks-add__field:has(:disabled) .tasks-add__icon {
+  color: var(--fg-disabled);
+}
+
+.tasks-add__input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 14px;
+  outline: none;
+  user-select: text;
+  cursor: text;
+}
+
+.tasks-add__input::placeholder {
+  color: var(--fg-secondary);
+  opacity: 1;
+}
+
+.tasks-add__input:focus::placeholder {
+  color: var(--fg-tertiary);
+}
+
+.tasks-add__input:disabled {
+  cursor: default;
+}
+
+.tasks-add__input:disabled::placeholder {
+  color: var(--fg-disabled);
+}
+
+.tasks-add__hint {
+  max-width: 50%;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-add__enter {
+  flex-shrink: 0;
+}
+
+.tasks-scroll {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--space-1) var(--tasks-gutter) var(--space-4);
+  overflow-y: auto;
+}
+
+.tasks-search-note {
+  padding: 2px var(--space-3) var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+/* --- Task rows ------------------------------------------------------------------------- */
+
+.tasks-listbox {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  outline: none;
+}
+
+.tasks-row {
+  display: grid;
+  grid-template-areas: "check title meta star";
+  grid-template-columns: 18px minmax(0, 1fr) auto 28px;
+  align-items: center;
+  column-gap: var(--space-3);
+  min-height: 44px;
+  padding: 6px 6px 6px var(--space-3);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  scroll-margin: 40px 0 8px;
+  transition: opacity 240ms var(--ease);
+}
+
+/* Hover eases in; selecting (arrow keys, clicks) changes at once. */
+.tasks-row:hover:not([aria-selected="true"]) {
+  background: var(--bg-hover);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    opacity 240ms var(--ease);
+}
+
+.tasks-row[aria-selected="true"] {
+  background: var(--bg-selected);
+  box-shadow: inset 0 0 0 1px var(--brand-subtle-hover);
+}
+
+.tasks-row[aria-selected="true"]:hover {
+  background: var(--bg-selected-hover);
+}
+
+.tasks-listbox:focus-visible .tasks-row[aria-selected="true"] {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* A task just checked off stays a moment, fading, then its row closes up
+   (TaskRow) and it moves to Completed. */
+.tasks-listbox .tasks-row.tasks-row--settling {
+  overflow: hidden;
+  opacity: 0.55;
+  transition: opacity 240ms var(--ease) 120ms;
+}
+
+.tasks-row > .tasks-check {
+  grid-area: check;
+}
+
+/* The title, then a note mark right after it (so it never drifts with the date). */
+.tasks-row__title {
+  display: flex;
+  grid-area: title;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.tasks-row__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-row__note {
+  flex-shrink: 0;
+  color: var(--fg-tertiary);
+}
+
+.tasks-row--done .tasks-row__title {
+  color: var(--fg-tertiary);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 70%, transparent);
+}
+
+.tasks-row__meta {
+  display: flex;
+  grid-area: meta;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.tasks-row__list {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 190px;
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.tasks-row__list-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 2.5px;
+}
+
+.tasks-row__list-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Room for the widest short date, so list names line up too. */
+.tasks-row__due {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: flex-end;
+  min-width: 92px;
+}
+
+/* Due date chip: quiet by default, red when overdue, teal for today. */
+.tasks-due {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 7px 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tasks-due svg {
+  color: var(--fg-tertiary);
+}
+
+.tasks-due--overdue,
+.tasks-due--today {
+  box-shadow: none;
+}
+
+.tasks-due--overdue {
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.tasks-due--today {
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+}
+
+.tasks-due--overdue svg,
+.tasks-due--today svg {
+  color: inherit;
+}
+
+.tasks-row--done .tasks-due {
+  background: transparent;
+  color: var(--fg-tertiary);
+}
+
+/* Scheduled: Overdue, Today, Tomorrow... */
+.tasks-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tasks-group + .tasks-group {
+  margin-top: var(--space-2);
+}
+
+.tasks-group__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 6px var(--space-2) 0 var(--space-3);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-tertiary);
+}
+
+.tasks-group__header::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  margin-left: var(--space-1);
+  background: var(--border-subtle);
+}
+
+.tasks-group--overdue .tasks-group__header {
+  color: var(--danger);
+}
+
+.tasks-group__count {
+  font-weight: var(--weight-medium);
+  color: var(--fg-tertiary);
+}
+
+/* Completed: a quiet divider that folds the done tasks away. */
+.tasks-completed {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: var(--space-3);
+}
+
+.tasks-completed__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--space-2) 0 14px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.tasks-completed__toggle::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  margin-left: var(--space-1);
+  background: var(--border-subtle);
+}
+
+.tasks-completed__toggle:hover {
+  color: var(--fg-primary);
+}
+
+.tasks-completed__chevron {
+  flex-shrink: 0;
+  transition: transform var(--duration-normal) var(--ease-in-out);
+}
+
+.tasks-completed__toggle[aria-expanded="true"] .tasks-completed__chevron {
+  transform: rotate(90deg);
+}
+
+.tasks-completed__count {
+  font-weight: var(--weight-medium);
+}
+
+/* --- Controls ---------------------------------------------------------------------------- */
+
+.tasks-check {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1.5px solid var(--fg-tertiary);
+  border-radius: var(--radius-round);
+  background: transparent;
+  color: var(--on-brand);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-normal) var(--ease),
+    border-color var(--duration-fast) var(--ease),
+    transform var(--duration-press) var(--ease-out);
+}
+
+/* A bigger target than the circle itself. */
+.tasks-check::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: var(--radius-round);
+}
+
+.tasks-check--lg {
+  width: 22px;
+  height: 22px;
+}
+
+.tasks-check svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tasks-check--lg svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* The check draws itself in when the task is done. */
+.tasks-check path {
+  stroke-dasharray: 13;
+  stroke-dashoffset: 13;
+  transition: stroke-dashoffset 220ms var(--ease-out);
+}
+
+.tasks-check:hover {
+  border-color: var(--brand);
+  background: var(--brand-subtle);
+}
+
+.tasks-check:active {
+  transform: scale(0.88);
+}
+
+.tasks-check:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.tasks-check[aria-checked="true"] {
+  border-color: var(--brand);
+  background: var(--brand);
+}
+
+.tasks-check[aria-checked="true"]:hover {
+  border-color: var(--brand-hover);
+  background: var(--brand-hover);
+}
+
+.tasks-check[aria-checked="true"] path {
+  stroke-dashoffset: 0;
+  transition-delay: 40ms;
+}
+
+/* Row stars: gold when set; unset ones show on hover and on the selected row. */
+.tasks .tasks-star {
+  grid-area: star;
+  color: var(--fg-tertiary);
+  opacity: 0;
+  transition:
+    opacity var(--duration-fast) var(--ease),
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease),
+    transform var(--duration-press) var(--ease-out);
+}
+
+.tasks-row:hover .tasks-star,
+.tasks-row[aria-selected="true"] .tasks-star,
+.tasks .tasks-star[aria-pressed="true"],
+.tasks .tasks-star:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .tasks .tasks-star {
+    opacity: 1;
+  }
+}
+
+.tasks .tasks-star:hover:not(:disabled),
+.tasks .tasks-star[aria-pressed="true"] {
+  color: var(--star);
+}
+
+/* Details: "Star" / "Starred". */
+.tasks-star-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px 0 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-control);
+  color: var(--fg-secondary);
+  font-size: 12.5px;
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease),
+    transform var(--duration-press) var(--ease-out);
+}
+
+.tasks-star-field svg {
+  color: var(--fg-tertiary);
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.tasks-star-field:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.tasks-star-field:hover svg {
+  color: var(--star);
+}
+
+.tasks-star-field:active {
+  transform: scale(0.97);
+}
+
+.tasks-star-field[aria-pressed="true"] {
+  background: var(--star-subtle);
+  box-shadow: inset 0 0 0 1px var(--star-border);
+  color: var(--star-text);
+}
+
+.tasks-star-field[aria-pressed="true"] svg {
+  color: var(--star);
+}
+
+/* Quick due dates on a sunken track; the one that matches is raised. */
+.tasks-quick {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.tasks-quick__option {
+  flex: 1;
+  height: 28px;
+  padding: 0 var(--space-2);
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: 12.5px;
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.tasks-quick__option:hover {
+  color: var(--fg-primary);
+}
+
+.tasks-quick__option[aria-pressed="true"] {
+  background: var(--bg-tile);
+  color: var(--brand-text);
+  box-shadow: var(--shadow-sm);
+}
+
+/* --- Details card ------------------------------------------------------------------------ */
+
+.tasks-details {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 340px;
+}
+
+/* Slides in a little when a task is picked; moving between tasks, and
+   coming back to Tasks with one open, don't animate. */
+.tasks-details--enter {
+  transition:
+    opacity var(--duration-normal) var(--ease-out),
+    transform var(--duration-normal) var(--ease-out);
+}
+
+@starting-style {
+  .tasks-details--enter {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+}
+
+.tasks-details__scroll {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  overflow-y: auto;
+}
+
+.tasks-details__head {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 10px;
+  padding-bottom: var(--space-4);
+}
+
+.tasks-details__head > .tasks-check {
+  margin-top: 6px;
+}
+
+/* Delete and Close, as in Calendar's event details. The close glyph lines
+   up with the card's content edge. */
+.tasks-details__actions {
+  display: flex;
+  margin: -1px -10px 0 -4px;
+}
+
+/* Destructive: red on hover, and it asks first (ConfirmDialog). */
+.tasks .tasks-details__delete:hover:not(:disabled) {
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.tasks-details__title-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+/* The title: a serif heading clamped to three lines, with the field stacked
+   over it (same cell, same metrics) taking clicks. While editing, the field
+   shows and grows to the whole title. */
+.tasks-title {
+  display: grid;
+  align-self: stretch;
+  min-width: 0;
+  margin-left: -4px;
+  border-radius: var(--radius-sm);
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
+}
+
+.tasks-title > * {
+  grid-area: 1 / 1;
+}
+
+.tasks-title__text,
+.tasks-title__input {
+  min-width: 0;
+  margin: 0;
+  padding: 2px 6px;
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.005em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Keep in step with TITLE_LINES in TaskDetails.tsx. */
+.tasks-title__text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  color: var(--fg-primary);
+}
+
+.tasks-title--expanded .tasks-title__text {
+  display: block;
+}
+
+.tasks-title__input {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: none;
+  background: transparent;
+  color: var(--fg-primary);
+  opacity: 0;
+  resize: none;
+  user-select: text;
+  cursor: text;
+}
+
+.tasks-title:hover {
+  background: var(--bg-hover);
+}
+
+.tasks-title--editing .tasks-title__text {
+  visibility: hidden;
+}
+
+.tasks-title--editing .tasks-title__input {
+  opacity: 1;
+}
+
+.tasks-title__input:focus {
+  outline: none;
+}
+
+.tasks-title:focus-within {
+  background: var(--bg-input);
+  box-shadow:
+    inset 0 0 0 1px var(--brand),
+    0 0 0 3px var(--brand-subtle);
+}
+
+.tasks-title--done .tasks-title__text,
+.tasks-title--done .tasks-title__input {
+  color: var(--fg-tertiary);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
+.tasks-title__more {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 24px;
+  /* Its text lines up with the title's. */
+  margin: 2px 0 0 -4px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.tasks-title__more:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.tasks-title__more svg {
+  transition: transform var(--duration-normal) var(--ease-in-out);
+}
+
+.tasks-title__more[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.tasks-field {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.tasks-field--row {
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.tasks-field__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.tasks-field__label {
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+}
+
+.tasks-field--row > .tasks-field__label {
+  width: 56px;
+}
+
+.tasks-field__value {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-field__value--empty {
+  font-weight: var(--weight-regular);
+  color: var(--fg-tertiary);
+}
+
+.tasks-field__value--overdue {
+  color: var(--danger);
+}
+
+.tasks-field__value--today {
+  color: var(--brand-text);
+}
+
+.tasks-details__date-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tasks .tasks-details__date {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The reminder's date and time side by side; Remove goes under them when
+   the card is narrow. */
+.tasks-details__reminder-row {
+  flex-wrap: wrap;
+}
+
+.tasks .tasks-details__reminder-row .tasks-details__date {
+  flex: 1 1 140px;
+  min-width: 140px;
+}
+
+.tasks .tasks-details__time {
+  flex: 1 1 112px;
+  width: auto;
+  min-width: 112px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tasks .tasks-details__reminder-row .tasks-details__remove {
+  margin-left: auto;
+}
+
+.tasks .tasks-details__remove {
+  flex-shrink: 0;
+  gap: var(--space-1);
+}
+
+.tasks-field__icon {
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+
+.tasks-field__list {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: var(--space-2);
+  min-width: 0;
+}
+
+.tasks-field__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2.5px;
+  background: var(--fg-tertiary);
+  transform: translateY(-1px);
+}
+
+.tasks-field__list-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.tasks-field__list-name {
+  font-weight: var(--weight-semibold);
+}
+
+.tasks-field__list-account {
+  overflow: hidden;
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-field--row:has(.tasks-star-field) {
+  align-items: center;
+}
+
+.tasks-field--notes {
+  gap: var(--space-2);
+}
+
+.tasks .tasks-details__notes {
+  display: block;
+  min-height: 120px;
+  overflow: hidden;
+  line-height: 1.5;
+  resize: none;
+}
+
+/* "Created Oct 8": quiet metadata right under the notes, not a pinned footer. */
+.tasks-details__stamp {
+  margin-top: -4px;
+  padding-bottom: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+/* --- Focus ------------------------------------------------------------------------------- */
+
+/* Listboxes show focus on their selected row instead of around themselves. */
+.tasks-nav:focus-visible,
+.tasks-listbox:focus-visible {
+  outline: none;
+}
+
+.tasks-nav:focus-visible .tasks-nav__item[aria-selected="true"] {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.tasks-nav:focus-visible:not([aria-activedescendant]),
+.tasks-listbox:focus-visible:not([aria-activedescendant]) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+  border-radius: var(--radius-md);
+}
+
+/* --- Narrow windows and cards -------------------------------------------------------------- */
+
+/* A narrower details card: a little less padding and a slightly smaller title,
+   so a short title still fits beside Delete and Close in two lines. */
+@media (max-width: 1100px) {
+  .tasks-details {
+    width: 300px;
+  }
+
+  .tasks-details__scroll {
+    padding-inline: var(--space-4);
+  }
+
+  .tasks-title__text,
+  .tasks-title__input {
+    font-size: 20px;
+  }
+
+  .tasks-details__head > .tasks-check {
+    margin-top: 4px;
+  }
+}
+
+/* A narrow main card puts the due date and list under each task's title. */
+@container tasks-main (max-width: 540px) {
+  .tasks-row {
+    grid-template-areas:
+      "check title star"
+      ". meta star";
+    grid-template-columns: 18px minmax(0, 1fr) 28px;
+    row-gap: 3px;
+  }
+
+  .tasks-row__due:empty {
+    display: none;
+  }
+
+  .tasks-row__due {
+    min-width: 0;
+  }
+}
+
+/* Reduced motion: fades stay, nothing slides or shrinks. */
+@media (prefers-reduced-motion: reduce) {
+  .tasks-details--enter {
+    transition: opacity var(--duration-normal) var(--ease-out);
+  }
+
+  .tasks-check:active,
+  .tasks-star-field:active {
+    transform: none;
+  }
+
+  .tasks-completed__chevron,
+  .tasks-title__more svg {
+    transition: none;
+  }
+}
+
+/* Empty-state sentences wrap evenly ("…to add / another." left an orphan). */
+.tasks .empty-state__description {
+  text-wrap: balance;
+}

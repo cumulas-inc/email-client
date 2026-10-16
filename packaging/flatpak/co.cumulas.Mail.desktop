@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Cumulas Mail
+GenericName=Email Client
+Comment=Email, calendar, contacts and tasks for Microsoft 365 and IMAP accounts
+Icon=co.cumulas.Mail
+Exec=cumulas-mail
+Terminal=false
+Categories=Office;Email;Calendar;ContactManagement;
+Keywords=email;mail;microsoft 365;exchange;imap;calendar;contacts;tasks;
+StartupNotify=true
+X-GNOME-UsesNotifications=true

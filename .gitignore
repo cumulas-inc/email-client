@@ -1,0 +1,41 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Tauri
+src-tauri/gen/schemas/
+
+# Playwright
+/test-results/
+/playwright-report/
+/e2e/.output/
+
+# Editors / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+*.swp
+
+# Local env
+.env
+.env.local
+
+# Flatpak (generated)
+packaging/flatpak/*-sources.json
+.flatpak-builder/
+build-dir/
+
+# Claude Code agent worktrees
+.claude/worktrees/
+
+# Python bytecode (e2e/desktop)
+__pycache__/
+
+# Flathub shared modules, cloned for Flatpak builds (packaging/flatpak/README.md).
+packaging/flatpak/shared-modules/

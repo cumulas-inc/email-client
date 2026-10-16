@@ -1,0 +1,35 @@
+From: =?ISO-8859-1?Q?Ren=E9e?= <renee@example.org>
+To: alice@example.com
+Subject: =?ISO-8859-1?Q?Diagramme_f=FCr_{TAG}?=
+Date: Mon, 07 Oct 2024 10:00:00 +0200
+Message-ID: <inline-{TAG}@example.org>
+X-Priority: 5
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="rel-boundary"
+
+--rel-boundary
+Content-Type: multipart/alternative; boundary="alt-boundary"
+
+--alt-boundary
+Content-Type: text/plain; charset=ISO-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+Voil=E0 le diagramme =E9tabli hier.
+
+--alt-boundary
+Content-Type: text/html; charset=ISO-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+<html><body><p>Voil=E0 le diagramme&nbsp;:</p><img src=3D"cid:chart-{TAG}@example.org"></body></html>
+
+--alt-boundary--
+
+--rel-boundary
+Content-Type: image/png
+Content-ID: <chart-{TAG}@example.org>
+Content-Transfer-Encoding: base64
+Content-Disposition: inline
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==
+
+--rel-boundary--

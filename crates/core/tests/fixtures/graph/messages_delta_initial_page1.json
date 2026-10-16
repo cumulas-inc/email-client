@@ -1,0 +1,54 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(message)",
+  "@odata.nextLink": "{{base}}/me/mailFolders/AAMkInbox/messages/delta?%24skiptoken=page-2",
+  "value": [
+    {
+      "@odata.type": "#microsoft.graph.message",
+      "@odata.etag": "W/\"CQAAABYAAAAiIsqMbYjsT5e-T7KzowPTAAAYNKvX\"",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAIgAA",
+      "receivedDateTime": "2026-10-12T08:15:00Z",
+      "hasAttachments": true,
+      "subject": "Quarterly numbers",
+      "bodyPreview": "Hi team,\r\n\r\nThe quarterly numbers are in. Revenue is up 12% on last year.",
+      "importance": "high",
+      "conversationId": "AAQkAGI2TG93AAA=",
+      "isRead": false,
+      "isDraft": false,
+      "from": {
+        "emailAddress": { "name": "Megan Bowen", "address": "MeganB@contoso.com" }
+      },
+      "sender": {
+        "emailAddress": { "name": "Megan Bowen", "address": "MeganB@contoso.com" }
+      },
+      "toRecipients": [
+        { "emailAddress": { "name": "Adele Vance", "address": "AdeleV@contoso.com" } }
+      ],
+      "ccRecipients": [
+        { "emailAddress": { "name": "Alex Wilber", "address": "AlexW@contoso.com" } },
+        { "emailAddress": { "name": "Unresolved" } }
+      ],
+      "flag": { "flagStatus": "flagged" }
+    },
+    {
+      "@odata.type": "#microsoft.graph.message",
+      "@odata.etag": "W/\"CQAAABYAAAAiIsqMbYjsT5e-T7KzowPTAAAYNKvY\"",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAIwAA",
+      "receivedDateTime": "2026-09-20T17:40:00Z",
+      "hasAttachments": false,
+      "subject": "Old news",
+      "bodyPreview": "This one is the oldest.",
+      "importance": "normal",
+      "conversationId": "AAQkAGI2TG94AAA=",
+      "isRead": true,
+      "isDraft": false,
+      "from": {
+        "emailAddress": { "name": "Lee Gu", "address": "LeeG@contoso.com" }
+      },
+      "toRecipients": [
+        { "emailAddress": { "name": "Adele Vance", "address": "AdeleV@contoso.com" } }
+      ],
+      "ccRecipients": [],
+      "flag": { "flagStatus": "notFlagged" }
+    }
+  ]
+}

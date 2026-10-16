@@ -1,0 +1,263 @@
+/* Form controls: Switch, SegmentedControl, ColorPicker. */
+
+/* --- Switch ---------------------------------------------------------------- */
+
+.switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.switch__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.switch__label {
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.switch__description {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.switch__control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.switch__box {
+  position: relative;
+  display: inline-flex;
+  width: 36px;
+  height: 20px;
+}
+
+.switch__input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switch__input:disabled {
+  cursor: default;
+}
+
+.switch__track {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0 2px;
+  border-radius: var(--radius-round);
+  background: var(--border-control);
+  transition: background var(--duration-normal) var(--ease);
+}
+
+.switch__thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-round);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+/* The thumb slides only for people who don't ask for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .switch__thumb {
+    transition: transform var(--duration-normal) var(--ease-in-out);
+  }
+}
+
+.switch__input:hover + .switch__track {
+  background: var(--border-strong);
+}
+
+.switch__input:checked + .switch__track {
+  background: var(--brand);
+}
+
+.switch__input:checked:hover + .switch__track {
+  background: var(--brand-hover);
+}
+
+.switch__input:checked + .switch__track .switch__thumb {
+  transform: translateX(16px);
+}
+
+.switch__input:focus-visible + .switch__track {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.switch__input:disabled + .switch__track {
+  opacity: 0.5;
+}
+
+/* --- Segmented control ----------------------------------------------------- */
+
+/* Options sit on a sunken track; the chosen one is a raised tile. */
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.segmented__option {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.segmented__option:hover {
+  color: var(--fg-primary);
+}
+
+.segmented__option--selected,
+.segmented__option--selected:hover {
+  background: var(--bg-tile);
+  color: var(--fg-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.segmented__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.segmented__option:has(.segmented__input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.segmented__icon {
+  display: inline-flex;
+  color: var(--fg-tertiary);
+}
+
+.segmented__option--selected .segmented__icon {
+  color: var(--brand-text);
+}
+
+.segmented__label {
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+/* Bigger choices (reading pane position, theme): separate tiles. */
+.segmented--tiles {
+  gap: var(--space-2);
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.segmented--tiles .segmented__option {
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 92px;
+  min-height: 68px;
+  padding: var(--space-2);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-control);
+}
+
+.segmented--tiles .segmented__option--selected,
+.segmented--tiles .segmented__option--selected:hover {
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+  box-shadow: inset 0 0 0 1.5px var(--brand);
+}
+
+.segmented--tiles .segmented__label {
+  font-size: var(--text-sm);
+}
+
+/* --- Color picker --------------------------------------------------------- */
+
+.color-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.color-picker__swatch {
+  position: relative;
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-round);
+  cursor: pointer;
+}
+
+.color-picker__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.color-picker__dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-round);
+  background: var(--swatch);
+  /* The check mark sits on the account color, which is always dark enough. */
+  color: #fff;
+  transition: box-shadow var(--duration-fast) var(--ease);
+}
+
+.color-picker__swatch:hover .color-picker__dot {
+  box-shadow:
+    0 0 0 2px var(--bg-surface-raised),
+    0 0 0 4px var(--border-strong);
+}
+
+.color-picker__input:checked + .color-picker__dot {
+  box-shadow:
+    0 0 0 2px var(--bg-surface-raised),
+    0 0 0 4px var(--fg-primary);
+}
+
+.color-picker__input:focus-visible + .color-picker__dot {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 5px;
+}

@@ -1,0 +1,43 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(message)",
+  "@odata.deltaLink": "{{base}}/me/mailFolders('AAMkInbox')/messages/delta?%24deltatoken=token-2",
+  "value": [
+    {
+      "@odata.type": "#microsoft.graph.message",
+      "@odata.etag": "W/\"CQAAABYAAAAiIsqMbYjsT5e-T7KzowPTAAAYNKwA\"",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAJQAA",
+      "receivedDateTime": "2026-10-14T07:30:00Z",
+      "hasAttachments": false,
+      "subject": "New arrival",
+      "bodyPreview": "Fresh message.",
+      "importance": "normal",
+      "conversationId": "AAQkAGI2TG96AAA=",
+      "isRead": false,
+      "isDraft": false,
+      "from": {
+        "emailAddress": { "name": "Isaiah Langer", "address": "IsaiahL@contoso.com" }
+      },
+      "toRecipients": [
+        { "emailAddress": { "name": "Adele Vance", "address": "AdeleV@contoso.com" } }
+      ],
+      "ccRecipients": [],
+      "flag": { "flagStatus": "notFlagged" }
+    },
+    {
+      "@odata.type": "#microsoft.graph.message",
+      "@odata.etag": "W/\"CQAAABYAAAAiIsqMbYjsT5e-T7KzowPTAAAYNKwB\"",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAIgAA",
+      "isRead": true
+    },
+    {
+      "@odata.type": "#microsoft.graph.message",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAJAAA",
+      "@removed": { "reason": "deleted" }
+    },
+    {
+      "@odata.type": "#microsoft.graph.message",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AqP8jr2fTrESaK7Kv9g_EgwAAAWlAIwAA",
+      "@removed": { "reason": "changed" }
+    }
+  ]
+}

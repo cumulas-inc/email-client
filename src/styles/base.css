@@ -1,0 +1,486 @@
+/* Reset, typography and shared primitives. Component-specific styles live
+   next to the component (e.g. src/modules/mail/mail.css). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: 1.4;
+  color: var(--fg-primary);
+  background:
+    radial-gradient(1200px 500px at 15% -10%, var(--bg-app-glow), transparent 70%), var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  font-optical-sizing: auto;
+  /* Inter: open digits, single-storey a off, rounded quotes. */
+  font-feature-settings:
+    "cv11" 1,
+    "ss03" 1;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+
+/* Inter's alternates mean other things in other families (useAppearance). */
+:root[data-interface-font="custom"] body {
+  font-feature-settings: normal;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--fg-link);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+::selection {
+  background: var(--brand-subtle-hover);
+}
+
+/* Text the user may want to copy (message headers, contact details...). */
+.selectable {
+  user-select: text;
+  cursor: auto;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-default) transparent;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- Typography roles ------------------------------------------------------ */
+
+/* The serif is for reading: subjects, headings and message text. Controls,
+   labels, names and times stay in the sans. */
+.serif {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+}
+
+/* Big pane titles: "Inbox", "Contacts", a task list's name. */
+.pane-title {
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.005em;
+  color: var(--fg-primary);
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Keyboard hint inside buttons and fields: "Ctrl K". */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+/* --- Cards ----------------------------------------------------------------- */
+
+/* Panes are cards floating on the canvas. */
+.card {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
+/* --- Buttons --------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-control);
+  color: var(--fg-primary);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease),
+    transform var(--duration-press) var(--ease-out);
+}
+
+/* Pressing answers at once. */
+.btn:active:not(:disabled),
+.icon-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn svg {
+  flex-shrink: 0;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--bg-pressed);
+}
+
+.btn:disabled {
+  color: var(--fg-disabled);
+  cursor: default;
+}
+
+.btn--primary {
+  background: var(--brand);
+  box-shadow: var(--shadow-button);
+  color: var(--on-brand);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--brand-hover);
+}
+
+.btn--primary:active:not(:disabled) {
+  background: var(--brand-pressed);
+}
+
+.btn--primary:disabled {
+  background: var(--bg-pressed);
+  box-shadow: none;
+  color: var(--fg-disabled);
+}
+
+.btn--subtle {
+  background: transparent;
+  box-shadow: none;
+  color: var(--fg-secondary);
+}
+
+.btn--subtle:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.btn--danger {
+  color: var(--danger);
+}
+
+/* The confirming button of an action that can't be undone. */
+.btn--destructive {
+  background: var(--danger);
+  box-shadow: 0 1px 2px rgba(80, 20, 10, 0.25);
+  color: var(--on-danger);
+}
+
+.btn--destructive:hover:not(:disabled) {
+  background: var(--danger-hover);
+}
+
+.btn--destructive:disabled {
+  background: var(--bg-pressed);
+  box-shadow: none;
+  color: var(--fg-disabled);
+}
+
+/* A button whose action is running: still disabled, but it keeps its fill so
+   it reads as progress rather than unavailable. */
+.btn--primary.btn--busy:disabled {
+  background: var(--brand);
+  box-shadow: var(--shadow-button);
+  color: var(--on-brand);
+  cursor: progress;
+}
+
+.btn--destructive.btn--busy:disabled {
+  background: var(--danger);
+  color: var(--on-danger);
+  cursor: progress;
+}
+
+/* A spinner in a button turns with the label's color, not teal on teal. */
+.btn .spinner {
+  color: inherit;
+}
+
+.btn--sm {
+  height: 28px;
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease),
+    transform var(--duration-press) var(--ease-out);
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.icon-btn:active:not(:disabled) {
+  background: var(--bg-pressed);
+}
+
+.icon-btn:disabled {
+  color: var(--fg-disabled);
+  cursor: default;
+}
+
+.icon-btn--sm {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+}
+
+.icon-btn[aria-pressed="true"] {
+  color: var(--brand-text);
+}
+
+/* --- Form fields ----------------------------------------------------------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.field__label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+}
+
+.field__hint {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.field__error {
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  user-select: text;
+  cursor: text;
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
+}
+
+.select {
+  cursor: pointer;
+}
+
+.textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.input:hover,
+.select:hover,
+.textarea:hover {
+  border-color: var(--border-strong);
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-subtle);
+}
+
+/* Dimmed like a disabled switch, which settings rows put it next to. */
+.select:disabled {
+  border-color: var(--border-control);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.input[aria-invalid="true"]:focus {
+  box-shadow: 0 0 0 3px var(--danger-subtle);
+}
+
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.checkbox input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+/* --- Misc ------------------------------------------------------------------ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-round);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+  color: var(--brand-text);
+}
+
+.badge--filled {
+  background: var(--brand);
+  color: var(--on-brand);
+}
+
+.divider {
+  height: 1px;
+  margin: var(--space-2) 0;
+  border: none;
+  background: var(--border-subtle);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 44px;
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.toolbar__spacer {
+  flex: 1;
+}
+
+.toolbar__separator {
+  width: 1px;
+  height: 20px;
+  margin: 0 var(--space-1);
+  background: var(--border-default);
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Reduced motion keeps fades and color changes, which help comprehension,
+   but nothing moves, grows or spins. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .btn:active:not(:disabled),
+  .icon-btn:active:not(:disabled) {
+    transform: none;
+  }
+}

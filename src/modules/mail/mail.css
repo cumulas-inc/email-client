@@ -1,0 +1,2553 @@
+/* Mail module. Tokens only (see src/styles/tokens.css): both themes follow.
+
+   Three cards on the canvas: folders, the message list, and the open
+   message. The open message is the one place with some voice: it reads like
+   a letter, with a serif headline and body on a comfortable measure. The
+   rest stays quiet. */
+
+/* --- Layout ------------------------------------------------------------------ */
+
+.mail {
+  /* The flag color, darkened enough to carry small text. */
+  --mail-flag-text: color-mix(in srgb, var(--flag) 80%, var(--fg-primary));
+  min-width: 0;
+}
+
+.mail.is-resizing-x,
+.mail.is-resizing-x * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.mail.is-resizing-y,
+.mail.is-resizing-y * {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+
+.mail.is-resizing-x iframe,
+.mail.is-resizing-y iframe {
+  pointer-events: none;
+}
+
+.mail__folders {
+  width: var(--mail-folders-w, var(--sidebar-width));
+  min-width: 200px;
+  flex-shrink: 1;
+}
+
+.mail__main {
+  flex: 1;
+  display: flex;
+  gap: var(--pane-gap);
+  min-width: 0;
+  min-height: 0;
+}
+
+.mail--bottom .mail__main {
+  flex-direction: column;
+}
+
+.mail__panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.mail__list-panel {
+  flex: 0 1 auto;
+  width: var(--mail-list-w, 420px);
+  min-width: 300px;
+}
+
+/* Until resized, the list takes 40% of the height (MailModule sets the
+   measured value; the percentage covers the first paint). */
+.mail--bottom .mail__list-panel {
+  width: auto;
+  min-width: 0;
+  height: var(--mail-list-h, 40%);
+  min-height: 160px;
+}
+
+.mail--off .mail__list-panel {
+  flex: 1;
+  width: auto;
+}
+
+.mail__reader-panel {
+  flex: 1 1 0;
+  min-width: 340px;
+}
+
+/* Side by side, the list and the reading pane keep their minimum widths:
+   in a narrow window the folders give way instead. */
+.mail--right .mail__main {
+  min-width: calc(300px + var(--pane-gap) + 340px);
+}
+
+.mail--bottom .mail__reader-panel,
+.mail--off .mail__reader-panel {
+  min-width: 0;
+  min-height: 200px;
+}
+
+/* A small window at a larger text size (see app.css): all three cards
+   still fit side by side, the folders giving way first. */
+@media (max-width: 900px) {
+  .mail__folders {
+    min-width: 180px;
+  }
+
+  .mail__list-panel {
+    min-width: 250px;
+  }
+
+  .mail__reader-panel {
+    min-width: 310px;
+  }
+
+  .mail--right .mail__main {
+    min-width: calc(250px + var(--pane-gap) + 310px);
+  }
+
+  .mail--bottom .mail__main,
+  .mail--off .mail__main {
+    min-width: 310px;
+  }
+
+  /* The reading pane is at its narrowest, so its actions keep their room;
+     the list beside it and J / K still move between messages. (A media
+     query: WebKit measures containers in zoomed pixels.) */
+  .mail--right .mail-reader__toolbar {
+    padding: 0 6px 0 8px;
+  }
+
+  .mail--right .mail-tool {
+    padding: 0 7px;
+  }
+
+  .mail--right .mail-tool__caret,
+  .mail--right .mail-reader__step {
+    display: none;
+  }
+}
+
+/* --- Splitters ---------------------------------------------------------------- */
+
+/* Each splitter fills the gap between two cards (the negative margins cancel
+   the flex gap it would otherwise add). Invisible until hovered or focused. */
+.mail-splitter {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  touch-action: none;
+  outline: none;
+}
+
+.mail-splitter--vertical {
+  width: var(--pane-gap);
+  margin-inline: calc(var(--pane-gap) * -1);
+  cursor: col-resize;
+}
+
+.mail-splitter--horizontal {
+  height: var(--pane-gap);
+  margin-block: calc(var(--pane-gap) * -1);
+  cursor: row-resize;
+}
+
+.mail-splitter::after {
+  content: "";
+  position: absolute;
+  border-radius: var(--radius-round);
+  background: transparent;
+  transition: background-color var(--duration-fast) var(--ease);
+}
+
+.mail-splitter--vertical::after {
+  top: 50%;
+  left: calc(50% - 1px);
+  width: 2px;
+  height: 36px;
+  transform: translateY(-50%);
+}
+
+.mail-splitter--horizontal::after {
+  left: 50%;
+  top: calc(50% - 1px);
+  width: 36px;
+  height: 2px;
+  transform: translateX(-50%);
+}
+
+.mail-splitter:hover::after {
+  background: var(--border-strong);
+}
+
+.mail-splitter:focus-visible::after,
+.mail.is-resizing-x .mail-splitter--vertical:hover::after,
+.mail.is-resizing-y .mail-splitter--horizontal:hover::after {
+  background: var(--focus-ring);
+}
+
+.mail-splitter--vertical:focus-visible::after {
+  height: 56px;
+}
+
+.mail-splitter--horizontal:focus-visible::after {
+  width: 56px;
+}
+
+/* --- Folder pane ---------------------------------------------------------------- */
+
+.mail-folders {
+  padding: var(--space-1) var(--space-2) var(--space-3);
+}
+
+.mail-tree,
+.mail-tree ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mail-tree__item {
+  outline: none;
+}
+
+.mail-tree__item:focus-visible > .mail-tree__row {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* A folder: a 30px tile. Depth indents it under its parent's label. A deep
+   tree (--mail-tree-depth, set by the pane) indents each level less, within
+   about a third of the row, so the deepest names keep room to be read. */
+.mail-tree__row {
+  --mail-indent: max(8px, min(24px, 36% / var(--mail-tree-depth, 1)));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 30px;
+  padding: 0 var(--space-2) 0 calc(10px + var(--depth, 0) * var(--mail-indent));
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mail-tree__row:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.mail-tree__row.is-selected {
+  background: var(--bg-selected);
+  color: var(--brand-text);
+  font-weight: var(--weight-semibold);
+}
+
+.mail-tree__row.is-selected:hover {
+  background: var(--bg-selected-hover);
+}
+
+.mail-tree__row.is-drop-target {
+  background: var(--brand-subtle-hover);
+  box-shadow: inset 0 0 0 1.5px var(--brand);
+  color: var(--brand-text);
+}
+
+.mail-tree__icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--fg-tertiary);
+}
+
+.mail-tree__row.is-selected .mail-tree__icon,
+.mail-tree__row.is-drop-target .mail-tree__icon {
+  color: var(--brand-text);
+}
+
+.mail-tree__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+
+.mail-tree__prefix {
+  color: var(--fg-tertiary);
+  font-weight: var(--weight-regular);
+}
+
+.mail-tree__row.is-selected .mail-tree__prefix {
+  color: inherit;
+  opacity: 0.75;
+}
+
+.mail-tree__count {
+  flex-shrink: 0;
+  color: var(--brand-text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+}
+
+.mail-tree__count--muted {
+  color: var(--fg-tertiary);
+  font-weight: var(--weight-medium);
+}
+
+.mail-tree__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: -4px;
+  flex-shrink: 0;
+  border-radius: 5px;
+  color: var(--fg-tertiary);
+}
+
+.mail-tree__chevron:hover {
+  background: var(--bg-pressed);
+  color: var(--fg-primary);
+}
+
+/* "Favorites": a small section label. */
+.mail-tree__row--section {
+  height: 26px;
+  padding: 0 var(--space-2);
+  color: var(--fg-tertiary);
+  font-size: 11.5px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.01em;
+}
+
+.mail-tree__row--section:hover {
+  background: none;
+  color: var(--fg-secondary);
+}
+
+/* An account: its badge, name and address. */
+.mail-tree__row--account {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-content: center;
+  gap: 1px 10px;
+  height: 40px;
+  margin: 12px 0 2px;
+  padding: 0 var(--space-2) 0 10px;
+  color: var(--fg-primary);
+}
+
+.mail-tree__row--account:hover {
+  color: var(--fg-primary);
+}
+
+.mail-tree__row--account .mail-tree__icon {
+  grid-row: 1 / 3;
+}
+
+.mail-tree__row--account .mail-tree__label {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: 12.5px;
+  font-weight: var(--weight-bold);
+  line-height: 1.25;
+}
+
+.mail-tree__row--account .mail-tree__secondary {
+  grid-column: 2;
+  grid-row: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-tertiary);
+  font-size: 11.5px;
+  font-weight: var(--weight-regular);
+  line-height: 1.25;
+}
+
+.mail-tree__row--account .mail-tree__chevron {
+  grid-column: 3;
+  grid-row: 1 / 3;
+}
+
+/* Section and account chevrons show when they're useful: on hover, on
+   keyboard focus, or when the section is folded away. */
+.mail-tree__row--section .mail-tree__chevron:not(.is-collapsed),
+.mail-tree__row--account .mail-tree__chevron:not(.is-collapsed) {
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease);
+}
+
+.mail-tree__row--section:hover .mail-tree__chevron,
+.mail-tree__row--account:hover .mail-tree__chevron,
+.mail-tree__item:focus-visible > .mail-tree__row .mail-tree__chevron {
+  opacity: 1;
+}
+
+/* Arrowing through the tree shows them at once: no fade on keystrokes. */
+.mail-tree__item:focus-visible > .mail-tree__row .mail-tree__chevron {
+  transition: none;
+}
+
+/* --- Message list ------------------------------------------------------------------ */
+
+.mail-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  container: mail-list / inline-size;
+}
+
+.mail-list__header {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-3) var(--space-3) 0;
+}
+
+/* The title row and, while several messages are picked, their actions:
+   stacked in one cell, so the list never moves under the pointer. */
+.mail-list__bar {
+  display: grid;
+}
+
+.mail-list__bar > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.mail-list__bar.is-selecting .mail-list__title-row {
+  visibility: hidden;
+}
+
+/* Title, account and filter wrap as whole pieces: a long folder name takes
+   the first line to itself and the rest moves under it. */
+.mail-list__title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px var(--space-2);
+  padding: 14px 4px 8px 6px;
+}
+
+.mail-list__titles {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.mail-list__title {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 22px;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* "4 results for “atlas”", under the title. */
+.mail-list__subtitle {
+  min-width: 0;
+  overflow: hidden;
+  margin-top: 1px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The folder's account, next to its name. */
+.mail-chip-account {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  /* Room for "Inbox", the account and the filter on one line. */
+  max-width: 124px;
+  height: 22px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-round);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-secondary);
+  font-size: 11.5px;
+  font-weight: var(--weight-semibold);
+}
+
+.mail-chip-account__dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 2.5px;
+}
+
+.mail-chip-account__name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* All / Unread / Flagged on the shared segmented track, compact. */
+.mail-filter {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 2px;
+  border-radius: 9px;
+}
+
+.mail-filter__option {
+  min-height: 24px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.mail-filter__option.segmented__option--selected,
+.mail-filter__option.segmented__option--selected:hover {
+  background: var(--bg-tile);
+  font-weight: var(--weight-semibold);
+}
+
+.mail-filter__option:focus-visible {
+  outline-offset: 0;
+}
+
+/* Several messages selected: their actions, on a tinted tile, lined up with
+   the rows below. */
+.mail-selection {
+  display: flex;
+  align-items: center;
+  align-self: end;
+  gap: 2px;
+  min-height: 40px;
+  margin: 0 -4px 6px;
+  padding: 3px 4px 3px 6px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-selected);
+  box-shadow: inset 0 0 0 1px var(--brand-subtle-hover);
+}
+
+.mail-selection__count {
+  margin-left: 2px;
+  color: var(--brand-text);
+  font-weight: var(--weight-bold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mail-selection .icon-btn {
+  color: var(--brand-text);
+}
+
+.mail-selection .icon-btn:hover:not(:disabled) {
+  background: var(--brand-subtle-hover);
+  color: var(--brand-text);
+}
+
+.mail-selection .icon-btn:disabled {
+  color: var(--fg-disabled);
+}
+
+/* The narrowest list: six actions and the count still fit. */
+@container mail-list (max-width: 380px) {
+  .mail-selection {
+    gap: 0;
+    padding-inline: 2px;
+  }
+
+  .mail-selection .icon-btn {
+    width: 29px;
+  }
+}
+
+.mail-list__scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  padding: 0 var(--space-2) var(--space-2);
+  overflow-y: auto;
+  /* Rows scrolled into view clear the sticky date label. */
+  scroll-padding-top: 32px;
+}
+
+.mail-list__items {
+  outline: none;
+  border-radius: var(--radius-md);
+}
+
+.mail-list__items:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+/* "Today", "Yesterday": a quiet label with a hairline running out. */
+.mail-group__header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 6px 10px 0 12px;
+  background: var(--bg-surface);
+  color: var(--fg-tertiary);
+  font-size: 11.5px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.01em;
+}
+
+.mail-group__header::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+.mail-list__more {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-3);
+}
+
+/* --- Message rows ------------------------------------------------------------------ */
+
+/* A row is a rounded tile. Selection changes are instant: they follow the
+   keyboard (j/k, arrows) and must keep up with it. */
+.mail-row {
+  position: relative;
+  display: flex;
+  gap: 11px;
+  padding: 10px var(--space-3) 10px 18px;
+  border-radius: var(--radius-md);
+  outline: none;
+  cursor: pointer;
+  /* Cheap virtualization: off-screen rows skip layout and paint. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 80px;
+}
+
+.mail-row + .mail-row {
+  margin-top: 1px;
+}
+
+.mail-row:hover {
+  background: var(--bg-hover);
+}
+
+.mail-row.is-selected {
+  background: var(--bg-selected);
+  box-shadow: inset 0 0 0 1px var(--brand-subtle-hover);
+}
+
+.mail-row.is-selected:hover {
+  background: var(--bg-selected-hover);
+}
+
+.mail-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Unread: a teal dot. The text stays ink; only its weight changes. */
+.mail-row.is-unread::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 19px;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-round);
+  background: var(--unread);
+}
+
+.mail-row__lead {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.mail-row__avatar {
+  display: flex;
+}
+
+.mail-row__check {
+  position: absolute;
+  inset: 8px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1.5px var(--border-strong);
+  color: var(--on-brand);
+}
+
+.mail-row__check.is-checked {
+  background: var(--brand);
+  box-shadow: none;
+}
+
+.mail-row__lead:hover .mail-row__avatar,
+.mail-row.is-check-mode .mail-row__avatar {
+  visibility: hidden;
+}
+
+.mail-row__lead:hover .mail-row__check,
+.mail-row.is-check-mode .mail-row__check {
+  display: flex;
+}
+
+.mail-row__body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.mail-row__line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.mail-row__sender,
+.mail-row__subject,
+.mail-row__preview {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Names, subjects and previews are isolated (dir="auto"): each sizes to its
+   text and cuts at its own end, so Arabic or Hebrew reads in order and loses
+   its last words, not its first. */
+.mail-row__sender {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: auto;
+  color: var(--fg-primary);
+  font-weight: var(--weight-medium);
+  line-height: 1.4;
+}
+
+.mail-row__sender.is-empty {
+  color: var(--fg-tertiary);
+}
+
+.mail-row__status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  align-self: center;
+  flex-shrink: 0;
+  color: var(--fg-tertiary);
+}
+
+.mail-row__importance {
+  color: var(--danger);
+}
+
+.mail-row__flag {
+  color: var(--flag);
+  fill: currentColor;
+}
+
+.mail-row__date {
+  flex-shrink: 0;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mail-row__subject-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+  margin-top: 1px;
+}
+
+/* Subjects are read, so they're set in the serif. */
+.mail-row__subject {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--fg-primary);
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: var(--text-lg);
+  line-height: 1.35;
+}
+
+/* "(no subject)" is a stand-in, not a subject: quiet italic. */
+.mail-row__subject.is-empty {
+  color: var(--fg-tertiary);
+  font-style: italic;
+}
+
+.mail-row__preview {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin-top: 2px;
+  color: var(--fg-tertiary);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.mail-row__preview-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mail-row.is-unread .mail-row__sender {
+  font-weight: var(--weight-bold);
+}
+
+.mail-row.is-unread .mail-row__subject {
+  font-weight: 700;
+}
+
+.mail-row.is-selected .mail-row__preview {
+  color: var(--fg-secondary);
+}
+
+.mail-row.is-selected .mail-row__date {
+  color: var(--brand-text);
+  font-weight: var(--weight-semibold);
+}
+
+.mail-row__draft {
+  flex-shrink: 0;
+  color: var(--brand-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+/* Quick actions take the end of the subject line while hovered. */
+.mail-row__actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  align-self: center;
+  flex-shrink: 0;
+  margin: -4px -6px -4px 0;
+}
+
+.mail-row:hover .mail-row__actions {
+  display: flex;
+}
+
+.mail-row__actions .icon-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.mail-row__actions .icon-btn:hover {
+  background: var(--bg-pressed);
+}
+
+.mail-row.is-selected .mail-row__actions .icon-btn:hover {
+  background: var(--brand-subtle-hover);
+}
+
+.mail-row__actions .mail-row__flag-btn[aria-pressed="true"] {
+  color: var(--flag);
+}
+
+.mail-row__flag-btn[aria-pressed="true"] svg {
+  fill: currentColor;
+}
+
+/* Folder and account, in search results and the unified inbox. A long
+   account name gives way before the preview does. */
+.mail-row__context {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  max-width: 62%;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: 17px;
+}
+
+.mail-row__context-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mail-row.is-selected .mail-row__context {
+  background: var(--bg-surface);
+}
+
+.mail-row__dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 2px;
+}
+
+/* Wide lists (reading pane off or at the bottom): one line per message. */
+@container mail-list (min-width: 860px) {
+  .mail-row {
+    align-items: center;
+    padding-top: 7px;
+    padding-bottom: 7px;
+    contain-intrinsic-size: auto 48px;
+  }
+
+  .mail-row.is-unread::before {
+    top: calc(50% - 3.5px);
+  }
+
+  .mail-row__lead {
+    margin-top: 0;
+  }
+
+  .mail-row__body {
+    display: grid;
+    grid-template-columns: minmax(140px, 220px) fit-content(40%) minmax(0, 1fr) auto 104px;
+    align-items: baseline;
+    column-gap: 14px;
+  }
+
+  .mail-row__line {
+    display: contents;
+  }
+
+  /* Text sizes to its content inside its column, so right-to-left names
+     sit at the column's start like everything else. */
+  .mail-row__sender {
+    grid-area: 1 / 1;
+    justify-self: start;
+    max-width: 100%;
+    margin-right: 0;
+  }
+
+  .mail-row__subject-cell {
+    grid-area: 1 / 2;
+    margin-top: 0;
+  }
+
+  .mail-row__preview {
+    grid-area: 1 / 3;
+    margin-top: 0;
+  }
+
+  .mail-row__status,
+  .mail-row__actions {
+    grid-area: 1 / 4;
+  }
+
+  .mail-row:hover .mail-row__status {
+    display: none;
+  }
+
+  .mail-row__date {
+    grid-area: 1 / 5;
+    text-align: right;
+  }
+}
+
+.mail-drag-ghost {
+  position: fixed;
+  top: -200px;
+  left: -200px;
+  max-width: 280px;
+  padding: 6px 12px;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--brand);
+  color: var(--on-brand);
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* --- Reading pane ---------------------------------------------------------------- */
+
+.mail-reader {
+  /* The letter's width, header included; its text keeps a 72ch measure. */
+  --mail-letter-w: 840px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  container: reader / inline-size;
+}
+
+/* Message actions, grouped: what to do with it on the left, where you are
+   in the list on the right. */
+.mail-reader__toolbar {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  height: 56px;
+  padding: 0 var(--space-3) 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.mail-tool {
+  gap: 7px;
+  padding: 0 10px;
+  color: var(--fg-secondary);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+}
+
+.mail-tool svg {
+  flex-shrink: 0;
+}
+
+.mail-tool__caret {
+  margin-left: -3px;
+  color: var(--fg-tertiary);
+}
+
+.mail-tool--flag[aria-pressed="true"],
+.mail-tool--flag[aria-pressed="true"]:hover:not(:disabled) {
+  color: var(--mail-flag-text);
+}
+
+.mail-tool--flag[aria-pressed="true"] svg {
+  color: var(--flag);
+  fill: currentColor;
+}
+
+.mail-reader__position {
+  margin-right: var(--space-1);
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+@container reader (max-width: 660px) {
+  .mail-tool--secondary {
+    padding: 0 8px;
+  }
+
+  .mail-tool--secondary .mail-tool__label {
+    display: none;
+  }
+}
+
+/* With the reading pane off, the back button needs its room too. */
+@container reader (max-width: 730px) {
+  .mail-reader__toolbar--back .mail-tool--secondary {
+    padding: 0 8px;
+  }
+
+  .mail-reader__toolbar--back .mail-tool--secondary .mail-tool__label {
+    display: none;
+  }
+}
+
+@container reader (max-width: 470px) {
+  .mail-tool {
+    padding: 0 8px;
+  }
+
+  .mail-tool__label,
+  .mail-reader__position {
+    display: none;
+  }
+}
+
+.mail-reader__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  outline: none;
+}
+
+/* The letter: a column with generous margins, centered when the pane is
+   wide (reading pane off or at the bottom). */
+.mail-reader__page {
+  max-width: var(--mail-letter-w);
+  margin-inline: auto;
+  padding: 30px 40px 48px;
+}
+
+.mail-reader__subject {
+  color: var(--fg-primary);
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+/* A subject of three lines or more steps down, so the sender and the first
+   lines of the letter stay on screen. */
+.mail-reader__subject.mail-reader__subject--long {
+  font-size: clamp(17px, 3.2cqi, 22px);
+  line-height: 1.25;
+  letter-spacing: 0;
+  text-wrap: pretty;
+}
+
+.mail-reader__subject.is-empty {
+  color: var(--fg-tertiary);
+  font-style: italic;
+  font-weight: 400;
+}
+
+.mail-reader__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.mail-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px 0 7px;
+  border-radius: 7px;
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.mail-tag svg {
+  flex-shrink: 0;
+}
+
+.mail-tag--danger {
+  background: var(--danger-subtle);
+  box-shadow: none;
+  color: var(--danger);
+}
+
+.mail-tag--flag {
+  background: var(--flag-subtle);
+  box-shadow: none;
+  color: var(--mail-flag-text);
+}
+
+.mail-tag--flag svg {
+  color: var(--flag);
+  fill: currentColor;
+}
+
+/* "Work · Inbox". It never outgrows the column: the account name gives way
+   first, then the folder's; the tooltip has both in full. */
+.mail-tag--place {
+  min-width: 0;
+  max-width: 100%;
+  padding-left: 8px;
+}
+
+.mail-tag__account,
+.mail-tag__folder {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mail-tag__account {
+  min-width: 2.5em;
+}
+
+/* The folder holds its width until the account is down to a few letters. */
+.mail-tag__account ~ .mail-tag__folder {
+  flex-shrink: 0;
+  max-width: calc(100% - 5em);
+}
+
+.mail-tag__sep {
+  flex-shrink: 0;
+}
+
+.mail-tag__dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 2.5px;
+}
+
+/* Who it's from, to whom, when; and the ways to answer, right beside it. */
+.mail-reader__sender {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: 22px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.mail-reader__people {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.mail-reader__from {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.mail-reader__from-name {
+  flex-shrink: 0;
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 14.5px;
+  font-weight: var(--weight-bold);
+  text-overflow: ellipsis;
+}
+
+/* "(no sender)": a stand-in, said quietly. */
+.mail-reader__from-name.is-empty {
+  color: var(--fg-tertiary);
+  font-weight: var(--weight-medium);
+}
+
+.mail-reader__from-address {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-tertiary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+}
+
+.mail-reader__recipients {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin-top: 3px;
+  color: var(--fg-tertiary);
+  font-size: 12.5px;
+}
+
+.mail-reader__recipients-toggle {
+  width: 20px;
+  height: 20px;
+  margin-top: -1px;
+}
+
+.mail-reader__recipient-rows {
+  flex: 1;
+  min-width: 0;
+}
+
+.mail-reader__recipient-row {
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.mail-reader__recipient-row--collapsed {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mail-reader__recipient {
+  color: var(--fg-secondary);
+  font-weight: var(--weight-medium);
+}
+
+.mail-reader__recipient-group + .mail-reader__recipient-group::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--fg-tertiary);
+}
+
+.mail-reader__side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.mail-reader__date {
+  color: var(--fg-tertiary);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+/* Reply, Reply all, Forward: one outlined group. */
+.mail-respond {
+  display: flex;
+  border-radius: 9px;
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-control);
+}
+
+.mail-respond__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border: none;
+  background: transparent;
+  color: var(--fg-primary);
+  font-size: 12.5px;
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease);
+}
+
+.mail-respond__btn:first-child {
+  border-radius: 9px 0 0 9px;
+}
+
+.mail-respond__btn:last-child {
+  border-radius: 0 9px 9px 0;
+}
+
+.mail-respond__btn + .mail-respond__btn {
+  box-shadow: -1px 0 0 var(--border-default);
+}
+
+.mail-respond__btn svg {
+  flex-shrink: 0;
+  color: var(--fg-secondary);
+}
+
+.mail-respond__btn--main,
+.mail-respond__btn--main svg {
+  color: var(--brand-text);
+}
+
+.mail-respond__btn:hover {
+  background: var(--bg-hover);
+}
+
+.mail-respond__btn:active {
+  background: var(--bg-pressed);
+}
+
+/* Narrow panes: the date and the reply group go under the sender. */
+@container reader (max-width: 600px) {
+  .mail-reader__page {
+    padding: 22px 22px 40px;
+  }
+
+  .mail-reader__subject {
+    font-size: 23px;
+  }
+
+  /* On their own lines below: the date, then the reply group. */
+  .mail-reader__side {
+    align-items: flex-start;
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
+.mail-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding: 6px 6px 6px var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--warning-subtle);
+  color: var(--fg-primary);
+}
+
+.mail-banner > svg {
+  flex-shrink: 0;
+  color: var(--warning);
+}
+
+.mail-banner__text {
+  flex: 1;
+}
+
+/* Attachments: small cards, a page tinted by file type on each. */
+.mail-attachments {
+  margin-top: 18px;
+}
+
+.mail-attachments__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 28px;
+  margin-bottom: 6px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+}
+
+.mail-attachments__list {
+  display: flex;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Several files: cards in as many columns as fit, so a dozen take six rows
+   instead of twelve. */
+.mail-attachments__list.is-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+}
+
+.mail-attachments__list.is-grid .mail-attachment {
+  width: auto;
+}
+
+.mail-attachment {
+  display: flex;
+  align-items: center;
+  width: 320px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 4px 6px 4px 4px;
+  border-radius: 11px;
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  transition:
+    box-shadow var(--duration-fast) var(--ease),
+    transform var(--duration-press) var(--ease-out);
+}
+
+/* The card gives under the pointer, like a button. */
+@media (prefers-reduced-motion: no-preference) {
+  .mail-attachment:has(.mail-attachment__open:active:not(:disabled)) {
+    transform: scale(0.98);
+  }
+}
+
+.mail-attachment:hover {
+  box-shadow:
+    inset 0 0 0 1px var(--border-control),
+    0 1px 3px rgba(60, 50, 35, 0.08);
+}
+
+.mail-attachment__open {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  flex: 1;
+  min-width: 0;
+  padding: 5px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mail-attachment__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mail-attachment__name {
+  font-size: 13px;
+  font-weight: var(--weight-semibold);
+}
+
+/* A file name cut in the middle: the head takes the ellipsis, the end of the
+   name and its extension always show. */
+.mail-filename {
+  display: flex;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.mail-filename__head {
+  flex: 0 1 auto;
+  min-width: 1.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mail-filename__tail {
+  flex: none;
+}
+
+.mail-attachment__size {
+  margin-top: 1px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.mail-attachment__save {
+  width: 30px;
+  height: 30px;
+}
+
+.mail-file-badge {
+  --file-bg: var(--avatar-slate-bg);
+  --file-fg: var(--avatar-slate-fg);
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 34px;
+  height: 40px;
+  padding-bottom: 6px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  background: var(--file-bg);
+  color: var(--file-fg);
+}
+
+/* The folded corner. */
+.mail-file-badge::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 10px;
+  height: 10px;
+  border-bottom-left-radius: 3px;
+  background: linear-gradient(
+    225deg,
+    var(--bg-surface) 50%,
+    color-mix(in srgb, var(--file-fg) 25%, var(--file-bg)) 50%
+  );
+}
+
+.mail-file-badge svg {
+  position: absolute;
+  top: 9px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.mail-file-badge:not(:has(.mail-file-badge__ext)) svg {
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.mail-file-badge__ext {
+  font-size: 8.5px;
+  font-weight: 750;
+  line-height: 1;
+  letter-spacing: 0.04em;
+}
+
+.mail-file-badge--pdf {
+  --file-bg: var(--avatar-rose-bg);
+  --file-fg: var(--avatar-rose-fg);
+}
+
+.mail-file-badge--word {
+  --file-bg: var(--avatar-sky-bg);
+  --file-fg: var(--avatar-sky-fg);
+}
+
+.mail-file-badge--sheet {
+  --file-bg: var(--avatar-green-bg);
+  --file-fg: var(--avatar-green-fg);
+}
+
+.mail-file-badge--slides {
+  --file-bg: var(--avatar-orange-bg);
+  --file-fg: var(--avatar-orange-fg);
+}
+
+.mail-file-badge--image,
+.mail-file-badge--video {
+  --file-bg: var(--avatar-violet-bg);
+  --file-fg: var(--avatar-violet-fg);
+}
+
+.mail-file-badge--archive,
+.mail-file-badge--audio {
+  --file-bg: var(--avatar-amber-bg);
+  --file-fg: var(--avatar-amber-fg);
+}
+
+.mail-file-badge--code {
+  --file-bg: var(--avatar-teal-bg);
+  --file-fg: var(--avatar-teal-fg);
+}
+
+/* The body. HTML mail renders in a sandboxed frame that sets its own serif
+   defaults (see bodyHtml.ts); plain text gets the same treatment here. */
+.mail-reader__body {
+  margin-top: 24px;
+}
+
+.mail-body-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color-scheme: light;
+}
+
+.mail-body-frame--paper {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.mail-body-frame--dark {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+/* Mail laid out wider than the pane (a 900px newsletter) scrolls sideways
+   inside its frame. A fade on the cut edge says there's more that way. */
+.mail-body-wide {
+  --mail-sheet: var(--bg-surface);
+  position: relative;
+}
+
+.mail-reader__body--paper .mail-body-wide {
+  --mail-sheet: #ffffff;
+}
+
+.mail-body-wide::before,
+.mail-body-wide::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 16px;
+  width: 40px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-normal) var(--ease);
+}
+
+.mail-body-wide::before {
+  left: 0;
+  background: linear-gradient(to right, var(--mail-sheet) 15%, transparent);
+}
+
+.mail-body-wide::after {
+  right: 0;
+  background: linear-gradient(to left, var(--mail-sheet) 15%, transparent);
+}
+
+.mail-reader__body--paper .mail-body-wide::before {
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+}
+
+.mail-reader__body--paper .mail-body-wide::after {
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+}
+
+.mail-body-wide[data-more-left]::before,
+.mail-body-wide[data-more-right]::after {
+  opacity: 1;
+}
+
+/* Plain text, set like the letter. Each paragraph takes its own direction,
+   so Hebrew and English lines both read in order. */
+.mail-plaintext {
+  color: var(--fg-primary);
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: 15.5px;
+  line-height: 1.6;
+}
+
+.mail-plaintext__p {
+  max-width: 72ch;
+  margin: 0 0 0.75em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+
+.mail-plaintext__quote {
+  color: var(--fg-secondary);
+}
+
+.mail-plaintext__signature {
+  color: var(--fg-secondary);
+  font-size: 14px;
+}
+
+.mail-plaintext a {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+/* Tables, aligned columns and box drawing were laid out for a fixed-width
+   font: keep it, and the line lengths. Shadows on the cut edges show that
+   the block scrolls sideways (they ride on the scroll, not the content). */
+.mail-plaintext__pre {
+  --pre-bg: var(--bg-field);
+  --pre-shade: color-mix(in srgb, var(--fg-primary) 14%, transparent);
+  margin: 0 0 0.9em;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(to right, var(--pre-bg) 30%, transparent) left / 32px 100% no-repeat local,
+    linear-gradient(to left, var(--pre-bg) 30%, transparent) right / 32px 100% no-repeat local,
+    linear-gradient(to right, var(--pre-shade), transparent) left / 12px 100% no-repeat scroll,
+    linear-gradient(to left, var(--pre-shade), transparent) right / 12px 100% no-repeat scroll,
+    var(--pre-bg);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre;
+  tab-size: 8;
+}
+
+.mail-plaintext__pre:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* A quiet way to answer at the foot of the letter: opens the composer. */
+.mail-quickreply {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: var(--mail-letter-w);
+  margin-inline: auto;
+  padding: 10px var(--space-4) 14px;
+}
+
+.mail-quickreply__btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 46px;
+  padding: 0 10px 0 10px;
+  border: none;
+  border-radius: var(--radius-card);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-tertiary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.mail-quickreply__btn:hover {
+  background: var(--bg-hover);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  color: var(--fg-secondary);
+}
+
+.mail-quickreply__btn:active {
+  background: var(--bg-pressed);
+}
+
+.mail-quickreply__text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* At the bottom, the reader is short: keep its height for the letter. */
+.mail--bottom .mail-quickreply {
+  display: none;
+}
+
+.mail-reader__status {
+  position: absolute;
+  left: var(--space-2);
+  bottom: var(--space-2);
+  z-index: 5;
+  max-width: 70%;
+  padding: 2px var(--space-2);
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-md);
+  color: var(--fg-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.mail-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.mail-menu-scroll {
+  display: inline-flex;
+}
+
+.mail-menu-scroll .menu {
+  max-width: min(360px, calc(100vw - 32px));
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+/* Folder paths stay on one line; the deepest are already folded. */
+.mail-menu-scroll .menu__icon {
+  flex-shrink: 0;
+}
+
+.mail-menu-scroll .menu__label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* --- Compose --------------------------------------------------------------------- */
+
+.mail-compose {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  container: compose / inline-size;
+}
+
+.mail-compose__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  height: 56px;
+  padding: 0 10px 0 22px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.mail-compose__title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-primary);
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: 18px;
+  font-weight: 700;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mail-compose__send {
+  min-width: 88px;
+  height: 34px;
+  margin: 0 2px 0 6px;
+  padding: 0 14px;
+}
+
+/* "Important", when on: the red of the mark the message carries in lists. */
+.mail-compose__important[aria-pressed="true"] {
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.mail-compose__important[aria-pressed="true"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-subtle), var(--danger) 10%);
+  color: var(--danger);
+}
+
+/* The subject row repeats it only when the toolbar's labels are hidden. */
+.mail-compose__important-tag {
+  display: none;
+}
+
+@container compose (max-width: 560px) {
+  .mail-compose__toolbar .mail-tool__label {
+    display: none;
+  }
+
+  .mail-compose__toolbar .mail-tool {
+    padding: 0 8px;
+  }
+
+  .mail-compose__important-tag {
+    display: inline-flex;
+  }
+}
+
+/* Too narrow for the title as well: the actions keep the row ("N…" helps
+   no one), and the section is still named for assistive tech. */
+@container compose (max-width: 440px) {
+  .mail-compose__title {
+    display: none;
+  }
+
+  .mail-compose__toolbar {
+    padding-left: 12px;
+  }
+}
+
+.mail-compose__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.mail-compose__page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  max-width: 920px;
+  padding: 20px 32px 32px;
+}
+
+@container compose (max-width: 560px) {
+  .mail-compose__page {
+    padding: 16px 18px 24px;
+  }
+}
+
+/* The envelope: From, To, Cc and Subject on one sunken panel. The row being
+   edited lifts out of it with a focus ring. */
+.mail-compose__fields {
+  display: flex;
+  flex-direction: column;
+  padding: 3px;
+  border-radius: var(--radius-card);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.mail-compose__fields > * + * {
+  border-top: 1px solid var(--border-default);
+}
+
+.mail-compose__field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 42px;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-radius: 9px;
+}
+
+/* Instant, like every focus ring: Tab moves through these fields. */
+.mail-compose__field:focus-within {
+  background: var(--bg-input);
+  box-shadow: inset 0 0 0 1.5px var(--focus-ring);
+}
+
+.mail-compose__label {
+  width: 56px;
+  flex-shrink: 0;
+  color: var(--fg-tertiary);
+  font-size: 12.5px;
+  font-weight: var(--weight-semibold);
+}
+
+/* With many recipients the label stays with the first line of chips. */
+.mail-recipients .mail-compose__label {
+  align-self: flex-start;
+  margin-top: 12px;
+}
+
+.mail-compose__field:focus-within .mail-compose__label {
+  color: var(--brand-text);
+}
+
+.mail-compose__from {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  padding: 0 24px 0 0;
+  text-overflow: ellipsis;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg-primary);
+  appearance: none;
+  cursor: pointer;
+}
+
+.mail-compose__from option {
+  background: var(--bg-surface-raised);
+}
+
+.mail-compose__from-caret {
+  position: absolute;
+  right: var(--space-3);
+  color: var(--fg-tertiary);
+  pointer-events: none;
+}
+
+.mail-compose__subject {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  user-select: text;
+}
+
+/* The row's ring shows focus, so the controls inside draw none. */
+.mail-compose__subject:focus-visible,
+.mail-compose__from:focus-visible,
+.mail-recipients__input:focus-visible {
+  outline: none;
+}
+
+.mail-compose__subject::placeholder,
+.mail-recipients__input::placeholder {
+  color: var(--fg-tertiary);
+  font-weight: var(--weight-regular);
+}
+
+.mail-compose__toggles {
+  display: flex;
+  gap: 2px;
+  align-self: flex-start;
+  flex-shrink: 0;
+  margin-top: 7px;
+}
+
+.mail-compose__toggles .btn {
+  color: var(--fg-tertiary);
+}
+
+.mail-compose__error {
+  padding: 2px var(--space-3) 8px 76px;
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.mail-recipients {
+  position: relative;
+}
+
+.mail-recipients.has-error .mail-compose__field {
+  box-shadow: inset 0 0 0 1.5px var(--danger);
+}
+
+.mail-recipients__box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1;
+  min-width: 0;
+  padding: 7px 0;
+  cursor: text;
+}
+
+.mail-recipients__input {
+  flex: 1 0 140px;
+  min-width: 140px;
+  height: 26px;
+  border: none;
+  outline: none;
+  background: transparent;
+  user-select: text;
+}
+
+/* Recipients: soft tiles. */
+.mail-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 260px;
+  height: 26px;
+  padding: 0 2px 0 9px;
+  border-radius: 7px;
+  background: var(--bg-tile);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  color: var(--fg-primary);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+}
+
+.mail-chip__text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mail-chip__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-tertiary);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.mail-chip__remove:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+/* Contact suggestions. They follow typing, so they appear without motion. */
+.mail-suggest {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 64px;
+  z-index: 20;
+  min-width: 300px;
+  max-width: 440px;
+  margin: 0;
+  padding: var(--space-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-md);
+  list-style: none;
+}
+
+.mail-suggest__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.mail-suggest__item[aria-selected="true"] {
+  background: var(--bg-selected);
+}
+
+.mail-suggest__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mail-suggest__name {
+  overflow: hidden;
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mail-suggest__address {
+  overflow: hidden;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mail-compose__attachments {
+  margin-top: var(--space-3);
+}
+
+.mail-compose__files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mail-file-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 300px;
+  padding: 4px 4px 4px 4px;
+  border-radius: var(--radius-lg);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+}
+
+.mail-file-chip .mail-file-badge {
+  width: 28px;
+  height: 32px;
+  padding-bottom: 4px;
+}
+
+.mail-file-chip .mail-file-badge svg {
+  top: 6px;
+}
+
+.mail-file-chip__name {
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+}
+
+.mail-file-chip__size {
+  flex-shrink: 0;
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.mail-compose__warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--space-2);
+  color: var(--warning);
+  font-size: var(--text-sm);
+}
+
+/* With a signature (or its "Add signature" button, or the note that the
+   organization adds it on send), the editor starts at about five lines and
+   grows with the text, and the signature follows right under it, so
+   removing or adding it doesn't move anything else. */
+.mail-compose__page--signed .mail-editor {
+  flex: none;
+}
+
+.mail-compose__page--signed .mail-editor__content {
+  min-height: calc(5 * 1.6em + 22px);
+  padding-bottom: 8px;
+}
+
+/* A reply or forward: the editor starts at about three lines and grows with
+   the text, and the original follows right under it. */
+.mail-compose__page--quoted .mail-editor {
+  flex: none;
+}
+
+/* Three lines plus the padding (14px above, 8px below). */
+.mail-compose__page--quoted .mail-editor__content {
+  min-height: calc(3 * 1.6em + 22px);
+  padding-bottom: 8px;
+}
+
+.mail-compose__quote .mail-reader__body {
+  margin-top: var(--space-2);
+}
+
+.mail-compose__quote-toggle {
+  margin-left: -8px;
+  color: var(--fg-tertiary);
+}
+
+/* --- Editor ---------------------------------------------------------------------- */
+
+.mail-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+  margin-top: var(--space-2);
+}
+
+.mail-format {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: var(--space-2) 0 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.mail-format__btn {
+  width: 28px;
+  height: 28px;
+  color: var(--fg-tertiary);
+}
+
+.mail-editor:focus-within .mail-format__btn {
+  color: var(--fg-secondary);
+}
+
+.mail-format .mail-format__btn[aria-pressed="true"] {
+  background: var(--bg-selected);
+  color: var(--brand-text);
+}
+
+.mail-format__separator {
+  width: 1px;
+  height: 16px;
+  margin: 0 6px;
+  background: var(--border-default);
+}
+
+.mail-editor__scroll {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* What you write is set like what you read: the serif, on a measure. */
+.mail-editor__content {
+  flex: 1;
+  max-width: 72ch;
+  min-height: 200px;
+  padding: 14px 0 24px;
+  outline: none;
+  color: var(--fg-primary);
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: 15.5px;
+  line-height: 1.6;
+  cursor: text;
+  user-select: text;
+}
+
+/* The format bar and the caret show where typing goes. */
+.mail-editor__content:focus-visible {
+  outline: none;
+}
+
+/* Each paragraph takes the direction of what's typed into it. */
+.mail-editor__content p {
+  margin: 0;
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+
+.mail-editor__content ul,
+.mail-editor__content ol {
+  margin: var(--space-1) 0;
+  padding-inline-start: 1.5em;
+}
+
+.mail-editor__content ul > li::marker {
+  color: var(--brand-text);
+}
+
+.mail-editor__content blockquote {
+  margin: var(--space-2) 0;
+  padding-inline-start: 14px;
+  border-inline-start: 2px solid var(--border-default);
+  color: var(--fg-secondary);
+}
+
+.mail-editor__content a {
+  color: var(--fg-link);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.mail-editor__content p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: var(--fg-tertiary);
+  pointer-events: none;
+}
+
+.mail-link-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* --- Signature ------------------------------------------------------------------- */
+
+/* An editable signature: a frame as tall as what it holds (SignatureEditor).
+   It draws no box itself, where it sits decides; the light sheet a signature
+   with its own colors gets in the dark theme is inside the frame. */
+.signature-editor {
+  position: relative;
+}
+
+.signature-editor__frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+}
+
+/* In the composer it's part of the letter: on the text's left edge, between
+   what's written and the original. Its name and buttons show when it's
+   pointed at or being edited, and are always there for the keyboard. */
+.mail-signature {
+  position: relative;
+  margin-bottom: var(--space-3);
+}
+
+.mail-signature__bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  margin-bottom: 2px;
+  opacity: 0;
+  transition: opacity var(--duration-normal) var(--ease-out);
+}
+
+.mail-signature:hover .mail-signature__bar {
+  opacity: 1;
+}
+
+/* No fade for the keyboard: it shows as focus arrives. */
+.mail-signature:focus-within .mail-signature__bar,
+.mail-signature:has(.signature-editor[data-focused]) .mail-signature__bar {
+  opacity: 1;
+  transition: none;
+}
+
+.mail-signature__label {
+  margin-right: 2px;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.mail-signature__remove {
+  color: var(--fg-tertiary);
+}
+
+.mail-signature__restore {
+  color: var(--fg-secondary);
+}
+
+/* Being edited: a teal rule in the margin beside it, where it doesn't move
+   the text. */
+.mail-signature::before {
+  content: "";
+  position: absolute;
+  top: 34px;
+  bottom: 0;
+  left: -14px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--focus-ring);
+  opacity: 0;
+}
+
+.mail-signature:has(.signature-editor[data-focused])::before {
+  opacity: 1;
+}
+
+.mail-signature-add {
+  align-self: flex-start;
+  margin: 0 0 var(--space-2) -8px;
+  color: var(--fg-tertiary);
+}
+
+.mail-signature-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: var(--space-1) 0 var(--space-3);
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+}
+
+.mail-signature-note svg {
+  flex: none;
+}
+
+/* --- Draft tab --------------------------------------------------------------------- */
+
+/* Appears without motion: it remounts when the pane switches (Enter, Esc,
+   module changes), and those must stay instant. */
+.mail-draftbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+  margin: 0 var(--space-2) var(--space-2);
+  padding: 4px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.mail-draftbar__open {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease);
+}
+
+.mail-draftbar__open:hover {
+  background: var(--bg-tile);
+}
+
+.mail-draftbar__open:active {
+  background: var(--bg-pressed);
+}
+
+.mail-draftbar__open svg {
+  flex-shrink: 0;
+  color: var(--brand-text);
+}
+
+.mail-draftbar__label {
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.mail-draftbar__subject {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-serif);
+  font-feature-settings: normal;
+  font-size: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mail-draftbar__subject.is-empty {
+  color: var(--fg-tertiary);
+  font-style: italic;
+}

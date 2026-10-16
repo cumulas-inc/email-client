@@ -1,0 +1,212 @@
+//! The push state the service keeps: one entry per account (its sync queue
+//! and the tasks serving it), the latest status of each, and the shared
+//! wake and network signals. `service::background` drives it.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, Weak};
+use std::time::Duration;
+
+use chrono::Utc;
+use tokio::runtime::Handle;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use super::{AdminConsent, PushHealth, PushMode, PushStatus};
+use crate::error::{Error, ErrorCode};
+use crate::service::targeted::SyncQueue;
+use crate::service::{CoreService, EventSink, SyncScope};
+
+/// How long stopping an account's push may take before its tasks are left
+/// to finish on their own.
+pub(crate) const STOP_LIMIT: Duration = Duration::from_secs(3);
+
+pub(crate) struct PushHub {
+    pub(crate) state: Mutex<HubState>,
+    statuses: Mutex<HashMap<String, PushStatus>>,
+    /// Why consent to the push service was refused at the account's last
+    /// sign-in (an administrator must approve it, or the user declined),
+    /// until push goes live.
+    consent_refusals: Mutex<HashMap<String, Error>>,
+    /// Bumped to make every supervisor reconnect at once.
+    pub(crate) wake: watch::Sender<u64>,
+    pub(crate) online: watch::Sender<bool>,
+    /// Parent of every task's token; cancelled on shutdown.
+    pub(crate) root: CancellationToken,
+    pub(crate) service: OnceLock<Weak<CoreService>>,
+}
+
+#[derive(Default)]
+pub(crate) struct HubState {
+    /// Set once the background work started.
+    pub(crate) runtime: Option<Handle>,
+    pub(crate) accounts: HashMap<String, AccountPush>,
+    /// The periodic sync and the resume detector.
+    pub(crate) tasks: Vec<JoinHandle<()>>,
+    pub(crate) shut_down: bool,
+}
+
+/// One account's push.
+pub(crate) struct AccountPush {
+    pub(crate) cancel: CancellationToken,
+    /// The supervisor's token, a child of `cancel`: parking or restarting
+    /// it stops listening while the queue keeps serving syncs.
+    pub(crate) listener: CancellationToken,
+    /// Tells the supervisor that the server refused a sync's connection,
+    /// so that it gives up its own.
+    pub(crate) busy: watch::Sender<Option<Error>>,
+    /// Why push is parked, until a full sync gets past that.
+    pub(crate) parked: Option<ErrorCode>,
+    pub(crate) queue: SyncQueue,
+    pub(crate) worker: JoinHandle<()>,
+    pub(crate) supervisor: Option<JoinHandle<()>>,
+}
+
+impl AccountPush {
+    /// Its tasks, to wait for once cancelled.
+    pub(crate) fn tasks(self) -> impl Iterator<Item = JoinHandle<()>> {
+        std::iter::once(self.worker).chain(self.supervisor)
+    }
+}
+
+impl Default for PushHub {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            statuses: Mutex::default(),
+            consent_refusals: Mutex::default(),
+            wake: watch::Sender::new(0),
+            online: watch::Sender::new(true),
+            root: CancellationToken::new(),
+            service: OnceLock::new(),
+        }
+    }
+}
+
+impl PushHub {
+    /// Records an account's status and tells the UI when it changed.
+    pub(crate) fn set_status(
+        &self,
+        sink: &dyn EventSink,
+        account_id: &str,
+        mode: PushMode,
+        health: PushHealth,
+        detail: Option<String>,
+    ) {
+        // Missing consent that the last sign-in was refused says why, rather
+        // than suggesting a sign-in that would be refused again, and carries
+        // the approval link when an administrator must approve.
+        let (detail, refused, admin_consent) = {
+            let mut refusals = self.consent_refusals.lock().unwrap();
+            match health {
+                PushHealth::ConsentMissing => match refusals.get(account_id) {
+                    Some(e) => (Some(e.message.clone()), true, AdminConsent::from_error(e)),
+                    None => (detail, false, None),
+                },
+                // Consent was given after all (an administrator approved).
+                PushHealth::Live => {
+                    refusals.remove(account_id);
+                    (detail, false, None)
+                }
+                _ => (detail, false, None),
+            }
+        };
+        let status = {
+            let mut statuses = self.statuses.lock().unwrap();
+            if statuses.get(account_id).is_some_and(|s| {
+                s.mode == mode
+                    && s.health == health
+                    && s.detail == detail
+                    && s.consent_refused == refused
+                    && s.admin_consent == admin_consent
+            }) {
+                return;
+            }
+            let status = PushStatus {
+                account_id: account_id.to_owned(),
+                mode,
+                health,
+                detail,
+                consent_refused: refused,
+                admin_consent,
+                since: Utc::now(),
+            };
+            statuses.insert(account_id.to_owned(), status.clone());
+            status
+        };
+        sink.push_status(&status);
+    }
+
+    pub(crate) fn status(&self, account_id: &str) -> Option<PushStatus> {
+        self.statuses.lock().unwrap().get(account_id).cloned()
+    }
+
+    pub(crate) fn forget_status(&self, account_id: &str) {
+        self.statuses.lock().unwrap().remove(account_id);
+        self.consent_refusals.lock().unwrap().remove(account_id);
+    }
+
+    /// Records the account's sign-in result for push consent: the refusal,
+    /// or `None` when consent wasn't refused.
+    pub(crate) fn set_consent_refusal(&self, account_id: &str, refusal: Option<Error>) {
+        let mut refusals = self.consent_refusals.lock().unwrap();
+        match refusal {
+            Some(e) => refusals.insert(account_id.to_owned(), e),
+            None => refusals.remove(account_id),
+        };
+    }
+
+    pub(crate) fn consent_refused(&self, account_id: &str) -> bool {
+        self.consent_refusals
+            .lock()
+            .unwrap()
+            .contains_key(account_id)
+    }
+
+    /// Stops the given accounts' push (all when `None`): cancels their
+    /// tasks and waits for them, briefly.
+    pub(crate) async fn stop(&self, account_ids: Option<&[String]>) {
+        let stopped: Vec<AccountPush> = {
+            let mut state = self.state.lock().unwrap();
+            match account_ids {
+                Some(ids) => ids
+                    .iter()
+                    .filter_map(|id| state.accounts.remove(id))
+                    .collect(),
+                None => state.accounts.drain().map(|(_, push)| push).collect(),
+            }
+        };
+        for push in &stopped {
+            push.cancel.cancel();
+        }
+        let tasks = stopped.into_iter().flat_map(AccountPush::tasks);
+        join_within(tasks, STOP_LIMIT).await;
+    }
+
+    /// Asks every account's queue for `scope`.
+    pub(crate) fn request(&self, scope: &SyncScope) {
+        let state = self.state.lock().unwrap();
+        for push in state.accounts.values() {
+            push.queue.push(scope.clone());
+        }
+    }
+
+    /// Asks one account's queue for `scope`; false when it has none (the
+    /// background work hasn't started).
+    pub(crate) fn request_for(&self, account_id: &str, scope: SyncScope) -> bool {
+        let state = self.state.lock().unwrap();
+        let Some(push) = state.accounts.get(account_id) else {
+            return false;
+        };
+        push.queue.push(scope);
+        true
+    }
+}
+
+/// Waits for `tasks` to finish, at most `limit`.
+pub(crate) async fn join_within(tasks: impl IntoIterator<Item = JoinHandle<()>>, limit: Duration) {
+    let all = futures::future::join_all(tasks);
+    if tokio::time::timeout(limit, all).await.is_err() {
+        tracing::debug!("background tasks did not stop within {limit:?}");
+    }
+}

@@ -1,0 +1,59 @@
+[package]
+name = "cumulas-mail"
+description = "Cumulas Mail: mail, calendar, contacts and tasks for Linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cumulas_mail_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+cumulas-core = { path = "../crates/core" }
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
+tauri-plugin-opener = "2"
+# One process per user: a launcher click while the app runs in the
+# background shows its window instead of starting a second copy. (2.5 needs
+# Rust 1.90 and Tauri 2.12.)
+tauri-plugin-single-instance = "~2.4"
+# Installed fonts for the font settings: fontdb finds and names them,
+# ttf-parser checks that they draw letters.
+fontdb = "0.24"
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+
+# The desktop around the core (src/desktop): notifications through the
+# portal (Flatpak) or org.freedesktop.Notifications, the Background,
+# NetworkMonitor and OpenURI portals, the tray's StatusNotifier host check,
+# and the window's startup id for focus on Wayland.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "notification", "background", "network_monitor", "open_uri"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+gtk = "0.18"
+# The tray library is loaded at run time, and tray-icon panics when it's
+# missing: it's looked for first.
+libloading = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# An in-process org.freedesktop.Notifications for the notifier's tests.
+zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }

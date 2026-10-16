@@ -1,0 +1,5 @@
+#!/bin/sh
+# Stands in for the desktop's opener (first on the app's PATH): records what
+# the app asks to open in $E2E_OUTPUT/opened.log, one per line, and opens
+# nothing.
+echo "$*" >>"${E2E_OUTPUT:-e2e/.output}/opened.log"

@@ -1,0 +1,92 @@
+# Flatpak manifest for local and CI builds (`sources: dir`). It isn't the
+# Flathub manifest, and must not be copied into the Flathub submission: it was
+# written with an AI agent, and Flathub's Generative AI policy forbids
+# AI-generated or AI-assisted content in manifests. A person writes that one
+# (see README.md, "Submitting to Flathub").
+#
+# Rust crates and npm packages are vendored by cargo-sources.json and
+# node-sources.json (generate with ./generate-sources.sh) because Flathub
+# builds have no network access.
+id: co.cumulas.Mail
+runtime: org.gnome.Platform
+runtime-version: "50"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node22
+command: cumulas-mail
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Mail, calendar and sign-in servers, the push service and the signature
+  # service.
+  - --share=network
+  # The tray icon (StatusNotifierItem), where the desktop shows tray icons.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Notifications go through the Notification portal, running in the
+  # background and starting at login through the Background portal, and
+  # passwords and tokens are kept in a keyring file in the app's data
+  # folder, with a key from the Secret portal; files use the FileChooser
+  # portal and links the OpenURI portal. So no notification server,
+  # keyring, autostart folder or filesystem access is needed.
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node22/bin
+  # CMake modules (the tray library's) install to lib, where pkg-config
+  # looks, also with flatpak-builder releases that don't say so themselves
+  # (Ubuntu 24.04's, which CI uses): CMake 4 picks lib64 otherwise.
+  libdir: /app/lib
+
+modules:
+  # The tray icon's library, which the app loads when the desktop shows tray
+  # icons. Flathub's shared module: a git submodule in the Flathub
+  # repository; CI clones flathub/shared-modules next to this file.
+  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+
+  - name: cumulas-mail
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/cumulas-mail/cargo
+        CARGO_NET_OFFLINE: "true"
+        XDG_CACHE_HOME: /run/build/cumulas-mail/flatpak-node/cache
+        npm_config_cache: /run/build/cumulas-mail/flatpak-node/npm-cache
+        npm_config_offline: "true"
+        # Application (client) ID of the published Entra app registration;
+        # leave empty to require users to enter one in Settings.
+        CUMULAS_MS_CLIENT_ID: ""
+        # Client ID of the shared Cumulas Signatures app (its Outlook
+        # add-in's), whose API company signatures come from; empty turns
+        # company signatures off.
+        CUMULAS_SIGNATURE_CLIENT_ID: ""
+    build-commands:
+      - npm ci --offline
+      - npm run build
+      # `tauri build` enables custom-protocol automatically; plain cargo must
+      # ask for it so the bundled UI is served instead of the dev server.
+      - cargo build --release --offline --locked -p cumulas-mail --features tauri/custom-protocol
+      - install -Dm755 target/release/cumulas-mail -t /app/bin/
+      - install -Dm644 packaging/flatpak/co.cumulas.Mail.desktop -t /app/share/applications/
+      - install -Dm644 packaging/flatpak/co.cumulas.Mail.metainfo.xml -t /app/share/metainfo/
+      - install -Dm644 public/icon.svg /app/share/icons/hicolor/scalable/apps/co.cumulas.Mail.svg
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/co.cumulas.Mail.png
+      - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/co.cumulas.Mail.png
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - .claude
+          - .flatpak-builder
+          - target
+          - packaging/flatpak/shared-modules
+          - node_modules
+          - dist
+          - flatpak_app
+          - build-dir
+          - repo
+      - cargo-sources.json
+      - node-sources.json
