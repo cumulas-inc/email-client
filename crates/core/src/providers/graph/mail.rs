@@ -50,6 +50,9 @@ const WELL_KNOWN_FOLDERS: &[(&str, FolderRole)] = &[
 
 /// Outlook allows four concurrent requests per mailbox.
 const CONCURRENCY: usize = 4;
+/// Removals a delta sync looks up to tell moves from deletions (three JSON
+/// batches); a bulk delete doesn't fan out into hundreds of lookups.
+const MAX_MOVE_LOOKUPS: usize = 60;
 const PREVIEW_CHARS: usize = 200;
 
 /// Inline images up to this size are embedded as `data:` URIs.
@@ -106,6 +109,8 @@ struct GraphMessage {
     is_draft: Option<bool>,
     has_attachments: Option<bool>,
     importance: Option<String>,
+    /// Only where asked for.
+    parent_folder_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +265,7 @@ struct Delta {
 struct Changes {
     upserts: Vec<MessageSummary>,
     removed: Vec<String>,
+    moved_out: Vec<MessageSummary>,
 }
 
 /// Delta tokens expire (410 Gone, or a `syncStateNotFound`-style code); the
@@ -455,6 +461,74 @@ impl GraphProvider {
             }
         }
         Ok(changes)
+    }
+
+    /// Looks up the messages a delta reported removed from `folder`: delta
+    /// says "deleted" for a move out too. One found in another folder moved
+    /// there, one found in this folder is back, one not found is gone.
+    /// Removals beyond [`MAX_MOVE_LOOKUPS`], or that can't be looked up,
+    /// stay removals; the store only removes those still in this folder.
+    async fn find_moves(&self, folder: &Folder, changes: &mut Changes) {
+        let lookups: Vec<String> = changes
+            .removed
+            .iter()
+            .take(MAX_MOVE_LOOKUPS)
+            .cloned()
+            .collect();
+        if lookups.is_empty() {
+            return;
+        }
+        let requests: Vec<_> = lookups
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                BatchRequest::get(
+                    i,
+                    format!(
+                        "/me/messages/{}?$select={SUMMARY_FIELDS},parentFolderId",
+                        segment(id)
+                    ),
+                )
+            })
+            .collect();
+        let mut responses = match self.client.batch(&requests, &[PREFER_IMMUTABLE_ID]).await {
+            Ok(responses) => responses,
+            Err(e) => {
+                tracing::debug!("looking up removed messages failed: {}", Error::from(e));
+                return;
+            }
+        };
+        let mut removed = Vec::new();
+        for (i, id) in lookups.into_iter().enumerate() {
+            let found = responses
+                .remove(&i.to_string())
+                .filter(|r| {
+                    if !r.is_success() && r.status() != StatusCode::NOT_FOUND {
+                        tracing::debug!("looking up a removed message returned {}", r.status());
+                    }
+                    r.is_success()
+                })
+                .and_then(|r| r.json::<GraphMessage>().ok());
+            let Some(message) = found else {
+                removed.push(id);
+                continue;
+            };
+            let in_folder = match message.parent_folder_id.as_deref() {
+                Some(parent) if parent == folder.remote_id => folder.id.clone(),
+                Some(parent) => local_id(&self.account_id, EntityKind::Folder, parent),
+                None => {
+                    removed.push(id);
+                    continue;
+                }
+            };
+            match message.into_summary(&self.account_id, &in_folder) {
+                Some(summary) if in_folder == folder.id => changes.upserts.push(summary),
+                Some(summary) => changes.moved_out.push(summary),
+                None => removed.push(id),
+            }
+        }
+        removed.extend(changes.removed.drain(..).skip(MAX_MOVE_LOOKUPS));
+        changes.removed = removed;
     }
 
     async fn full_sync(&self, folder: &Folder, window: SyncWindow) -> Result<MessageBatch> {
@@ -804,10 +878,12 @@ impl MailProvider for GraphProvider {
         if let Some(link) = sync_state.filter(|l| self.client.is_own_link(l)) {
             match self.read_delta(link).await {
                 Ok(delta) => {
-                    let changes = self.resolve(folder, delta.items).await?;
+                    let mut changes = self.resolve(folder, delta.items).await?;
+                    self.find_moves(folder, &mut changes).await;
                     return Ok(MessageBatch {
                         upserts: changes.upserts,
                         removed_remote_ids: changes.removed,
+                        moved_out: changes.moved_out,
                         sync_state: Some(delta.delta_link),
                         ..Default::default()
                     });

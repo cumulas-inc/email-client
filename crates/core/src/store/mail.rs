@@ -43,17 +43,22 @@ pub struct BatchOutcome {
     /// Ids of the folders that stored messages moved in from. Graph keeps a
     /// message's id when it moves, so the move shows as an update.
     pub moved_from: Vec<String>,
+    /// Local ids of stored messages that moved out to another folder.
+    pub moved_out: Vec<String>,
+    /// The folders they moved to (each once).
+    pub moved_to: Vec<String>,
 }
 
 impl BatchOutcome {
     /// Whether the folder's unread or total count may have changed (and
-    /// those of `moved_from`).
+    /// those of `moved_from` and `moved_to`).
     pub fn changes_counts(&self) -> bool {
         !(self.inserted.is_empty()
             && self.became_read.is_empty()
             && self.became_unread.is_empty()
             && self.removed.is_empty()
-            && self.moved_from.is_empty())
+            && self.moved_from.is_empty()
+            && self.moved_out.is_empty())
     }
 }
 
@@ -311,6 +316,69 @@ fn delete_message_rows(tx: &Transaction<'_>, ids: &[String]) -> rusqlite::Result
     Ok(deleted)
 }
 
+/// Deletes the messages still in `folder_id`; returns the ids deleted. A
+/// message that a sync of another folder, or a move made here, already put
+/// elsewhere stays: Graph keeps ids across folders and reports a move out
+/// as a removal.
+fn delete_rows_in_folder(
+    tx: &Transaction<'_>,
+    ids: &[String],
+    folder_id: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut deleted = Vec::new();
+    for id in ids {
+        if tx.execute(
+            "DELETE FROM messages WHERE id = ?1 AND folder_id = ?2",
+            params![id, folder_id],
+        )? > 0
+        {
+            deleted.push(id.clone());
+        }
+    }
+    Ok(deleted)
+}
+
+/// Applies `MessageBatch::moved_out` for `folder`; see there.
+fn move_out(
+    tx: &Transaction<'_>,
+    folder: &Folder,
+    moved: &[MessageSummary],
+    outcome: &mut BatchOutcome,
+) -> rusqlite::Result<()> {
+    for m in moved {
+        let stored_in: Option<String> = tx
+            .query_row(
+                "SELECT folder_id FROM messages WHERE id = ?1",
+                [&m.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if stored_in.as_deref() != Some(folder.id.as_str()) {
+            continue;
+        }
+        let destination_stored = tx
+            .query_row(
+                "SELECT 1 FROM folders WHERE id = ?1 AND account_id = ?2",
+                params![m.folder_id, folder.account_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if destination_stored {
+            upsert_summary(tx, m)?;
+            outcome.moved_out.push(m.id.clone());
+            if !outcome.moved_to.contains(&m.folder_id) {
+                outcome.moved_to.push(m.folder_id.clone());
+            }
+        } else {
+            outcome
+                .removed
+                .extend(delete_message_rows(tx, std::slice::from_ref(&m.id))?);
+        }
+    }
+    Ok(())
+}
+
 /// `SUMMARY_COLUMNS` of the messages row aliased `m`.
 fn summary_columns_of_m() -> String {
     SUMMARY_COLUMNS
@@ -523,7 +591,10 @@ impl Store {
         }
         removed.sort_unstable();
         removed.dedup();
-        outcome.removed.extend(delete_message_rows(&tx, &removed)?);
+        outcome
+            .removed
+            .extend(delete_rows_in_folder(&tx, &removed, &folder.id)?);
+        move_out(&tx, folder, &batch.moved_out, &mut outcome)?;
         for m in &batch.upserts {
             let Some(previous) = upsert_summary(&tx, m)? else {
                 outcome.inserted.push(m.clone());
@@ -792,7 +863,14 @@ impl Store {
         match new_remote_id {
             Some(remote_id) => {
                 let new_id = local_id(&destination.account_id, EntityKind::Message, remote_id);
-                // Its index rows travel with it (`fts_rowid`).
+                // A sync or search may have stored the copy in the
+                // destination meanwhile (IMAP); the moved row, which carries
+                // the fetched body, wins. Its index rows travel with it
+                // (`fts_rowid`).
+                tx.execute(
+                    "DELETE FROM messages WHERE id = ?2 AND id <> ?1",
+                    params![id, new_id],
+                )?;
                 tx.execute(
                     "UPDATE messages SET id = ?2, remote_id = ?3, folder_id = ?4 WHERE id = ?1",
                     params![id, new_id, remote_id, destination.id],
@@ -1137,6 +1215,212 @@ mod tests {
         // Applied again, it stays put.
         let again = store.apply_message_batch(&inbox, &batch).unwrap();
         assert_eq!(again, BatchOutcome::default());
+    }
+
+    fn apply(store: &Store, folder: &Folder, batch: MessageBatch) -> BatchOutcome {
+        store.apply_message_batch(folder, &batch).unwrap()
+    }
+
+    fn upserts(messages: &[&MessageSummary]) -> MessageBatch {
+        MessageBatch {
+            upserts: messages.iter().map(|m| (*m).clone()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn fetch_body(store: &Store, m: &MessageSummary, text: &str) {
+        store
+            .save_message_content(
+                &m.id,
+                &MessageContent {
+                    body_text: Some(text.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    fn folder_of(store: &Store, id: &str) -> Option<String> {
+        store.get_message_summary(id).ok().map(|m| m.folder_id)
+    }
+
+    /// Graph keeps a message's id when it moves, and reports the move out
+    /// of a folder as a removal.
+    #[test]
+    fn removals_only_remove_rows_still_in_the_folder() {
+        let (store, inbox, archive) = setup();
+        // (A) Moved Archive → Inbox on the server; the Inbox syncs first.
+        let archived = message(&archive, "1", "One", false);
+        apply(&store, &archive, upserts(&[&archived]));
+        let in_inbox = MessageSummary {
+            folder_id: inbox.id.clone(),
+            ..archived.clone()
+        };
+        apply(&store, &inbox, upserts(&[&in_inbox]));
+        let outcome = apply(
+            &store,
+            &archive,
+            MessageBatch {
+                removed_remote_ids: vec!["1".into()],
+                ..Default::default()
+            },
+        );
+        assert!(outcome.removed.is_empty());
+        assert_eq!(folder_of(&store, &archived.id), Some(inbox.id.clone()));
+
+        // (B) Moved here, Inbox → Archive: the Inbox's removal leaves it and
+        // its body in the Archive.
+        let two = message(&inbox, "2", "Two", false);
+        apply(&store, &inbox, upserts(&[&two]));
+        fetch_body(&store, &two, "pineapple");
+        store
+            .relocate_message(&two.id, &archive, Some("2"))
+            .unwrap();
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                removed_remote_ids: vec!["2".into()],
+                ..Default::default()
+            },
+        );
+        assert!(outcome.removed.is_empty());
+        assert_eq!(folder_of(&store, &two.id), Some(archive.id.clone()));
+        assert!(store.get_message_content(&two.id).unwrap().is_some());
+        assert_eq!(search(&store, "pineapple").unwrap().len(), 1);
+
+        // Removed from the folder it is in: gone.
+        let outcome = apply(
+            &store,
+            &archive,
+            MessageBatch {
+                removed_remote_ids: vec!["2".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome.removed, [two.id.as_str()]);
+        assert!(search(&store, "pineapple").unwrap().is_empty());
+    }
+
+    #[test]
+    fn moved_out_moves_the_row_and_keeps_its_body() {
+        let (store, inbox, archive) = setup();
+        let m = message(&inbox, "1", "One", false);
+        apply(&store, &inbox, upserts(&[&m]));
+        fetch_body(&store, &m, "pineapple");
+        // Moved to the Archive and read elsewhere; only the Inbox synced.
+        let moved = MessageSummary {
+            folder_id: archive.id.clone(),
+            is_read: true,
+            subject: "One (moved)".into(),
+            ..m.clone()
+        };
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                moved_out: vec![moved],
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome.moved_out, [m.id.as_str()]);
+        assert_eq!(outcome.moved_to, [archive.id.as_str()]);
+        assert!(outcome.removed.is_empty() && outcome.inserted.is_empty());
+        assert!(outcome.changes_counts());
+        let stored = store.get_message_summary(&m.id).unwrap();
+        assert_eq!(stored.folder_id, archive.id);
+        assert!(stored.is_read);
+        assert!(store.get_message_content(&m.id).unwrap().is_some());
+        // Indexed again for its new subject, with its body.
+        assert_eq!(search(&store, "moved pineapple").unwrap().len(), 1);
+        assert_eq!(index_rows(&store), (1, 1));
+        // Reported again (the Archive's own delta, say): nothing more.
+        let again = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                moved_out: vec![stored],
+                ..Default::default()
+            },
+        );
+        assert_eq!(again, BatchOutcome::default());
+    }
+
+    #[test]
+    fn moved_out_to_an_unknown_folder_removes_it() {
+        let (store, inbox, _) = setup();
+        let m = message(&inbox, "1", "One", false);
+        apply(&store, &inbox, upserts(&[&m]));
+        let elsewhere = MessageSummary {
+            folder_id: local_id("a", EntityKind::Folder, "Hidden"),
+            ..m.clone()
+        };
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                moved_out: vec![elsewhere],
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome.removed, [m.id.as_str()]);
+        assert!(outcome.moved_out.is_empty());
+        assert_eq!(folder_of(&store, &m.id), None);
+        assert_eq!(index_rows(&store), (0, 0));
+    }
+
+    #[test]
+    fn moved_out_of_another_folder_is_ignored() {
+        let (store, inbox, archive) = setup();
+        let m = message(&archive, "1", "One", false);
+        apply(&store, &archive, upserts(&[&m]));
+        let sent = folder("a", "Sent", FolderRole::Sent);
+        store
+            .replace_folders("a", &[inbox.clone(), archive.clone(), sent.clone()])
+            .unwrap();
+        // The Inbox says it moved out to Sent, but it isn't in the Inbox;
+        // and one never stored isn't inserted.
+        let outcome = apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                moved_out: vec![
+                    MessageSummary {
+                        folder_id: sent.id.clone(),
+                        ..m.clone()
+                    },
+                    message(&sent, "2", "Two", false),
+                ],
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome, BatchOutcome::default());
+        assert_eq!(folder_of(&store, &m.id), Some(archive.id.clone()));
+        assert_eq!(
+            folder_of(&store, &local_id("a", EntityKind::Message, "2")),
+            None
+        );
+    }
+
+    #[test]
+    fn relocate_over_an_existing_destination_copy_keeps_the_moved_row() {
+        let (store, inbox, archive) = setup();
+        let m = message(&inbox, "INBOX:1", "One", false);
+        apply(&store, &inbox, upserts(&[&m]));
+        fetch_body(&store, &m, "pineapple");
+        // The Archive synced the copy the move made before the move
+        // returned (IMAP: a new id in the destination).
+        let copy = message(&archive, "Archive:9", "One", false);
+        apply(&store, &archive, upserts(&[&copy]));
+        store
+            .relocate_message(&m.id, &archive, Some("Archive:9"))
+            .unwrap();
+        let moved = store.get_message_summary(&copy.id).unwrap();
+        assert_eq!(moved.folder_id, archive.id);
+        assert!(store.get_message_content(&copy.id).unwrap().is_some());
+        assert_eq!(folder_of(&store, &m.id), None);
+        assert_eq!(search(&store, "pineapple").unwrap().len(), 1);
+        assert_eq!(index_rows(&store), (1, 1));
     }
 
     #[test]

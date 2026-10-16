@@ -46,6 +46,9 @@ pub(crate) struct FakeServer {
     /// (`watching`), the operations connection is refused.
     pub one_free_slot: bool,
     pub watching: Arc<AtomicUsize>,
+    /// Messages (folder, remote id) the next sync of the folder reports as
+    /// moved out of it, as Graph's does after looking up its removals.
+    pub moves: Vec<(String, String)>,
     next_uid: u32,
 }
 
@@ -149,21 +152,31 @@ impl MailProvider for FakeMail {
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
-        let server = self.server.lock().unwrap();
+        let mut server = self.server.lock().unwrap();
         if server.fail_sync {
             return Err(Error::new(ErrorCode::AuthRequired, "token expired"));
         }
         if let Some(e) = &server.failure {
             return Err(e.clone());
         }
+        let upserts = server
+            .messages
+            .values()
+            .filter(|(f, _)| *f == folder.remote_id)
+            .map(|(_, m)| m.clone())
+            .collect();
+        let (moves, others): (Vec<_>, Vec<_>) = std::mem::take(&mut server.moves)
+            .into_iter()
+            .partition(|(from, _)| *from == folder.remote_id);
+        server.moves = others;
         Ok(MessageBatch {
-            upserts: server
-                .messages
-                .values()
-                .filter(|(f, _)| *f == folder.remote_id)
-                .map(|(_, m)| m.clone())
+            upserts,
+            // Like a delta: what changed, not the whole folder.
+            full_resync: moves.is_empty(),
+            moved_out: moves
+                .iter()
+                .map(|(_, remote)| server.messages[remote].1.clone())
                 .collect(),
-            full_resync: true,
             sync_state: Some("state".into()),
             ..Default::default()
         })
@@ -1305,6 +1318,43 @@ async fn mail_moved_in_elsewhere_refreshes_both_folders_counts() {
     assert_eq!((archive.unread_count, archive.total_count), (0, 0));
     // A message moved in isn't new mail.
     assert!(h.sink.new_mail.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_targeted_sync_after_a_move_refreshes_both_folders() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let welcome = local_id(&account.id, EntityKind::Message, "INBOX:1");
+    // Read here, so its body is stored.
+    h.service.get_message(&welcome, false).await.unwrap();
+    // Moved to the Archive on the phone (keeping its id, as on Graph);
+    // only the Inbox is synced.
+    {
+        let mut server = h.server.lock().unwrap();
+        let (folder, message) = server.messages.get_mut("INBOX:1").unwrap();
+        *folder = "Archive".into();
+        message.folder_id = local_id(&account.id, EntityKind::Folder, "Archive");
+        server.moves.push(("INBOX".into(), "INBOX:1".into()));
+    }
+    h.service
+        .sync_targets(&account.id, SyncScope::inbox())
+        .await
+        .unwrap();
+    let store = h.service.store();
+    let archive = store
+        .find_folder_by_role(&account.id, FolderRole::Archive)
+        .unwrap()
+        .unwrap();
+    let moved = store.get_message_summary(&welcome).unwrap();
+    assert_eq!(moved.folder_id, archive.id);
+    assert!(store.get_message_content(&welcome).unwrap().is_some());
+    // Both folders' counts came from the server.
+    let inbox = inbox(&h, &account);
+    assert_eq!((inbox.unread_count, inbox.total_count), (1, 1));
+    assert_eq!((archive.unread_count, archive.total_count), (1, 1));
+    assert_eq!(h.server.lock().unwrap().count_requests, 2);
+    // Its new-mail notification can go.
+    assert_eq!(*h.sink.settled.lock().unwrap(), [welcome]);
 }
 
 /// A service with background work and a scripted push watcher.

@@ -67,6 +67,13 @@ pub struct MessageBatch {
     /// Opaque provider cursor to pass to the next sync of this folder
     /// (Graph `@odata.deltaLink`, IMAP `uidvalidity:uidnext:modseq`, ...).
     pub sync_state: Option<String>,
+    /// Messages that left this folder for another folder of the account,
+    /// with `folder_id` naming the one they are in now (Graph reports a move
+    /// out as a removal; the provider looks such removals up). A stored copy
+    /// still in this folder moves there, keeping its fetched body; one whose
+    /// destination isn't stored is removed; others are ignored (never
+    /// inserted).
+    pub moved_out: Vec<MessageSummary>,
 }
 
 /// A folder's message counts as the server reports them.
