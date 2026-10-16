@@ -1499,6 +1499,29 @@ async fn settings_and_account_changes_restart_push() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_account_whose_removal_failed_keeps_its_push() {
+    let b = background();
+    let account = b.account().await;
+    b.service.start_background();
+    b.settle().await;
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 1);
+    b.service.store().execute_for_tests(
+        "CREATE TEMP TRIGGER keep_accounts BEFORE DELETE ON accounts
+         BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+    );
+    assert!(b.service.remove_account(&account.id).await.is_err());
+    b.settle().await;
+    // Push was stopped for the removal, and starts again.
+    assert_eq!(b.watcher.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(b.watcher.connections.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        b.health(&account),
+        Some((PushMode::ImapIdle, PushHealth::Live))
+    );
+    b.service.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn accounts_without_a_watcher_poll_the_inbox() {
     let b = background();
     *b.h.connector.watcher.lock().unwrap() = None;

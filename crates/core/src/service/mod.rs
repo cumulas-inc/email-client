@@ -444,8 +444,9 @@ impl CoreService {
         // From here on no signature check starts for it, whoever found it.
         self.signatures.forget(account_id);
         if let Err(e) = self.store.delete_account(account_id) {
-            // The account stays, and so do its signature checks.
+            // The account stays, and so do its signature checks and push.
             self.signatures.restore(account_id);
+            self.restart_push(account_id).await;
             return Err(e);
         }
         {
