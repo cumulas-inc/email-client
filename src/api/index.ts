@@ -25,7 +25,8 @@ const DEMO_SIGNATURE: readonly DemoSignature[] = [
  * push in that state, `?notray` a desktop without tray icons, and
  * `?reminders` a task reminder 12 minutes overdue besides the events' own.
  * `?signature=addedOnSend|notAllowed|stale|notUsed|unreachable` shows its
- * company signature in that state.
+ * company signature in that state. `?searchfail` makes searches of the IMAP
+ * account's server fail, as when it can't be reached.
  */
 export function createBackend(): Backend {
   if (isTauri()) return tauriBackend;
@@ -41,6 +42,7 @@ export function createBackend(): Backend {
     push: push && DEMO_PUSH.includes(push) ? push : undefined,
     signature: signature && DEMO_SIGNATURE.includes(signature) ? signature : undefined,
     overdueReminder: params.has("reminders"),
+    searchFail: params.has("searchfail"),
     background: params.has("notray") ? { trayAvailable: false } : undefined,
   });
 }

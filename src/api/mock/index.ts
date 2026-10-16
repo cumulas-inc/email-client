@@ -294,6 +294,8 @@ export interface MockOptions {
   push?: DemoPush;
   /** Show the Microsoft account's company signature in this state. */
   signature?: DemoSignature;
+  /** IMAP accounts' server searches fail, as with an unreachable server (`?searchfail`). */
+  searchFail?: boolean;
   /** Add a task reminder that went off 12 minutes ago (`?reminders`), besides the events' own. */
   overdueReminder?: boolean;
   /** What the desktop reports (the tray, the portal…). */
@@ -422,6 +424,18 @@ export class MockBackend implements Backend {
       }
     }
     if (options.signature && microsoft) this.demoSignature(microsoft.id, options.signature);
+    // An account whose sync fails can't be searched on its server either
+    // (`?worst`), as in the app.
+    for (const account of this.state.accounts) {
+      if (account.syncError || (options.searchFail && account.kind === "imap")) {
+        const host =
+          account.settings.kind === "imap" ? account.settings.imapHost : "Microsoft Graph";
+        this.serverSearchFailures.set(account.id, {
+          code: "network",
+          message: `Could not reach ${host}.`,
+        });
+      }
+    }
     if (options.overdueReminder) {
       const metrics = this.state.tasks.find((t) => t.title === "Send Q3 metrics to Dana");
       if (metrics) metrics.reminderAt = new Date(Date.now() - 12 * 60_000).toISOString();

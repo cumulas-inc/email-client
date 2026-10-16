@@ -507,6 +507,26 @@ describe("the demo's search", () => {
     });
   });
 
+  it("fails server searches the demo is asked to, and those of an account whose sync fails", async () => {
+    const failing = new MockBackend({ searchFail: true });
+    expect(await failing.searchServer("s-1", "zebras", "acct-home")).toMatchObject({
+      status: "failed",
+      error: { code: "network", message: "Could not reach imap.morgan-family.example." },
+    });
+    expect(await failing.searchServer("s-1", "invoice", "acct-work")).toMatchObject({
+      status: "done",
+    });
+    const worst = new MockBackend({ worst: true });
+    const broken = (await worst.listAccounts()).filter((a) => a.syncError);
+    expect(broken).not.toHaveLength(0);
+    for (const account of broken) {
+      expect(await worst.searchServer("s-2", "order", account.id)).toMatchObject({
+        status: "failed",
+        error: { code: "network" },
+      });
+    }
+  });
+
   it("reports an account's failure in the result, and rejects only bad calls", async () => {
     const backend = new MockBackend();
     const offline: BackendError = {

@@ -964,8 +964,10 @@ describe("Search", () => {
     await renderMail({ backend: new MockBackend({ worst: true }) });
     await setSearch('subject:"purchase order"');
     await expectResults(...Array.from({ length: 50 }, () => /Purchase order 4500/));
-    // The servers have more: the count says it is so far.
-    await waitFor(() => expect(announced()).toBe("50 results so far."));
+    // The servers have more: the count says it is so far. (The worst-case
+    // data's account whose sync fails can't be searched either.)
+    const unsearched = "Couldn't search J on the server.";
+    await waitFor(() => expect(announced()).toBe(`50 results so far. ${unsearched}`));
     expect(document.querySelector(".mail-list__count")).toHaveTextContent(
       '50 results so far for “subject:"purchase order"”',
     );
@@ -978,7 +980,7 @@ describe("Search", () => {
     await user.click(screen.getByRole("button", { name: "Show more results" }));
     await expectResults(...Array.from({ length: 130 }, () => /Purchase order 4500/));
     expect(screen.queryByRole("button", { name: "Show more results" })).not.toBeInTheDocument();
-    await waitFor(() => expect(announced()).toBe("130 results."));
+    await waitFor(() => expect(announced()).toBe(`130 results. ${unsearched}`));
   });
 
   it("offers to sign in again, not to try again, when an account's sign-in failed", async () => {
