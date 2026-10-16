@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
@@ -29,6 +30,66 @@ pub struct SearchUpsert {
     pub ids: Vec<String>,
     /// How many of them weren't stored before.
     pub added: u32,
+}
+
+/// Messages changed here (deleted, moved, read or flagged, by the user or
+/// a sync) while server search pages were on their way. A page the server
+/// answered before such a change must not undo it when it is stored after:
+/// bring a deleted message back, or move one back to where it was. Kept
+/// only while a page is on its way.
+#[derive(Debug, Default)]
+pub(super) struct LocalChanges {
+    /// Counts the changes noted.
+    seq: u64,
+    /// The pages on their way: the `seq` each started at, and how many.
+    pages: BTreeMap<u64, usize>,
+    /// Ids changed, with the `seq` of their latest change.
+    changed: HashMap<String, u64>,
+}
+
+impl LocalChanges {
+    fn note<'a>(&mut self, ids: impl IntoIterator<Item = &'a String>) {
+        if self.pages.is_empty() {
+            return;
+        }
+        for id in ids {
+            self.seq += 1;
+            self.changed.insert(id.clone(), self.seq);
+        }
+    }
+
+    fn changed_since(&self, id: &str, seq: u64) -> bool {
+        self.changed.get(id).is_some_and(|&at| at > seq)
+    }
+}
+
+fn lock_changes(changes: &Mutex<LocalChanges>) -> MutexGuard<'_, LocalChanges> {
+    changes.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A server search page on its way, from before the server is asked until
+/// what it found is stored; see [`Store::search_page_started`].
+#[derive(Debug)]
+pub struct SearchPageMark {
+    seq: u64,
+    changes: Arc<Mutex<LocalChanges>>,
+}
+
+impl Drop for SearchPageMark {
+    fn drop(&mut self) {
+        let mut changes = lock_changes(&self.changes);
+        if let Some(count) = changes.pages.get_mut(&self.seq) {
+            *count -= 1;
+            if *count == 0 {
+                changes.pages.remove(&self.seq);
+            }
+        }
+        // Only changes after the oldest page still on its way matter.
+        match changes.pages.keys().next().copied() {
+            Some(oldest) => changes.changed.retain(|_, at| *at > oldest),
+            None => changes.changed.clear(),
+        }
+    }
 }
 
 /// Change to a folder's unread count caused by a local operation.
@@ -324,10 +385,13 @@ fn reindex(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<()> {
     index_message(tx, &summary, preview)
 }
 
-fn stored_read_state(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<bool>> {
-    tx.query_row("SELECT is_read FROM messages WHERE id = ?1", [id], |r| {
-        r.get(0)
-    })
+/// The read and flagged state stored for a message.
+fn stored_flags(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<Option<(bool, bool)>> {
+    tx.query_row(
+        "SELECT is_read, is_flagged FROM messages WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
     .optional()
 }
 
@@ -644,26 +708,38 @@ impl Store {
                 _ => {}
             }
         }
+        let mut reflagged = Vec::new();
         for update in &batch.flag_updates {
             let id = local_id(&folder.account_id, EntityKind::Message, &update.remote_id);
-            let Some(was_read) = stored_read_state(&tx, &id)? else {
+            let Some((was_read, was_flagged)) = stored_flags(&tx, &id)? else {
                 continue;
             };
+            if (was_read, was_flagged) == (update.is_read, update.is_flagged) {
+                continue;
+            }
             tx.execute(
                 "UPDATE messages SET is_read = ?2, is_flagged = ?3 WHERE id = ?1",
                 params![id, update.is_read, update.is_flagged],
             )?;
             match (was_read, update.is_read) {
-                (false, true) => outcome.became_read.push(id),
-                (true, false) => outcome.became_unread.push(id),
+                (false, true) => outcome.became_read.push(id.clone()),
+                (true, false) => outcome.became_unread.push(id.clone()),
                 _ => {}
             }
+            reflagged.push(id);
         }
         tx.execute(
             "UPDATE folders SET sync_state = ?2 WHERE id = ?1",
             params![folder.id, batch.sync_state],
         )?;
         tx.commit()?;
+        self.note_changed(
+            outcome
+                .removed
+                .iter()
+                .chain(&outcome.moved_out)
+                .chain(&reflagged),
+        );
         Ok(outcome)
     }
 
@@ -841,6 +917,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        self.note_changed(ids);
         Ok(deltas
             .into_iter()
             .map(|(folder_id, delta)| FolderUnreadDelta { folder_id, delta })
@@ -859,6 +936,7 @@ impl Store {
                 ),
             ),
         )?;
+        self.note_changed(ids);
         Ok(())
     }
 
@@ -914,6 +992,7 @@ impl Store {
             }
         }
         tx.commit()?;
+        self.note_changed([&id.to_owned()]);
         Ok(())
     }
 
@@ -943,25 +1022,50 @@ impl Store {
         }
         delete_message_rows(&tx, ids)?;
         tx.commit()?;
+        self.note_changed(ids);
         Ok(())
     }
 
     // --- rows server search fetched -----------------------------------------
 
+    /// Notes that changes were made to these messages, for the server
+    /// search pages on their way. Called with the connection still locked,
+    /// so a page is stored either before the change or after it is noted.
+    fn note_changed<'a>(&self, ids: impl IntoIterator<Item = &'a String>) {
+        lock_changes(&self.changes).note(ids);
+    }
+
+    /// Marks the start of a server search page, before the server is asked:
+    /// what is changed here from now on wins over what the page brings
+    /// (see [`Store::upsert_search_results`]). Kept until it is stored.
+    pub fn search_page_started(&self) -> SearchPageMark {
+        let mut changes = lock_changes(&self.changes);
+        let seq = changes.seq;
+        *changes.pages.entry(seq).or_default() += 1;
+        SearchPageMark {
+            seq,
+            changes: Arc::clone(&self.changes),
+        }
+    }
+
     /// Stores what a server search found in an account: messages not stored
     /// yet as search results (indexed, outside the sync window, so window
     /// pruning leaves them alone), and search results again, as they are
-    /// now. Messages a sync stored are left to it. Those in folders that
-    /// aren't stored are skipped. Folder counts are left alone: the server's
-    /// already include them. Returns the ids stored, in input order.
+    /// now. Messages a sync stored are left to it, and so are those changed
+    /// here since `page` started (a deleted one stays deleted). Those in
+    /// folders that aren't stored are skipped. Folder counts are left alone:
+    /// the server's already include them. Returns the ids stored, in input
+    /// order.
     pub fn upsert_search_results(
         &self,
         account_id: &str,
         messages: &[MessageSummary],
         now: DateTime<Utc>,
+        page: &SearchPageMark,
     ) -> Result<SearchUpsert> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        let changes = lock_changes(&self.changes);
         let mut result = SearchUpsert::default();
         for m in messages {
             let folder_stored = tx
@@ -982,6 +1086,14 @@ impl Store {
                     |r| r.get(0),
                 )
                 .optional()?;
+            if changes.changed_since(&m.id, page.seq) {
+                // What is stored is newer than the page: still a match if
+                // it is still here.
+                if search_only.is_some() && !result.ids.contains(&m.id) {
+                    result.ids.push(m.id.clone());
+                }
+                continue;
+            }
             if search_only != Some(false) {
                 upsert_summary(&tx, m, Origin::Keep)?;
                 tx.execute(
@@ -1579,7 +1691,12 @@ mod tests {
         let old = old_message(&archive, "old", "Northwind invoice 2023-118");
         let older = old_message(&inbox, "older", "Kickoff notes");
         let stored = store
-            .upsert_search_results("a", &[old.clone(), older.clone(), old.clone()], now)
+            .upsert_search_results(
+                "a",
+                &[old.clone(), older.clone(), old.clone()],
+                now,
+                &store.search_page_started(),
+            )
             .unwrap();
         assert_eq!(
             stored,
@@ -1610,7 +1727,9 @@ mod tests {
             is_read: true,
             ..old.clone()
         };
-        let again = store.upsert_search_results("a", &[moved], later).unwrap();
+        let again = store
+            .upsert_search_results("a", &[moved], later, &store.search_page_started())
+            .unwrap();
         assert_eq!(again.added, 0);
         assert_eq!(
             search_state(&store, &old.id),
@@ -1640,7 +1759,7 @@ mod tests {
             ..synced.clone()
         };
         let stored = store
-            .upsert_search_results("a", &[found], Utc::now())
+            .upsert_search_results("a", &[found], Utc::now(), &store.search_page_started())
             .unwrap();
         assert_eq!(stored.ids, [synced.id.as_str()]);
         assert_eq!(stored.added, 0);
@@ -1670,6 +1789,7 @@ mod tests {
                     old_message(&other_account, "other", "Other"),
                 ],
                 Utc::now(),
+                &store.search_page_started(),
             )
             .unwrap();
         assert_eq!(stored.ids, [kept.id.as_str()]);
@@ -1684,7 +1804,12 @@ mod tests {
         apply(&store, &inbox, upserts(&[&synced]));
         let found = old_message(&inbox, "old", "Old");
         store
-            .upsert_search_results("a", std::slice::from_ref(&found), Utc::now())
+            .upsert_search_results(
+                "a",
+                std::slice::from_ref(&found),
+                Utc::now(),
+                &store.search_page_started(),
+            )
             .unwrap();
         // A window that no longer has the synced one, never had the old one.
         let outcome = apply(
@@ -1715,7 +1840,12 @@ mod tests {
         let deleted = old_message(&inbox, "deleted", "Deleted");
         let renumbered = old_message(&archive, "renumbered", "Renumbered");
         store
-            .upsert_search_results("a", &[deleted.clone(), renumbered.clone()], Utc::now())
+            .upsert_search_results(
+                "a",
+                &[deleted.clone(), renumbered.clone()],
+                Utc::now(),
+                &store.search_page_started(),
+            )
             .unwrap();
         let outcome = apply(
             &store,
@@ -1744,7 +1874,12 @@ mod tests {
         let (store, inbox, _) = setup();
         let found = message(&inbox, "1", "One", false);
         let stored = store
-            .upsert_search_results("a", std::slice::from_ref(&found), Utc::now())
+            .upsert_search_results(
+                "a",
+                std::slice::from_ref(&found),
+                Utc::now(),
+                &store.search_page_started(),
+            )
             .unwrap();
         assert_eq!(stored.added, 1);
         let outcome = apply(&store, &inbox, upserts(&[&found]));
@@ -1760,6 +1895,114 @@ mod tests {
             },
         );
         assert_eq!(outcome.removed, [found.id.as_str()]);
+    }
+
+    /// A page the server answered before a change here, stored after it.
+    #[test]
+    fn a_search_page_older_than_a_change_here_undoes_nothing() {
+        let (store, inbox, archive) = setup();
+        // Moved here under a new id (IMAP): the old id stays gone.
+        let invoice = message(&inbox, "INBOX:2", "Invoice", false);
+        apply(&store, &inbox, upserts(&[&invoice]));
+        let page = store.search_page_started();
+        store
+            .relocate_message(&invoice.id, &archive, Some("Archive:5"))
+            .unwrap();
+        let stored = store
+            .upsert_search_results("a", std::slice::from_ref(&invoice), Utc::now(), &page)
+            .unwrap();
+        assert_eq!((stored.ids.len(), stored.added), (0, 0));
+        assert_eq!(folder_of(&store, &invoice.id), None);
+        assert_eq!(search(&store, "invoice").unwrap().len(), 1);
+
+        // Moved under the same id (Graph), and marked read: it stays where
+        // it went, as it is, and is still a result.
+        let old = old_message(&inbox, "AAMk-old", "Old zebracorn");
+        store
+            .upsert_search_results(
+                "a",
+                std::slice::from_ref(&old),
+                Utc::now(),
+                &store.search_page_started(),
+            )
+            .unwrap();
+        let page = store.search_page_started();
+        store
+            .relocate_message(&old.id, &archive, Some("AAMk-old"))
+            .unwrap();
+        store
+            .set_messages_read(std::slice::from_ref(&old.id), true)
+            .unwrap();
+        let stored = store
+            .upsert_search_results("a", std::slice::from_ref(&old), Utc::now(), &page)
+            .unwrap();
+        assert_eq!(stored.ids, [old.id.as_str()]);
+        let now = store.get_message_summary(&old.id).unwrap();
+        assert_eq!(
+            (now.folder_id.as_str(), now.is_read),
+            (archive.id.as_str(), true)
+        );
+
+        // Deleted, or removed by a sync: not brought back.
+        let deleted = old_message(&inbox, "deleted", "Deleted zebracorn");
+        let removed = old_message(&inbox, "removed", "Removed zebracorn");
+        store
+            .upsert_search_results(
+                "a",
+                &[deleted.clone(), removed.clone()],
+                Utc::now(),
+                &store.search_page_started(),
+            )
+            .unwrap();
+        let page = store.search_page_started();
+        store
+            .delete_messages(std::slice::from_ref(&deleted.id))
+            .unwrap();
+        apply(
+            &store,
+            &inbox,
+            MessageBatch {
+                removed_remote_ids: vec!["removed".into()],
+                ..Default::default()
+            },
+        );
+        let stored = store
+            .upsert_search_results("a", &[deleted.clone(), removed.clone()], Utc::now(), &page)
+            .unwrap();
+        assert!(stored.ids.is_empty());
+        assert_eq!(folder_of(&store, &deleted.id), None);
+        assert_eq!(folder_of(&store, &removed.id), None);
+
+        // A page that started after the change brings what it found.
+        let stored = store
+            .upsert_search_results(
+                "a",
+                std::slice::from_ref(&deleted),
+                Utc::now(),
+                &store.search_page_started(),
+            )
+            .unwrap();
+        assert_eq!(stored.added, 1);
+    }
+
+    #[test]
+    fn changes_are_kept_only_while_a_page_is_on_its_way() {
+        let (store, _, _) = setup();
+        let ids: Vec<String> = (0..3).map(|i| format!("m{i}")).collect();
+        let changed = |store: &Store| lock_changes(&store.changes).changed.len();
+        store.set_messages_flagged(&ids[..1], true).unwrap();
+        assert_eq!(changed(&store), 0);
+        let first = store.search_page_started();
+        store.set_messages_flagged(&ids[..2], true).unwrap();
+        let second = store.search_page_started();
+        store.set_messages_flagged(&ids, true).unwrap();
+        assert_eq!(changed(&store), 3);
+        // The first page done, the second still needs the changes after it.
+        drop(first);
+        assert_eq!(changed(&store), 3);
+        drop(second);
+        assert_eq!(changed(&store), 0);
+        assert!(lock_changes(&store.changes).pages.is_empty());
     }
 
     #[test]
@@ -1780,6 +2023,7 @@ mod tests {
                     &folder.account_id,
                     std::slice::from_ref(&m),
                     now - Duration::days(days_ago),
+                    &store.search_page_started(),
                 )
                 .unwrap();
             m.id

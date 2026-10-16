@@ -56,6 +56,10 @@ pub(crate) struct FakeServer {
     pub server_only: HashMap<String, (String, MessageSummary)>,
     /// Server searches wait for this, when set.
     pub search_gate: Option<Arc<tokio::sync::Notify>>,
+    /// Server searches say when their answer is ready, then wait for
+    /// `search_hold` before giving it, when set.
+    pub search_answered: Option<Arc<tokio::sync::Notify>>,
+    pub search_hold: Option<Arc<tokio::sync::Notify>>,
     /// Server searches of these accounts fail so.
     pub search_failures: HashMap<String, Error>,
     next_uid: u32,
@@ -304,7 +308,41 @@ impl MailProvider for FakeMail {
         if let Some(gate) = gate {
             gate.notified().await;
         }
-        let server = self.server.lock().unwrap();
+        let (page, answered, hold) = {
+            let server = self.server.lock().unwrap();
+            (
+                self.search_page(&server, query, cursor, limit),
+                server.search_answered.clone(),
+                server.search_hold.clone(),
+            )
+        };
+        if let Some(answered) = answered {
+            answered.notify_one();
+        }
+        if let Some(hold) = hold {
+            hold.notified().await;
+        }
+        page
+    }
+
+    async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {
+        if message.reply_to_message_id.is_some() {
+            assert!(original.is_some());
+        }
+        self.server.lock().unwrap().sent.push(message.clone());
+        Ok(())
+    }
+}
+
+impl FakeMail {
+    /// See `search` above.
+    fn search_page(
+        &self,
+        server: &FakeServer,
+        query: &crate::search::SearchQuery,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<crate::providers::SearchPage> {
         if let Some(e) = server.search_failures.get(&self.account_id) {
             return Err(e.clone());
         }
@@ -333,14 +371,6 @@ impl MailProvider for FakeMail {
             messages: found[start..end].to_vec(),
             next: (end < found.len()).then(|| end.to_string()),
         })
-    }
-
-    async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {
-        if message.reply_to_message_id.is_some() {
-            assert!(original.is_some());
-        }
-        self.server.lock().unwrap().sent.push(message.clone());
-        Ok(())
     }
 }
 
@@ -1808,6 +1838,49 @@ async fn stale_search_results_are_pruned_after_sync() {
     assert!(h.service.store().get_message_summary(&fresh).is_ok());
     let inbox_after = inbox(&h, &account);
     assert_eq!(inbox_before.total_count, inbox_after.total_count);
+}
+
+/// The user deletes a message while a server search whose answer lists it
+/// is on its way: the answer, stored after, doesn't bring it back.
+#[tokio::test]
+async fn a_search_answered_before_a_deletion_doesnt_bring_it_back() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let answered = Arc::new(tokio::sync::Notify::new());
+    let hold = Arc::new(tokio::sync::Notify::new());
+    {
+        let mut server = h.server.lock().unwrap();
+        server.search_answered = Some(answered.clone());
+        server.search_hold = Some(hold.clone());
+    }
+    let invoice = local_id(&account.id, EntityKind::Message, "INBOX:2");
+    let search = h.service.search_server("s", "invoice", &account.id, false);
+    let delete = async {
+        answered.notified().await;
+        h.service
+            .delete_messages(std::slice::from_ref(&invoice))
+            .await
+            .unwrap();
+        hold.notify_one();
+    };
+    let (found, ()) = tokio::join!(search, delete);
+    let found = found.unwrap();
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert!(found.message_ids.is_empty(), "{:?}", found.message_ids);
+    // Only its copy in Trash, before and after a sync.
+    let trash = h
+        .service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Trash)
+        .unwrap()
+        .unwrap();
+    for _ in 0..2 {
+        assert!(h.service.store().get_message_summary(&invoice).is_err());
+        let hits = h.service.search_messages("invoice", None, &[]).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].folder_id, trash.id);
+        h.service.sync_account(&account.id).await.unwrap();
+    }
 }
 
 #[tokio::test]

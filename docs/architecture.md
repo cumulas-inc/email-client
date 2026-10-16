@@ -296,7 +296,9 @@ result is a stored message in its folder, which opens, moves and flags like
 any other, and shows in its folder's list too. The sync window's pruning
 (Graph's full resync, IMAP's `retain_only`) leaves these rows alone; a removal
 the server reports deletes them, and so does opening one the server no longer
-has. A sync that sees one takes it over. Otherwise they go 14 days after a
+has. A page stored after a change made here while the server answered (a
+deletion, a move, a flag) leaves that message as it is now. A sync that sees
+one takes it over. Otherwise they go 14 days after a
 search last found them or they were last opened, and beyond 2,000 per account
 (after each sync of the account, even one that fails). Read and flag changes made elsewhere reach them when a
 search next finds them.

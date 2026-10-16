@@ -13,7 +13,7 @@ mod signatures;
 mod tasks;
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use rusqlite::Connection;
@@ -22,12 +22,15 @@ use serde::de::DeserializeOwned;
 
 use crate::error::Result;
 
-pub use mail::{BatchOutcome, FolderUnreadDelta, SearchUpsert};
+pub use mail::{BatchOutcome, FolderUnreadDelta, SearchPageMark, SearchUpsert};
 pub use push::PushSubscription;
 pub use signatures::{StoredOrganizationSignature, StoredSignatures};
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// Messages changed while server search pages were on their way; see
+    /// [`Store::search_page_started`].
+    changes: Arc<Mutex<mail::LocalChanges>>,
 }
 
 impl Store {
@@ -50,6 +53,7 @@ impl Store {
         schema::migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            changes: Arc::default(),
         })
     }
 

@@ -154,6 +154,8 @@ impl CoreService {
             Ok(folders) => folders,
             Err(e) => return Ok(failed(e)),
         };
+        // Changes made here while the server answers win over its answer.
+        let page_mark = self.store.search_page_started();
         let searched = tokio::select! {
             // Dropping the search leaves an IMAP session mid-command
             // unhealthy, so it is replaced before its next use.
@@ -178,10 +180,12 @@ impl CoreService {
         if cancel.is_cancelled() {
             return Ok(answer(ServerSearchStatus::Cancelled, None));
         }
-        let stored = match self
-            .store
-            .upsert_search_results(account_id, &page.messages, Utc::now())
-        {
+        let stored = match self.store.upsert_search_results(
+            account_id,
+            &page.messages,
+            Utc::now(),
+            &page_mark,
+        ) {
             Ok(stored) => stored,
             Err(e) => return Ok(failed(e)),
         };
