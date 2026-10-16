@@ -20,8 +20,9 @@ pub const PUBLISHED_SIGNATURE_CLIENT_ID: &str = "da27f705-3818-4ca0-9b5d-7781405
 /// The variable with the client ID of the signature service's shared app
 /// registration (its Outlook add-in's), whose API the app asks tokens for.
 pub const SIGNATURE_CLIENT_ID_VAR: &str = "CUMULAS_SIGNATURE_CLIENT_ID";
-/// The value of `CUMULAS_SIGNATURE_CLIENT_ID` that turns company signatures
-/// off, in any case. An empty value means "not set" instead, so that a
+/// The value of a client ID variable (`CUMULAS_SIGNATURE_CLIENT_ID`, or
+/// `CUMULAS_MS_CLIENT_ID` at build time) that leaves out its published
+/// default, in any case. An empty value means "not set" instead, so that a
 /// packaging file can list the variable without changing anything.
 pub const NO_CLIENT_ID: &str = "none";
 const BUILT_IN_URL: Option<&str> = option_env!("CUMULAS_SIGNATURE_URL");
