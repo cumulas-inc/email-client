@@ -3,10 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { MockBackend } from "../../api/mock";
+import type { Settings } from "../../api/types";
 import { useAppStore } from "../../app/store";
 import { messageBridgeUrl } from "./bodyHtml";
 import { useMailStore } from "./mailStore";
-import { deferred, folderTree, renderMail, row, setSearch, toolbarButton } from "./testUtils";
+import {
+  deferred,
+  folderTree,
+  renderMail,
+  respondButton,
+  row,
+  setSearch,
+  toolbarButton,
+} from "./testUtils";
 
 // Full-module tests in jsdom; allow for slow, busy CI machines.
 vi.setConfig({ testTimeout: 20_000 });
@@ -35,6 +44,14 @@ function post(data: unknown, source: MessageEventSource | null) {
   act(() => {
     window.dispatchEvent(new MessageEvent("message", { data, source }));
   });
+}
+
+/** How many new documents `frame` has been given since this was called. */
+function documentsGiven(frame: HTMLIFrameElement): () => number {
+  let given = 0;
+  const observer = new MutationObserver((records) => (given += records.length));
+  observer.observe(frame, { attributeFilter: ["srcdoc"] });
+  return () => (given += observer.takeRecords().length);
 }
 
 describe("Mail folders", () => {
@@ -364,6 +381,70 @@ describe("Reading pane", () => {
     key(next.frame, next.channel, { key: "r", code: "KeyR", ctrlKey: true });
     const composer = await screen.findByRole("region", { name: "Reply" });
     expect(within(composer).getByDisplayValue(/^Re: Scheduled maintenance/)).toBeInTheDocument();
+  });
+
+  // A reading font other than the default: the frame's font is built from
+  // the settings, and the frame keeps its document while the reader changes
+  // around it (a new one would reload it, and change its channel).
+  describe.each<[string, Settings["readingFont"], string]>([
+    ["a chosen family", { kind: "family", family: "Literata" }, 'font-family: "Literata"'],
+    ["the interface font", { kind: "interface" }, '@font-face { font-family: "Inter Variable"'],
+  ])("in %s", (_, readingFont, inFrame) => {
+    it("keeps the message's document while the reader changes around it", async () => {
+      const user = userEvent.setup();
+      await renderMail({ settings: { readingFont } });
+      await openMessage(user, CHECKLIST);
+      const title = /^Message: Atlas launch checklist/;
+      await waitFor(() =>
+        expect(screen.getByTitle(title).getAttribute("srcdoc")).toContain(inFrame),
+      );
+      const { frame, channel } = await messageFrame(title);
+      const srcdoc = frame.getAttribute("srcdoc");
+      const given = documentsGiven(frame);
+      const fromFrame = (data: object) => post({ channel, ...data }, frame.contentWindow);
+
+      // Pointing at a link shows where it goes, and keeps showing it.
+      fromFrame({ type: "hover", href: "https://evil.example/login" });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(screen.getByText("https://evil.example/login")).toHaveClass("mail-reader__status");
+
+      // The reader renders again and again: the frame's size, another link.
+      fromFrame({ type: "size", height: 300, wide: false, left: false, right: false });
+      fromFrame({ type: "hover", href: "https://example.org/plan" });
+      fromFrame({ type: "size", height: 412, wide: true, left: false, right: true });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(screen.getByText("https://example.org/plan")).toHaveClass("mail-reader__status");
+      expect(frame.style.height).toBe("428px");
+      expect(screen.getByTitle(title)).toBe(frame);
+      expect(frame.getAttribute("srcdoc")).toBe(srcdoc);
+      expect(given()).toBe(0);
+    });
+
+    it("keeps the original's document under a reply as it's written", async () => {
+      const user = userEvent.setup();
+      await renderMail({ settings: { readingFont } });
+      await openMessage(user, CHECKLIST);
+      await user.click(respondButton("Reply"));
+      const composer = await screen.findByRole("region", { name: "Reply" });
+      // Focused once it's there: typing goes to the subject after that.
+      await within(composer).findByRole("textbox", { name: "Message body" });
+      await waitFor(() =>
+        expect(within(composer).getByTitle("Original message").getAttribute("srcdoc")).toContain(
+          inFrame,
+        ),
+      );
+      const quote = within(composer).getByTitle("Original message") as HTMLIFrameElement;
+      const srcdoc = quote.getAttribute("srcdoc");
+      const given = documentsGiven(quote);
+
+      await user.type(within(composer).getByRole("textbox", { name: "Subject" }), " (agreed)");
+      expect(within(composer).getByRole("textbox", { name: "Subject" })).toHaveValue(
+        "Re: Atlas launch checklist — final review today (agreed)",
+      );
+      expect(within(composer).getByTitle("Original message")).toBe(quote);
+      expect(quote.getAttribute("srcdoc")).toBe(srcdoc);
+      expect(given()).toBe(0);
+    });
   });
 
   it("opens and saves attachments", async () => {

@@ -7,7 +7,7 @@
 // installed, or lacks a letter, reads like the subject above it. Mail that
 // sets its own fonts keeps them: this is only the frame's default.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useSettings } from "../../api/queries";
 import type { Settings } from "../../api/types";
@@ -62,7 +62,11 @@ function loadInterFaces(): Promise<string> {
   return interLoad;
 }
 
-/** The frame's font from the settings; null while Inter's faces load (once). */
+/**
+ * The frame's font from the settings; null while Inter's faces load (once).
+ * The same object until the family or its faces change: a frame's document
+ * is built from it, and a new one would reload the frame on every render.
+ */
 export function useBodyFont(): BodyFont | null {
   const { data: settings } = useSettings();
   const needsInter = needsInterFaces(settings);
@@ -80,5 +84,11 @@ export function useBodyFont(): BodyFont | null {
       live = false;
     };
   }, [needsInter, faces]);
-  return bodyFont(settings, faces);
+  const font = bodyFont(settings, faces);
+  const family = font?.family;
+  const fontFaces = font?.faces;
+  return useMemo(
+    () => (family === undefined || fontFaces === undefined ? null : { family, faces: fontFaces }),
+    [family, fontFaces],
+  );
 }

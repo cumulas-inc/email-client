@@ -60,6 +60,8 @@ export function MessageBody({
 
   // The reading font is only the default: mail that sets its own fonts keeps them.
   const font = useBodyFont();
+  // One document and channel until what they're built from changes (the
+  // font stays the same object until then): a new one reloads the frame.
   const frameDoc = useMemo(() => {
     if (!font) return null;
     const bridge = { url: messageBridgeUrl(), channel: newChannel() };

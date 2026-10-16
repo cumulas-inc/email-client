@@ -1,12 +1,14 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { describe, expect, it } from "vitest";
 
 import { MockBackend } from "../../api/mock";
+import { qk } from "../../api/queries";
 import type { Settings } from "../../api/types";
 import { SANS_STACK, SERIF_STACK } from "../../lib/fonts";
 import { renderWithBackend } from "../../test/render";
-import { bodyFont } from "./bodyFont";
-import { buildSrcDoc, DEFAULT_BODY_FONT } from "./bodyHtml";
+import { bodyFont, useBodyFont } from "./bodyFont";
+import { type BodyFont, buildSrcDoc, DEFAULT_BODY_FONT } from "./bodyHtml";
 import { MessageBody } from "./MessageBody";
 
 const fonts = (interfaceFont: Settings["interfaceFont"], readingFont: Settings["readingFont"]) => ({
@@ -61,6 +63,44 @@ describe("the message frame's font", () => {
     expect(doc).not.toContain("<script>");
     expect(doc.match(/<\/style>/g)).toHaveLength(1);
     expect(doc).toContain('font-family: "\\3c /style\\3e \\3c script\\3e alert(1)');
+  });
+});
+
+describe("useBodyFont", () => {
+  it("gives the same font from render to render, until the settings change it", async () => {
+    const backend = new MockBackend();
+    const settings = {
+      ...(await backend.getSettings()),
+      readingFont: { kind: "family", family: "Literata" } as const,
+    };
+    await backend.updateSettings(settings);
+    const seen: (BodyFont | null)[] = [];
+    let renderAgain = () => {};
+    function Reader() {
+      const [, setRenders] = useState(0);
+      renderAgain = () => setRenders((n) => n + 1);
+      seen.push(useBodyFont());
+      return null;
+    }
+    const { client } = renderWithBackend(<Reader />, { backend });
+    await waitFor(() => expect(seen.at(-1)?.family).toBe(`"Literata", ${SERIF_STACK}`));
+    const font = seen.at(-1);
+    const from = seen.length;
+    act(() => renderAgain());
+    act(() => renderAgain());
+    expect(seen.length).toBeGreaterThan(from);
+    // A frame's document is built from it: a new one would reload the frame.
+    expect(seen.slice(from).every((f) => f === font)).toBe(true);
+
+    act(() => {
+      client.setQueryData(qk.settings(), {
+        ...settings,
+        readingFont: { kind: "family", family: "Gelasio" },
+      });
+    });
+    await waitFor(() =>
+      expect(seen.at(-1)).toEqual({ family: `"Gelasio", ${SERIF_STACK}`, faces: "" }),
+    );
   });
 });
 
