@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
+use chrono::Utc;
 use serde::Serialize;
 
 use super::CoreService;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::html::sanitize_email_html;
 use crate::model::{
     AttachmentMeta, DataKind, EmailAddress, Folder, FolderRole, Message, MessagePage, MessageQuery,
@@ -58,14 +59,6 @@ impl CoreService {
         self.store.list_messages(folder_id, query)
     }
 
-    pub fn search_messages(
-        &self,
-        text: &str,
-        account_id: Option<&str>,
-    ) -> Result<Vec<MessageSummary>> {
-        self.store.search_messages(text, account_id, 200)
-    }
-
     pub fn suggest_addresses(&self, text: &str) -> Result<Vec<EmailAddress>> {
         if text.trim().is_empty() {
             return Ok(Vec::new());
@@ -73,20 +66,36 @@ impl CoreService {
         self.store.suggest_addresses(text.trim(), 8)
     }
 
-    /// Cached content, or fetched from the server and cached.
+    /// Cached content, or fetched from the server and cached. A message the
+    /// server no longer has is removed here too: deletions outside the
+    /// sync window (of messages server search found) are noticed so.
     async fn message_content(&self, summary: &MessageSummary) -> Result<MessageContent> {
         if let Some(content) = self.store.get_message_content(&summary.id)? {
             return Ok(content);
         }
         let folder = self.store.get_folder(&summary.folder_id)?;
         let providers = self.providers_for(&summary.account_id).await?;
-        let content = providers
+        let fetched = providers
             .mail
             .fetch_message(&MessageLocator {
                 folder_remote_id: folder.remote_id,
                 remote_id: summary.remote_id.clone(),
             })
-            .await?;
+            .await;
+        let content = match fetched {
+            Ok(content) => content,
+            Err(e) if e.code == ErrorCode::NotFound => {
+                let gone = [summary.id.clone()];
+                self.store.delete_messages(&gone)?;
+                self.sink.mail_settled(&gone);
+                self.notify(&[DataKind::Mail], Some(&summary.account_id));
+                return Err(Error::new(
+                    ErrorCode::NotFound,
+                    "This message is no longer on the server.",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
         self.store.save_message_content(&summary.id, &content)?;
         Ok(content)
     }
@@ -95,6 +104,8 @@ impl CoreService {
     /// `allow_remote` is set or the settings allow it for this sender.
     pub async fn get_message(&self, id: &str, allow_remote: bool) -> Result<Message> {
         let summary = self.store.get_message_summary(id)?;
+        // A search result opened is kept longer.
+        self.store.touch_search_result(id, Utc::now())?;
         let content = self.message_content(&summary).await?;
         let allow_remote = allow_remote || self.remote_content_allowed(&summary)?;
         let sanitized = content

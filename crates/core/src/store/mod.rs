@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::Result;
 
-pub use mail::{BatchOutcome, FolderUnreadDelta};
+pub use mail::{BatchOutcome, FolderUnreadDelta, SearchUpsert};
 pub use push::PushSubscription;
 pub use signatures::{StoredOrganizationSignature, StoredSignatures};
 

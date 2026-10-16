@@ -15,12 +15,13 @@ pub mod imap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{
     AttachmentMeta, Calendar, Contact, ContactDraft, EmailAddress, Event, EventDraft,
     EventResponse, Folder, Message, MessageSummary, OutgoingMessage, Task, TaskDraft, TaskList,
     TaskPatch,
 };
+use crate::search::SearchQuery;
 
 /// Where a message lives on the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,17 +57,30 @@ pub struct MessageBatch {
     pub flag_updates: Vec<FlagUpdate>,
     /// Remote ids of messages that disappeared from the folder.
     pub removed_remote_ids: Vec<String>,
-    /// When set, the complete list of remote ids currently in the folder: any
-    /// stored message of the folder not listed is removed. Lets providers that
-    /// cannot report deletions (IMAP without QRESYNC) reconcile cheaply.
+    /// When set, the complete list of remote ids currently in the folder
+    /// within the sync window: any stored message of the folder not listed is
+    /// removed, but for messages server search fetched from outside it. Lets
+    /// providers that cannot report deletions (IMAP without QRESYNC)
+    /// reconcile cheaply.
     pub retain_only: Option<Vec<String>>,
     /// When true, `upserts` is the complete content of the folder within the
     /// sync window and anything else stored locally for it must be dropped
-    /// (e.g. IMAP UIDVALIDITY changed or a Graph delta token expired).
+    /// (e.g. IMAP UIDVALIDITY changed or a Graph delta token expired), but
+    /// for messages server search fetched from outside the window.
     pub full_resync: bool,
     /// Opaque provider cursor to pass to the next sync of this folder
     /// (Graph `@odata.deltaLink`, IMAP `uidvalidity:uidnext:modseq`, ...).
     pub sync_state: Option<String>,
+    /// Messages that left this folder for another folder of the account,
+    /// with `folder_id` naming the one they are in now (Graph reports a move
+    /// out as a removal; the provider looks such removals up). A stored copy
+    /// still in this folder moves there, keeping its fetched body; one whose
+    /// destination isn't stored is removed; others are ignored (never
+    /// inserted).
+    pub moved_out: Vec<MessageSummary>,
+    /// With `full_resync`: the folder's remote ids were reassigned (IMAP
+    /// UIDVALIDITY changed), so rows server search fetched go too.
+    pub ids_reassigned: bool,
 }
 
 /// A folder's message counts as the server reports them.
@@ -74,6 +88,16 @@ pub struct MessageBatch {
 pub struct FolderCounts {
     pub unread: u32,
     pub total: u32,
+}
+
+/// One page of a server-side search.
+#[derive(Debug, Clone, Default)]
+pub struct SearchPage {
+    /// Matches on this page, newest first, with `folder_id` set to the local
+    /// id of the folder each is in (it may name a folder that isn't stored).
+    pub messages: Vec<MessageSummary>,
+    /// Opaque cursor for the next page; `None` when there is none.
+    pub next: Option<String>,
 }
 
 /// Body and full headers of a message, as fetched from the server.
@@ -139,6 +163,21 @@ pub trait MailProvider: Send + Sync {
     /// forwarded, if any, so threading headers can be set. The provider is
     /// responsible for leaving a copy in the Sent folder.
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()>;
+
+    /// Searches the whole mailbox on the server, at most `limit` messages a
+    /// page. `folders` are the account's stored folders, well-known ones
+    /// first. `cursor` continues a previous page.
+    async fn search(
+        &self,
+        _query: &SearchQuery,
+        _folders: &[Folder],
+        _cursor: Option<&str>,
+        _limit: u32,
+    ) -> Result<SearchPage> {
+        Err(Error::unsupported(
+            "This account can't be searched on the server.",
+        ))
+    }
 }
 
 /// A Microsoft Graph change subscription, as Graph lists it.

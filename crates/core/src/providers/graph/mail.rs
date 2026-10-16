@@ -25,8 +25,10 @@ use crate::model::{
     OutgoingMessage, ReplyKind, local_id,
 };
 use crate::providers::{
-    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow,
+    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SearchPage,
+    SyncWindow,
 };
+use crate::search::{SearchQuery, kql};
 
 const FOLDER_FIELDS: &str =
     "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
@@ -50,6 +52,9 @@ const WELL_KNOWN_FOLDERS: &[(&str, FolderRole)] = &[
 
 /// Outlook allows four concurrent requests per mailbox.
 const CONCURRENCY: usize = 4;
+/// Removals a delta sync looks up to tell moves from deletions (three JSON
+/// batches); a bulk delete doesn't fan out into hundreds of lookups.
+const MAX_MOVE_LOOKUPS: usize = 60;
 const PREVIEW_CHARS: usize = 200;
 
 /// Inline images up to this size are embedded as `data:` URIs.
@@ -106,6 +111,8 @@ struct GraphMessage {
     is_draft: Option<bool>,
     has_attachments: Option<bool>,
     importance: Option<String>,
+    /// Only where asked for.
+    parent_folder_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +267,7 @@ struct Delta {
 struct Changes {
     upserts: Vec<MessageSummary>,
     removed: Vec<String>,
+    moved_out: Vec<MessageSummary>,
 }
 
 /// Delta tokens expire (410 Gone, or a `syncStateNotFound`-style code); the
@@ -455,6 +463,172 @@ impl GraphProvider {
             }
         }
         Ok(changes)
+    }
+
+    /// Looks up the messages a delta reported removed from `folder`: delta
+    /// says "deleted" for a move out too. One found in another folder moved
+    /// there, one found in this folder is back, one not found is gone.
+    /// Removals beyond [`MAX_MOVE_LOOKUPS`], or that can't be looked up,
+    /// stay removals; the store only removes those still in this folder.
+    async fn find_moves(&self, folder: &Folder, changes: &mut Changes) {
+        let lookups: Vec<String> = changes
+            .removed
+            .iter()
+            .take(MAX_MOVE_LOOKUPS)
+            .cloned()
+            .collect();
+        if lookups.is_empty() {
+            return;
+        }
+        let requests: Vec<_> = lookups
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                BatchRequest::get(
+                    i,
+                    format!(
+                        "/me/messages/{}?$select={SUMMARY_FIELDS},parentFolderId",
+                        segment(id)
+                    ),
+                )
+            })
+            .collect();
+        let mut responses = match self.client.batch(&requests, &[PREFER_IMMUTABLE_ID]).await {
+            Ok(responses) => responses,
+            Err(e) => {
+                tracing::debug!("looking up removed messages failed: {}", Error::from(e));
+                return;
+            }
+        };
+        let mut removed = Vec::new();
+        for (i, id) in lookups.into_iter().enumerate() {
+            let found = responses
+                .remove(&i.to_string())
+                .filter(|r| {
+                    if !r.is_success() && r.status() != StatusCode::NOT_FOUND {
+                        tracing::debug!("looking up a removed message returned {}", r.status());
+                    }
+                    r.is_success()
+                })
+                .and_then(|r| r.json::<GraphMessage>().ok());
+            let Some(message) = found else {
+                removed.push(id);
+                continue;
+            };
+            let in_folder = match message.parent_folder_id.as_deref() {
+                Some(parent) if parent == folder.remote_id => folder.id.clone(),
+                Some(parent) => local_id(&self.account_id, EntityKind::Folder, parent),
+                None => {
+                    removed.push(id);
+                    continue;
+                }
+            };
+            match message.into_summary(&self.account_id, &in_folder) {
+                Some(summary) if in_folder == folder.id => changes.upserts.push(summary),
+                Some(summary) => changes.moved_out.push(summary),
+                None => removed.push(id),
+            }
+        }
+        removed.extend(changes.removed.drain(..).skip(MAX_MOVE_LOOKUPS));
+        changes.removed = removed;
+    }
+
+    /// One page of a search of the whole mailbox; see
+    /// [`MailProvider::search`]. `cursor` is Graph's `@odata.nextLink`.
+    async fn search_page(
+        &self,
+        query: &SearchQuery,
+        folders: &[Folder],
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<SearchPage> {
+        let url = match cursor {
+            Some(link) => link.to_owned(),
+            None => {
+                let Some(kql) = kql::kql(query) else {
+                    return Ok(SearchPage::default());
+                };
+                // Graph refuses `$orderby` and `$filter` with `$search`; it
+                // sorts by date sent itself.
+                self.client.url_with_query(
+                    "/me/messages",
+                    &[
+                        ("$search", &kql::search_param(&kql)),
+                        ("$select", &format!("{SUMMARY_FIELDS},parentFolderId")),
+                        ("$top", &limit.to_string()),
+                    ],
+                )
+            }
+        };
+        // Refuses a cursor that isn't a link to Graph, so the token stays.
+        let page: Page<GraphMessage> = self.client.get_page(&url, &[PREFER_IMMUTABLE_ID]).await?;
+        let stored: HashSet<&str> = folders.iter().map(|f| f.remote_id.as_str()).collect();
+        let mut unknown: Vec<&str> = page
+            .value
+            .iter()
+            .filter_map(|m| m.parent_folder_id.as_deref())
+            .filter(|id| !stored.contains(id))
+            .collect();
+        unknown.sort_unstable();
+        unknown.dedup();
+        let aliases = self.stored_folder_aliases(&unknown, &stored).await;
+        let mut messages: Vec<MessageSummary> = Vec::with_capacity(page.value.len());
+        for message in page.value {
+            let Some(parent) = message.parent_folder_id.clone() else {
+                continue;
+            };
+            let parent = aliases.get(&parent).cloned().unwrap_or(parent);
+            let folder_id = local_id(&self.account_id, EntityKind::Folder, &parent);
+            messages.extend(message.into_summary(&self.account_id, &folder_id));
+        }
+        messages.sort_by_key(|m| std::cmp::Reverse(m.received_at));
+        Ok(SearchPage {
+            messages,
+            next: page.next_link,
+        })
+    }
+
+    /// Of folder ids that aren't the stored folders' own, those that name a
+    /// stored folder another way, mapped to its id: asked of Graph, which
+    /// answers with the canonical id. Lookups that fail map nothing.
+    async fn stored_folder_aliases(
+        &self,
+        ids: &[&str],
+        stored: &HashSet<&str>,
+    ) -> HashMap<String, String> {
+        let mut aliases = HashMap::new();
+        if ids.is_empty() {
+            return aliases;
+        }
+        let requests: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                BatchRequest::get(i, format!("/me/mailFolders/{}?$select=id", segment(id)))
+            })
+            .collect();
+        let mut responses = match self.client.batch(&requests, &[PREFER_IMMUTABLE_ID]).await {
+            Ok(responses) => responses,
+            Err(e) => {
+                tracing::debug!(
+                    "looking up folders of search results failed: {}",
+                    Error::from(e)
+                );
+                return aliases;
+            }
+        };
+        for (i, id) in ids.iter().enumerate() {
+            if let Some(folder) = responses
+                .remove(&i.to_string())
+                .filter(BatchResponse::is_success)
+                .and_then(|r| r.json::<IdOnly>().ok())
+                && folder.id != *id
+                && stored.contains(folder.id.as_str())
+            {
+                aliases.insert((*id).to_owned(), folder.id);
+            }
+        }
+        aliases
     }
 
     async fn full_sync(&self, folder: &Folder, window: SyncWindow) -> Result<MessageBatch> {
@@ -804,10 +978,12 @@ impl MailProvider for GraphProvider {
         if let Some(link) = sync_state.filter(|l| self.client.is_own_link(l)) {
             match self.read_delta(link).await {
                 Ok(delta) => {
-                    let changes = self.resolve(folder, delta.items).await?;
+                    let mut changes = self.resolve(folder, delta.items).await?;
+                    self.find_moves(folder, &mut changes).await;
                     return Ok(MessageBatch {
                         upserts: changes.upserts,
                         removed_remote_ids: changes.removed,
+                        moved_out: changes.moved_out,
                         sync_state: Some(delta.delta_link),
                         ..Default::default()
                     });
@@ -951,6 +1127,16 @@ impl MailProvider for GraphProvider {
         self.per_message(messages, "POST", "/permanentDelete", None, true)
             .await?;
         Ok(())
+    }
+
+    async fn search(
+        &self,
+        query: &SearchQuery,
+        folders: &[Folder],
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<SearchPage> {
+        self.search_page(query, folders, cursor, limit).await
     }
 
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {

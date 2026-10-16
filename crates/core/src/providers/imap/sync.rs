@@ -60,10 +60,10 @@ impl Cursor {
     }
 }
 
-/// The folder being synced.
-struct Target<'a> {
-    folder: &'a Folder,
-    uid_validity: u32,
+/// The folder being synced (or searched).
+pub(super) struct Target<'a> {
+    pub folder: &'a Folder,
+    pub uid_validity: u32,
 }
 
 impl Target<'_> {
@@ -89,7 +89,13 @@ pub(super) async fn sync_folder(
         .filter(|c| c.uid_validity == info.uid_validity)
     {
         Some(previous) => incremental_sync(session, &target, &info, previous, window).await,
-        None => full_sync(session, &target, &info, window).await,
+        None => {
+            let mut batch = full_sync(session, &target, &info, window).await?;
+            // Synced before under other UIDs: the ids of rows server search
+            // fetched, made of the old ones, are stale too.
+            batch.ids_reassigned = state.is_some();
+            Ok(batch)
+        }
     }
 }
 
@@ -214,7 +220,7 @@ fn imap_date(instant: DateTime<Utc>) -> String {
 }
 
 /// Fetches summaries (headers, flags, structure and preview) for `uids`.
-async fn fetch_summaries(
+pub(super) async fn fetch_summaries(
     session: &mut ImapSession,
     target: &Target<'_>,
     uids: &[u32],

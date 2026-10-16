@@ -8,7 +8,7 @@ use cumulas_core::model::{
     Account, AccountSignature, ActiveReminder, Calendar, ComposeSignature, Contact, ContactDraft,
     EmailAddress, Event, EventDraft, EventResponse, Folder, ImapAccountUpdate, Message,
     MessagePage, MessageQuery, MessageSummary, NewImapAccount, OutgoingMessage, ReplyKind,
-    Settings, Snooze, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
+    ServerSearchResult, Settings, Snooze, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::push::PushStatus;
 use cumulas_core::service::builtin_microsoft_client_id;
@@ -22,6 +22,14 @@ use crate::AppState;
 use crate::desktop::background::{self, BackgroundState};
 use crate::desktop::router::Navigate;
 use crate::desktop::{self as desktop_shell, Desktop, notify, tray};
+
+/// Runs store work off the main thread and off the async workers: a sync
+/// holding the store lock must not freeze the window.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| Error::internal(format!("background task failed: {e}")))?
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,8 +94,9 @@ pub fn quit_canceled(desktop: State<'_, Desktop>) {
 // --- accounts & settings ------------------------------------------------------
 
 #[tauri::command]
-pub fn list_accounts(state: State<'_, AppState>) -> Result<Vec<Account>> {
-    state.service.list_accounts()
+pub async fn list_accounts(state: State<'_, AppState>) -> Result<Vec<Account>> {
+    let service = state.service.clone();
+    blocking(move || service.list_accounts()).await
 }
 
 #[tauri::command]
@@ -161,8 +170,9 @@ pub async fn remove_account(state: State<'_, AppState>, account_id: String) -> R
 }
 
 #[tauri::command]
-pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
-    state.service.get_settings()
+pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
+    let service = state.service.clone();
+    blocking(move || service.get_settings()).await
 }
 
 /// Installed font families for the font settings (scanned once, then cached).
@@ -218,15 +228,17 @@ pub fn sync_all(state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-pub fn get_sync_statuses(state: State<'_, AppState>) -> Result<Vec<SyncStatus>> {
-    state.service.sync_statuses()
+pub async fn get_sync_statuses(state: State<'_, AppState>) -> Result<Vec<SyncStatus>> {
+    let service = state.service.clone();
+    blocking(move || service.sync_statuses()).await
 }
 
 /// How each account hears about new mail; changes arrive as `push-status`
 /// events.
 #[tauri::command]
-pub fn get_push_statuses(state: State<'_, AppState>) -> Result<Vec<PushStatus>> {
-    state.service.push_statuses()
+pub async fn get_push_statuses(state: State<'_, AppState>) -> Result<Vec<PushStatus>> {
+    let service = state.service.clone();
+    blocking(move || service.push_statuses()).await
 }
 
 // --- desktop --------------------------------------------------------------------
@@ -276,8 +288,9 @@ pub fn take_pending_navigation(desktop: State<'_, Desktop>) -> Option<Navigate> 
 
 /// The reminders due now, or snoozed.
 #[tauri::command]
-pub fn list_active_reminders(state: State<'_, AppState>) -> Result<Vec<ActiveReminder>> {
-    state.service.list_active_reminders()
+pub async fn list_active_reminders(state: State<'_, AppState>) -> Result<Vec<ActiveReminder>> {
+    let service = state.service.clone();
+    blocking(move || service.list_active_reminders()).await
 }
 
 /// Snoozes a reminder for `minutes`, or until `until`; its notification
@@ -330,11 +343,12 @@ pub async fn dismiss_reminders(
 /// The account's own signature and what its organization last said about
 /// its own; changes arrive as `data-changed` events with `signatures`.
 #[tauri::command]
-pub fn get_account_signature(
+pub async fn get_account_signature(
     state: State<'_, AppState>,
     account_id: String,
 ) -> Result<AccountSignature> {
-    state.service.get_account_signature(&account_id)
+    let service = state.service.clone();
+    blocking(move || service.get_account_signature(&account_id)).await
 }
 
 /// Saves the account's own signature, sanitized; more than 512 KB is
@@ -384,26 +398,68 @@ pub async fn get_compose_signature(
 // --- mail -----------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_folders(state: State<'_, AppState>, account_id: Option<String>) -> Result<Vec<Folder>> {
-    state.service.list_folders(account_id.as_deref())
+pub async fn list_folders(
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+) -> Result<Vec<Folder>> {
+    let service = state.service.clone();
+    blocking(move || service.list_folders(account_id.as_deref())).await
 }
 
 #[tauri::command]
-pub fn list_messages(
+pub async fn list_messages(
     state: State<'_, AppState>,
     folder_id: String,
     query: MessageQuery,
 ) -> Result<MessagePage> {
-    state.service.list_messages(&folder_id, &query)
+    let service = state.service.clone();
+    blocking(move || service.list_messages(&folder_id, &query)).await
 }
 
+/// Messages on this device matching `text` (operators such as `from:`
+/// included), and the messages `includeIds` names: those server searches
+/// found. Newest first.
 #[tauri::command]
-pub fn search_messages(
+pub async fn search_messages(
     state: State<'_, AppState>,
     text: String,
     account_id: Option<String>,
+    include_ids: Option<Vec<String>>,
 ) -> Result<Vec<MessageSummary>> {
-    state.service.search_messages(&text, account_id.as_deref())
+    let service = state.service.clone();
+    blocking(move || {
+        service.search_messages(
+            &text,
+            account_id.as_deref(),
+            include_ids.as_deref().unwrap_or_default(),
+        )
+    })
+    .await
+}
+
+/// Searches one account's whole mailbox on its server (the first page, or
+/// the next with `more`) and stores what it finds. A new `searchId`
+/// cancels the previous search. The server's failures come back in the
+/// result; only an unknown account or a bad search id is an error.
+#[tauri::command]
+pub async fn search_server(
+    state: State<'_, AppState>,
+    search_id: String,
+    text: String,
+    account_id: String,
+    more: Option<bool>,
+) -> Result<ServerSearchResult> {
+    state
+        .service
+        .search_server(&search_id, &text, &account_id, more.unwrap_or(false))
+        .await
+}
+
+/// Cancels the server search if it is the current one. Only takes the
+/// search registry's lock, never the store's.
+#[tauri::command]
+pub fn cancel_server_search(state: State<'_, AppState>, search_id: String) {
+    state.service.cancel_server_search(&search_id);
 }
 
 #[tauri::command]
@@ -465,8 +521,12 @@ pub async fn send_message(state: State<'_, AppState>, message: OutgoingMessage) 
 }
 
 #[tauri::command]
-pub fn suggest_addresses(state: State<'_, AppState>, text: String) -> Result<Vec<EmailAddress>> {
-    state.service.suggest_addresses(&text)
+pub async fn suggest_addresses(
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<Vec<EmailAddress>> {
+    let service = state.service.clone();
+    blocking(move || service.suggest_addresses(&text)).await
 }
 
 /// Strips anything that could make an attachment name escape its directory.
@@ -548,20 +608,20 @@ pub async fn open_attachment(
 // --- calendar -------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_calendars(state: State<'_, AppState>) -> Result<Vec<Calendar>> {
-    state.service.list_calendars()
+pub async fn list_calendars(state: State<'_, AppState>) -> Result<Vec<Calendar>> {
+    let service = state.service.clone();
+    blocking(move || service.list_calendars()).await
 }
 
 #[tauri::command]
-pub fn list_events(
+pub async fn list_events(
     state: State<'_, AppState>,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     calendar_ids: Option<Vec<String>>,
 ) -> Result<Vec<Event>> {
-    state
-        .service
-        .list_events(start, end, calendar_ids.as_deref())
+    let service = state.service.clone();
+    blocking(move || service.list_events(start, end, calendar_ids.as_deref())).await
 }
 
 #[tauri::command]
@@ -609,14 +669,13 @@ pub async fn respond_to_event(
 // --- contacts -------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_contacts(
+pub async fn list_contacts(
     state: State<'_, AppState>,
     account_id: Option<String>,
     text: Option<String>,
 ) -> Result<Vec<Contact>> {
-    state
-        .service
-        .list_contacts(account_id.as_deref(), text.as_deref())
+    let service = state.service.clone();
+    blocking(move || service.list_contacts(account_id.as_deref(), text.as_deref())).await
 }
 
 #[tauri::command]
@@ -641,19 +700,19 @@ pub async fn delete_contact(state: State<'_, AppState>, contact_id: String) -> R
 // --- tasks ----------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_task_lists(state: State<'_, AppState>) -> Result<Vec<TaskList>> {
-    state.service.list_task_lists()
+pub async fn list_task_lists(state: State<'_, AppState>) -> Result<Vec<TaskList>> {
+    let service = state.service.clone();
+    blocking(move || service.list_task_lists()).await
 }
 
 #[tauri::command]
-pub fn list_tasks(
+pub async fn list_tasks(
     state: State<'_, AppState>,
     list_id: Option<String>,
     include_completed: bool,
 ) -> Result<Vec<Task>> {
-    state
-        .service
-        .list_tasks(list_id.as_deref(), include_completed)
+    let service = state.service.clone();
+    blocking(move || service.list_tasks(list_id.as_deref(), include_completed)).await
 }
 
 #[tauri::command]
