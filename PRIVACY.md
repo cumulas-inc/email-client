@@ -17,7 +17,10 @@ _Last updated: October 16, 2026._
 
 - **A copy of your mail, calendar, contacts and tasks**, so that lists and
   search work instantly and offline. It's in a database in the app's data
-  folder, `~/.local/share/co.cumulas.Mail/`, along with your settings. For
+  folder, `~/.local/share/co.cumulas.Mail/`, along with your settings. Older
+  messages that a search of your whole mailbox finds on the server are kept
+  there too, so that they open like the rest, until 14 days after a search
+  last found them or you last opened them (at most 2,000 per account). For
   reminders, the same database keeps which ones went off and which you
   snoozed or dismissed (forgotten after 30 days), and, for Microsoft
   accounts, the reminder times Microsoft reports.
@@ -87,6 +90,10 @@ accounts use:
 - **IMAP accounts**: the IMAP and SMTP servers you set up, with the password
   you gave. To show new mail within seconds, the app keeps a second
   connection open to your IMAP server (IMAP IDLE).
+
+When you search your mail, the words you type go to the mail servers of your
+accounts (Microsoft, or your IMAP server), so that each can search your whole
+mailbox, and never to Cumulas.
 
 Pictures and other content from the internet in messages are blocked unless
 you allow them, because loading them can tell senders when and where you

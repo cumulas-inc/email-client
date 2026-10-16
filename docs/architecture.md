@@ -20,7 +20,8 @@ system webview (WebKitGTK on Linux).
 │  push/      IMAP IDLE/NOTIFY watchers, the push service client     │
 │  reminders/ which reminders are due (a pure planner)               │
 │  signatures/ company signatures (Cumulas Signatures client)        │
-│  store/     SQLite cache (+ FTS5 search)                           │
+│  store/     SQLite cache (+ FTS5 full-text indexes)                │
+│  search/    the search language, for FTS5, Graph KQL, IMAP SEARCH  │
 │  providers/ MailProvider · CalendarProvider · ContactsProvider ·   │
 │             TasksProvider                                          │
 │     ├─ graph/  Microsoft 365 & Outlook.com (Microsoft Graph)       │
@@ -36,7 +37,14 @@ system webview (WebKitGTK on Linux).
 - **The UI reads only from the local cache.** Lists and searches are instant
   and work offline. The sync engine (`service/sync.rs`) refreshes the cache in
   the background and emits `data-changed` events; the UI invalidates the
-  matching React Query keys (every key starts with a `DataKind`).
+  matching React Query keys (every key starts with a `DataKind`). The one
+  call that asks a server is searching the whole mailbox
+  ([Search](#search)), and even that stores what it finds in the cache, which
+  the UI then reads like any other message.
+- **Store reads stay off the main thread.** Commands that read the store are
+  `async` and do it on the blocking pool (`blocking` in
+  `src-tauri/src/commands.rs`): a sync holding the store's lock makes them
+  wait, never the window.
 - **Writes go to the server first**, then to the cache, so the cache never
   shows something the server rejected. The UI may update optimistically.
 - **One provider trait per domain.** Microsoft accounts implement all four
@@ -46,7 +54,11 @@ system webview (WebKitGTK on Linux).
 - **Local ids.** Every entity has a stable local id derived from
   `(account, kind, remote id)` (`model::local_id`). The UI only uses local ids.
   Graph requests use immutable ids (`Prefer: IdType="ImmutableId"`) so messages
-  keep their id when moved.
+  keep their id when moved. Graph's delta reports a move out of a folder as a
+  removal, as it does a deletion, so the provider looks removals up (60 per
+  sync at most) and reports the moved ones in `MessageBatch::moved_out`: the
+  row moves with its fetched body. A removal only deletes a row still in the
+  folder that reported it.
 - **Errors are typed.** Rust `Error { code, message, details }` is serialized
   to the UI as-is; the UI branches on `code` (e.g. `adminConsentRequired`).
 - **The core does not depend on Tauri** and is tested headless with fakes
@@ -239,6 +251,65 @@ already, so a kept company signature and the relay never make two. A relay
 that signs on send puts its signature just before `cumulas-quote`, outside
 the letter's block.
 
+## Search
+
+The search box looks in two places at once: the mail on this device, at once
+and offline, and each account's whole mailbox on its server, whose finds come
+in after.
+
+**The query** (`crates/core/src/search`): one parser for words, `"phrases"`,
+`from:`, `to:`, `cc:`, `subject:`, `body:` and `has:attachment`. Anything else
+is a word, and no input is an error (at most 16 terms). It becomes:
+
+- for the device (`fts.rs`), FTS5 matches on two indexes keyed by
+  `messages.fts_rowid`, a rowid each message row keeps, so indexing or
+  removing a message is a rowid lookup, never a scan; a trigger on `messages`
+  removes a message's index rows, also on cascades. `messages_fts` has the
+  subject, sender, To, Cc and body (a message's text once it's been opened, its
+  preview before) and matches words by their start; `messages_infix`, a
+  trigram index of subjects and senders, matches inside words from 3
+  characters ("voice" finds "Invoice");
+- for Microsoft Graph (`kql.rs`), KQL for `$search`: words as prefixes
+  (`invoi*`), matched in the sender, subject and body;
+- for IMAP (`imap.rs`), `UID SEARCH` keys (`TEXT`, `FROM`, `SUBJECT`…, which
+  match substrings), with `CHARSET UTF-8` and literals only when a word isn't
+  ASCII.
+
+The browser demo's backend (`src/api/mock/searchQuery.ts`) ports the parser
+and the local matching, tested on the same cases, so the UI's tests search the
+way the app does.
+
+**On the server** (`MailProvider::search`, `service/search.rs`):
+`search_server` asks one account for one page (50 messages) at a time. Graph
+searches every folder with `GET /me/messages?$search=` (which takes no
+`$filter` or `$orderby`) and pages by its own next links; IMAP searches each
+folder in turn, keeps the newest 200 matches of each (2,000 in all) and
+pages through them by date. A search id names the search over every account:
+a new one cancels the one before, whose pending calls come back `cancelled`
+and store nothing. A page may take 45 seconds. An account's failure comes back
+in its result, never as an error, so it doesn't hide the others' results or
+the device's.
+
+**What it finds is stored**, as rows marked `search_only`, and returned as
+local ids. The UI passes them to the local search (`includeIds`), so every
+result is a stored message in its folder, which opens, moves and flags like
+any other, and shows in its folder's list too. The sync window's pruning
+(Graph's full resync, IMAP's `retain_only`) leaves these rows alone; a removal
+the server reports deletes them, and so does opening one the server no longer
+has. A sync that sees one takes it over. Otherwise they go 14 days after a
+search last found them or they were last opened, and beyond 2,000 per account
+(after each sync). Read and flag changes made elsewhere reach them when a
+search next finds them.
+
+**In the UI** (`modules/mail/serverSearch.ts`, `MessageList.tsx`): the local
+search runs 150 ms after typing stops, the servers are asked after 600 ms.
+The server search's state is kept out of React Query, so the `data-changed`
+of every sync doesn't ask the servers again; the local search's key carries
+how many server hits it includes. "Searching your whole mailbox…" shows while
+servers answer (never "No results"), a failed account gets a row with Try
+again, and "Show more results" asks for the next pages. The Unread and Flagged
+filters apply to results too, and say so when they hide some.
+
 ## Security
 
 - Email HTML is sanitized in Rust (`html.rs`: no scripts, event handlers,
@@ -295,7 +366,9 @@ when it is blocked the app shows an admin-consent link to forward to IT. See
 ## Adding a provider
 
 1. Implement the relevant traits from `crates/core/src/providers/mod.rs`,
-   deriving local ids with `model::local_id`.
+   deriving local ids with `model::local_id`. `MailProvider::search` is
+   optional: without it, an account's server search fails with a message,
+   and its local search still works.
 2. Return a `ProviderSet` for the new account kind from
    `service/connector.rs`.
 3. Add the account kind to `model::AccountSettings` and to `src/api/types.ts`.

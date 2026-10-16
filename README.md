@@ -35,9 +35,18 @@ reviewers. See [Self-hosted repository](packaging/flatpak/README.md#self-hosted-
 
 - **Mail**: folders and favorites, unified inbox, reading pane (right,
   bottom or off), rich-text compose with attachments,
-  reply/reply all/forward, flag, archive, move (drag and drop), undo, instant
-  offline search, and the keyboard shortcuts people switching from other mail
-  clients expect (Ctrl+R, Ctrl+Shift+R, Ctrl+F, Ctrl+Q or Q to mark read…).
+  reply/reply all/forward, flag, archive, move (drag and drop), undo, and the
+  keyboard shortcuts people switching from other mail clients expect (Ctrl+R,
+  Ctrl+Shift+R, Ctrl+F, Ctrl+Q or Q to mark read…).
+- **Search**: instant and offline in the mail on your computer, and across
+  each account's whole mailbox on its server, in every folder and however
+  old, with what the server finds added as it comes (newest first, 50 at a
+  time). Words match by their start (and inside subjects and senders);
+  `"exact phrases"`, `from:`, `to:`, `cc:`, `subject:`, `body:` and
+  `has:attachment` narrow it down. Messages found on the server open, move
+  and flag like any other. On your computer, a message's text is searched
+  once you've opened it (its preview before that); Gmail's All Mail folder
+  isn't searched on the server.
 - **Signatures**: a signature of your own for each account and, for
   Microsoft 365 work and school accounts whose organization uses Cumulas
   Signatures, the company signature, added automatically with nothing to set
@@ -119,8 +128,9 @@ CI runs all of these, plus a Flatpak build.
 
 ## Before release
 
-- Test sign-in, instant updates and company signatures against real
-  Microsoft 365 and Outlook.com accounts.
+- Test sign-in, instant updates, company signatures and searching the whole
+  mailbox (prefix words such as `invoi`, `from:` with part of a name) against
+  real Microsoft 365 and Outlook.com accounts.
 - Make the repository or the screenshots public for the Flathub listing.
 - Finish [setting up the self-hosted Flatpak repository](packaging/flatpak/README.md#setting-it-up)
   before the first release tag: the signing key, DNS and GitHub Pages are
@@ -137,7 +147,8 @@ CI runs all of these, plus a Flatpak build.
 
 Not built yet: saving drafts to the server, conversation threading, recurring
 event editing (single occurrence vs series), CalDAV/CardDAV for IMAP accounts,
-`mailto:` handling, and OAuth for Gmail/Yahoo IMAP (app passwords work today).
+`mailto:` handling, OAuth for Gmail/Yahoo IMAP (app passwords work today), and
+`OR`, `NOT` and dates in searches.
 
 ## License
 

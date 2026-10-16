@@ -16,16 +16,16 @@ All permissions are **delegated** (the app acts as the signed-in user, never
 on behalf of the whole organization) and are ones Microsoft lets users grant
 themselves by default:
 
-| Permission                                | Used for                                           |
-| ----------------------------------------- | -------------------------------------------------- |
-| `openid`, `profile`, `email`, `User.Read` | Signing in and showing your name and address       |
-| `offline_access`                          | Staying signed in (refresh token)                  |
-| `Mail.ReadWrite`                          | Reading, flagging, moving and deleting mail        |
-| `Mail.Send`                               | Sending mail                                       |
-| `MailboxSettings.Read`                    | Time zone and mailbox preferences                  |
-| `Calendars.ReadWrite`                     | Calendar views, creating events, meeting responses |
-| `Contacts.ReadWrite`                      | Contacts and address autocomplete                  |
-| `Tasks.ReadWrite`                         | Microsoft To Do lists and tasks                    |
+| Permission                                | Used for                                               |
+| ----------------------------------------- | ------------------------------------------------------ |
+| `openid`, `profile`, `email`, `User.Read` | Signing in and showing your name and address           |
+| `offline_access`                          | Staying signed in (refresh token)                      |
+| `Mail.ReadWrite`                          | Reading, searching, flagging, moving and deleting mail |
+| `Mail.Send`                               | Sending mail                                           |
+| `MailboxSettings.Read`                    | Time zone and mailbox preferences                      |
+| `Calendars.ReadWrite`                     | Calendar views, creating events, meeting responses     |
+| `Contacts.ReadWrite`                      | Contacts and address autocomplete                      |
+| `Tasks.ReadWrite`                         | Microsoft To Do lists and tasks                        |
 
 One more scope is not a Graph permission but the app's own:
 `api://<client ID>/Sync.Receive` lets the app open a stream to the Cumulas push
