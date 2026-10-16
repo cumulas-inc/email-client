@@ -55,9 +55,10 @@ describe("useServerSearch", () => {
     const searchId = searchServer.mock.calls[0]![0];
     expect(searchServer.mock.calls[1]![0]).toBe(searchId);
     expect(result.current).toMatchObject({ text: "invoice", searchId, ids: ["a", "b", "c"] });
+    const settledAs = { status: "done", retrying: false, loadingMore: false, error: null };
     expect(result.current.accounts).toEqual([
-      { accountId: "acct-work", status: "done", hasMore: true, loadingMore: false, error: null },
-      { accountId: "acct-home", status: "done", hasMore: false, loadingMore: false, error: null },
+      { accountId: "acct-work", ...settledAs, hasMore: true },
+      { accountId: "acct-home", ...settledAs, hasMore: false },
     ]);
 
     act(() => result.current.showMore());
@@ -117,7 +118,12 @@ describe("useServerSearch", () => {
 
     offline = false;
     act(() => result.current.retry("acct-home"));
-    expect(result.current.accounts[1]).toMatchObject({ status: "searching", error: null });
+    // The failure stays, as what is being tried again, until the answer.
+    expect(result.current.accounts[1]).toMatchObject({
+      status: "searching",
+      retrying: true,
+      error: { code: "network" },
+    });
     await waitFor(() => expect(result.current.searching).toBe(false));
     expect(searchServer.mock.calls.at(-1)).toEqual([
       searchServer.mock.calls[0]![0],
@@ -126,7 +132,11 @@ describe("useServerSearch", () => {
       false,
     ]);
     expect(result.current.ids).toEqual(["a", "h"]);
-    expect(result.current.accounts[1]).toMatchObject({ status: "done", error: null });
+    expect(result.current.accounts[1]).toMatchObject({
+      status: "done",
+      retrying: false,
+      error: null,
+    });
   });
 
   it("turns a rejection into a failure, and settles a search canceled from elsewhere", async () => {
@@ -136,10 +146,18 @@ describe("useServerSearch", () => {
     });
     await settled();
     expect(result.current.accounts).toEqual([
-      { accountId: "acct-work", status: "done", hasMore: false, loadingMore: false, error: null },
+      {
+        accountId: "acct-work",
+        status: "done",
+        retrying: false,
+        hasMore: false,
+        loadingMore: false,
+        error: null,
+      },
       {
         accountId: "acct-home",
         status: "failed",
+        retrying: false,
         hasMore: false,
         loadingMore: false,
         error: { code: "notFound", message: "account not found" },

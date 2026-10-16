@@ -976,6 +976,59 @@ describe("Search", () => {
     await waitFor(() => expect(announced()).toBe("130 results."));
   });
 
+  it("keeps the keyboard on Show more results, and at the end once all are shown", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ worst: true });
+    await renderMail({ backend });
+    await setSearch('subject:"purchase order"');
+    const pages = (n: number) => Array.from({ length: n }, () => /Purchase order 4500/);
+    await expectResults(...pages(50));
+    const more = screen.getByRole("button", { name: "Show more results" });
+    more.focus();
+
+    const resume = backend.pauseServerSearch();
+    await user.keyboard("{Enter}");
+    // Busy where it was, and still where the keyboard is.
+    expect(more).toHaveAccessibleName("Loading more results…");
+    expect(more).toHaveAttribute("aria-busy", "true");
+    expect(more).toHaveFocus();
+    resume();
+    await expectResults(...pages(100));
+    expect(more).toHaveAccessibleName("Show more results");
+    expect(more).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    await expectResults(...pages(130));
+    const end = await screen.findByText("No more results.");
+    await waitFor(() => expect(end).toHaveFocus());
+  });
+
+  it("keeps the keyboard on Try again while it tries, and in the search box once it worked", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    backend.failServerSearch("acct-home", {
+      code: "network",
+      message: "Could not reach imap.morgan-family.example.",
+    });
+    await renderMail({ backend });
+    await setSearch("zebras");
+    expect(await screen.findByText("No results")).toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: "Try again" });
+    retry.focus();
+
+    backend.failServerSearch("acct-home", null);
+    const resume = backend.pauseServerSearch();
+    await user.keyboard("{Enter}");
+    expect(retry).toHaveAccessibleName("Trying again…");
+    expect(retry).toHaveFocus();
+    resume();
+    await expectResults(/Safari photos from Etosha/);
+    expect(failureRow()).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("searchbox", { name: "Search mail" })).toHaveFocus(),
+    );
+  });
+
   it("shows results with their folder and account", async () => {
     const user = userEvent.setup();
     await renderMail();

@@ -644,6 +644,17 @@
   padding: var(--space-3);
 }
 
+.mail-list__more .btn--busy {
+  cursor: progress;
+}
+
+/* Where "Show more results" was: focusable, for the keyboard that was there. */
+.mail-list__end {
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  outline: none;
+}
+
 /* --- Search: the servers' progress and failures ------------------------------------ */
 
 /* "Searching your whole mailbox…" above an empty state. */

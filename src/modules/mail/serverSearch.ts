@@ -25,6 +25,8 @@ export interface AccountSearch {
   accountId: string;
   /** "searching" while the first page is on its way (again, after "Try again"). */
   status: "searching" | "done" | "failed";
+  /** Searching again after failing: `error` is the failure, until the answer. */
+  retrying: boolean;
   /** The server has another page ("Show more results"). */
   hasMore: boolean;
   loadingMore: boolean;
@@ -121,6 +123,7 @@ class ServerSearchStore {
       accounts: accountIds.map((accountId) => ({
         accountId,
         status: "searching",
+        retrying: false,
         hasMore: false,
         loadingMore: false,
         error: null,
@@ -151,7 +154,7 @@ class ServerSearchStore {
   retry = (accountId: string): void => {
     const account = this.state.accounts.find((a) => a.accountId === accountId);
     if (account?.status !== "failed") return;
-    this.update(accountId, { status: "searching", error: null, hasMore: false });
+    this.update(accountId, { status: "searching", retrying: true, hasMore: false });
     this.page(accountId, false);
   };
 
@@ -182,13 +185,20 @@ class ServerSearchStore {
       case "done":
         this.update(
           accountId,
-          { status: "done", hasMore: result.hasMore, loadingMore: false, error: null },
+          {
+            status: "done",
+            retrying: false,
+            hasMore: result.hasMore,
+            loadingMore: false,
+            error: null,
+          },
           result.messageIds,
         );
         break;
       case "failed":
         this.update(accountId, {
           status: "failed",
+          retrying: false,
           hasMore: false,
           loadingMore: false,
           error: result.error ?? { code: "internal", message: "Something went wrong." },
@@ -197,7 +207,13 @@ class ServerSearchStore {
       case "cancelled":
         // Canceled from elsewhere while still ours: settle with what came,
         // rather than search forever.
-        this.update(accountId, { status: "done", hasMore: false, loadingMore: false });
+        this.update(accountId, {
+          status: "done",
+          retrying: false,
+          hasMore: false,
+          loadingMore: false,
+          error: null,
+        });
         break;
     }
   }

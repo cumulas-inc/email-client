@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import clsx from "clsx";
 import {
   Archive,
   CircleAlert,
@@ -14,6 +15,7 @@ import {
 } from "lucide-react";
 import {
   type DragEvent,
+  type FocusEvent,
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
@@ -509,13 +511,43 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   // Results shown aren't this text's yet, or lack the server's latest hits.
   const resultsStale = searching && (localText !== query || results.isPlaceholderData);
   const settled = searching && !serverBusy && !resultsStale;
+  // Failed, or being tried again after failing.
   const failedAccounts = serverCurrent
-    ? server.accounts.filter((a) => a.status === "failed" && accountById.has(a.accountId))
+    ? server.accounts.filter(
+        (a) => (a.status === "failed" || a.retrying) && accountById.has(a.accountId),
+      )
     : [];
   const moreToShow =
     serverCurrent &&
     !server.accounts.some((a) => a.status === "searching") &&
     server.accounts.some((a) => a.hasMore || a.loadingMore);
+  const loadingMore = server.accounts.some((a) => a.loadingMore);
+  // Once "Show more results" was offered, the end of the results says so.
+  const [moreOfferedFor, setMoreOfferedFor] = useState<string | null>(null);
+  if (moreToShow && server.searchId && moreOfferedFor !== server.searchId) {
+    setMoreOfferedFor(server.searchId);
+  }
+  const allShown =
+    serverCurrent && !moreToShow && !server.searching && moreOfferedFor === server.searchId;
+
+  // Keyboard focus in a control that goes away ("Show more results" once
+  // the last page came, a "Try again" that worked) goes to what took its
+  // place, not back to the start of the page.
+  const focusWas = useRef<"more" | "failures" | null>(null);
+  const endRef = useRef<HTMLParagraphElement>(null);
+  const rememberFocus = (e: FocusEvent<HTMLElement>) => {
+    focusWas.current = e.currentTarget.dataset.keepsFocus === "more" ? "more" : "failures";
+  };
+  const forgetFocus = (e: FocusEvent<HTMLElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) focusWas.current = null;
+  };
+  useEffect(() => {
+    const where = focusWas.current;
+    if (!where || document.activeElement !== document.body) return;
+    focusWas.current = null;
+    const next = where === "more" ? endRef.current : null;
+    (next ?? document.getElementById("global-search"))?.focus();
+  });
 
   const searchStatus = serverBusy ? (
     <div className="mail-search-status">
@@ -523,20 +555,41 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
       Searching your whole mailbox…
     </div>
   ) : null;
+  // The button stays while the page loads, so keyboard focus stays on it.
   const showMore = moreToShow ? (
+    <div
+      className="mail-list__more"
+      data-keeps-focus="more"
+      onFocus={rememberFocus}
+      onBlur={forgetFocus}
+    >
+      <button
+        type="button"
+        className={clsx("btn btn--subtle btn--sm", loadingMore && "btn--busy")}
+        aria-disabled={loadingMore || undefined}
+        aria-busy={loadingMore || undefined}
+        onClick={loadingMore ? undefined : server.showMore}
+      >
+        {loadingMore && <LoaderCircle size={14} className="spin" aria-hidden="true" />}
+        {loadingMore ? "Loading more results…" : "Show more results"}
+      </button>
+    </div>
+  ) : allShown ? (
     <div className="mail-list__more">
-      {server.accounts.some((a) => a.loadingMore) ? (
-        <Spinner size={18} label="Loading more results" />
-      ) : (
-        <button type="button" className="btn btn--subtle btn--sm" onClick={server.showMore}>
-          Show more results
-        </button>
-      )}
+      <p ref={endRef} className="mail-list__end" tabIndex={-1}>
+        No more results.
+      </p>
     </div>
   ) : null;
+  // A row stays while its account is tried again, with its button busy.
   const failures =
     failedAccounts.length > 0 ? (
-      <div className="mail-search-notes">
+      <div
+        className="mail-search-notes"
+        data-keeps-focus="failures"
+        onFocus={rememberFocus}
+        onBlur={forgetFocus}
+      >
         {failedAccounts.map((a, i) => (
           <div key={a.accountId} className="mail-search-error">
             <CircleAlert size={16} aria-hidden="true" />
@@ -546,11 +599,14 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
             </p>
             <button
               type="button"
-              className="btn btn--subtle btn--sm"
+              className={clsx("btn btn--subtle btn--sm", a.retrying && "btn--busy")}
               aria-describedby={`mail-search-error-${i}`}
-              onClick={() => server.retry(a.accountId)}
+              aria-disabled={a.retrying || undefined}
+              aria-busy={a.retrying || undefined}
+              onClick={a.retrying ? undefined : () => server.retry(a.accountId)}
             >
-              Try again
+              {a.retrying && <LoaderCircle size={14} className="spin" aria-hidden="true" />}
+              {a.retrying ? "Trying again…" : "Try again"}
             </button>
           </div>
         ))}
