@@ -52,6 +52,16 @@ pub fn builtin_microsoft_client_id() -> Option<&'static str> {
     RESOLVED.as_deref()
 }
 
+/// The client ID sign-in uses: the one entered in Settings (`setting`),
+/// else the built-in one; `None` when there's neither.
+fn microsoft_client_id(setting: Option<&str>, built_in: Option<&str>) -> Option<String> {
+    setting
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .or(built_in)
+        .map(str::to_owned)
+}
+
 fn resolve_builtin_microsoft_client_id(built_in: Option<&str>) -> Option<String> {
     let Some(value) = built_in.map(str::trim).filter(|v| !v.is_empty()) else {
         return Some(PUBLISHED_MICROSOFT_CLIENT_ID.to_owned());
@@ -185,19 +195,19 @@ impl LiveConnector {
 
     fn microsoft_config(&self) -> Result<MicrosoftAuthConfig> {
         let settings = self.store.get_settings()?;
-        let client_id = settings
-            .microsoft_client_id
-            .filter(|id| !id.trim().is_empty())
-            .or_else(|| builtin_microsoft_client_id().map(str::to_owned))
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorCode::NotConfigured,
-                    "No Microsoft application (client) ID is configured. Add one under \
-                     Settings → Accounts → Microsoft app registration.",
-                )
-            })?;
+        let client_id = microsoft_client_id(
+            settings.microsoft_client_id.as_deref(),
+            builtin_microsoft_client_id(),
+        )
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::NotConfigured,
+                "No Microsoft application (client) ID is configured. Add one under \
+                 Settings → Accounts → Microsoft app registration.",
+            )
+        })?;
         Ok(MicrosoftAuthConfig::new(
-            client_id.trim(),
+            client_id,
             settings.microsoft_tenant.filter(|t| !t.trim().is_empty()),
         ))
     }
@@ -318,6 +328,26 @@ mod tests {
     use super::*;
 
     const ID: &str = "99999999-8888-7777-6666-555555555555";
+
+    #[test]
+    fn a_client_id_in_settings_comes_before_the_built_in_one() {
+        let published = Some(PUBLISHED_MICROSOFT_CLIENT_ID);
+        assert_eq!(
+            microsoft_client_id(Some(&format!(" {ID} ")), published).as_deref(),
+            Some(ID)
+        );
+        // An empty or blank entry in Settings leaves the built-in one.
+        for blank in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                microsoft_client_id(blank, published).as_deref(),
+                published,
+                "{blank:?}"
+            );
+        }
+        // A build with `none` and nothing in Settings: not configured.
+        assert_eq!(microsoft_client_id(Some(" "), None), None);
+        assert_eq!(microsoft_client_id(Some(ID), None).as_deref(), Some(ID));
+    }
 
     #[test]
     fn the_published_client_id_is_built_in_unless_the_build_names_another() {
