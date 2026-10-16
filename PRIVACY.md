@@ -156,18 +156,19 @@ that answer:
   about 15 seconds after the app starts, every 6 hours, and in the
   background when you start a message more than an hour after the last
   answer.
-- **While it doesn't** (Microsoft refused, or the service has no signature
-  for you) **or hasn't allowed Cumulas Mail**: once a day, and not each time
-  the app starts or you start a message.
+- **While it doesn't** (your organization hasn't added the Cumulas
+  Signatures app, or the service has no signature for you) **or hasn't
+  allowed Cumulas Mail**: once a day, and not each time the app starts or
+  you start a message.
 - **After a check that failed** (no network, say): 30 minutes later (or when
   the service asks), when the network comes back, and when the app next
   starts.
 - **Whatever the answer**: right after you sign in.
 - **When you open Settings → Signatures**: if the last answer is more than
   10 minutes old or the last check failed, unless that answer was that your
-  organization doesn't sign your mail (Microsoft refused, or the service has
-  no signature for you): your organization is then asked again only once a
-  day and when you sign in.
+  organization hasn't added the Cumulas Signatures app, or that the service
+  has no signature for you: your organization is then asked again only once
+  a day and when you sign in.
 
 Pictures in a company signature, such as a logo, load from where your
 organization keeps them (usually `signature.cumulas.co`) when the app shows

@@ -202,8 +202,9 @@ accounts can have their organization's, from Cumulas Signatures (see
   (`html::sanitize_signature_html`) and again whenever they're read
   (`sanitize_stored_signature_html`), so a stricter sanitizer applies at
   once. The kept ETag starts with the sanitizer's version
-  (`html::SIGNATURE_SANITIZER_VERSION`, as `s1:`), and a check sends only
-  one this sanitizer kept: an answer kept by another comes again in full.
+  (`html::SIGNATURE_SANITIZER_VERSION`, as `s<version>:`), and a check
+  sends only one this sanitizer kept: an answer kept by another comes again
+  in full.
 - **The scheduler** asks about 15 seconds after start while the
   organization signs the mail, before its first answer and after a failure;
   then every 6 hours while it signs the mail, every 24 hours (by the last
