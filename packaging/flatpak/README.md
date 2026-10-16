@@ -278,40 +278,51 @@ Once, in this order, by an owner of the repository and of cumulas.co's DNS:
 
 ### Rotating the signing key
 
-Rotate it if it may have leaked, or to replace it. Flatpak can't hand people a
-new key: each of them has to import it, so plan for it.
+Flatpak checks updates against the keys each person's remote trusts, so a new
+key has to reach people before it signs anything. A planned rotation does that
+in two phases, with nothing for people to do; a leaked key can't wait for
+that.
 
-1. Generate a new key as in [Setting it up](#setting-it-up), step 1.
-2. In a pull request, rename the old `cumulas-flatpak.gpg` to
-   `cumulas-flatpak-previous.gpg` (publishing checks the published summary,
-   still signed with it, against the committed keys) and commit the new one as
-   `cumulas-flatpak.gpg`. When it's merged, replace the
-   `FLATPAK_GPG_PRIVATE_KEY` secret of the `flatpak-signing` environment.
-   (Publishing fails while the two don't match.)
-3. Publish. From then on the summary and new builds are signed with the new
-   key, and new installs get it from the `.flatpakrepo` and `.flatpakref`.
-4. Tell people (release notes, cumulas.co): until they import the new key,
-   updates from this repository fail with a GPG signature error, in software
-   centers too. To import it, checking its fingerprint against the one on
-   <https://flatpak.cumulas.co>:
+**To replace a key that hasn't leaked:**
 
-   ```sh
-   curl -fsSLO https://flatpak.cumulas.co/cumulas-flatpak.gpg
-   gpg --show-keys cumulas-flatpak.gpg
-   flatpak remote-modify --gpg-import=cumulas-flatpak.gpg cumulas   # add --user for a per-user remote
-   ```
+1. Generate the new key as in [Setting it up](#setting-it-up), step 1, but
+   export its public half to `packaging/flatpak/repo/cumulas-flatpak-next.gpg`.
+   Keep its private half as you keep the current one's.
+2. **Phase 1**: commit `cumulas-flatpak-next.gpg` in a pull request, and
+   publish. While the file exists, every publish is still signed with the
+   current key, and its summary carries the next one (`update-repo.sh` passes
+   it to `flatpak build-update-repo --gpg-import`). Flatpak, software centers
+   included, adds it to the remote's keys when it checks for updates. Leave
+   phase 1 in place for long enough that most people have checked, over
+   several releases if you can.
+3. **Phase 2**: in a pull request, rename `cumulas-flatpak.gpg` to
+   `cumulas-flatpak-previous.gpg`, and `cumulas-flatpak-next.gpg` to
+   `cumulas-flatpak.gpg`. (The next publish checks the published summary,
+   still signed with the old key, with the previous one.) When it's merged,
+   replace the `FLATPAK_GPG_PRIVATE_KEY` secret of the `flatpak-signing`
+   environment with the new private key and check it with a manual dry run of
+   `main` (Setting it up, step 9); publishing fails while the two don't match.
+   From the next publish on, the summary and new builds are signed with the
+   new key only, and new installs get it from the `.flatpakrepo` and
+   `.flatpakref`.
+4. Once a publish signed with the new key is out, delete
+   `cumulas-flatpak-previous.gpg`. The builds signed with the old key leave the
+   repository after 3 more publishes.
 
-   That adds the new key to the old one. If the old key leaked, remove and add
-   the remote instead, so it's trusted no more (installed apps stay):
+People who didn't check for updates during phase 1 get a GPG signature error
+from phase 2 on, and have to remove and add the remote as below.
 
-   ```sh
-   flatpak remote-delete --force cumulas
-   flatpak remote-add cumulas https://flatpak.cumulas.co/cumulas.flatpakrepo
-   ```
+**If the key may have leaked**, stop trusting it at once: generate a new key,
+rename the old `cumulas-flatpak.gpg` to `cumulas-flatpak-previous.gpg` (only
+until the first publish with the new key, which needs it to read the published
+history), commit the new one as `cumulas-flatpak.gpg`, replace the secret, and
+publish. Then tell people (release notes, cumulas.co) to remove and add the
+remote, so that the old key is trusted no more (installed apps stay):
 
-Once a publish signed with the new key is out, delete
-`cumulas-flatpak-previous.gpg`. The builds signed with the old key leave the
-repository after 3 more publishes.
+```sh
+flatpak remote-delete --force cumulas
+flatpak remote-add cumulas https://flatpak.cumulas.co/cumulas.flatpakrepo   # add --user for a per-user remote
+```
 
 ### When a publish fails
 

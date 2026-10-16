@@ -16,6 +16,10 @@
 #  - five publishes in a row (mirror, add-builds, update-repo, assemble-site,
 #    then "deploy") keep the last KEEP_BUILDS builds of each ref, with their
 #    history, static deltas and appstream data, and leave .Debug out;
+#  - a key rotation: a client that trusts the current key updates from a
+#    publish signed with it that carries the next key (phase 1), then from
+#    one signed with the next key only (phase 2), and the next publishes'
+#    mirrors trust what they must;
 #  - smoke-test.sh installs the last one from the .flatpakrepo and the
 #    .flatpakref.
 #
@@ -494,6 +498,87 @@ else
   fail "mirror: an unreachable host, in a dry run, starts empty"
   cat "$work/output" >&2
 fi
+
+# --- Rotating the signing key ----------------------------------------------------
+
+# Publishes a build for this architecture on top of the repository at
+# $work/www/rotation, signed with KEY, its mirror trusting the keys in
+# rotation_trust, and deploys it there.
+rotation_publish() { # NAME KEY [UPDATE-REPO-OPTION...]
+  local name=$1 key=$2 dir="$work/$1" trusted import=()
+  shift 2
+  for trusted in "${rotation_trust[@]}"; do
+    import+=(--gpg-import "$keys/$trusted.gpg")
+  done
+  mkdir -p "$dir"
+  "$here/mirror.sh" "${import[@]}" "$dir/repo" "$www/rotation/repo" >/dev/null &&
+    make_build "$dir/build" "$native" "$name" &&
+    "$here/add-builds.sh" --gpg-homedir "$keys/$key" --gpg-key "$(cat "$keys/$key.fpr")" \
+      --subject "Test build $name" "$dir/repo" "$dir/build" &&
+    "$here/update-repo.sh" --gpg-homedir "$keys/$key" --gpg-key "$(cat "$keys/$key.fpr")" \
+      "$@" "$dir/repo" &&
+    "$here/assemble-site.sh" "$dir/repo" "$keys/$key.gpg" "$dir/site" &&
+    ln -sfn "$dir/site" "$work/www/rotation"
+}
+client() { # FLATPAK-COMMAND ARGUMENT...: in the rotation's client installation
+  FLATPAK_USER_DIR="$work/rotation-client" flatpak "$1" --user "${@:2}"
+}
+late_client() { # The same, for a client that doesn't check for updates in phase 1
+  FLATPAK_USER_DIR="$work/rotation-late-client" flatpak "$1" --user "${@:2}"
+}
+client_trusts() { # FINGERPRINT: the client's remote has this key
+  gpg --homedir "$keys/signer" --batch --with-colons --show-keys \
+    "$work/rotation-client/repo/$REMOTE_NAME.trustedkeys.gpg" 2>/dev/null |
+    grep -q "^fpr:*:$1:"
+}
+client_commit() {
+  client info --show-commit "$APP_ID" 2>/dev/null
+}
+summary_carries_keys() { # REPO
+  ostree --repo="$1" summary --view | grep -q '^xa\.gpg-keys:'
+}
+site_commit() { # SITE
+  cat "$1/repo/refs/heads/app/$APP_ID/$native/$BRANCH"
+}
+
+new_key next
+next=$(cat "$keys/next.fpr")
+ln -sfn "$site" "$work/www/rotation"
+sed "s|^Url=.*|Url=$www/rotation/repo/|" "$site/$REMOTE_NAME.flatpakrepo" >"$work/rotation.flatpakrepo"
+client remote-add --if-not-exists flathub "$www/flathub/flathub.flatpakrepo" >/dev/null
+client remote-add --from "$REMOTE_NAME" "$work/rotation.flatpakrepo" >/dev/null
+expect_success "rotation: the client installs the app, trusting the current key" \
+  client install --noninteractive "$REMOTE_NAME" "$APP_ID"
+late_client remote-add --from "$REMOTE_NAME" "$work/rotation.flatpakrepo" >/dev/null
+
+rotation_trust=(signer)
+expect_error "rotation: update-repo.sh refuses a next key that is the signing key" "next key no more" \
+  "$here/update-repo.sh" --gpg-homedir "$keys/signer" --gpg-key "$signer" \
+  --next-key "$keys/signer.gpg" "$work/round5/repo"
+expect_success "rotation, phase 1: publishes signed with the current key, carrying the next" \
+  rotation_publish rotation1 signer --next-key "$keys/next.gpg"
+check "rotation, phase 1: the summary carries the next key" summary_carries_keys "$work/rotation1/repo"
+expect_success "rotation, phase 1: the client updates" client update --noninteractive
+check "rotation, phase 1: ... to the new build" test "$(client_commit)" = "$(site_commit "$work/rotation1/site")"
+check "rotation, phase 1: ... and trusts the next key too" client_trusts "$next"
+check "rotation, phase 1: ... and still the current one" client_trusts "$signer"
+
+rotation_trust=(next)
+expect_error "rotation, phase 2: the mirror needs the previous key to read what's published" \
+  "isn't signed with" rotation_publish rotation2-without-previous next
+rotation_trust=(next signer)
+expect_success "rotation, phase 2: publishes signed with the next key only" \
+  rotation_publish rotation2 next
+expect_success "rotation, phase 2: the client updates" client update --noninteractive
+check "rotation, phase 2: ... to the build signed with the next key" \
+  test "$(client_commit)" = "$(site_commit "$work/rotation2/site")"
+expect_error "rotation, phase 2: a client that didn't check for updates in phase 1 can't" \
+  "GPG|signature" late_client remote-ls "$REMOTE_NAME"
+rotation_trust=(next)
+expect_success "rotation: once a publish with the next key is out, the mirror needs only it" \
+  rotation_publish rotation3 next
+expect_success "rotation: the client updates again" client update --noninteractive
+check "rotation: ... to that build" test "$(client_commit)" = "$(site_commit "$work/rotation3/site")"
 
 # --- Installing -----------------------------------------------------------------
 

@@ -5,7 +5,12 @@
 # summary. Records KEEP_BUILDS in the repository's config for the next
 # publish's mirror.sh, then checks the result.
 #
-# Usage: update-repo.sh --gpg-homedir DIR --gpg-key FINGERPRINT REPO
+# Usage: update-repo.sh --gpg-homedir DIR --gpg-key FINGERPRINT
+#          [--next-key PUBLIC-KEY] REPO
+#   --next-key  during a key rotation, the key that signs from phase 2 on:
+#               the summary carries it, and Flatpak clients that check for
+#               updates import it. NEXT_PUBLIC_KEY (common.sh) by default, and
+#               nothing when there's no such file.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -17,11 +22,12 @@ usage() {
   exit 2
 }
 
-gpg_homedir='' gpg_key=''
+gpg_homedir='' gpg_key='' next_key=$NEXT_PUBLIC_KEY
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpg-homedir) gpg_homedir=$2; shift 2 ;;
     --gpg-key) gpg_key=$2; shift 2 ;;
+    --next-key) next_key=$2; shift 2 ;;
     --) shift; break ;;
     -*) usage ;;
     *) break ;;
@@ -29,6 +35,18 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$gpg_homedir" ] && [ -n "$gpg_key" ] && [ $# = 1 ] || usage
 repo=$1
+
+# Each publish starts from a new repository (mirror.sh), so the next key goes
+# in again every time, for as long as the file exists.
+next_args=()
+if [ -e "$next_key" ]; then
+  next_fingerprint=$("$here/signing-key.sh" check "$next_key")
+  if [ "${next_fingerprint^^}" = "${gpg_key^^}" ]; then
+    die "$next_key is the key that signs: it's the next key no more. Delete it (packaging/flatpak/README.md, \"Rotating the signing key\")."
+  fi
+  next_args=(--gpg-import="$next_key")
+  log "The summary carries the next signing key, $next_fingerprint: clients import it when they check for updates."
+fi
 
 # --prune-depth counts the parents kept besides each ref's newest commit.
 flatpak build-update-repo \
@@ -41,12 +59,17 @@ flatpak build-update-repo \
   --generate-static-deltas \
   --prune --prune-depth=$((KEEP_BUILDS - 1)) \
   --gpg-homedir="$gpg_homedir" --gpg-sign="$gpg_key" \
+  "${next_args[@]}" \
   "$repo"
 # How many builds the next publish's mirror.sh should find for each ref.
 ostree --repo="$repo" config set cumulas.keep-builds "$KEEP_BUILDS"
 
 # Check what clients and the next publish rely on.
 [ -s "$repo/summary" ] && [ -s "$repo/summary.sig" ] || die "$repo has no signed summary."
+if [ ${#next_args[@]} -gt 0 ]; then
+  ostree --repo="$repo" summary --view | grep -q '^xa\.gpg-keys:' ||
+    die "The summary of $repo doesn't carry the next key."
+fi
 mapfile -t refs < <(managed_refs "$repo")
 [ ${#refs[@]} -gt 0 ] || die "$repo has none of the app's refs."
 deltas=$(ostree --repo="$repo" static-delta list)

@@ -22,11 +22,13 @@ REPO_HOMEPAGE=https://cumulas.co
 REPO_ICON="$SITE_URL/logo.svg"
 
 # The committed public keys (packaging/flatpak/README.md, "Rotating the
-# signing key"): the one the repository is signed with and, after a
-# rotation, the previous one, which signed what's published until the first
-# publish with the new key.
+# signing key"): the one the repository is signed with and, during a
+# rotation, the next one (phase 1: the summary carries it, so that clients
+# import it before it signs) and then the previous one (phase 2: it signed
+# what's published until the first publish with the new key).
 KEYS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PUBLIC_KEY="$KEYS_DIR/cumulas-flatpak.gpg"
+NEXT_PUBLIC_KEY="$KEYS_DIR/cumulas-flatpak-next.gpg"
 PREVIOUS_PUBLIC_KEY="$KEYS_DIR/cumulas-flatpak-previous.gpg"
 
 # The refs these scripts publish, as an extended regular expression: the app

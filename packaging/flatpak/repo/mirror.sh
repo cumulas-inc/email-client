@@ -10,7 +10,8 @@
 #   URL           the published repository; REPO_URL (common.sh) by default
 #   --gpg-import  a public key the published summary may be signed with;
 #                 repeatable. By default, the committed keys: PUBLIC_KEY and,
-#                 after a rotation, PREVIOUS_PUBLIC_KEY (common.sh).
+#                 during a rotation, NEXT_PUBLIC_KEY and PREVIOUS_PUBLIC_KEY
+#                 (common.sh).
 #
 # - URL/summary answers 200: its signature must verify with one of the keys,
 #   and then the app's refs (MANAGED_REFS in common.sh) and their history are
@@ -52,7 +53,7 @@ if [ $# -lt 1 ] || [ $# -gt 2 ]; then
   usage
 fi
 if [ ${#keys[@]} = 0 ]; then
-  for key in "$PUBLIC_KEY" "$PREVIOUS_PUBLIC_KEY"; do
+  for key in "$PUBLIC_KEY" "$NEXT_PUBLIC_KEY" "$PREVIOUS_PUBLIC_KEY"; do
     [ ! -e "$key" ] || keys+=("$key")
   done
 fi
