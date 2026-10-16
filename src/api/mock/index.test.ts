@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import type { ActiveReminder, DataChangedEvent, RemindersChangedEvent } from "../types";
 import { MockBackend } from ".";
@@ -286,5 +286,51 @@ describe("the demo's signatures", () => {
     );
     expect((await backend.getComposeSignature("acct-work", null)).kind).toBe("own");
     expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  it("ask an organization at most once a minute, not before its service said, and say when", async () => {
+    const backend = new MockBackend();
+    const start = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(start);
+    onTestFinished(() => now.mockRestore());
+    const at = (ms: number) => new Date(start + ms).toISOString();
+    const ready = { state: "ready", html: "<div>Acme</div>", onReplies: true } as const;
+    const check = async () => (await backend.checkOrganizationSignature("acct-work")).organization;
+    expect((await backend.getAccountSignature("acct-work")).organization.checkableAt).toBeNull();
+
+    // A failed check: not again for a minute.
+    backend.setOrganizationSignature("acct-work", {}, "unreachable");
+    expect(await check()).toMatchObject({ stale: true, checkableAt: at(60_000) });
+    backend.setOrganizationSignature("acct-work", {}, ready);
+    now.mockReturnValue(start + 59_000);
+    expect(await check()).toMatchObject({ stale: true, checkableAt: at(60_000) });
+    expect((await backend.getAccountSignature("acct-work")).organization.checkableAt).toBe(
+      at(60_000),
+    );
+    now.mockReturnValue(start + 60_000);
+    expect(await check()).toMatchObject({ state: "ready", stale: false, checkableAt: at(120_000) });
+
+    // A busy service that says to wait five minutes: not before then.
+    now.mockReturnValue(start + 10 * 60_000);
+    backend.setOrganizationSignature("acct-work", {}, { retryAfter: 300 });
+    expect(await check()).toMatchObject({ stale: true, checkableAt: at(15 * 60_000) });
+    backend.setOrganizationSignature("acct-work", {}, ready);
+    now.mockReturnValue(start + 14 * 60_000);
+    expect(await check()).toMatchObject({ stale: true, checkableAt: at(15 * 60_000) });
+    now.mockReturnValue(start + 15 * 60_000);
+    expect(await check()).toMatchObject({ stale: false, checkableAt: at(16 * 60_000) });
+
+    // Less than a minute is a minute; one said while the clock was ahead
+    // isn't waited for once it's set right, only the minute.
+    now.mockReturnValue(start + 20 * 60_000);
+    backend.setOrganizationSignature("acct-work", {}, { retryAfter: 5 });
+    expect(await check()).toMatchObject({ stale: true, checkableAt: at(21 * 60_000) });
+    now.mockReturnValue(start + 30 * 60_000);
+    backend.setOrganizationSignature("acct-work", {}, { retryAfter: 3600 });
+    expect(await check()).toMatchObject({ checkableAt: at(90 * 60_000) });
+    now.mockReturnValue(start + 25 * 60_000);
+    expect((await backend.getAccountSignature("acct-work")).organization.checkableAt).toBe(
+      at(26 * 60_000),
+    );
   });
 });

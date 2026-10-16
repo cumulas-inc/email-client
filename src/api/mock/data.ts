@@ -655,6 +655,7 @@ function demoSignatures(): AccountSignature[] {
         onReplies: true,
         checkedAt: iso(new Date(Date.now() - 5 * 60_000)),
         stale: false,
+        checkableAt: null,
       },
     },
     {
@@ -667,6 +668,7 @@ function demoSignatures(): AccountSignature[] {
         onReplies: false,
         checkedAt: null,
         stale: false,
+        checkableAt: null,
       },
     },
   ];

@@ -210,12 +210,25 @@ const CONSUMER_TENANT = "9188040d-6c67-4c5b-b112-36a304b66dad";
 const MAX_SIGNATURE_BYTES = 512 * 1024;
 /** Starting a message asks an organization that signs again after this long. */
 const COMPOSE_RECHECK_MS = 60 * 60_000;
+/** Like the core: a check that ended less than this long ago isn't repeated. */
+const CHECK_INTERVAL_MS = 60_000;
+/** Like the core: the shortest and the longest wait a service's Retry-After can ask for. */
+const MIN_RETRY_AFTER_MS = 60_000;
+const MAX_RETRY_AFTER_MS = 6 * 60 * 60_000;
+/** Like the core: a time kept more than this after now was kept while the clock was ahead. */
+const CLOCK_SLACK_MS = 60_000;
 
-/** What an organization says when asked for its signature; "unreachable" when it can't be asked. */
-export type OrganizationAnswer =
-  Pick<OrganizationSignature, "state" | "html" | "onReplies"> | "unreachable";
+/** What an organization says when asked for its signature, when it answers. */
+type OrganizationReply = Pick<OrganizationSignature, "state" | "html" | "onReplies">;
 
-const NOT_USED: Exclude<OrganizationAnswer, "unreachable"> = {
+/**
+ * What an organization says when asked for its signature: "unreachable" when
+ * it can't be asked, and `{ retryAfter }` when its service is busy and says
+ * to ask again in that many seconds.
+ */
+export type OrganizationAnswer = OrganizationReply | "unreachable" | { retryAfter: number };
+
+const NOT_USED: OrganizationReply = {
   state: "notUsed",
   html: null,
   onReplies: false,
@@ -344,6 +357,8 @@ export class MockBackend implements Backend {
   private organizationAnswers = new Map<string, OrganizationAnswer>();
   /** When each account's organization was last asked (ms). */
   private signatureChecks = new Map<string, number>();
+  /** Until when each account's organization's service said to wait (ms). */
+  private signatureRetries = new Map<string, number>();
 
   constructor(options: MockOptions = {}) {
     this.latency = options.latency ?? 0;
@@ -602,6 +617,7 @@ export class MockBackend implements Backend {
     this.signatures.delete(accountId);
     this.organizationAnswers.delete(accountId);
     this.signatureChecks.delete(accountId);
+    this.signatureRetries.delete(accountId);
     this.emit(["accounts", "mail", "calendar", "contacts", "tasks", "signatures"]);
   }
 
@@ -1129,7 +1145,7 @@ export class MockBackend implements Backend {
 
   /** Puts the demo's company signature in a state (`?signature=`). */
   private demoSignature(accountId: string, kind: DemoSignature): void {
-    const answered = (answer: Exclude<OrganizationAnswer, "unreachable">) =>
+    const answered = (answer: OrganizationReply) =>
       this.setOrganizationSignature(
         accountId,
         { ...answer, checkedAt: new Date().toISOString(), stale: false },
@@ -1161,7 +1177,7 @@ export class MockBackend implements Backend {
    */
   setOrganizationSignature(
     accountId: string,
-    known: Partial<OrganizationSignature>,
+    known: Partial<Omit<OrganizationSignature, "checkableAt">>,
     next: OrganizationAnswer,
   ): void {
     const signature = this.accountSignature(accountId);
@@ -1189,6 +1205,7 @@ export class MockBackend implements Backend {
           onReplies: false,
           checkedAt: null,
           stale: false,
+          checkableAt: null,
         },
       };
       this.signatures.set(accountId, signature);
@@ -1196,9 +1213,34 @@ export class MockBackend implements Backend {
     return signature;
   }
 
+  /**
+   * Like the core: when checking would ask the organization again (ms), a
+   * minute after the last check and not before its service said (unless it
+   * said so while the clock was ahead); undefined when at once.
+   */
+  private checkableAt(accountId: string): number | undefined {
+    const last = this.signatureChecks.get(accountId);
+    if (last === undefined) return undefined;
+    const now = Date.now();
+    // The core times the minute on a clock that's never set: never more
+    // than a minute from now.
+    let at = Math.min(last, now) + CHECK_INTERVAL_MS;
+    const retry = this.signatureRetries.get(accountId);
+    if (retry !== undefined && last <= now + CLOCK_SLACK_MS) at = Math.max(at, retry);
+    return at > now ? at : undefined;
+  }
+
+  /** The account's signatures as the UI gets them. */
+  private publicSignature(accountId: string): AccountSignature {
+    const signature = clone(this.accountSignature(accountId));
+    const at = this.checkableAt(accountId);
+    signature.organization.checkableAt = at === undefined ? null : new Date(at).toISOString();
+    return signature;
+  }
+
   async getAccountSignature(accountId: string) {
     await this.delay();
-    return clone(this.accountSignature(accountId));
+    return this.publicSignature(accountId);
   }
 
   async updateOwnSignature(accountId: string, html: string, onReplies: boolean) {
@@ -1210,28 +1252,40 @@ export class MockBackend implements Backend {
     signature.ownHtml = cleanSignature(html);
     signature.ownOnReplies = onReplies;
     this.emit(["signatures"], accountId);
-    return clone(signature);
+    return this.publicSignature(accountId);
   }
 
   async checkOrganizationSignature(accountId: string) {
     await this.delay();
     const signature = this.accountSignature(accountId);
     const before = signature.organization;
-    const last = this.signatureChecks.get(accountId);
-    // Like the core, at most once a minute.
-    if (before.state === "unsupported" || (last !== undefined && Date.now() - last < 60_000)) {
-      return clone(signature);
+    // Like the core, at most once a minute, and not before the service said.
+    if (before.state === "unsupported" || this.checkableAt(accountId) !== undefined) {
+      return this.publicSignature(accountId);
     }
-    this.signatureChecks.set(accountId, Date.now());
+    const now = Date.now();
+    this.signatureChecks.set(accountId, now);
     const answer = this.organizationAnswers.get(accountId) ?? NOT_USED;
+    const busy = typeof answer === "object" && "retryAfter" in answer;
+    if (busy) {
+      const wait = Math.min(
+        Math.max(answer.retryAfter * 1000, MIN_RETRY_AFTER_MS),
+        MAX_RETRY_AFTER_MS,
+      );
+      this.signatureRetries.set(accountId, now + wait);
+    } else {
+      this.signatureRetries.delete(accountId);
+    }
     signature.organization =
-      answer === "unreachable"
+      answer === "unreachable" || busy
         ? { ...before, stale: true }
         : {
             ...answer,
             html: answer.html && cleanSignature(answer.html),
             checkedAt: new Date().toISOString(),
             stale: false,
+            // Worked out as it's asked for.
+            checkableAt: null,
           };
     const after = signature.organization;
     if (
@@ -1242,7 +1296,7 @@ export class MockBackend implements Backend {
     ) {
       this.emit(["signatures"], accountId);
     }
-    return clone(signature);
+    return this.publicSignature(accountId);
   }
 
   /**

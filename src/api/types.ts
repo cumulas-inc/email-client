@@ -362,6 +362,12 @@ export interface OrganizationSignature {
   checkedAt: string | null;
   /** The last check failed (offline, the service down): `state` is the last known. */
   stale: boolean;
+  /**
+   * The earliest that checking now would ask the organization (ISO 8601): a
+   * minute after the last check ended, and not before the service said to
+   * wait until. Null when it would at once.
+   */
+  checkableAt: string | null;
 }
 
 /** An account's signatures: the person's own and the organization's. */

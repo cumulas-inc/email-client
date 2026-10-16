@@ -136,7 +136,8 @@ export interface Backend {
   ): Promise<AccountSignature>;
   /**
    * Asks the account's organization for its signature now, unless it was
-   * asked in the last minute. Doesn't fail for the network or the service:
+   * asked in the last minute or its service said to wait (until
+   * `organization.checkableAt`). Doesn't fail for the network or the service:
    * the answer is then the last known state, marked stale.
    */
   checkOrganizationSignature(accountId: string): Promise<AccountSignature>;
