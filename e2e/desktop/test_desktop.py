@@ -2,7 +2,8 @@
 tauri-driver: add an IMAP account, read mail (following, pointing at and
 pressing shortcuts in a message, whose own script never runs; pointing at a
 link again in a reading font chosen in Settings), send mail,
-set up a signature and send it, edited; then, with the window
+set up a signature and send it, edited; search mail, with operators, and
+find and open a message only the server has; then, with the window
 closed to the background, get notified of new mail (pushed over IMAP IDLE),
 open a message from its notification, use its buttons, and see notifications
 go once their mail is read elsewhere; get an event's reminder, snooze one and
@@ -159,20 +160,26 @@ def test() -> None:
     driver = start()
     try:
         first_run(driver)
+        search(driver)
         background_and_notifications(driver, notifications)
         dismissed = reminders(driver, notifications)
+        # What the server search found is old mail, not new.
+        found = [n for n in notifications.notified if n["body"] == OLD_SUBJECT]
+        assert not found, f"notified of a message the search found: {found}"
     except Exception:
         shot(driver, "failure")
         raise
     finally:
         driver.quit()
 
-    # Restart: the account, cache and keyring password survive, and the
-    # dismissed reminder stays dismissed.
+    # Restart: the account, cache and keyring password survive, the message
+    # the server search found is still on the device (syncs since kept it),
+    # and the dismissed reminder stays dismissed.
     driver = start()
     try:
         wait_for(lambda: len(message_rows(driver)) >= 2, timeout=60, what="messages after restart")
         shot(driver, "06-after-restart")
+        assert subjects(local_search(driver, "zebracorn")) == [OLD_SUBJECT], "the server's find went"
         wait_for(lambda: invoke(driver, "list_active_reminders") is not None, what="reminders")
         active = invoke(driver, "list_active_reminders")
         assert all(r["title"] != dismissed for r in active), active
@@ -591,6 +598,98 @@ def signature(driver) -> None:
     assert lines == ["Alice Example", "Example Corp Labs"], (lines, html)
     # Under the body, as Outlook puts it.
     assert html.index("With a signature below.") < html.index("cumulas-signature"), html
+
+
+# --- search -------------------------------------------------------------------------
+
+# Seeded over IMAP with an arrival date before the sync window (seed_mail.py):
+# only a search of the whole mailbox on the server finds it.
+OLD_SUBJECT = "Old zebracorn invoice"
+
+
+def local_search(driver, text: str) -> list[dict]:
+    """What a search finds on this device alone (the app's local search)."""
+    return invoke(driver, "search_messages", {"text": text})
+
+
+def subjects(messages: list[dict]) -> list[str]:
+    return [m["subject"] for m in messages]
+
+
+def search_results(driver) -> list[str]:
+    """The accessible names of the rows in the search results."""
+    lists = driver.find_elements(By.CSS_SELECTOR, "[role=listbox][aria-label='Search results']")
+    return [
+        o.get_attribute("aria-label") or ""
+        for listbox in lists
+        for o in listbox.find_elements(By.CSS_SELECTOR, "[role=option]")
+    ]
+
+
+def results_are(driver, expected: list[str]):
+    """The results show exactly these subjects (each in a row's name)."""
+
+    def check():
+        names = search_results(driver)
+        if len(names) != len(expected):
+            return None
+        return names if all(any(s in name for name in names) for s in expected) else None
+
+    return check
+
+
+def search_settled(driver, subtitle: str):
+    """The servers have all answered, and the list says what it shows."""
+
+    def check():
+        busy = any(
+            "Searching your whole mailbox" in (e.get_attribute("textContent") or "")
+            for e in driver.find_elements(By.CSS_SELECTOR, ".mail-search-status, .mail-search-empty")
+        )
+        subtitles = driver.find_elements(By.CSS_SELECTOR, ".mail-list__subtitle")
+        shown = [e.get_attribute("textContent") for e in subtitles]
+        return not busy and subtitle in shown
+
+    wait_for(check, what=f"the search to settle on {subtitle!r}")
+
+
+def search(driver) -> None:
+    """The search box finds words by their start, and from:, subject: and
+    the like narrow it (they used to find nothing). A message from before
+    the sync window, on the server only, shows up as the server is searched,
+    labeled with its folder, and opens like any other."""
+    box = driver.find_element(By.CSS_SELECTOR, "input[aria-label='Search mail']")
+    type_into(box, "quarter")
+    wait_for(results_are(driver, ["Quarterly numbers"]), what="a result for a word's start")
+    search_settled(driver, "1 result for “quarter”")
+    shot(driver, "search-results")
+
+    type_into(box, "from:bob contract")
+    wait_for(results_are(driver, ["Signed contract"]), what="a result for from: and a word")
+
+    # Not on the device: the sync window ends long after it arrived.
+    assert local_search(driver, "zebracorn") == [], "the old message was synced"
+    type_into(box, "zebracorn")
+    names = wait_for(results_are(driver, [OLD_SUBJECT]), what="the server's find")
+    assert "Inbox" in names[0], names
+    search_settled(driver, "1 result for “zebracorn”")
+    shot(driver, "search-server")
+
+    # It opens like any other message: its body comes from the server.
+    by_text(driver, OLD_SUBJECT).click()
+    by_text(driver, OLD_SUBJECT, "h1")
+    wait_for(
+        lambda: "for your records"
+        in (driver.find_element(By.CSS_SELECTOR, ".mail-reader").get_attribute("textContent") or ""),
+        what="the old message's body",
+    )
+    # Now on the device, found by local search alone.
+    assert subjects(local_search(driver, "zebracorn")) == [OLD_SUBJECT]
+
+    box = driver.find_element(By.CSS_SELECTOR, "input[aria-label='Search mail']")
+    box.click()
+    box.send_keys(Keys.ESCAPE)
+    wait_for(lambda: not search_results(driver), what="the search to clear")
 
 
 # --- new mail in the background ------------------------------------------------

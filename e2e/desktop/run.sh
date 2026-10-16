@@ -44,7 +44,7 @@ java -Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap -Dgreenmail.hostnam
   -jar "$greenmail_jar" >"$E2E_OUTPUT/greenmail.log" 2>&1 &
 greenmail_pid=$!
 until (exec 3<>/dev/tcp/127.0.0.1/3143) 2>/dev/null; do sleep 0.5; done
-python3 e2e/desktop/seed_mail.py 127.0.0.1 3025
+python3 e2e/desktop/seed_mail.py 127.0.0.1 3025 3143
 
 if [ -z "${DISPLAY:-}" ]; then
   Xvfb :97 -screen 0 1440x900x24 >/dev/null 2>&1 &
