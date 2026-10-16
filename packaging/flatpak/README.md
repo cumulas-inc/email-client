@@ -137,7 +137,7 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
   1. mirrors the published repository with its history (`repo/mirror.sh`),
      after checking that its summary is signed with the committed key, so that
      nothing unsigned joins a signed publish (say, from someone else serving
-     the domain);
+     the domain), and stops if a build in that history can't be fetched;
   2. adds the new builds on top of it, signed (`repo/add-builds.sh`);
   3. generates the appstream data software centers read and static deltas,
      prunes old builds and signs the summary (`repo/update-repo.sh`);
@@ -316,8 +316,8 @@ so the site stays as it was. Fix the cause and run the workflow again ("Re-run
 failed jobs" reuses the builds for 3 days).
 
 - **The published repository can't be read** (DNS, TLS, an HTTP error, a
-  missing object): the publish stops rather than drop the published history.
-  Check the site.
+  missing object, a history that stops short of the builds it keeps): the
+  publish stops rather than drop the published history. Check the site.
 - **Its summary isn't signed with a committed key**: the publish stops rather
   than sign on top of a history it can't trust. Someone else may be serving
   flatpak.cumulas.co, or a key rotation skipped a step: check the domain's

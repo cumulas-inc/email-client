@@ -7,8 +7,10 @@
 #    with a passphrase, and more than one key;
 #  - mirror.sh starts empty when nothing is published (404), and fails on a
 #    server error, an unreachable host (unless it's a dry run), a published
-#    repository with a missing object or summary, one without the app, and
-#    one whose summary isn't signed with a key it trusts;
+#    repository with a missing object or summary, one without the app, one
+#    whose summary isn't signed with a key it trusts, and one whose history
+#    stops short (a warning in a dry run), unless its config says it keeps
+#    fewer builds (after KEEP_BUILDS is raised);
 #  - five publishes in a row (mirror, add-builds, update-repo, assemble-site,
 #    then "deploy") keep the last KEEP_BUILDS builds of each ref, with their
 #    history, static deltas and appstream data, and leave .Debug out;
@@ -341,6 +343,8 @@ check "site: index.html has no scripts" test -z "$(grep -i '<script' "$site/inde
 check "site: index.html loads nothing from elsewhere" \
   test -z "$(grep -Ei '(src|srcset)="(https?:)?//|<link[^>]*href="(https?:)?//|@import|url\(' "$site/index.html" || true)"
 check "site: the icon is there" test -s "$site/logo.svg"
+check "site: the repository's config records KEEP_BUILDS" \
+  grep -qx "keep-builds=$KEEP_BUILDS" "$site/repo/config"
 
 # --- What clients see -----------------------------------------------------------
 
@@ -400,6 +404,37 @@ expect_error "mirror: a published summary without a signature" "isn't signed wit
   mirror "$work/mirror-unsigned" "$www/unsigned/repo"
 expect_error "mirror: a public key that isn't there" "doesn't exist" \
   "$here/mirror.sh" --gpg-import "$keys/missing.gpg" "$work/mirror-missing-key" "$live"
+
+# A commit missing in the middle of the published history: ostree takes it
+# for the start of the history, and would quietly drop the builds before it.
+mkdir -p "$work/www/missing-commit"
+cp -a "$site/." "$work/www/missing-commit/"
+middle=$(ostree --repo="$work/www/missing-commit/repo" rev-parse "app/$APP_ID/$native/$BRANCH^")
+rm -- "$work/www/missing-commit/repo/objects/${middle:0:2}/${middle:2}.commit"
+expect_error "mirror: a published history with a commit missing" "history stops after 1 build" \
+  mirror "$work/mirror-missing-commit" "$www/missing-commit/repo"
+if mirror --dry-run "$work/mirror-missing-commit-dry-run" "$www/missing-commit/repo" \
+  >"$work/output" 2>&1; then
+  check "mirror: a published history with a commit missing, in a dry run, is a warning" \
+    grep -q "^warning: .*history stops after 1 build" "$work/output"
+else
+  fail "mirror: a published history with a commit missing, in a dry run, is a warning"
+  cat "$work/output" >&2
+fi
+
+# After KEEP_BUILDS is raised, the published refs have fewer builds until
+# enough are published, and the published config says so.
+mkdir -p "$work/www/raised"
+cp -a "$site/." "$work/www/raised/"
+ostree --repo="$work/www/raised/repo" prune --refs-only --depth=$((KEEP_BUILDS - 2)) >/dev/null
+ostree --repo="$work/www/raised/repo" config set cumulas.keep-builds $((KEEP_BUILDS - 1))
+expect_success "mirror: a published history as long as its config says, shorter than KEEP_BUILDS" \
+  mirror "$work/mirror-raised" "$www/raised/repo"
+check "mirror: ... all of that history" \
+  test "$(ref_history "$work/mirror-raised" "app/$APP_ID/$native/$BRANCH" | wc -l)" = $((KEEP_BUILDS - 1))
+ostree --repo="$work/www/raised/repo" config set cumulas.keep-builds "$KEEP_BUILDS"
+expect_error "mirror: the same history, when its config says it keeps KEEP_BUILDS" \
+  "history stops after $((KEEP_BUILDS - 1)) build" mirror "$work/mirror-raised-2" "$www/raised/repo"
 
 error_port=$(free_port)
 python3 -c '

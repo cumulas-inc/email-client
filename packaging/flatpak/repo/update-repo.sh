@@ -2,7 +2,8 @@
 # Brings the repository's metadata up to date after add-builds.sh: the
 # appstream branches that software centers read, static deltas for quick
 # updates, pruning to the last KEEP_BUILDS builds of each ref, and a signed
-# summary. Then checks the result.
+# summary. Records KEEP_BUILDS in the repository's config for the next
+# publish's mirror.sh, then checks the result.
 #
 # Usage: update-repo.sh --gpg-homedir DIR --gpg-key FINGERPRINT REPO
 set -euo pipefail
@@ -41,6 +42,8 @@ flatpak build-update-repo \
   --prune --prune-depth=$((KEEP_BUILDS - 1)) \
   --gpg-homedir="$gpg_homedir" --gpg-sign="$gpg_key" \
   "$repo"
+# How many builds the next publish's mirror.sh should find for each ref.
+ostree --repo="$repo" config set cumulas.keep-builds "$KEEP_BUILDS"
 
 # Check what clients and the next publish rely on.
 [ -s "$repo/summary" ] && [ -s "$repo/summary.sig" ] || die "$repo has no signed summary."
