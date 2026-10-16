@@ -242,14 +242,18 @@ the letter's block.
   main frame only). Its Content Security Policy blocks remote images and styles
   unless the user allows them (tracking pixels are blocked by default) and runs
   one script, by its exact URL: the app's bridge (`public/message-bridge.js`),
-  first in the document, before any of the mail. WebKitGTK calls no event
-  listener in a frame that may not run scripts, and the app can't reach into
-  an opaque one, so the bridge reports what happens inside by `postMessage`:
-  links clicked (opened through the app, in the browser or a new message) and
-  pointed at (the reader shows where they really go), keys pressed (the mail
-  shortcuts), and the document's size. Only real input is reported, and the
-  app takes a message only from its own frame, carrying the secret channel
-  that frame's document was given.
+  right after the charset and policy tags, before any of the mail. WebKitGTK
+  calls no event listener in a frame that may not run scripts, and the app
+  can't reach into an opaque one, so the bridge reports what happens inside by
+  `postMessage`: links clicked (opened through the app, in the browser or a
+  new message) and pointed at (the reader shows where they really go), keys
+  pressed (the mail shortcuts), and the document's size. Only real input is
+  reported, and the app takes a message only from its own frame, carrying the
+  secret channel that frame's document was given. Should a script in the mail
+  run anyway, the bridge limits what it can change: its listeners are called
+  first, it reads events and links through getters taken before the mail is
+  parsed, and a link clicked with the pointer opens only if it still leads
+  where it did when the pointer went down on it.
 - Signatures, which go into messages the person sends, are sanitized more
   strictly: pictures and CSS backgrounds only over HTTPS or as `data:` images,
   links only to `http`, `https`, `mailto` and `tel`, and no CSS that imports,
