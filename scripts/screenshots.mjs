@@ -277,6 +277,19 @@ const scenes = [
       ]) {
         await page.getByRole("tab", { name: tab }).click();
         if (tab === "Signatures") await page.locator(".signature-field iframe").waitFor();
+        if (tab === "About") {
+          // The privacy statements, whole: below the logo, they don't all fit.
+          const privacy = page.getByRole("region", { name: "Privacy" });
+          await privacy.waitFor();
+          await page.locator(".settings__content").evaluate(
+            (content, section) => {
+              const top = parseFloat(getComputedStyle(content).paddingTop);
+              content.scrollTop +=
+                section.getBoundingClientRect().top - content.getBoundingClientRect().top - top;
+            },
+            await privacy.elementHandle(),
+          );
+        }
         await shot(name);
       }
     },
