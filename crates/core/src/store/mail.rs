@@ -1044,6 +1044,18 @@ impl Store {
         Ok(())
     }
 
+    /// Deletes messages found to be gone from the server some time after
+    /// the fact (opening one): folder counts are left to the next folder
+    /// listing, as the server's may already have left them out.
+    pub fn forget_gone_messages(&self, ids: &[String]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        delete_message_rows(&tx, ids)?;
+        tx.commit()?;
+        self.note_changed(ids);
+        Ok(())
+    }
+
     // --- rows server search fetched -----------------------------------------
 
     /// Notes that changes were made to these messages, for the server

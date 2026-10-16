@@ -86,7 +86,7 @@ impl CoreService {
             Ok(content) => content,
             Err(e) if e.code == ErrorCode::NotFound => {
                 let gone = [summary.id.clone()];
-                self.store.delete_messages(&gone)?;
+                self.store.forget_gone_messages(&gone)?;
                 self.sink.mail_settled(&gone);
                 self.notify(&[DataKind::Mail], Some(&summary.account_id));
                 return Err(Error::new(

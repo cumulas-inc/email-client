@@ -1806,13 +1806,26 @@ async fn opening_a_search_result_touches_it_and_a_gone_one_is_removed() {
     let message = h.service.get_message(&kept, false).await.unwrap();
     assert!(message.body_html.unwrap().contains("Hello"));
 
-    // Deleted on the server, outside the window: noticed when opened.
+    // Deleted on the server, outside the window: noticed when opened. The
+    // folder's counts are the server's, which may not count it any more.
     h.server.lock().unwrap().server_only.remove("Archive:8");
+    let archive = h
+        .service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Archive)
+        .unwrap()
+        .unwrap();
+    h.service
+        .store()
+        .set_folder_counts(&archive.id, 3, 10)
+        .unwrap();
     let error = h.service.get_message(&gone, false).await.unwrap_err();
     assert_eq!(error.code, ErrorCode::NotFound);
     assert_eq!(error.message, "This message is no longer on the server.");
     assert!(h.service.store().get_message_summary(&gone).is_err());
     assert!(h.sink.settled.lock().unwrap().contains(&gone));
+    let archive = h.service.store().get_folder(&archive.id).unwrap();
+    assert_eq!((archive.unread_count, archive.total_count), (3, 10));
 
     h.service.sync_account(&account.id).await.unwrap();
     assert_eq!(local_ids(&h, "zebracorn", &[]), [kept]);
