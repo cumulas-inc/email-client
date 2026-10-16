@@ -97,9 +97,17 @@
   </keywords>
 
   <releases>
-    <release version="0.1.0" date="2026-10-14">
+    <release version="0.1.0" date="2026-10-16">
       <description>
-        <p>First preview release.</p>
+        <p>The first release of Cumulas Mail.</p>
+        <ul>
+          <li>Mail, calendar, contacts and tasks for Microsoft 365, Outlook.com and any IMAP/SMTP account</li>
+          <li>New mail arrives within seconds: IMAP IDLE, and the Cumulas push service for Microsoft accounts</li>
+          <li>Notifications with quick actions, and reminders for events and tasks</li>
+          <li>Keeps running in the background, with a tray icon where the desktop shows one</li>
+          <li>Company signatures from Cumulas Signatures for Microsoft 365 work accounts, and a signature of your own for each account</li>
+          <li>Your choice of fonts and text size</li>
+        </ul>
       </description>
     </release>
   </releases>
