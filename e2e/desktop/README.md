@@ -18,10 +18,13 @@ SMTP and checks its delivery and the copy in Sent. It types a signature into Set
 Signatures (the signature editor is a sandboxed frame), adds a word to it in
 a new message and checks that the delivered HTML has it, edited, in its
 `cumulas-signature` block under the body. It searches mail: by the start of a
-word, and with `from:`; and for a message from long before the sync window
-(`seed_mail.py` puts it into the Inbox over IMAP with an arrival date 400 days
-ago), which only a search of the whole mailbox on the server finds: it shows
-labeled with its folder, and opens (and is never notified as new mail). Then it closes the window (as a window manager
+word, and with `from:`, and the Flagged filter says it hides the result; and
+for a message from long before the sync window (`seed_mail.py` puts it into
+the Inbox over IMAP with an arrival date 400 days ago), which only a search of
+the whole mailbox on the server finds: it shows labeled with its folder, and
+opens (and is never notified as new mail). Of 55 old purchase orders, 50 come
+first and the rest with "Show more results"; one of them is flagged, replied
+to, archived and deleted, each checked on the server. Then it closes the window (as a window manager
 would, with `WM_DELETE_WINDOW`) and, with the app running in the background,
 checks the desktop side against a fake notification server
 (`fake_notifications.py`, on the test's session bus): mail delivered over SMTP
