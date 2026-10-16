@@ -790,6 +790,23 @@ describe("Search", () => {
     expect(screen.getByText("The only result for “lisbon” isn't flagged.")).toBeInTheDocument();
   });
 
+  it("says what the filter hides only about the results of the text they are for", async () => {
+    const user = userEvent.setup();
+    // Slow enough that the next text's results take a moment.
+    const backend = new MockBackend({ latency: 60 });
+    await renderMail({ backend });
+    await user.click(screen.getByRole("button", { name: "Unread" }));
+    await setSearch("from:jonas");
+    expect(await screen.findByText("No unread results")).toBeInTheDocument();
+    const claimed = watchFor("for “from:pri” are unread");
+
+    await setSearch("from:pri");
+    await waitFor(() => expect(announced()).toMatch(/^\d+ unread of \d+ results\.$/));
+    // None of Jonas's results being unread was never said of Priya's.
+    expect(claimed()).toBe(false);
+    expect(document.querySelector(".mail-list__count")).toHaveTextContent(/for “from:pri”$/);
+  });
+
   it("searches the whole mailbox on the servers, and what it finds acts like any message", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend();
@@ -850,6 +867,7 @@ describe("Search", () => {
     await waitFor(() =>
       expect(announced()).toBe("1 result. Couldn't search Alex (Personal) on the server."),
     );
+    expect(document.querySelector(".mail-list__count")).toHaveAttribute("title", "1 result");
 
     // With nothing found, it says nothing was found on this device.
     await setSearch("zebras");

@@ -215,6 +215,12 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   /** A server is still being asked for the first page for this text (or soon will be). */
   const serverBusy =
     serverWanted && (!serverCurrent || server.accounts.some((a) => a.status === "searching"));
+  // The text the listed results are for: the last one answered, while the
+  // next one loads. What the header and the empty states say is about it.
+  const [resultsFor, setResultsFor] = useState("");
+  const answered = !!results.data && !results.isPlaceholderData;
+  if (answered && resultsFor !== localText) setResultsFor(localText);
+  const shownFor = answered ? localText : resultsFor;
 
   const fetched = useMemo(() => {
     // Unread and Flagged narrow search results too; the title says when
@@ -470,13 +476,13 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
           title={
             filtered
               ? `${exactCount(items.length)} ${filterWord} of ${exactCount(resultCount)} ${resultsWord}`
-              : `${exactCount(items.length)} results`
+              : `${exactCount(items.length)} ${items.length === 1 ? "result" : "results"}`
           }
         >
           {filtered
             ? `${formatCount(items.length)} ${filterWord} of ${formatCount(resultCount)} ${resultsWord}`
             : `${formatCount(items.length)} ${items.length === 1 ? "result" : "results"}`}{" "}
-          for “<bdi>{query}</bdi>”
+          for “<bdi>{shownFor}</bdi>”
         </span>
         {/* Here rather than above the list, so the rows don't move when
             the servers answer. */}
@@ -613,7 +619,10 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     );
   } else if (items.length === 0) {
     body = searching ? (
-      resultCount > 0 && filter !== "all" ? (
+      resultCount > 0 && filter !== "all" && shownFor !== query ? (
+        // What the filter hides is another text's results: no claim yet.
+        <PaneSpinner />
+      ) : resultCount > 0 && filter !== "all" ? (
         // Results the filter hides: say so, rather than "No results".
         searchEmpty(
           <EmptyState
@@ -621,8 +630,8 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
             title={filter === "unread" ? "No unread results" : "No flagged results"}
             description={
               resultCount === 1
-                ? `The only result for “${query}” isn't ${filterWord}.`
-                : `None of the ${formatCount(resultCount)} results for “${query}” are ${filterWord}.`
+                ? `The only result for “${shownFor}” isn't ${filterWord}.`
+                : `None of the ${formatCount(resultCount)} results for “${shownFor}” are ${filterWord}.`
             }
             action={
               <>
