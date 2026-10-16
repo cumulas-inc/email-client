@@ -4,7 +4,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MockBackend } from "../api/mock";
 import { qk } from "../api/queries";
@@ -13,6 +13,7 @@ import { toast, useToasts } from "../components/toast";
 import { ALL_INBOXES, resetMailStore, useMailStore } from "../modules/mail/mailStore";
 import { useAddAccountRequest } from "../modules/settings/addAccountStore";
 import { useTasksStore } from "../modules/tasks/store";
+import { loadLazyModules } from "../test/lazyModules";
 import { App } from "./App";
 import { OFFERED_KEY } from "./offers";
 import { useAppStore } from "./store";
@@ -27,6 +28,8 @@ async function firstInboxMessage(backend: MockBackend, folderId = "w-inbox") {
   const page = await backend.listMessages(folderId, { offset: 0, limit: 5 });
   return page.items[0] as MessageSummary;
 }
+
+beforeAll(loadLazyModules, 60_000);
 
 beforeEach(() => {
   resetMailStore();
