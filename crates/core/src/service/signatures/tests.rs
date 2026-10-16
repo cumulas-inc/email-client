@@ -1320,6 +1320,27 @@ async fn a_removed_account_is_never_checked_again() {
     assert!(!s.service.signatures.asked_this_run(&account.id));
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_account_whose_removal_failed_is_still_checked() {
+    let s = setup();
+    let account = work_account(&s);
+    s.service.store().execute_for_tests(
+        "CREATE TEMP TRIGGER keep_accounts BEFORE DELETE ON accounts
+         BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+    );
+    assert!(s.service.remove_account(&account.id).await.is_err());
+    s.organization
+        .answer(signature("<p>Org</p>", true, "\"1\""));
+    let checked = s
+        .service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap()
+        .organization;
+    assert_eq!(s.organization.calls(), 1);
+    assert_eq!(checked.state, OrganizationSignatureState::Ready);
+}
+
 #[test]
 fn the_next_check_follows_what_was_said() {
     use OrganizationSignatureState as State;

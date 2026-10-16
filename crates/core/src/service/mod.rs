@@ -436,7 +436,11 @@ impl CoreService {
         self.forget_providers(Some(account_id)).await;
         // From here on no signature check starts for it, whoever found it.
         self.signatures.forget(account_id);
-        self.store.delete_account(account_id)?;
+        if let Err(e) = self.store.delete_account(account_id) {
+            // The account stays, and so do its signature checks.
+            self.signatures.restore(account_id);
+            return Err(e);
+        }
         for key in [
             keys::imap_password(account_id),
             keys::refresh_token(account_id),

@@ -183,6 +183,13 @@ impl SignatureHub {
         self.finished.lock().unwrap().remove(account_id);
     }
 
+    /// An account whose removal failed after [`Self::forget`]: it stays,
+    /// so its checks go on.
+    pub(crate) fn restore(&self, account_id: &str) {
+        self.removed.lock().unwrap().remove(account_id);
+        self.poke.notify_one();
+    }
+
     /// Forgets every account's organization service (the Microsoft app
     /// registration changed).
     pub(crate) fn forget_services(&self) {

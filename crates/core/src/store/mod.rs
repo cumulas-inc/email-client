@@ -100,7 +100,16 @@ pub(crate) fn like_pattern(input: &str) -> String {
 pub(crate) mod test_support {
     use chrono::Utc;
 
+    use super::Store;
     use crate::model::{Account, AccountKind, AccountSettings, ImapSettings, TlsMode};
+
+    impl Store {
+        /// Runs `sql` on the database, for tests that need it in a state
+        /// the app never puts it in.
+        pub fn execute_for_tests(&self, sql: &str) {
+            self.conn().execute_batch(sql).unwrap();
+        }
+    }
 
     pub fn imap_account(id: &str) -> Account {
         Account {
