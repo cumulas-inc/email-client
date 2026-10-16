@@ -7,7 +7,8 @@
 #    with a passphrase, and more than one key;
 #  - mirror.sh starts empty when nothing is published (404), and fails on a
 #    server error, an unreachable host (unless it's a dry run), a published
-#    repository with a missing object or summary, and one without the app;
+#    repository with a missing object or summary, one without the app, and
+#    one whose summary isn't signed with a key it trusts;
 #  - five publishes in a row (mirror, add-builds, update-repo, assemble-site,
 #    then "deploy") keep the last KEEP_BUILDS builds of each ref, with their
 #    history, static deltas and appstream data, and leave .Debug out;
@@ -71,6 +72,19 @@ expect_failure() {
   shift
   if "$@" >"$work/output" 2>&1; then
     fail "$what (it succeeded)"
+    cat "$work/output" >&2
+  else pass "$what"; fi
+}
+# expect_error DESCRIPTION PATTERN COMMAND...: the command fails, and its
+# output matches PATTERN (grep -E), so that it fails for the reason tested.
+expect_error() {
+  local what=$1 pattern=$2
+  shift 2
+  if "$@" >"$work/output" 2>&1; then
+    fail "$what (it succeeded)"
+    cat "$work/output" >&2
+  elif ! grep -Eq -- "$pattern" "$work/output"; then
+    fail "$what (but not with /$pattern/)"
     cat "$work/output" >&2
   else pass "$what"; fi
 }
@@ -176,6 +190,11 @@ expect_failure "import: into a GNUPGHOME that isn't empty" \
 
 # --- Fake builds, a fake Flathub and the "published" site ------------------------
 
+# mirror.sh, trusting the test signing key.
+mirror() {
+  "$here/mirror.sh" --gpg-import "$keys/signer.gpg" "$@"
+}
+
 # A build as flatpak-builder --repo --default-branch=stable leaves it: the
 # app, its Locale extension and its debug info.
 make_build() { # REPO ARCH VERSION
@@ -241,7 +260,7 @@ declare -A commits=()
 for round in 1 2 3 4 5; do
   dir="$work/round$round"
   mkdir -p "$dir"
-  if ! "$here/mirror.sh" "$dir/repo" "$live" 2>"$dir/mirror.log"; then
+  if ! mirror "$dir/repo" "$live" 2>"$dir/mirror.log"; then
     fail "publish $round: mirror"
     cat "$dir/mirror.log" >&2
     break
@@ -337,31 +356,50 @@ done
 
 # --- Mirror failures ----------------------------------------------------------------
 
-expect_failure "mirror: an existing destination" "$here/mirror.sh" "$work/round5" "$live"
+expect_failure "mirror: an existing destination" mirror "$work/round5" "$live"
 
 mkdir -p "$work/www/missing-object"
 cp -a "$site/." "$work/www/missing-object/"
 object=$(find "$work/www/missing-object/repo/objects" -name '*.filez' -print -quit)
 rm -- "$object"
 expect_failure "mirror: a published repository with a missing object" \
-  "$here/mirror.sh" "$work/mirror-missing-object" "$www/missing-object/repo"
+  mirror "$work/mirror-missing-object" "$www/missing-object/repo"
 
 mkdir -p "$work/www/corrupt-summary"
 cp -a "$site/." "$work/www/corrupt-summary/"
 head -c 4096 /dev/urandom >"$work/www/corrupt-summary/repo/summary"
 expect_failure "mirror: a published repository with a corrupt summary" \
-  "$here/mirror.sh" "$work/mirror-corrupt-summary" "$www/corrupt-summary/repo"
+  mirror "$work/mirror-corrupt-summary" "$www/corrupt-summary/repo"
 
 mkdir -p "$work/www/no-summary/repo"
 cp "$site/repo/config" "$work/www/no-summary/repo/"
 expect_failure "mirror: a published repository with a config but no summary" \
-  "$here/mirror.sh" "$work/mirror-no-summary" "$www/no-summary/repo"
+  mirror "$work/mirror-no-summary" "$www/no-summary/repo"
 
 mkdir -p "$work/www/other-app"
 ostree --repo="$work/www/other-app/repo" init --mode=archive
-flatpak build-update-repo "$work/www/other-app/repo" >/dev/null
+flatpak build-update-repo --gpg-homedir="$keys/signer" --gpg-sign="$signer" \
+  "$work/www/other-app/repo" >/dev/null
 expect_failure "mirror: a published repository without the app" \
-  "$here/mirror.sh" "$work/mirror-other-app" "$www/other-app/repo"
+  mirror "$work/mirror-other-app" "$www/other-app/repo"
+
+mkdir -p "$work/www/other-key"
+cp -a "$site/." "$work/www/other-key/"
+flatpak build-update-repo --gpg-homedir="$keys/other" --gpg-sign="$(cat "$keys/other.fpr")" \
+  "$work/www/other-key/repo" >/dev/null
+expect_error "mirror: a published summary signed with a key it isn't given" "isn't signed with" \
+  mirror "$work/mirror-other-key" "$www/other-key/repo"
+expect_error "mirror: a published summary signed with a key it isn't given, in a dry run" \
+  "isn't signed with" mirror --dry-run "$work/mirror-other-key-dry-run" "$www/other-key/repo"
+expect_success "mirror: a published summary signed with one of the keys it's given" \
+  mirror --gpg-import "$keys/other.gpg" "$work/mirror-two-keys" "$www/other-key/repo"
+mkdir -p "$work/www/unsigned"
+cp -a "$site/." "$work/www/unsigned/"
+rm -- "$work/www/unsigned/repo/summary.sig"
+expect_error "mirror: a published summary without a signature" "isn't signed with" \
+  mirror "$work/mirror-unsigned" "$www/unsigned/repo"
+expect_error "mirror: a public key that isn't there" "doesn't exist" \
+  "$here/mirror.sh" --gpg-import "$keys/missing.gpg" "$work/mirror-missing-key" "$live"
 
 error_port=$(free_port)
 python3 -c '
@@ -377,15 +415,15 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
 servers+=("$!")
 wait_for "http://127.0.0.1:$error_port/"
 expect_failure "mirror: a server error" \
-  "$here/mirror.sh" "$work/mirror-500" "http://127.0.0.1:$error_port/repo"
+  mirror "$work/mirror-500" "http://127.0.0.1:$error_port/repo"
 expect_failure "mirror: a server error, in a dry run" \
-  "$here/mirror.sh" --dry-run "$work/mirror-500-dry-run" "http://127.0.0.1:$error_port/repo"
+  mirror --dry-run "$work/mirror-500-dry-run" "http://127.0.0.1:$error_port/repo"
 
 unused_port=$(free_port)
 expect_failure "mirror: an unreachable host" \
-  "$here/mirror.sh" "$work/mirror-unreachable" "http://127.0.0.1:$unused_port/repo"
+  mirror "$work/mirror-unreachable" "http://127.0.0.1:$unused_port/repo"
 expect_success "mirror: an unreachable host, in a dry run, starts empty" \
-  "$here/mirror.sh" --dry-run "$work/mirror-unreachable-dry-run" "http://127.0.0.1:$unused_port/repo"
+  mirror --dry-run "$work/mirror-unreachable-dry-run" "http://127.0.0.1:$unused_port/repo"
 
 # --- Installing -----------------------------------------------------------------
 

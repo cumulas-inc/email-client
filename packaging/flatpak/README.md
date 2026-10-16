@@ -134,7 +134,10 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
   publish and the key check above. Pull requests, other branches and dry runs
   never get it.
 - **Each run** builds both architectures (`build-repo.sh`), then:
-  1. mirrors the published repository with its history (`repo/mirror.sh`);
+  1. mirrors the published repository with its history (`repo/mirror.sh`),
+     after checking that its summary is signed with the committed key, so that
+     nothing unsigned joins a signed publish (say, from someone else serving
+     the domain);
   2. adds the new builds on top of it, signed (`repo/add-builds.sh`);
   3. generates the appstream data software centers read and static deltas,
      prunes old builds and signs the summary (`repo/update-repo.sh`);
@@ -275,9 +278,12 @@ Rotate it if it may have leaked, or to replace it. Flatpak can't hand people a
 new key: each of them has to import it, so plan for it.
 
 1. Generate a new key as in [Setting it up](#setting-it-up), step 1.
-2. Commit the new `cumulas-flatpak.gpg` in a pull request, and when it's merged,
-   replace the `FLATPAK_GPG_PRIVATE_KEY` secret of the `flatpak-signing`
-   environment. (Publishing fails while the two don't match.)
+2. In a pull request, rename the old `cumulas-flatpak.gpg` to
+   `cumulas-flatpak-previous.gpg` (publishing checks the published summary,
+   still signed with it, against the committed keys) and commit the new one as
+   `cumulas-flatpak.gpg`. When it's merged, replace the
+   `FLATPAK_GPG_PRIVATE_KEY` secret of the `flatpak-signing` environment.
+   (Publishing fails while the two don't match.)
 3. Publish. From then on the summary and new builds are signed with the new
    key, and new installs get it from the `.flatpakrepo` and `.flatpakref`.
 4. Tell people (release notes, cumulas.co): until they import the new key,
@@ -299,9 +305,9 @@ new key: each of them has to import it, so plan for it.
    flatpak remote-add cumulas https://flatpak.cumulas.co/cumulas.flatpakrepo
    ```
 
-The builds signed with the old key leave the repository after 3 more
-publishes. Publishing doesn't check old signatures, so a rotation doesn't
-block it.
+Once a publish signed with the new key is out, delete
+`cumulas-flatpak-previous.gpg`. The builds signed with the old key leave the
+repository after 3 more publishes.
 
 ### When a publish fails
 
@@ -312,6 +318,10 @@ failed jobs" reuses the builds for 3 days).
 - **The published repository can't be read** (DNS, TLS, an HTTP error, a
   missing object): the publish stops rather than drop the published history.
   Check the site.
+- **Its summary isn't signed with a committed key**: the publish stops rather
+  than sign on top of a history it can't trust. Someone else may be serving
+  flatpak.cumulas.co, or a key rotation skipped a step: check the domain's
+  Pages settings and the committed keys.
 - **It answers 404**: that means nothing is published yet, so the publish
   starts a new repository, with a warning. After the first publish, a 404
   means Pages or its custom domain is misconfigured: fix that before

@@ -21,6 +21,14 @@ REPO_DESCRIPTION="Releases of Cumulas Mail, built from https://github.com/cumula
 REPO_HOMEPAGE=https://cumulas.co
 REPO_ICON="$SITE_URL/logo.svg"
 
+# The committed public keys (packaging/flatpak/README.md, "Rotating the
+# signing key"): the one the repository is signed with and, after a
+# rotation, the previous one, which signed what's published until the first
+# publish with the new key.
+KEYS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PUBLIC_KEY="$KEYS_DIR/cumulas-flatpak.gpg"
+PREVIOUS_PUBLIC_KEY="$KEYS_DIR/cumulas-flatpak-previous.gpg"
+
 # The refs these scripts publish, as an extended regular expression: the app
 # and, when a build has translations, its Locale extension. Debug info
 # (.Debug) stays out, to keep the site well under GitHub Pages' size limit.
