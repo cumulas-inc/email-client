@@ -247,7 +247,11 @@ function OwnSignature({ signature, email }: { signature: AccountSignature; email
     pending.current = false;
     const edit = latest.current;
     unsaved.set(accountId, edit);
-    trackSave(mutateAsync({ accountId, ...edit })).then(
+    const failed = (e: unknown) => `Couldn't save the signature for ${email}. ${errorMessage(e)}`;
+    trackSave(mutateAsync({ accountId, ...edit }), (e) =>
+      // Out of Signatures, it says which account's.
+      useAppStore.getState().settingsOpen === "signatures" ? undefined : failed(e),
+    ).then(
       () => {
         if (unsaved.get(accountId) === edit) unsaved.delete(accountId);
       },
@@ -258,7 +262,7 @@ function OwnSignature({ signature, email }: { signature: AccountSignature; email
         if (useAppStore.getState().settingsOpen) return;
         useToasts.getState().push({
           kind: "error",
-          message: `Couldn't save the signature for ${email}. ${errorMessage(e)}`,
+          message: failed(e),
           action: {
             label: "Edit signature",
             onClick: () => useAppStore.getState().openSettings("signatures"),

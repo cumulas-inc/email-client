@@ -101,7 +101,7 @@ export function SaveIndicator() {
       {state === "error" && (
         <div className="save-indicator save-indicator--error" role="alert">
           <CircleAlert size={14} aria-hidden="true" />
-          Couldn&apos;t save: {error}
+          {error}
         </div>
       )}
     </>

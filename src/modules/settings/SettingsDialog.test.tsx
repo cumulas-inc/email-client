@@ -946,18 +946,26 @@ describe("Signatures", () => {
     editFrame(doc, huge);
     await user.click(screen.getByRole("tab", { name: "General" }));
     expect(update).toHaveBeenCalledWith("acct-home", huge, true);
-    // Settings is still open: its header says it, and no toast says it again.
+    // Settings is still open: its header says it, naming the account, since
+    // General doesn't show it, and no toast says it again.
     expect(await within(settingsDialog()).findByRole("alert")).toHaveTextContent(
-      "Couldn't save: That signature is too large.",
+      "Couldn't save the signature for alex@morgan-family.example. " +
+        "That signature is too large. Signatures can be 512 KB at most.",
     );
     expect(useToasts.getState().toasts).toEqual([]);
 
-    // Back in Signatures, the edit is there, and goes again.
+    // Back in Signatures, the edit is there, and goes again; failing there,
+    // it's said as any other save in Settings.
     await user.click(screen.getByRole("tab", { name: "Signatures" }));
     home = await screen.findByRole("region", { name: /^Alex \(Personal\)/ });
     doc = await loadFrame((await within(home).findByTitle("Signature")) as HTMLIFrameElement);
     expect(doc.body.innerHTML).toBe(huge);
     await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(within(settingsDialog()).getByRole("alert")).toHaveTextContent(
+        "Couldn't save: That signature is too large. Signatures can be 512 KB at most.",
+      ),
+    );
     editFrame(doc, "<div>Alex</div>");
     await waitFor(() =>
       expect(update).toHaveBeenLastCalledWith("acct-home", "<div>Alex</div>", true),

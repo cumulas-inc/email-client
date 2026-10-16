@@ -13,6 +13,7 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 
 interface SaveStatus {
   state: SaveState;
+  /** What the indicator says of a failed save. */
   error: string | null;
   pending: number;
 }
@@ -21,8 +22,15 @@ export const useSaveStatus = create<SaveStatus>(() => ({ state: "idle", error: n
 
 let fadeTimer: ReturnType<typeof setTimeout> | undefined;
 
-/** Runs a save and reflects it in the indicator. Rethrows failures. */
-export async function trackSave<T>(work: Promise<T>): Promise<T> {
+/**
+ * Runs a save and reflects it in the indicator. Rethrows failures. The
+ * indicator says one as "Couldn't save: {reason}", unless `describe`, asked
+ * as it fails, says something else.
+ */
+export async function trackSave<T>(
+  work: Promise<T>,
+  describe?: (e: unknown) => string | undefined,
+): Promise<T> {
   clearTimeout(fadeTimer);
   useSaveStatus.setState((s) => ({ state: "saving", error: null, pending: s.pending + 1 }));
   try {
@@ -41,7 +49,7 @@ export async function trackSave<T>(work: Promise<T>): Promise<T> {
     useSaveStatus.setState((s) => ({
       pending: Math.max(0, s.pending - 1),
       state: "error",
-      error: errorMessage(e),
+      error: describe?.(e) ?? `Couldn't save: ${errorMessage(e)}`,
     }));
     throw e;
   }
