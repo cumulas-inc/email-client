@@ -29,7 +29,9 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
-[ -n "$gpg_homedir" ] && [ -n "$gpg_key" ] && [ -n "$subject" ] && [ $# -ge 2 ] || usage
+if [ -z "$gpg_homedir" ] || [ -z "$gpg_key" ] || [ -z "$subject" ] || [ $# -lt 2 ]; then
+  usage
+fi
 repo=$1
 shift
 

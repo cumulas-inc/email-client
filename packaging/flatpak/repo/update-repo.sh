@@ -33,7 +33,9 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
-[ -n "$gpg_homedir" ] && [ -n "$gpg_key" ] && [ $# = 1 ] || usage
+if [ -z "$gpg_homedir" ] || [ -z "$gpg_key" ] || [ $# != 1 ]; then
+  usage
+fi
 repo=$1
 
 # Each publish starts from a new repository (mirror.sh), so the next key goes
@@ -65,7 +67,9 @@ flatpak build-update-repo \
 ostree --repo="$repo" config set cumulas.keep-builds "$KEEP_BUILDS"
 
 # Check what clients and the next publish rely on.
-[ -s "$repo/summary" ] && [ -s "$repo/summary.sig" ] || die "$repo has no signed summary."
+if [ ! -s "$repo/summary" ] || [ ! -s "$repo/summary.sig" ]; then
+  die "$repo has no signed summary."
+fi
 if [ ${#next_args[@]} -gt 0 ]; then
   ostree --repo="$repo" summary --view | grep -q '^xa\.gpg-keys:' ||
     die "The summary of $repo doesn't carry the next key."
