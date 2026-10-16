@@ -60,10 +60,10 @@ impl Cursor {
     }
 }
 
-/// The folder being synced.
-struct Target<'a> {
-    folder: &'a Folder,
-    uid_validity: u32,
+/// The folder being synced (or searched).
+pub(super) struct Target<'a> {
+    pub folder: &'a Folder,
+    pub uid_validity: u32,
 }
 
 impl Target<'_> {
@@ -220,7 +220,7 @@ fn imap_date(instant: DateTime<Utc>) -> String {
 }
 
 /// Fetches summaries (headers, flags, structure and preview) for `uids`.
-async fn fetch_summaries(
+pub(super) async fn fetch_summaries(
     session: &mut ImapSession,
     target: &Target<'_>,
     uids: &[u32],

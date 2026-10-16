@@ -43,6 +43,7 @@ use cumulas_core::push::supervisor::Supervisor;
 use cumulas_core::push::{
     EndReason, MailWatcher, PushEvent, PushHealth, PushMode, PushStatus, WatchSignal, WatchSink,
 };
+use cumulas_core::search::SearchQuery;
 use cumulas_core::secrets::MemorySecretStore;
 use cumulas_core::service::{EventSink, LiveConnector, MailAlert};
 use cumulas_core::store::Store;
@@ -644,6 +645,208 @@ async fn reuses_the_session_and_reconnects_after_a_drop() {
     // Other tests may add folders meanwhile; the inbox is always there.
     assert!(again.iter().any(|f| f.id == inbox.id));
     assert_eq!(proxy.connections.load(Ordering::SeqCst), 2);
+}
+
+// --- server search -------------------------------------------------------------
+
+/// A plain message as another client would append it.
+fn rfc822(from: &str, subject: &str, date: chrono::DateTime<Utc>, body: &str) -> String {
+    format!(
+        "From: {from}\r\nTo: Alice <alice@example.com>\r\nSubject: {subject}\r\n\
+         Date: {}\r\nMessage-ID: <{}@example.com>\r\nMIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n",
+        date.to_rfc2822(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// `APPEND`'s date-time argument.
+fn internal_date(date: chrono::DateTime<Utc>) -> String {
+    format!("\"{}\"", date.format("%d-%b-%Y %H:%M:%S +0000"))
+}
+
+/// Mail outside the sync window and in other folders, for searching:
+/// returns the folders, in the order the app searches them.
+async fn searchable_mailbox(config: &Config, credentials: &ImapCredentials) -> Vec<Folder> {
+    let mut raw = config.other_device(credentials).await;
+    let capabilities = raw.capabilities().await.expect("capabilities");
+    let literal_plus = capabilities.has_str("LITERAL+") || capabilities.has_str("LITERAL-");
+    println!(
+        "server search literals: {}",
+        if literal_plus {
+            "non-synchronizing (LITERAL+/-)"
+        } else {
+            "synchronizing"
+        }
+    );
+    raw.create("Archive").await.expect("create Archive");
+    let now = Utc::now();
+    let old = now - chrono::Duration::days(400);
+    let messages = [
+        (
+            "INBOX",
+            old,
+            rfc822(
+                "Northwind Billing <billing@northwind.example>",
+                "An old zebracorn invoice",
+                old,
+                "Invoice 2023-118 is attached.",
+            ),
+        ),
+        (
+            "INBOX",
+            now - chrono::Duration::days(2),
+            rfc822(
+                "Renée <renee@example.com>",
+                "=?UTF-8?Q?Caf=C3=A9_=C3=BCber_alles?=",
+                now - chrono::Duration::days(2),
+                "Rendez-vous au café.",
+            ),
+        ),
+        (
+            "INBOX",
+            now - chrono::Duration::days(3),
+            "From: Bob <bob@example.com>\r\nTo: Alice <alice@example.com>\r\n\
+             Subject: Budget\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n\
+             --b1\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nThe budget.\r\n\
+             --b1\r\nContent-Type: application/pdf; name=\"budget.pdf\"\r\n\
+             Content-Disposition: attachment; filename=\"budget.pdf\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n--b1--\r\n"
+                .to_owned(),
+        ),
+        (
+            "Archive",
+            now - chrono::Duration::days(10),
+            rfc822(
+                "Grace Hopper <grace@example.com>",
+                "Archived zebracorn notes",
+                now - chrono::Duration::days(10),
+                "Notes.",
+            ),
+        ),
+    ];
+    for (mailbox, date, message) in messages {
+        raw.append(
+            mailbox,
+            Some("()"),
+            Some(&internal_date(date)),
+            message.as_bytes(),
+        )
+        .await
+        .expect("append");
+    }
+    let _ = raw.logout().await;
+    let provider = ImapProvider::new("acct", credentials.clone());
+    let mut folders = provider.list_folders().await.expect("folders");
+    folders.sort_by_key(|f| f.role.sort_rank());
+    folders
+}
+
+fn subjects(page: &cumulas_core::providers::SearchPage) -> Vec<&str> {
+    page.messages.iter().map(|m| m.subject.as_str()).collect()
+}
+
+#[tokio::test]
+async fn imap_server_search() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let credentials = config.fresh_mailbox().await;
+    let folders = searchable_mailbox(&config, &credentials).await;
+    let inbox = folders
+        .iter()
+        .find(|f| f.role == FolderRole::Inbox)
+        .unwrap();
+    let archive = folders.iter().find(|f| f.remote_id == "Archive").unwrap();
+    let provider = ImapProvider::new("acct", credentials.clone());
+
+    // The sync window doesn't reach the old one.
+    let synced = provider
+        .sync_messages(inbox, None, window())
+        .await
+        .expect("sync");
+    assert!(
+        find(&synced, "An old zebracorn invoice").is_none(),
+        "{:?}",
+        synced
+            .upserts
+            .iter()
+            .map(|m| &m.subject)
+            .collect::<Vec<_>>()
+    );
+
+    let search = |text: &str, cursor: Option<String>, limit: u32| {
+        let provider = &provider;
+        let folders = &folders;
+        let query = SearchQuery::parse(text);
+        let text = text.to_owned();
+        async move {
+            provider
+                .search(&query, folders, cursor.as_deref(), limit)
+                .await
+                .unwrap_or_else(|e| panic!("searching {text:?}: {e}"))
+        }
+    };
+
+    // Every folder, newest first, each in its own.
+    let page = search("zebracorn", None, 50).await;
+    assert_eq!(
+        subjects(&page),
+        ["Archived zebracorn notes", "An old zebracorn invoice"]
+    );
+    assert_eq!(page.messages[0].folder_id, archive.id);
+    assert_eq!(page.messages[1].folder_id, inbox.id);
+    assert_eq!(page.next, None);
+    assert!(page.messages[1].received_at < Utc::now() - chrono::Duration::days(399));
+
+    // Non-ASCII: CHARSET UTF-8 and a literal.
+    let page = search("subject:café", None, 50).await;
+    assert_eq!(subjects(&page), ["Café über alles"]);
+    let page = search("über", None, 50).await;
+    assert_eq!(subjects(&page), ["Café über alles"]);
+
+    assert_eq!(
+        subjects(&search("has:attachment", None, 50).await),
+        ["Budget"]
+    );
+    assert_eq!(
+        subjects(&search("from:billing@northwind.example", None, 50).await),
+        ["An old zebracorn invoice"]
+    );
+    assert_eq!(
+        subjects(&search("body:2023-118", None, 50).await),
+        ["An old zebracorn invoice"]
+    );
+    assert!(
+        search("zebracorn has:attachment", None, 50)
+            .await
+            .messages
+            .is_empty()
+    );
+    assert!(
+        search("nothing-matches-this", None, 50)
+            .await
+            .messages
+            .is_empty()
+    );
+
+    // A page at a time; the session serves others between pages.
+    let first = search("zebracorn", None, 1).await;
+    assert_eq!(subjects(&first), ["Archived zebracorn notes"]);
+    assert!(first.next.is_some());
+    let welcome = find(&synced, "Welcome").expect("the welcome message");
+    provider
+        .fetch_message(&locator(inbox, welcome))
+        .await
+        .expect("open a message between pages");
+    provider
+        .sync_messages(archive, None, window())
+        .await
+        .expect("sync between pages");
+    let second = search("zebracorn", first.next, 1).await;
+    assert_eq!(subjects(&second), ["An old zebracorn invoice"]);
+    assert_eq!(second.next, None);
 }
 
 // --- push ----------------------------------------------------------------------

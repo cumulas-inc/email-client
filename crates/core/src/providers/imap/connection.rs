@@ -920,6 +920,72 @@ impl ImapSession {
         Ok(uids)
     }
 
+    /// `UID SEARCH` in the selected mailbox, sent in `segments` (see
+    /// [`crate::search::imap::ImapCriteria::render`]): each after the first
+    /// once the server asks for the literal the previous one announced. A
+    /// server that doesn't know the charset gives an `Unsupported` error.
+    pub(super) async fn uid_search_segments(&mut self, segments: &[String]) -> Result<Vec<u32>> {
+        let Some((first, rest)) = segments.split_first() else {
+            return Ok(Vec::new());
+        };
+        let command = format!("UID SEARCH {first}");
+        self.healthy = false;
+        self.last_used = Instant::now();
+        let tag = self
+            .session
+            .run_command(&command)
+            .await
+            .map_err(imap_failure)?;
+        let mut rest = rest.iter();
+        let mut uids = Vec::new();
+        let mut farewell: Option<String> = None;
+        loop {
+            let data = match self.session.read_response().await {
+                Ok(Some(data)) => data,
+                Ok(None) => return Err(closed(&farewell)),
+                Err(e) => return Err(io_failure(e)),
+            };
+            match data.parsed() {
+                Response::Continue(_) => {
+                    let Some(segment) = rest.next() else {
+                        return Err(Error::provider(
+                            "The IMAP server asked for more of a search than there was.",
+                        ));
+                    };
+                    self.session
+                        .run_command_untagged(segment)
+                        .await
+                        .map_err(imap_failure)?;
+                }
+                Response::MailboxData(MailboxDatum::Search(found)) => {
+                    uids.extend_from_slice(found);
+                }
+                Response::Done {
+                    tag: done,
+                    status,
+                    outcome,
+                } if *done == tag => {
+                    // Complete either way, even when refused before every
+                    // literal was sent: the session stays usable.
+                    self.healthy = true;
+                    self.last_used = Instant::now();
+                    if matches!(outcome.code, Some(ResponseCode::BadCharset(_))) {
+                        return Err(Error::unsupported(
+                            "This mail server can't search for these characters.",
+                        ));
+                    }
+                    check_status(&command, status, outcome.information.as_deref())?;
+                    return Ok(uids);
+                }
+                Response::Data {
+                    status: Status::Bye,
+                    outcome,
+                } => farewell = outcome.information.as_deref().map(str::to_owned),
+                _ => {}
+            }
+        }
+    }
+
     /// `UID FETCH` in the selected mailbox. Unsolicited `FETCH` responses for
     /// other messages may be included; callers match on `uid`.
     pub(super) async fn uid_fetch(

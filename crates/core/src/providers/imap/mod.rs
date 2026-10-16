@@ -28,9 +28,13 @@ pub(crate) use self::connection::is_server_busy;
 pub use self::idle::{IdleConfig, ImapIdleWatcher};
 
 use self::connection::{ImapSession, MailboxInfo, quote};
-use super::{FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow};
+use super::{
+    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SearchPage,
+    SyncWindow,
+};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Folder, ImapSettings, Message, OutgoingMessage};
+use crate::search::SearchQuery;
 
 /// UIDs per `UID STORE`/`MOVE`/`COPY`/`EXPUNGE` command, keeping command
 /// lines well below server limits.
@@ -71,6 +75,9 @@ macro_rules! with_session {
         }
     }};
 }
+
+// After `with_session!`, which it uses.
+mod search;
 
 impl ImapProvider {
     pub fn new(account_id: impl Into<String>, credentials: ImapCredentials) -> Self {
@@ -509,6 +516,16 @@ impl MailProvider for ImapProvider {
 
     async fn delete_messages(&self, messages: &[MessageLocator]) -> Result<()> {
         with_session!(self, |session| delete_messages(session, messages))
+    }
+
+    async fn search(
+        &self,
+        query: &SearchQuery,
+        folders: &[Folder],
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<SearchPage> {
+        self.search_mailbox(query, folders, cursor, limit).await
     }
 
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {
