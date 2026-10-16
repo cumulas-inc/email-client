@@ -313,10 +313,12 @@ search next finds them.
 search runs 150 ms after typing stops, the servers are asked after 600 ms.
 The server search's state is kept out of React Query, so the `data-changed`
 of every sync doesn't ask the servers again; the local search's key carries
-how many server hits it includes. "Searching your whole mailbox…" shows while
-servers answer (never "No results"), a failed account gets a row with Try
-again, and "Show more results" asks for the next pages. The Unread and Flagged
-filters apply to results too, and say so when they hide some.
+how many server hits it includes. Single letters are left to the device.
+"Searching your whole mailbox…" shows beside the count while servers answer
+(never "No results"), a failed account gets a row above the results with Try
+again (Sign in again when its sign-in failed), and "Show more results" asks
+for the next pages, up to the 1,000 hits a local search includes. The Unread
+and Flagged filters apply to results too, and say so when they hide some.
 
 ## Security
 

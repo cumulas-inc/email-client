@@ -247,6 +247,8 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   const answered = !!results.data && !results.isPlaceholderData;
   if (answered && resultsFor !== localText) setResultsFor(localText);
   const shownFor = answered ? localText : resultsFor;
+  // A server has more pages than are shown: the count is so far.
+  const serverHasMore = serverCurrent && server.accounts.some((a) => a.hasMore || a.loadingMore);
 
   const fetched = useMemo(() => {
     // Unread and Flagged narrow search results too; the title says when
@@ -494,6 +496,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   const filtered = filter !== "all" && items.length < resultCount;
   const filterWord = filter === "unread" ? "unread" : "flagged";
   const resultsWord = resultCount === 1 ? "result" : "results";
+  const soFar = serverHasMore ? " so far" : "";
   const subtitle =
     searching && results.data && items.length > 0 ? (
       <span className="mail-list__subtitle">
@@ -506,8 +509,8 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
           }
         >
           {filtered
-            ? `${formatCount(items.length)} ${filterWord} of ${formatCount(resultCount)} ${resultsWord}`
-            : `${formatCount(items.length)} ${items.length === 1 ? "result" : "results"}`}{" "}
+            ? `${formatCount(items.length)} ${filterWord} of ${formatCount(resultCount)} ${resultsWord}${soFar}`
+            : `${formatCount(items.length)} ${items.length === 1 ? "result" : "results"}${soFar}`}{" "}
           for “<bdi>{shownFor}</bdi>”
         </span>
         {/* Here rather than above the list, so the rows don't move when
@@ -541,18 +544,21 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
         (a) => (a.status === "failed" || a.retrying) && accountById.has(a.accountId),
       )
     : [];
+  // Pages beyond the first 1,000 hits would add nothing to the list.
   const moreToShow =
-    serverCurrent &&
-    !server.accounts.some((a) => a.status === "searching") &&
-    server.accounts.some((a) => a.hasMore || a.loadingMore);
+    serverHasMore && !server.full && !server.accounts.some((a) => a.status === "searching");
   const loadingMore = server.accounts.some((a) => a.loadingMore);
   // Once "Show more results" was offered, the end of the results says so.
   const [moreOfferedFor, setMoreOfferedFor] = useState<string | null>(null);
   if (moreToShow && server.searchId && moreOfferedFor !== server.searchId) {
     setMoreOfferedFor(server.searchId);
   }
+  const tooMany = serverHasMore && server.full;
   const allShown =
-    serverCurrent && !moreToShow && !server.searching && moreOfferedFor === server.searchId;
+    serverCurrent &&
+    !moreToShow &&
+    !server.searching &&
+    (moreOfferedFor === server.searchId || tooMany);
 
   // Keyboard focus in a control that goes away ("Show more results" once
   // the last page came, a "Try again" that worked) goes to what took its
@@ -601,7 +607,9 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   ) : allShown ? (
     <div className="mail-list__more">
       <p ref={endRef} className="mail-list__end" tabIndex={-1}>
-        No more results.
+        {tooMany
+          ? "The servers found more than can be shown. Add words to narrow the search."
+          : "No more results."}
       </p>
     </div>
   ) : null;
@@ -655,8 +663,8 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
         : filtered
           ? items.length === 0
             ? `No ${filterWord} results`
-            : `${exactCount(items.length)} ${filterWord} of ${exactCount(resultCount)} ${resultsWord}`
-          : `${exactCount(items.length)} ${items.length === 1 ? "result" : "results"}`;
+            : `${exactCount(items.length)} ${filterWord} of ${exactCount(resultCount)} ${resultsWord}${soFar}`
+          : `${exactCount(items.length)} ${items.length === 1 ? "result" : "results"}${soFar}`;
     announcement = [
       `${count}.`,
       ...failedAccounts.map((a) => `Couldn't search ${accountName(a.accountId)} on the server.`),

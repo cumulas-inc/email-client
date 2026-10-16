@@ -21,6 +21,12 @@ export function wantsServerSearch(text: string): boolean {
   return isNarrowEnoughForServers(parseSearch(text));
 }
 
+/**
+ * Most server hits the list shows: the core includes the first 1,000 ids in
+ * a local search, so pages beyond them would add nothing.
+ */
+export const MAX_SERVER_RESULTS = 1000;
+
 export interface AccountSearch {
   accountId: string;
   /** "searching" while the first page is on its way (again, after "Try again"). */
@@ -45,6 +51,8 @@ export interface ServerSearchState {
 export interface ServerSearch extends ServerSearchState {
   /** Some account is searching or loading more. */
   searching: boolean;
+  /** As many hits as the list shows have come: no more pages are asked for. */
+  full: boolean;
   /** Asks every account that has more for its next page. */
   showMore(): void;
   /** Asks a failed account for the first page again, in the same search. */
@@ -143,6 +151,7 @@ class ServerSearchStore {
   }
 
   showMore = (): void => {
+    if (this.state.ids.length >= MAX_SERVER_RESULTS) return;
     for (const a of this.state.accounts) {
       if (a.status === "done" && a.hasMore && !a.loadingMore) {
         this.update(a.accountId, { loadingMore: true });
@@ -241,6 +250,7 @@ export function useServerSearch(text: string): ServerSearch {
     () => ({
       ...state,
       searching: state.accounts.some((a) => a.status === "searching" || a.loadingMore),
+      full: state.ids.length >= MAX_SERVER_RESULTS,
       showMore: store.showMore,
       retry: store.retry,
     }),

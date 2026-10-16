@@ -964,7 +964,11 @@ describe("Search", () => {
     await renderMail({ backend: new MockBackend({ worst: true }) });
     await setSearch('subject:"purchase order"');
     await expectResults(...Array.from({ length: 50 }, () => /Purchase order 4500/));
-    await waitFor(() => expect(announced()).toBe("50 results."));
+    // The servers have more: the count says it is so far.
+    await waitFor(() => expect(announced()).toBe("50 results so far."));
+    expect(document.querySelector(".mail-list__count")).toHaveTextContent(
+      '50 results so far for “subject:"purchase order"”',
+    );
     // A button after the list, not an option in it.
     const listbox = screen.getByRole("listbox", { name: "Search results" });
     expect(within(listbox).queryByRole("button", { name: "Show more results" })).toBeNull();
@@ -1008,6 +1012,29 @@ describe("Search", () => {
     });
     await user.click(screen.getByRole("button", { name: "Account settings" }));
     expect(useAppStore.getState().settingsOpen).toBe("accounts");
+  });
+
+  it("stops offering more once as many results have come as the list shows", async () => {
+    const backend = new MockBackend();
+    // A server with ever more hits: a thousand ids at once, as if from many pages.
+    const hits = Array.from({ length: 1000 }, (_, i) => `hit-${i}`);
+    backend.searchServer = async (searchId, _text, accountId) => ({
+      searchId,
+      accountId,
+      status: "done",
+      messageIds: accountId === "acct-work" ? hits : [],
+      added: 0,
+      hasMore: true,
+      error: null,
+    });
+    await renderMail({ backend });
+    await setSearch("lisbon");
+    expect(
+      await screen.findByText(
+        "The servers found more than can be shown. Add words to narrow the search.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show more results" })).not.toBeInTheDocument();
   });
 
   it("keeps the keyboard on Show more results, and at the end once all are shown", async () => {

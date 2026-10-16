@@ -7,7 +7,7 @@ import { BackendProvider } from "../../api/BackendProvider";
 import type { Backend } from "../../api/backend";
 import { MockBackend } from "../../api/mock";
 import type { ServerSearchResult } from "../../api/types";
-import { useServerSearch } from "./serverSearch";
+import { MAX_SERVER_RESULTS, useServerSearch } from "./serverSearch";
 import { deferred } from "./testUtils";
 
 type Call = Parameters<Backend["searchServer"]>;
@@ -163,6 +163,20 @@ describe("useServerSearch", () => {
         error: { code: "notFound", message: "account not found" },
       },
     ]);
+  });
+
+  it("asks for no more pages once as many hits have come as the list shows", async () => {
+    const many = Array.from({ length: MAX_SERVER_RESULTS }, (_, i) => `m${i}`);
+    const { result, searchServer, settled } = setup(async (...call) =>
+      call[2] === "acct-work" ? done(call, many, true) : done(call, []),
+    );
+    await settled();
+    expect(result.current.ids).toHaveLength(MAX_SERVER_RESULTS);
+    expect(result.current.full).toBe(true);
+    expect(result.current.accounts[0]!.hasMore).toBe(true);
+    act(() => result.current.showMore());
+    expect(result.current.searching).toBe(false);
+    expect(searchServer).toHaveBeenCalledTimes(2);
   });
 
   it("leaves single letters to this device, and cancels when the text clears or it unmounts", async () => {

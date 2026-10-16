@@ -41,7 +41,7 @@ reviewers. See [Self-hosted repository](packaging/flatpak/README.md#self-hosted-
 - **Search**: instant and offline in the mail on your computer, and across
   each account's whole mailbox on its server, in every folder and however
   old, with what the server finds added as it comes (newest first, 50 at a
-  time). Words match by their start (and inside subjects and senders);
+  time, up to 1,000). Words match by their start (and inside subjects and senders);
   `"exact phrases"`, `from:`, `to:`, `cc:`, `subject:`, `body:` and
   `has:attachment` narrow it down. Messages found on the server open, move
   and flag like any other. On your computer, a message's text is searched
