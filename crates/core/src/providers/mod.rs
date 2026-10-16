@@ -15,12 +15,13 @@ pub mod imap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{
     AttachmentMeta, Calendar, Contact, ContactDraft, EmailAddress, Event, EventDraft,
     EventResponse, Folder, Message, MessageSummary, OutgoingMessage, Task, TaskDraft, TaskList,
     TaskPatch,
 };
+use crate::search::SearchQuery;
 
 /// Where a message lives on the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +90,16 @@ pub struct FolderCounts {
     pub total: u32,
 }
 
+/// One page of a server-side search.
+#[derive(Debug, Clone, Default)]
+pub struct SearchPage {
+    /// Matches on this page, newest first, with `folder_id` set to the local
+    /// id of the folder each is in (it may name a folder that isn't stored).
+    pub messages: Vec<MessageSummary>,
+    /// Opaque cursor for the next page; `None` when there is none.
+    pub next: Option<String>,
+}
+
 /// Body and full headers of a message, as fetched from the server.
 #[derive(Debug, Clone, Default)]
 pub struct MessageContent {
@@ -152,6 +163,21 @@ pub trait MailProvider: Send + Sync {
     /// forwarded, if any, so threading headers can be set. The provider is
     /// responsible for leaving a copy in the Sent folder.
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()>;
+
+    /// Searches the whole mailbox on the server, at most `limit` messages a
+    /// page. `folders` are the account's stored folders, well-known ones
+    /// first. `cursor` continues a previous page.
+    async fn search(
+        &self,
+        _query: &SearchQuery,
+        _folders: &[Folder],
+        _cursor: Option<&str>,
+        _limit: u32,
+    ) -> Result<SearchPage> {
+        Err(Error::unsupported(
+            "This account can't be searched on the server.",
+        ))
+    }
 }
 
 /// A Microsoft Graph change subscription, as Graph lists it.

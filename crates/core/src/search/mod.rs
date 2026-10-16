@@ -10,6 +10,7 @@
 //! parser; both pass the same test vectors.
 
 pub mod fts;
+pub mod kql;
 
 /// The part of a message a term must match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

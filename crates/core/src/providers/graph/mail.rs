@@ -25,8 +25,10 @@ use crate::model::{
     OutgoingMessage, ReplyKind, local_id,
 };
 use crate::providers::{
-    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow,
+    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SearchPage,
+    SyncWindow,
 };
+use crate::search::{SearchQuery, kql};
 
 const FOLDER_FIELDS: &str =
     "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
@@ -531,6 +533,104 @@ impl GraphProvider {
         changes.removed = removed;
     }
 
+    /// One page of a search of the whole mailbox; see
+    /// [`MailProvider::search`]. `cursor` is Graph's `@odata.nextLink`.
+    async fn search_page(
+        &self,
+        query: &SearchQuery,
+        folders: &[Folder],
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<SearchPage> {
+        let url = match cursor {
+            Some(link) => link.to_owned(),
+            None => {
+                let Some(kql) = kql::kql(query) else {
+                    return Ok(SearchPage::default());
+                };
+                // Graph refuses `$orderby` and `$filter` with `$search`; it
+                // sorts by date sent itself.
+                self.client.url_with_query(
+                    "/me/messages",
+                    &[
+                        ("$search", &kql::search_param(&kql)),
+                        ("$select", &format!("{SUMMARY_FIELDS},parentFolderId")),
+                        ("$top", &limit.to_string()),
+                    ],
+                )
+            }
+        };
+        // Refuses a cursor that isn't a link to Graph, so the token stays.
+        let page: Page<GraphMessage> = self.client.get_page(&url, &[PREFER_IMMUTABLE_ID]).await?;
+        let stored: HashSet<&str> = folders.iter().map(|f| f.remote_id.as_str()).collect();
+        let mut unknown: Vec<&str> = page
+            .value
+            .iter()
+            .filter_map(|m| m.parent_folder_id.as_deref())
+            .filter(|id| !stored.contains(id))
+            .collect();
+        unknown.sort_unstable();
+        unknown.dedup();
+        let aliases = self.stored_folder_aliases(&unknown, &stored).await;
+        let mut messages: Vec<MessageSummary> = Vec::with_capacity(page.value.len());
+        for message in page.value {
+            let Some(parent) = message.parent_folder_id.clone() else {
+                continue;
+            };
+            let parent = aliases.get(&parent).cloned().unwrap_or(parent);
+            let folder_id = local_id(&self.account_id, EntityKind::Folder, &parent);
+            messages.extend(message.into_summary(&self.account_id, &folder_id));
+        }
+        messages.sort_by_key(|m| std::cmp::Reverse(m.received_at));
+        Ok(SearchPage {
+            messages,
+            next: page.next_link,
+        })
+    }
+
+    /// Of folder ids that aren't the stored folders' own, those that name a
+    /// stored folder another way, mapped to its id: asked of Graph, which
+    /// answers with the canonical id. Lookups that fail map nothing.
+    async fn stored_folder_aliases(
+        &self,
+        ids: &[&str],
+        stored: &HashSet<&str>,
+    ) -> HashMap<String, String> {
+        let mut aliases = HashMap::new();
+        if ids.is_empty() {
+            return aliases;
+        }
+        let requests: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                BatchRequest::get(i, format!("/me/mailFolders/{}?$select=id", segment(id)))
+            })
+            .collect();
+        let mut responses = match self.client.batch(&requests, &[PREFER_IMMUTABLE_ID]).await {
+            Ok(responses) => responses,
+            Err(e) => {
+                tracing::debug!(
+                    "looking up folders of search results failed: {}",
+                    Error::from(e)
+                );
+                return aliases;
+            }
+        };
+        for (i, id) in ids.iter().enumerate() {
+            if let Some(folder) = responses
+                .remove(&i.to_string())
+                .filter(BatchResponse::is_success)
+                .and_then(|r| r.json::<IdOnly>().ok())
+                && folder.id != *id
+                && stored.contains(folder.id.as_str())
+            {
+                aliases.insert((*id).to_owned(), folder.id);
+            }
+        }
+        aliases
+    }
+
     async fn full_sync(&self, folder: &Folder, window: SyncWindow) -> Result<MessageBatch> {
         let since = window.since.to_rfc3339_opts(SecondsFormat::Secs, true);
         let url = self.client.url_with_query(
@@ -1027,6 +1127,16 @@ impl MailProvider for GraphProvider {
         self.per_message(messages, "POST", "/permanentDelete", None, true)
             .await?;
         Ok(())
+    }
+
+    async fn search(
+        &self,
+        query: &SearchQuery,
+        folders: &[Folder],
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<SearchPage> {
+        self.search_page(query, folders, cursor, limit).await
     }
 
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {
