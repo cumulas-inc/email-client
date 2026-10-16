@@ -32,7 +32,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Utc;
 use cumulas_core::model::{
     Account, DataKind, EmailAddress, Folder, FolderRole, ImapSettings, Importance, MessageSummary,
-    NewImapAccount, OutgoingAttachment, OutgoingMessage, SyncStatus, TlsMode,
+    NewImapAccount, OutgoingAttachment, OutgoingMessage, ServerSearchStatus, SyncStatus, TlsMode,
 };
 use cumulas_core::providers::imap::{
     self, IdleConfig, ImapCredentials, ImapIdleWatcher, ImapProvider,
@@ -717,12 +717,12 @@ async fn searchable_mailbox(config: &Config, credentials: &ImapCredentials) -> V
         ),
         (
             "Archive",
-            now - chrono::Duration::days(10),
+            now - chrono::Duration::days(200),
             rfc822(
                 "Grace Hopper <grace@example.com>",
                 "Archived zebracorn notes",
-                now - chrono::Duration::days(10),
-                "Notes.",
+                now - chrono::Duration::days(200),
+                "Notes from the offsite.",
             ),
         ),
     ];
@@ -847,6 +847,106 @@ async fn imap_server_search() {
     let second = search("zebracorn", first.next, 1).await;
     assert_eq!(subjects(&second), ["An old zebracorn invoice"]);
     assert_eq!(second.next, None);
+}
+
+#[tokio::test]
+async fn core_server_search_end_to_end() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let credentials = config.fresh_mailbox().await;
+    searchable_mailbox(&config, &credentials).await;
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let secrets = Arc::new(MemorySecretStore::default());
+    let service = CoreService::new(
+        store.clone(),
+        secrets.clone(),
+        Arc::new(LiveConnector::new(store, secrets)),
+        Arc::new(RecordingSink::default()),
+    );
+    let account = service
+        .add_imap_account(NewImapAccount {
+            display_name: "Search Tester".into(),
+            email: credentials.email.clone(),
+            password: credentials.password.clone(),
+            settings: credentials.settings.clone(),
+        })
+        .await
+        .expect("add the account");
+    service.sync_account(&account.id).await.expect("sync");
+    let local = |include: &[String]| -> Vec<MessageSummary> {
+        service
+            .search_messages("zebracorn", None, include)
+            .expect("local search")
+    };
+    // Both are older than the sync window.
+    assert!(local(&[]).is_empty());
+
+    let found = service
+        .search_server("e2e", "zebracorn", &account.id, false)
+        .await
+        .expect("server search");
+    assert_eq!(found.status, ServerSearchStatus::Done, "{:?}", found.error);
+    assert_eq!((found.message_ids.len(), found.added), (2, 2));
+    let results = local(&found.message_ids);
+    let subjects: Vec<&str> = results.iter().map(|m| m.subject.as_str()).collect();
+    assert_eq!(
+        subjects,
+        ["Archived zebracorn notes", "An old zebracorn invoice"]
+    );
+    let (notes, invoice) = (results[0].clone(), results[1].clone());
+    let message = service
+        .get_message(&notes.id, false)
+        .await
+        .expect("open a search result");
+    assert!(
+        message
+            .body_text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Notes from the offsite"),
+        "{message:?}"
+    );
+
+    // Syncing again (incrementally) keeps them; they are indexed now.
+    service.sync_account(&account.id).await.expect("sync again");
+    assert_eq!(local(&[]).len(), 2);
+
+    // Expunged by another client, outside the window: noticed when opened.
+    let mut other = config.other_device(&credentials).await;
+    other.select("INBOX").await.expect("select");
+    other
+        .run_command_and_check_ok(format!(
+            "UID STORE {} +FLAGS.SILENT (\\Deleted)",
+            uid_of(&invoice)
+        ))
+        .await
+        .expect("flag deleted");
+    other
+        .run_command_and_check_ok("EXPUNGE")
+        .await
+        .expect("expunge");
+    let _ = other.logout().await;
+    let error = service.get_message(&invoice.id, false).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+    assert!(service.store().get_message_summary(&invoice.id).is_err());
+
+    // Acting on a search result works like on any message.
+    service
+        .set_flagged(std::slice::from_ref(&notes.id), true)
+        .await
+        .expect("flag");
+    service
+        .delete_messages(std::slice::from_ref(&notes.id))
+        .await
+        .expect("delete");
+    assert!(local(&[]).is_empty());
+    let again = service
+        .search_server("e2e-again", "zebracorn", &account.id, false)
+        .await
+        .expect("server search");
+    assert_eq!(again.status, ServerSearchStatus::Done);
+    assert!(again.message_ids.is_empty(), "{:?}", again.message_ids);
 }
 
 // --- push ----------------------------------------------------------------------

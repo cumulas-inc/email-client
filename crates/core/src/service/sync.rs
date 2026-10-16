@@ -122,6 +122,7 @@ impl CoreService {
         self.progress(account, "Connecting…");
         let providers = self.providers_for(&account.id).await?;
         self.sync_mail(account, &providers).await?;
+        self.prune_search_results(&account.id);
         // Calendar, contacts and tasks failures should not hide mail errors and
         // vice versa, but one failing module must not stop the others.
         let mut first_error: Option<Error> = None;

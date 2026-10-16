@@ -329,6 +329,37 @@ pub struct MessagePage {
     pub total: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ServerSearchStatus {
+    /// The server answered (perhaps with nothing).
+    Done,
+    /// A newer search replaced this one, or it was canceled; nothing was
+    /// stored.
+    Cancelled,
+    /// The server couldn't be asked, or failed; `error` says why.
+    Failed,
+}
+
+/// One account's page of a search of the whole mailbox on its server.
+/// (No `PartialEq`: [`crate::error::Error`] has none.)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerSearchResult {
+    pub search_id: String,
+    pub account_id: String,
+    pub status: ServerSearchStatus,
+    /// Local ids of the messages found on this page, newest first; all
+    /// stored now.
+    pub message_ids: Vec<String>,
+    /// How many of them weren't stored on this device before.
+    pub added: u32,
+    /// Another page can be asked for (`more`).
+    pub has_more: bool,
+    /// Why it failed (status `failed`), else null.
+    pub error: Option<crate::error::Error>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OutgoingAttachment {
