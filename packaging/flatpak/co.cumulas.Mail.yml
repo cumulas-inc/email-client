@@ -55,12 +55,16 @@ modules:
         XDG_CACHE_HOME: /run/build/cumulas-mail/flatpak-node/cache
         npm_config_cache: /run/build/cumulas-mail/flatpak-node/npm-cache
         npm_config_offline: "true"
-        # Application (client) ID of the published Entra app registration;
-        # leave empty to require users to enter one in Settings.
+        # Application (client) ID of the Entra app registration to build in.
+        # Empty means Cumulas Mail's published registration, which the app
+        # has built in; "none" builds in no ID, and people must then enter
+        # one in Settings before signing in to Microsoft.
         CUMULAS_MS_CLIENT_ID: ""
-        # Client ID of the shared Cumulas Signatures app (its Outlook
-        # add-in's), whose API company signatures come from; empty turns
-        # company signatures off.
+        # Client ID of the signature service's shared app (its Outlook
+        # add-in's), whose API company signatures come from. Empty means
+        # Cumulas Signatures' published shared app, which goes with its own
+        # address only (a CUMULAS_SIGNATURE_URL elsewhere needs its client
+        # ID here); "none" turns company signatures off.
         CUMULAS_SIGNATURE_CLIENT_ID: ""
     build-commands:
       - npm ci --offline
