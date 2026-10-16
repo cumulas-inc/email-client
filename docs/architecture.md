@@ -271,9 +271,11 @@ is a word, and no input is an error (at most 16 terms). It becomes:
   characters ("voice" finds "Invoice");
 - for Microsoft Graph (`kql.rs`), KQL for `$search`: words as prefixes
   (`invoi*`), matched in the sender, subject and body;
-- for IMAP (`imap.rs`), `UID SEARCH` keys (`TEXT`, `FROM`, `SUBJECT`…, which
-  match substrings), with `CHARSET UTF-8` and literals only when a word isn't
-  ASCII.
+- for IMAP (`imap.rs`), `UID SEARCH` keys (`FROM`, `SUBJECT`…, which match
+  substrings; a plain word is `OR`ed over sender, To, Cc, subject and body,
+  where the device looks, not `TEXT`, which looks in every header too), with
+  `CHARSET UTF-8` and literals only when a word isn't ASCII, in the case it
+  was typed in.
 
 The browser demo's backend (`src/api/mock/searchQuery.ts`) ports the parser
 and the local matching, tested on the same cases, so the UI's tests search the
