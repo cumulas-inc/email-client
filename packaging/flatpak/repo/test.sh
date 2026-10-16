@@ -1,0 +1,707 @@
+#!/usr/bin/env bash
+# Tests the repository scripts end to end without building the app, with
+# fake builds and a fake Flathub served from 127.0.0.1:
+#
+#  - check-release.sh lets only the highest vMAJOR.MINOR.PATCH tag publish,
+#    and only when it's the metainfo's newest release;
+#  - signing-key.sh imports the key whose public half is committed, and
+#    refuses a missing, empty, expired or different public key, a private key
+#    with a passphrase, and more than one key;
+#  - mirror.sh starts empty when nothing is published (404), and fails on a
+#    server error, an unreachable host (unless it's a dry run), a published
+#    repository with a missing object or summary, one without the app, one
+#    whose summary isn't signed with a key it trusts, and one whose history
+#    stops short (a warning in a dry run), unless its config says it keeps
+#    fewer builds of that ref (after KEEP_BUILDS is raised);
+#  - five publishes in a row (mirror, add-builds, update-repo, assemble-site,
+#    then "deploy") keep the last KEEP_BUILDS builds of each ref, with their
+#    history, static deltas and appstream data, record in the repository's
+#    config how many each keeps, and leave .Debug out;
+#  - raising KEEP_BUILDS from 2 to 4 after three publishes: the publishes
+#    after it carry on, the history growing by a build each, and so does one
+#    after a publish that left a ref out;
+#  - a key rotation: a client that trusts the current key updates from a
+#    publish signed with it that carries the next key (phase 1), then from
+#    one signed with the next key only (phase 2), and the next publishes'
+#    mirrors trust what they must;
+#  - check-live-summary.sh lets a deploy go ahead only when the published
+#    summary is still the one mirrored, or there's still none (404), and
+#    stops it on any other summary, a server error or no answer;
+#  - verify-live.sh finds the deployed summary and the app on a "live" site,
+#    and gives up on a summary that isn't the deployed one;
+#  - smoke-test.sh installs the last one from the .flatpakrepo and the
+#    .flatpakref.
+#
+# Usage: test.sh
+# Needs flatpak, ostree, gpg, python3 and curl. Your own Flatpak
+# installations are left alone: it uses a temporary FLATPAK_USER_DIR. The
+# test keys' GnuPG homes go in /tmp whatever TMPDIR is: gpg-agent puts its
+# sockets there, and a socket's path can't be much longer than 100 bytes.
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=SCRIPTDIR/common.sh
+. "$here/common.sh"
+
+# Expected failures shouldn't show up as error annotations in GitHub Actions.
+unset GITHUB_ACTIONS FLATPAK_GPG_PRIVATE_KEY
+
+work=$(mktemp -d)
+keys=$(mktemp -d /tmp/flatpak-test-keys.XXXXXX)
+servers=()
+gnupg_homes=()
+cleanup() {
+  local pid home
+  for pid in "${servers[@]}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  for home in "${gnupg_homes[@]}"; do
+    "$here/signing-key.sh" remove "$home" 2>/dev/null || true
+  done
+  rm -rf -- "$work" "$keys"
+}
+trap cleanup EXIT
+export FLATPAK_USER_DIR="$work/flatpak-user"
+native=$(flatpak --default-arch)
+if [ "$native" = x86_64 ]; then other=aarch64; else other=x86_64; fi
+
+failures=0
+pass() {
+  log "ok - $1"
+}
+fail() {
+  log "FAIL - $1"
+  failures=$((failures + 1))
+}
+# expect_success|expect_failure DESCRIPTION COMMAND...: the command's output
+# shows only when the expectation isn't met.
+expect_success() {
+  local what=$1
+  shift
+  if "$@" >"$work/output" 2>&1; then pass "$what"; else
+    fail "$what"
+    cat "$work/output" >&2
+  fi
+}
+expect_failure() {
+  local what=$1
+  shift
+  if "$@" >"$work/output" 2>&1; then
+    fail "$what (it succeeded)"
+    cat "$work/output" >&2
+  else pass "$what"; fi
+}
+# expect_error DESCRIPTION PATTERN COMMAND...: the command fails, and its
+# output matches PATTERN (grep -E), so that it fails for the reason tested.
+expect_error() {
+  local what=$1 pattern=$2
+  shift 2
+  if "$@" >"$work/output" 2>&1; then
+    fail "$what (it succeeded)"
+    cat "$work/output" >&2
+  elif ! grep -Eq -- "$pattern" "$work/output"; then
+    fail "$what (but not with /$pattern/)"
+    cat "$work/output" >&2
+  else pass "$what"; fi
+}
+check() {
+  local what=$1
+  shift
+  if "$@"; then pass "$what"; else fail "$what"; fi
+}
+
+free_port() {
+  python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+wait_for() {
+  local _
+  for _ in $(seq 1 50); do
+    curl -s -o /dev/null "$1" && return 0
+    sleep 0.2
+  done
+  die "Nothing answers at $1."
+}
+
+# --- Release tags ---------------------------------------------------------------
+
+metainfo() { # VERSION... → a metainfo with these releases, newest first
+  local version
+  {
+    printf '<?xml version="1.0"?>\n<component type="desktop-application">\n  <releases>\n'
+    for version in "$@"; do
+      printf '    <release version="%s" date="2026-01-01">\n      <description><p>Notes</p></description>\n    </release>\n' "$version"
+    done
+    printf '  </releases>\n</component>\n'
+  } >"$work/metainfo.xml"
+}
+release_check() { # TAG → check-release.sh, with these tags in the repository
+  printf '%s\n' v0.9.0 v1.2.0 v1.9.0 v1.10.0 v1.11.0-rc.1 nightly |
+    "$here/check-release.sh" "$1" "$work/metainfo.xml"
+}
+metainfo 1.10.0 1.9.0
+expect_success "release: the highest release tag, the metainfo's newest release" release_check v1.10.0
+expect_error "release: a tag below the highest (by version, not text)" "v1.10.0 is" release_check v1.9.0
+expect_error "release: a pre-release tag" "isn't a release tag" release_check v1.11.0-rc.1
+metainfo 1.11.0 1.10.0
+expect_success "release: a tag above the ones listed" release_check v1.11.0
+expect_error "release: a tag that isn't the metainfo's newest release" "newest release in" \
+  release_check v1.10.0
+
+# --- Signing keys -------------------------------------------------------------
+
+# Runs gpg, and stops the test with gpg's messages if it fails: a key the
+# test needs that can't be made would only show up as checks failing later.
+gpg_or_die() { # WHAT GPG-ARGUMENT...
+  local what=$1
+  shift
+  gpg "$@" 2>"$work/gpg.log" || die "$what failed: $(cat "$work/gpg.log")"
+}
+new_key() { # NAME → $keys/NAME (GNUPGHOME), NAME.gpg (public key), NAME.fpr
+  local name=$1
+  gnupg_homes+=("$keys/$name")
+  "$here/signing-key.sh" throwaway "$keys/$name" "$keys/$name.gpg" >"$keys/$name.fpr" 2>"$work/gpg.log" ||
+    die "Generating the test key '$name' failed: $(cat "$work/gpg.log")"
+}
+secret_of() {
+  gpg_or_die "Exporting the test key '$1'" --homedir "$keys/$1" --batch --armor --export-secret-keys
+}
+import_key() { # SECRET PUBLIC-KEY → imports into a new GNUPGHOME
+  local home="$keys/import.$RANDOM$RANDOM"
+  gnupg_homes+=("$home")
+  FLATPAK_GPG_PRIVATE_KEY=$1 "$here/signing-key.sh" import "$home" "$2"
+}
+
+new_key signer
+new_key other
+signer=$(cat "$keys/signer.fpr")
+signer_secret=$(secret_of signer)
+
+expect_success "check: a committed public key" "$here/signing-key.sh" check "$keys/signer.gpg"
+if import_key "$signer_secret" "$keys/signer.gpg" >"$work/imported" 2>"$work/output"; then
+  check "import: the key that matches the committed public key, printing its fingerprint" \
+    test "$(cat "$work/imported")" = "$signer"
+else
+  fail "import: the key that matches the committed public key"
+  cat "$work/output" >&2
+fi
+expect_failure "import: a different committed public key" \
+  import_key "$signer_secret" "$keys/other.gpg"
+expect_failure "import: no committed public key" \
+  import_key "$signer_secret" "$keys/missing.gpg"
+: >"$keys/empty.gpg"
+expect_failure "import: an empty committed public key" \
+  import_key "$signer_secret" "$keys/empty.gpg"
+expect_failure "import: no private key" import_key "" "$keys/signer.gpg"
+expect_failure "import: something that isn't a key" import_key "not a key" "$keys/signer.gpg"
+cat "$keys/signer.gpg" "$keys/other.gpg" >"$keys/both.gpg"
+expect_failure "check: two public keys" "$here/signing-key.sh" check "$keys/both.gpg"
+expect_failure "import: two private keys" \
+  import_key "$signer_secret"$'\n'"$(secret_of other)" "$keys/signer.gpg"
+printf '%s\n' "$signer_secret" >"$keys/secret.asc"
+expect_failure "check: a private key committed as the public key" \
+  "$here/signing-key.sh" check "$keys/secret.asc"
+
+mkdir -m 700 "$keys/protected"
+gnupg_homes+=("$keys/protected")
+gpg_or_die "Generating a key with a passphrase" --homedir "$keys/protected" --batch \
+  --pinentry-mode loopback --passphrase secret \
+  --quick-generate-key "Protected <protected@example.com>" rsa2048 sign 1d
+gpg_or_die "Exporting the key with a passphrase" --homedir "$keys/protected" --batch \
+  --export >"$keys/protected.gpg"
+protected_secret=$(gpg_or_die "Exporting the private key with a passphrase" \
+  --homedir "$keys/protected" --batch --pinentry-mode loopback --passphrase secret \
+  --armor --export-secret-keys)
+expect_failure "import: a private key with a passphrase" import_key \
+  "$protected_secret" "$keys/protected.gpg"
+
+mkdir -m 700 "$keys/expired"
+gnupg_homes+=("$keys/expired")
+gpg_or_die "Generating an expiring key" --homedir "$keys/expired" --batch --passphrase '' \
+  --quick-generate-key "Expired <expired@example.com>" rsa2048 sign seconds=1
+gpg_or_die "Exporting the expiring key" --homedir "$keys/expired" --batch \
+  --export >"$keys/expired.gpg"
+sleep 2
+expect_failure "check: an expired public key" "$here/signing-key.sh" check "$keys/expired.gpg"
+
+mkdir -p "$keys/not-empty"
+touch "$keys/not-empty/file"
+expect_failure "import: into a GNUPGHOME that isn't empty" \
+  env FLATPAK_GPG_PRIVATE_KEY="$signer_secret" "$here/signing-key.sh" import \
+  "$keys/not-empty" "$keys/signer.gpg"
+
+# --- Fake builds, a fake Flathub and the "published" site ------------------------
+
+# mirror.sh, trusting the test signing key.
+mirror() {
+  "$here/mirror.sh" --gpg-import "$keys/signer.gpg" "$@"
+}
+
+# A build as flatpak-builder --repo --default-branch=stable leaves it: the
+# app, its Locale extension (unless --no-locale) and its debug info.
+make_build() { # REPO ARCH VERSION [--no-locale]
+  local repo=$1 arch=$2 version=$3 dir
+  dir=$(mktemp -d "$work/build.XXXXXX")
+  mkdir -p "$dir/app/files/bin" "$dir/app/files/share/app-info/xmls" "$dir/app/export" \
+    "$dir/locale/files" "$dir/debug/files"
+  cat >"$dir/app/metadata" <<EOF
+[Application]
+name=$APP_ID
+runtime=org.gnome.Platform/$arch/50
+sdk=org.gnome.Sdk/$arch/50
+command=cumulas-mail
+EOF
+  printf '#!/bin/sh\necho %s\n' "$version" >"$dir/app/files/bin/cumulas-mail"
+  chmod +x "$dir/app/files/bin/cumulas-mail"
+  # Something that changes with every build, like the real binary.
+  head -c 100000 /dev/urandom >"$dir/app/files/bin/data"
+  printf '<?xml version="1.0"?>\n<components version="0.8" origin="%s"><component type="desktop-application"><id>%s</id><name>%s</name><summary>%s</summary></component></components>\n' \
+    "$APP_ID" "$APP_ID" "$APP_NAME" "$APP_SUMMARY" | gzip >"$dir/app/files/share/app-info/xmls/$APP_ID.xml.gz"
+  printf '[Runtime]\nname=%s.Locale\n' "$APP_ID" >"$dir/locale/metadata"
+  printf '%s\n' "$version" >"$dir/locale/files/version"
+  printf '[Runtime]\nname=%s.Debug\n' "$APP_ID" >"$dir/debug/metadata"
+  printf '%s\n' "$version" >"$dir/debug/files/version"
+  flatpak build-export --arch="$arch" --no-update-summary "$repo" "$dir/app" "$BRANCH" >/dev/null
+  if [ "${4:-}" != --no-locale ]; then
+    flatpak build-export --runtime --files=files --arch="$arch" --no-update-summary \
+      "$repo" "$dir/locale" "$BRANCH" >/dev/null
+  fi
+  flatpak build-export --runtime --files=files --arch="$arch" --no-update-summary \
+    "$repo" "$dir/debug" "$BRANCH" >/dev/null
+}
+
+mkdir -p "$work/www/flathub"
+start_port=$(free_port)
+python3 -m http.server --bind 127.0.0.1 --directory "$work/www" "$start_port" >"$work/http.log" 2>&1 &
+servers+=("$!")
+www="http://127.0.0.1:$start_port"
+wait_for "$www/"
+live="$www/live/repo"
+
+# The runtime the fake app needs, signed like Flathub's.
+mkdir -p "$work/runtime/files" "$work/runtime/usr"
+printf '[Runtime]\nname=org.gnome.Platform\nruntime=org.gnome.Platform/%s/50\nsdk=org.gnome.Sdk/%s/50\n' \
+  "$native" "$native" >"$work/runtime/metadata"
+printf 'fake runtime\n' >"$work/runtime/usr/README"
+flatpak build-export --runtime --arch="$native" --gpg-homedir="$keys/signer" \
+  --gpg-sign="$signer" "$work/www/flathub/repo" "$work/runtime" 50 >/dev/null
+flatpak build-update-repo --gpg-homedir="$keys/signer" --gpg-sign="$signer" \
+  "$work/www/flathub/repo" >/dev/null
+printf '[Flatpak Repo]\nTitle=Fake Flathub\nUrl=%s/flathub/repo/\nGPGKey=%s\n' \
+  "$www" "$(base64 -w 0 "$keys/signer.gpg")" >"$work/www/flathub/flathub.flatpakrepo"
+
+# --- Five publishes in a row ------------------------------------------------------
+
+# The subject of a commit: the first line after the headers of ostree log.
+subject() {
+  ostree --repo="$1" log "$2" | sed -n '/^$/{n;s/^ *//;p;q}'
+}
+has_commit() { # REPO COMMIT
+  [ -n "$2" ] && [ -e "$1/objects/${2:0:2}/${2:2}.commit" ]
+}
+# REPO keeps BUILDS builds of REF, and its config says so (update-repo.sh).
+keeps() { # REPO REF BUILDS
+  [ "$(ref_history "$1" "$2" | wc -l)" = "$3" ] &&
+    [ "$(ostree --repo="$1" config --group="$KEPT_BUILDS_GROUP" get "$2" 2>/dev/null)" = "$3" ]
+}
+
+declare -A commits=()
+for round in 1 2 3 4 5; do
+  dir="$work/round$round"
+  mkdir -p "$dir"
+  if ! summary=$(mirror "$dir/repo" "$live" 2>"$dir/mirror.log"); then
+    fail "publish $round: mirror"
+    cat "$dir/mirror.log" >&2
+    break
+  fi
+  mirrored=$((round - 1 < KEEP_BUILDS ? round - 1 : KEEP_BUILDS))
+  if [ "$round" = 1 ]; then
+    check "publish 1: nothing published yet, so the mirror starts empty" \
+      test -z "$(ostree --repo="$dir/repo" refs)"
+    check "publish 1: mirror.sh says there was no summary" test "$summary" = none
+  else
+    check "publish $round: the mirror has the last $mirrored build(s)" \
+      test "$(ref_history "$dir/repo" "app/$APP_ID/$other/$BRANCH" | wc -l)" = "$mirrored"
+    check "publish $round: mirror.sh prints the SHA-256 of the summary it mirrored" \
+      test "$summary" = "$(sha256sum <"$work/www/live/repo/summary" | cut -d ' ' -f 1)"
+  fi
+
+  make_build "$dir/build-$native" "$native" "$round"
+  make_build "$dir/build-$other" "$other" "$round"
+  expect_success "publish $round: add-builds" "$here/add-builds.sh" \
+    --gpg-homedir "$keys/signer" --gpg-key "$signer" --subject "Test build $round" \
+    "$dir/repo" "$dir/build-$native" "$dir/build-$other"
+  expect_success "publish $round: update-repo" "$here/update-repo.sh" \
+    --gpg-homedir "$keys/signer" --gpg-key "$signer" "$dir/repo"
+  expect_success "publish $round: assemble-site" "$here/assemble-site.sh" \
+    "$dir/repo" "$keys/signer.gpg" "$dir/site"
+  [ -d "$dir/site" ] || break
+  # (Before anything opens the copy with ostree, which makes them again.)
+  check "publish $round: no ostree working files in the site" \
+    test -z "$(ls -d "$dir/site/repo/tmp" "$dir/site/repo/state" 2>/dev/null || true)"
+
+  kept=$((round < KEEP_BUILDS ? round : KEEP_BUILDS))
+  for arch in "$native" "$other"; do
+    for ref in "app/$APP_ID/$arch/$BRANCH" "runtime/$APP_ID.Locale/$arch/$BRANCH"; do
+      check "publish $round: $ref keeps $kept build(s), and the repository's config says so" \
+        keeps "$dir/site/repo" "$ref" "$kept"
+    done
+    head=$(ostree --repo="$dir/site/repo" rev-parse "app/$APP_ID/$arch/$BRANCH")
+    commits[$arch.$round]=$head
+    check "publish $round: the $arch head is this build" \
+      test "$(subject "$dir/site/repo" "$head")" = "Test build $round"
+    check "publish $round: no debug info for $arch" \
+      test -z "$(ostree --repo="$dir/site/repo" refs | grep -F ".Debug/" || true)"
+  done
+  # "Deploy".
+  ln -sfn "$dir/site" "$work/www/live"
+done
+
+site="$work/round5/site"
+for arch in "$native" "$other"; do
+  for round in 1 2; do
+    if [ -n "${commits[$arch.$round]:-}" ] && ! has_commit "$site/repo" "${commits[$arch.$round]}"; then
+      pass "pruned: the $arch build of publish $round is gone"
+    else
+      fail "pruned: the $arch build of publish $round is gone"
+    fi
+  done
+  check "kept: the $arch build of publish 3 is there" has_commit "$site/repo" "${commits[$arch.3]:-}"
+done
+
+# --- The site ---------------------------------------------------------------------
+
+key_line() {
+  sed -n "s/^$2=//p" "$1"
+}
+check "site: the .flatpakrepo points at $REPO_URL" \
+  test "$(key_line "$site/$REMOTE_NAME.flatpakrepo" Url)" = "$REPO_URL"
+for file in "$REMOTE_NAME.flatpakrepo" "$APP_ID.flatpakref"; do
+  key_line "$site/$file" GPGKey | base64 -d >"$work/published.gpg"
+  check "site: the key in $file is the signing key" \
+    test "$("$here/signing-key.sh" check "$work/published.gpg" 2>/dev/null)" = "$signer"
+  check "site: $file names Flathub for the runtime" \
+    test "$(key_line "$site/$file" RuntimeRepo)" = "$FLATHUB_REPO_FILE"
+done
+check "site: cumulas-flatpak.gpg is the signing key" \
+  test "$("$here/signing-key.sh" check "$site/cumulas-flatpak.gpg" 2>/dev/null)" = "$signer"
+for line in "Name=$APP_ID" "Branch=$BRANCH" "IsRuntime=false" "SuggestRemoteName=$REMOTE_NAME" "Url=$REPO_URL"; do
+  check "site: the .flatpakref has $line" grep -qx "$line" "$site/$APP_ID.flatpakref"
+done
+check "site: index.html shows the fingerprint" grep -q "${signer:0:4} ${signer:4:4}" "$site/index.html"
+check "site: index.html has no scripts" test -z "$(grep -i '<script' "$site/index.html" || true)"
+check "site: index.html loads nothing from elsewhere" \
+  test -z "$(grep -Ei '(src|srcset)="(https?:)?//|<link[^>]*href="(https?:)?//|@import|url\(' "$site/index.html" || true)"
+check "site: the icon is there" test -s "$site/logo.svg"
+
+# --- What clients see -----------------------------------------------------------
+
+sed "s|^Url=.*|Url=$www/live/repo/|" "$site/$REMOTE_NAME.flatpakrepo" >"$work/client.flatpakrepo"
+expect_success "client: adds the remote from the .flatpakrepo" \
+  flatpak remote-add --user --from "$REMOTE_NAME" "$work/client.flatpakrepo"
+for arch in "$native" "$other"; do
+  check "client: lists the $arch build (the summary's signature verifies)" \
+    test "$(flatpak remote-ls --user --app --arch="$arch" --columns=application "$REMOTE_NAME" 2>/dev/null)" = "$APP_ID"
+  check "client: sees $KEEP_BUILDS $arch builds in the history" \
+    test "$(flatpak remote-info --user --log --arch="$arch" "$REMOTE_NAME" "$APP_ID" 2>/dev/null | grep -c 'Commit:')" = "$KEEP_BUILDS"
+done
+
+# --- Mirror failures ----------------------------------------------------------------
+
+expect_failure "mirror: an existing destination" mirror "$work/round5" "$live"
+
+mkdir -p "$work/www/missing-object"
+cp -a "$site/." "$work/www/missing-object/"
+object=$(find "$work/www/missing-object/repo/objects" -name '*.filez' -print -quit)
+rm -- "$object"
+expect_failure "mirror: a published repository with a missing object" \
+  mirror "$work/mirror-missing-object" "$www/missing-object/repo"
+
+mkdir -p "$work/www/corrupt-summary"
+cp -a "$site/." "$work/www/corrupt-summary/"
+head -c 4096 /dev/urandom >"$work/www/corrupt-summary/repo/summary"
+expect_failure "mirror: a published repository with a corrupt summary" \
+  mirror "$work/mirror-corrupt-summary" "$www/corrupt-summary/repo"
+
+mkdir -p "$work/www/no-summary/repo"
+cp "$site/repo/config" "$work/www/no-summary/repo/"
+expect_failure "mirror: a published repository with a config but no summary" \
+  mirror "$work/mirror-no-summary" "$www/no-summary/repo"
+
+mkdir -p "$work/www/other-app"
+ostree --repo="$work/www/other-app/repo" init --mode=archive
+flatpak build-update-repo --gpg-homedir="$keys/signer" --gpg-sign="$signer" \
+  "$work/www/other-app/repo" >/dev/null
+expect_failure "mirror: a published repository without the app" \
+  mirror "$work/mirror-other-app" "$www/other-app/repo"
+
+mkdir -p "$work/www/other-key"
+cp -a "$site/." "$work/www/other-key/"
+flatpak build-update-repo --gpg-homedir="$keys/other" --gpg-sign="$(cat "$keys/other.fpr")" \
+  "$work/www/other-key/repo" >/dev/null
+expect_error "mirror: a published summary signed with a key it isn't given" "isn't signed with" \
+  mirror "$work/mirror-other-key" "$www/other-key/repo"
+expect_error "mirror: a published summary signed with a key it isn't given, in a dry run" \
+  "isn't signed with" mirror --dry-run "$work/mirror-other-key-dry-run" "$www/other-key/repo"
+expect_success "mirror: a published summary signed with one of the keys it's given" \
+  mirror --gpg-import "$keys/other.gpg" "$work/mirror-two-keys" "$www/other-key/repo"
+mkdir -p "$work/www/unsigned"
+cp -a "$site/." "$work/www/unsigned/"
+rm -- "$work/www/unsigned/repo/summary.sig"
+expect_error "mirror: a published summary without a signature" "isn't signed with" \
+  mirror "$work/mirror-unsigned" "$www/unsigned/repo"
+expect_error "mirror: a public key that isn't there" "doesn't exist" \
+  "$here/mirror.sh" --gpg-import "$keys/missing.gpg" "$work/mirror-missing-key" "$live"
+
+# A commit missing in the middle of the published history: ostree takes it
+# for the start of the history, and would quietly drop the builds before it.
+mkdir -p "$work/www/missing-commit"
+cp -a "$site/." "$work/www/missing-commit/"
+middle=$(ostree --repo="$work/www/missing-commit/repo" rev-parse "app/$APP_ID/$native/$BRANCH^")
+rm -- "$work/www/missing-commit/repo/objects/${middle:0:2}/${middle:2}.commit"
+expect_error "mirror: a published history with a commit missing" "history stops after 1 build" \
+  mirror "$work/mirror-missing-commit" "$www/missing-commit/repo"
+if mirror --dry-run "$work/mirror-missing-commit-dry-run" "$www/missing-commit/repo" \
+  >"$work/output" 2>&1; then
+  check "mirror: a published history with a commit missing, in a dry run, is a warning" \
+    grep -q "^warning: .*history stops after 1 build" "$work/output"
+else
+  fail "mirror: a published history with a commit missing, in a dry run, is a warning"
+  cat "$work/output" >&2
+fi
+
+# After KEEP_BUILDS is raised, the published refs have fewer builds until
+# enough are published, and the published config says so.
+record_builds() { # REPO BUILDS: its config says each ref keeps BUILDS, or nothing if empty
+  local ref
+  for ref in $(managed_refs "$1"); do
+    if [ -n "$2" ]; then
+      ostree --repo="$1" config --group="$KEPT_BUILDS_GROUP" set "$ref" "$2"
+    else
+      ostree --repo="$1" config --group="$KEPT_BUILDS_GROUP" unset "$ref"
+    fi
+  done
+}
+mkdir -p "$work/www/raised"
+cp -a "$site/." "$work/www/raised/"
+ostree --repo="$work/www/raised/repo" prune --refs-only --depth=$((KEEP_BUILDS - 2)) >/dev/null
+record_builds "$work/www/raised/repo" $((KEEP_BUILDS - 1))
+expect_success "mirror: a published history as long as its config says, shorter than KEEP_BUILDS" \
+  mirror "$work/mirror-raised" "$www/raised/repo"
+check "mirror: ... all of that history" \
+  test "$(ref_history "$work/mirror-raised" "app/$APP_ID/$native/$BRANCH" | wc -l)" = $((KEEP_BUILDS - 1))
+record_builds "$work/www/raised/repo" "$KEEP_BUILDS"
+expect_error "mirror: the same history, when its config says it keeps KEEP_BUILDS" \
+  "history stops after $((KEEP_BUILDS - 1)) build" mirror "$work/mirror-raised-2" "$www/raised/repo"
+record_builds "$work/www/raised/repo" ""
+expect_error "mirror: the same history, when its config says nothing (KEEP_BUILDS, then)" \
+  "history stops after $((KEEP_BUILDS - 1)) build" mirror "$work/mirror-raised-3" "$www/raised/repo"
+
+error_port=$(free_port)
+python3 -c '
+import http.server, sys
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_error(500)
+    do_HEAD = do_GET
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+' "$error_port" &
+servers+=("$!")
+wait_for "http://127.0.0.1:$error_port/"
+expect_failure "mirror: a server error" \
+  mirror "$work/mirror-500" "http://127.0.0.1:$error_port/repo"
+expect_failure "mirror: a server error, in a dry run" \
+  mirror --dry-run "$work/mirror-500-dry-run" "http://127.0.0.1:$error_port/repo"
+
+unused_port=$(free_port)
+expect_failure "mirror: an unreachable host" \
+  mirror "$work/mirror-unreachable" "http://127.0.0.1:$unused_port/repo"
+if summary=$(mirror --dry-run "$work/mirror-unreachable-dry-run" \
+  "http://127.0.0.1:$unused_port/repo" 2>"$work/output"); then
+  check "mirror: an unreachable host, in a dry run, starts empty" test "$summary" = none
+else
+  fail "mirror: an unreachable host, in a dry run, starts empty"
+  cat "$work/output" >&2
+fi
+
+# --- Raising KEEP_BUILDS ---------------------------------------------------------
+
+# These scripts as they'd be committed with KEEP_BUILDS at 2, then at 4.
+for keep in 2 4; do
+  mkdir -p "$work/keep-$keep"
+  cp -a "$here/." "$work/keep-$keep/"
+  sed -i "s/^KEEP_BUILDS=[0-9]*\$/KEEP_BUILDS=$keep/" "$work/keep-$keep/common.sh"
+  grep -qx "KEEP_BUILDS=$keep" "$work/keep-$keep/common.sh" ||
+    die "Setting KEEP_BUILDS in a copy of common.sh failed."
+done
+# Publishes a build for this architecture on top of the repository at
+# $work/www/raise with the scripts that keep KEEP builds, and deploys it there.
+raise_publish() { # ROUND KEEP [MAKE-BUILD-OPTION]
+  local round=$1 scripts="$work/keep-$2" dir="$work/raise$1"
+  mkdir -p "$dir"
+  "$scripts/mirror.sh" --gpg-import "$keys/signer.gpg" "$dir/repo" "$www/raise/repo" >/dev/null &&
+    make_build "$dir/build" "$native" "raise$round" "${@:3}" &&
+    "$scripts/add-builds.sh" --gpg-homedir "$keys/signer" --gpg-key "$signer" \
+      --subject "Test build raise$round" "$dir/repo" "$dir/build" &&
+    "$scripts/update-repo.sh" --gpg-homedir "$keys/signer" --gpg-key "$signer" "$dir/repo" &&
+    "$here/assemble-site.sh" "$dir/repo" "$keys/signer.gpg" "$dir/site" &&
+    ln -sfn "$dir/site" "$work/www/raise"
+}
+# The publish of ROUND keeps APP builds of the app and LOCALE of its Locale
+# extension, and its config says so.
+raise_kept() { # ROUND APP LOCALE
+  keeps "$work/raise$1/site/repo" "app/$APP_ID/$native/$BRANCH" "$2" &&
+    keeps "$work/raise$1/site/repo" "runtime/$APP_ID.Locale/$native/$BRANCH" "$3"
+}
+
+for round in 1 2 3; do
+  expect_success "raise: publish $round, keeping 2 builds" raise_publish "$round" 2
+done
+check "raise: after 3 publishes keeping 2, each ref has 2" raise_kept 3 2 2
+expect_success "raise: publish 4, keeping 4 builds, mirrors the 2 published" raise_publish 4 4
+check "raise: ... and keeps 3" raise_kept 4 3 3
+expect_success "raise: publish 5, without the Locale extension, mirrors the 3 published" \
+  raise_publish 5 4 --no-locale
+check "raise: ... and keeps 4 of the app, still 3 of the Locale extension" raise_kept 5 4 3
+expect_success "raise: publish 6 mirrors the 4 published of the app, 3 of the Locale extension" \
+  raise_publish 6 4
+check "raise: ... and keeps 4 of each" raise_kept 6 4 4
+
+# --- Rotating the signing key ----------------------------------------------------
+
+# Publishes a build for this architecture on top of the repository at
+# $work/www/rotation, signed with KEY, its mirror trusting the keys in
+# rotation_trust, and deploys it there.
+rotation_publish() { # NAME KEY [UPDATE-REPO-OPTION...]
+  local name=$1 key=$2 dir="$work/$1" trusted import=()
+  shift 2
+  for trusted in "${rotation_trust[@]}"; do
+    import+=(--gpg-import "$keys/$trusted.gpg")
+  done
+  mkdir -p "$dir"
+  "$here/mirror.sh" "${import[@]}" "$dir/repo" "$www/rotation/repo" >/dev/null &&
+    make_build "$dir/build" "$native" "$name" &&
+    "$here/add-builds.sh" --gpg-homedir "$keys/$key" --gpg-key "$(cat "$keys/$key.fpr")" \
+      --subject "Test build $name" "$dir/repo" "$dir/build" &&
+    "$here/update-repo.sh" --gpg-homedir "$keys/$key" --gpg-key "$(cat "$keys/$key.fpr")" \
+      "$@" "$dir/repo" &&
+    "$here/assemble-site.sh" "$dir/repo" "$keys/$key.gpg" "$dir/site" &&
+    ln -sfn "$dir/site" "$work/www/rotation"
+}
+client() { # FLATPAK-COMMAND ARGUMENT...: in the rotation's client installation
+  FLATPAK_USER_DIR="$work/rotation-client" flatpak "$1" --user "${@:2}"
+}
+late_client() { # The same, for a client that doesn't check for updates in phase 1
+  FLATPAK_USER_DIR="$work/rotation-late-client" flatpak "$1" --user "${@:2}"
+}
+client_trusts() { # FINGERPRINT: the client's remote has this key
+  gpg --homedir "$keys/signer" --batch --with-colons --show-keys \
+    "$work/rotation-client/repo/$REMOTE_NAME.trustedkeys.gpg" 2>/dev/null |
+    grep -q "^fpr:*:$1:"
+}
+client_commit() {
+  client info --show-commit "$APP_ID" 2>/dev/null
+}
+summary_carries_keys() { # REPO
+  ostree --repo="$1" summary --view | grep -q '^xa\.gpg-keys:'
+}
+site_commit() { # SITE
+  cat "$1/repo/refs/heads/app/$APP_ID/$native/$BRANCH"
+}
+
+new_key next
+next=$(cat "$keys/next.fpr")
+ln -sfn "$site" "$work/www/rotation"
+sed "s|^Url=.*|Url=$www/rotation/repo/|" "$site/$REMOTE_NAME.flatpakrepo" >"$work/rotation.flatpakrepo"
+client remote-add --if-not-exists flathub "$www/flathub/flathub.flatpakrepo" >/dev/null
+client remote-add --from "$REMOTE_NAME" "$work/rotation.flatpakrepo" >/dev/null
+expect_success "rotation: the client installs the app, trusting the current key" \
+  client install --noninteractive "$REMOTE_NAME" "$APP_ID"
+late_client remote-add --from "$REMOTE_NAME" "$work/rotation.flatpakrepo" >/dev/null
+
+rotation_trust=(signer)
+expect_error "rotation: update-repo.sh refuses a next key that is the signing key" "next key no more" \
+  "$here/update-repo.sh" --gpg-homedir "$keys/signer" --gpg-key "$signer" \
+  --next-key "$keys/signer.gpg" "$work/round5/repo"
+expect_success "rotation, phase 1: publishes signed with the current key, carrying the next" \
+  rotation_publish rotation1 signer --next-key "$keys/next.gpg"
+check "rotation, phase 1: the summary carries the next key" summary_carries_keys "$work/rotation1/repo"
+expect_success "rotation, phase 1: the client updates" client update --noninteractive
+check "rotation, phase 1: ... to the new build" test "$(client_commit)" = "$(site_commit "$work/rotation1/site")"
+check "rotation, phase 1: ... and trusts the next key too" client_trusts "$next"
+check "rotation, phase 1: ... and still the current one" client_trusts "$signer"
+
+rotation_trust=(next)
+expect_error "rotation, phase 2: the mirror needs the previous key to read what's published" \
+  "isn't signed with" rotation_publish rotation2-without-previous next
+rotation_trust=(next signer)
+expect_success "rotation, phase 2: publishes signed with the next key only" \
+  rotation_publish rotation2 next
+expect_success "rotation, phase 2: the client updates" client update --noninteractive
+check "rotation, phase 2: ... to the build signed with the next key" \
+  test "$(client_commit)" = "$(site_commit "$work/rotation2/site")"
+expect_error "rotation, phase 2: a client that didn't check for updates in phase 1 can't" \
+  "GPG|signature" late_client remote-ls "$REMOTE_NAME"
+rotation_trust=(next)
+expect_success "rotation: once a publish with the next key is out, the mirror needs only it" \
+  rotation_publish rotation3 next
+expect_success "rotation: the client updates again" client update --noninteractive
+check "rotation: ... to that build" test "$(client_commit)" = "$(site_commit "$work/rotation3/site")"
+
+# --- The live site, after a deploy -------------------------------------------------
+
+# The last publish, with its install files pointing at the local server.
+mkdir -p "$work/www/verify"
+ln -s "$site/repo" "$work/www/verify/repo"
+for file in "$REMOTE_NAME.flatpakrepo" "$APP_ID.flatpakref"; do
+  sed "s|^Url=.*|Url=$www/verify/repo/|" "$site/$file" >"$work/www/verify/$file"
+done
+deployed=$(sha256sum <"$site/repo/summary" | cut -d ' ' -f 1)
+other_summary=$(sha256sum <"$site/repo/config" | cut -d ' ' -f 1)
+
+# Before a deploy: is what's published still what the run mirrored?
+check_live() { # URL MIRRORED-SUMMARY
+  "$here/check-live-summary.sh" --url "$1" "$2"
+}
+expect_success "check-live-summary: the published summary is still the one mirrored" \
+  check_live "$www/verify/repo" "$deployed"
+expect_error "check-live-summary: a published summary that isn't the one mirrored" \
+  "changed since this run mirrored it" check_live "$www/verify/repo" "$other_summary"
+expect_success "check-live-summary: nothing published (404), and nothing mirrored" \
+  check_live "$www/nothing-published/repo" none
+expect_error "check-live-summary: nothing published (404), but a summary mirrored" \
+  "changed since this run mirrored it" check_live "$www/nothing-published/repo" "$deployed"
+expect_error "check-live-summary: a summary published, but nothing mirrored" \
+  "changed since this run mirrored it" check_live "$www/verify/repo" none
+expect_error "check-live-summary: no mirrored summary given" \
+  "changed since this run mirrored it" check_live "$www/verify/repo" ""
+expect_error "check-live-summary: a server error" "answers HTTP 500" \
+  check_live "http://127.0.0.1:$error_port/repo" none
+expect_error "check-live-summary: an unreachable host" "Fetching .* failed" \
+  check_live "http://127.0.0.1:$unused_port/repo" none
+
+if "$here/verify-live.sh" --site "$www/verify" --timeout 5 "$deployed" >"$work/report" 2>"$work/output"; then
+  pass "verify-live: the deployed site"
+  for arch in $ARCHES; do
+    check "verify-live: reports the $arch build" grep -q "^| $arch | commit " "$work/report"
+  done
+  check "verify-live: reports the .flatpakref's Content-Type" \
+    grep -q "^\`$APP_ID.flatpakref\` is served as \`[^\`]" "$work/report"
+else
+  fail "verify-live: the deployed site"
+  cat "$work/output" >&2
+fi
+expect_error "verify-live: a summary that isn't the deployed one" "still isn't the one deployed" \
+  "$here/verify-live.sh" --site "$www/verify" --timeout 1 "$other_summary"
+
+# --- Installing -----------------------------------------------------------------
+
+expect_success "smoke-test.sh installs the last publish" \
+  env SMOKE_FLATHUB_REPO_FILE="$www/flathub/flathub.flatpakrepo" "$here/smoke-test.sh" "$site"
+
+if [ "$failures" != 0 ]; then
+  die "$failures check(s) failed."
+fi
+log "All checks passed."

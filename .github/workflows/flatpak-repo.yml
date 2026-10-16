@@ -1,0 +1,435 @@
+# Builds Cumulas Mail for x86_64 and aarch64 and publishes it to the
+# self-hosted Flatpak repository at https://flatpak.cumulas.co (GitHub Pages),
+# branch "stable". Release tags (vMAJOR.MINOR.PATCH) publish. Pull requests
+# that touch the packaging, and manual runs unless asked to publish, are dry
+# runs: the same steps, signed with a throwaway key, and nothing deployed.
+# Every run installs the result from a local copy of the site before anything
+# is deployed, and a publish checks the live site after. See
+# packaging/flatpak/README.md, "Self-hosted repository".
+#
+# The signing key is a secret of the flatpak-signing environment, whose
+# deployment rules let only the default branch and release tags use it: the
+# publish job signs with it, and check-key (manual dry runs of the default
+# branch) checks it. No other job, and no other ref, gets it.
+name: Flatpak repository
+
+on:
+  push:
+    # Releases only: vMAJOR.MINOR.PATCH, no pre-releases (a filter pattern,
+    # not a regular expression: "+" repeats, "." is a dot).
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the default branch to flatpak.cumulas.co (otherwise a dry run)
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/flatpak-repo.yml
+      - .github/actions/**
+      - packaging/flatpak/**
+
+permissions:
+  contents: read
+
+# One publish at a time: each one adds to the history the one before
+# deployed, and waits until the live site serves it. A publish waiting here
+# is replaced by a newer one (GitHub keeps one pending run per group); only
+# the newest release tag can publish anyway.
+concurrency:
+  group: flatpak-repo-${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && 'publish' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  mode:
+    name: Publish or dry run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.mode.outputs.publish }}
+      label: ${{ steps.mode.outputs.label }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          PUBLISH_INPUT: ${{ inputs.publish }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          label="$GITHUB_REF_NAME@${GITHUB_SHA:0:12}"
+          case "$EVENT" in
+            push)
+              publish=true
+              label=$GITHUB_REF_NAME
+              ;;
+            workflow_dispatch)
+              publish=$PUBLISH_INPUT
+              if [ "$publish" = true ] && [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+                echo "::error::A manual run publishes only from the default branch ($DEFAULT_BRANCH), not $GITHUB_REF."
+                exit 1
+              fi
+              ;;
+            *) publish=false ;;
+          esac
+          . packaging/flatpak/repo/common.sh
+          {
+            echo "publish=$publish"
+            echo "label=$label"
+          } >>"$GITHUB_OUTPUT"
+          if [ "$publish" = true ]; then
+            echo "Publishing $label to $SITE_URL" >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "Dry run for $label: signed with a throwaway key, not deployed" >>"$GITHUB_STEP_SUMMARY"
+          fi
+      # A tag publishes only if it's the highest release tag and the newest
+      # release in the metainfo. Every other job waits for this one, so a tag
+      # that can't publish stops the run before it builds. The publish job
+      # checks again, for runs whose failed jobs are re-run after a newer tag.
+      - &check-release
+        name: Check that this is the newest release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[].ref | ltrimstr("refs/tags/")' |
+            packaging/flatpak/repo/check-release.sh "$GITHUB_REF_NAME"
+
+  # Manual dry runs of the default branch also check the signing key, the
+  # secret of the flatpak-signing environment: imported into a scratch GnuPG
+  # home, checked against the committed public key with a test signature,
+  # and removed. Nothing is signed with it. The way to check the secret
+  # before a release.
+  check-key:
+    name: Check the signing key
+    needs: mode
+    if: github.event_name == 'workflow_dispatch' && needs.mode.outputs.publish != 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: flatpak-signing
+    env:
+      PUBLIC_KEY: packaging/flatpak/repo/cumulas-flatpak.gpg
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the signing key against the committed public key
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          home=$(mktemp -d "$RUNNER_TEMP/gnupg.XXXXXXXX")
+          trap 'packaging/flatpak/repo/signing-key.sh remove "$home"' EXIT
+          fingerprint=$(packaging/flatpak/repo/signing-key.sh import "$home" "$PUBLIC_KEY")
+          echo "The signing key in the flatpak-signing environment is \`$fingerprint\`, the key in \`$PUBLIC_KEY\`, and its signatures verify with that file alone." >>"$GITHUB_STEP_SUMMARY"
+
+  scripts:
+    name: Repository scripts (fake builds)
+    needs: mode
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-flatpak-builder
+        with:
+          free-disk-space: "false"
+          packages: ostree shellcheck
+      - name: ShellCheck
+        run: shellcheck -x packaging/flatpak/*.sh packaging/flatpak/repo/*.sh
+      - name: Mirror, prune, sign, assemble and install, with fake builds
+        run: packaging/flatpak/repo/test.sh
+
+  sources:
+    name: Offline sources
+    needs: mode
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/flatpak-sources
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flatpak-sources
+          path: packaging/flatpak/*-sources.json
+          if-no-files-found: error
+          retention-days: 3
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: flatpak-sources
+          path: packaging/flatpak
+      - uses: ./.github/actions/setup-flatpak-builder
+      - name: Fetch Flathub shared modules
+        run: packaging/flatpak/fetch-shared-modules.sh
+      - name: Build
+        run: |
+          packaging/flatpak/build-repo.sh repo --default-branch=stable 2>&1 | tee flatpak-build.log
+          test -f "repo/refs/heads/app/co.cumulas.Mail/$ARCH/stable"
+          df -h /
+      - name: Pack the build repository
+        run: tar -cf "flatpak-repo-build-$ARCH.tar" repo
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flatpak-repo-build-${{ matrix.arch }}
+          path: flatpak-repo-build-${{ matrix.arch }}.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: flatpak-build-log-${{ matrix.arch }}
+          path: flatpak-build.log
+          if-no-files-found: ignore
+
+  # Mirrors the published repository, adds the new builds on top of its
+  # history, prunes, signs and assembles the site. The only job that signs
+  # with the repository's key: a secret of the flatpak-signing environment,
+  # which only the default branch and release tags can use. dry-run below
+  # runs the same steps (YAML aliases of these) with a throwaway key.
+  publish:
+    name: Assemble and sign the repository
+    needs: [mode, scripts, build]
+    if: needs.mode.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: flatpak-signing
+    outputs:
+      mirrored-summary: ${{ steps.mirror.outputs.summary-sha256 }}
+      deployed-summary: ${{ steps.site.outputs.summary-sha256 }}
+    env:
+      PUBLISH: "true"
+      LABEL: ${{ needs.mode.outputs.label }}
+      PUBLIC_KEY: packaging/flatpak/repo/cumulas-flatpak.gpg
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - *check-release
+      - &setup
+        uses: ./.github/actions/setup-flatpak-builder
+        with:
+          free-disk-space: "false"
+          packages: ostree
+      - &download-builds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: flatpak-repo-build-*
+          path: builds
+      - &unpack-builds
+        name: Unpack the builds
+        run: |
+          for arch in x86_64 aarch64; do
+            mkdir -p "builds/$arch"
+            tar -xf "builds/flatpak-repo-build-$arch/flatpak-repo-build-$arch.tar" -C "builds/$arch"
+          done
+      - &gnupg-home
+        name: Create a temporary GnuPG home
+        run: echo "SIGNING_GNUPGHOME=$(mktemp -d "$RUNNER_TEMP/gnupg.XXXXXXXX")" >>"$GITHUB_ENV"
+      - name: Import the signing key
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          fingerprint=$(packaging/flatpak/repo/signing-key.sh import "$SIGNING_GNUPGHOME" "$PUBLIC_KEY")
+          echo "SIGNING_KEY=$fingerprint" >>"$GITHUB_ENV"
+          echo "SIGNING_PUBLIC_KEY=$PUBLIC_KEY" >>"$GITHUB_ENV"
+      - &mirror
+        id: mirror
+        name: Mirror the published repository
+        run: |
+          if [ "$PUBLISH" = true ]; then
+            summary=$(packaging/flatpak/repo/mirror.sh repo)
+          else
+            summary=$(packaging/flatpak/repo/mirror.sh --dry-run repo)
+          fi
+          echo "summary-sha256=$summary" >>"$GITHUB_OUTPUT"
+      - &add-builds
+        name: Add the new builds
+        run: |
+          packaging/flatpak/repo/add-builds.sh \
+            --gpg-homedir "$SIGNING_GNUPGHOME" --gpg-key "$SIGNING_KEY" \
+            --subject "Cumulas Mail $LABEL" \
+            --body "Built from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            repo builds/x86_64/repo builds/aarch64/repo
+      - &update-repo
+        name: Prune, sign and update appstream, deltas and summary
+        run: |
+          packaging/flatpak/repo/update-repo.sh \
+            --gpg-homedir "$SIGNING_GNUPGHOME" --gpg-key "$SIGNING_KEY" repo
+      - &remove-key
+        name: Remove the signing key
+        if: always() && env.SIGNING_GNUPGHOME != ''
+        run: packaging/flatpak/repo/signing-key.sh remove "$SIGNING_GNUPGHOME"
+      - &assemble-site
+        id: site
+        name: Assemble the site
+        run: |
+          packaging/flatpak/repo/assemble-site.sh repo "$SIGNING_PUBLIC_KEY" site
+          echo "summary-sha256=$(sha256sum site/repo/summary | cut -d ' ' -f 1)" >>"$GITHUB_OUTPUT"
+          {
+            echo "| Ref | Commit | Builds kept |"
+            echo "| --- | --- | --- |"
+            for ref in $(ostree --repo=repo refs | grep -E '^(app|runtime)/' | sort); do
+              builds=$(ostree --repo=repo log "$ref" | grep -c '^commit ')
+              echo "| \`$ref\` | \`$(ostree --repo=repo rev-parse "$ref" | cut -c 1-12)\` | $builds |"
+            done
+            echo
+            echo "Site: $(du -sh site | cut -f 1), signed with \`$SIGNING_KEY\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+      - &upload-site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  # The publish job's steps for dry runs, signed with a throwaway key. Outside
+  # the flatpak-signing environment, so the signing key isn't there to read.
+  dry-run:
+    name: Assemble the repository (dry run)
+    needs: [mode, scripts, build]
+    if: needs.mode.outputs.publish != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PUBLISH: "false"
+      LABEL: ${{ needs.mode.outputs.label }}
+      PUBLIC_KEY: packaging/flatpak/repo/cumulas-flatpak.gpg
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - *setup
+      - *download-builds
+      - *unpack-builds
+      - *gnupg-home
+      - name: Generate a throwaway signing key
+        run: |
+          if [ -e "$PUBLIC_KEY" ]; then
+            packaging/flatpak/repo/signing-key.sh check "$PUBLIC_KEY" >/dev/null
+          else
+            echo "::warning::$PUBLIC_KEY isn't committed yet: publishing fails until it is (packaging/flatpak/README.md)."
+          fi
+          fingerprint=$(packaging/flatpak/repo/signing-key.sh throwaway "$SIGNING_GNUPGHOME" "$RUNNER_TEMP/throwaway.gpg")
+          echo "SIGNING_KEY=$fingerprint" >>"$GITHUB_ENV"
+          echo "SIGNING_PUBLIC_KEY=$RUNNER_TEMP/throwaway.gpg" >>"$GITHUB_ENV"
+      - *mirror
+      - *add-builds
+      - *update-repo
+      - *remove-key
+      - *assemble-site
+      - *upload-site
+
+  smoke:
+    name: Install test (${{ matrix.arch }})
+    needs: [publish, dry-run]
+    # After whichever of the two ran; the other is skipped.
+    if: ${{ !cancelled() && (needs.publish.result == 'success' || needs.dry-run.result == 'success') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-flatpak-builder
+        with:
+          free-disk-space: "false"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/pages
+      - name: Unpack the site
+        run: mkdir site && tar -xf "$RUNNER_TEMP/pages/artifact.tar" -C site
+      # Adds the remote from the .flatpakrepo, installs (the runtime from
+      # Flathub), checks branch, origin, commit and appstream; then the same
+      # through the .flatpakref.
+      - name: Install from the site
+        run: packaging/flatpak/repo/smoke-test.sh site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: [mode, publish, smoke]
+    # Spelled out: smoke runs after a skipped job (dry-run), and a job after
+    # one that was skipped is skipped too unless its condition says otherwise.
+    if: ${{ !cancelled() && needs.mode.outputs.publish == 'true' && needs.publish.result == 'success' && needs.smoke.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The site adds to the history this run mirrored. If anything was
+      # deployed since (a run of another tag, an older run re-run), deploying
+      # it would drop that.
+      - name: Check that the published repository hasn't changed since
+        env:
+          MIRRORED_SUMMARY: ${{ needs.publish.outputs.mirrored-summary }}
+        run: packaging/flatpak/repo/check-live-summary.sh "$MIRRORED_SUMMARY"
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  # Once Pages serves the deployed summary (its cache keeps files for up to
+  # 10 minutes), adds the remote from the live .flatpakrepo and finds the app
+  # on both architectures, as people will. A publish waiting behind this run
+  # starts after it, so it mirrors what was just deployed.
+  verify:
+    name: Check the live site
+    needs: [publish, deploy]
+    if: ${{ !cancelled() && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-flatpak-builder
+        with:
+          free-disk-space: "false"
+      - name: Wait for the deployed summary, then read the app from the live site
+        env:
+          DEPLOYED_SUMMARY: ${{ needs.publish.outputs.deployed-summary }}
+        run: packaging/flatpak/repo/verify-live.sh "$DEPLOYED_SUMMARY" | tee -a "$GITHUB_STEP_SUMMARY"
