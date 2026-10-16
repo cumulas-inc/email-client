@@ -238,6 +238,35 @@ describe("message bridge", () => {
     expect(messages).toEqual([link("https://example.org/other")]);
   });
 
+  it("knows a link for what it is, whichever window made it", async () => {
+    const { frame, doc, messages } = await load('<p id="here"></p>');
+    messages.length = 0;
+    const { view, point, press, click } = person(frame);
+    const errors: unknown[] = [];
+    view.addEventListener("error", (e) => errors.push(e.error));
+    // A script in the frame, had one run, putting in a link made in a frame
+    // of its own: an element whose prototypes are that frame's, not this one's.
+    const own = doc.createElement("iframe");
+    doc.body.append(own);
+    const made = own.contentDocument!;
+    const odd = made.createElement("a");
+    odd.setAttribute("href", "https://example.org/odd");
+    const inside = made.createElement("b");
+    odd.append(inside);
+    doc.getElementById("here")!.append(odd);
+    expect(inside instanceof view.Element).toBe(false);
+
+    point(inside);
+    press(inside);
+    const followed = click(inside);
+    // What isn't an element is no link (nor anything to stumble on).
+    give(doc, new view.MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
+    await settle();
+    expect(followed.defaultPrevented).toBe(true);
+    expect(messages).toEqual([hover("https://example.org/odd"), link("https://example.org/odd")]);
+    expect(errors).toEqual([]);
+  });
+
   it("reads events and links as they are, whatever a script in the frame redefines", async () => {
     const { frame, doc, messages } = await load(
       '<p><a id="real" href="https://example.org/real">Real</a> ' +

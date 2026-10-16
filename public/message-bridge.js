@@ -14,12 +14,18 @@
 // app, read the channel or forge input: the bridge reports only trusted
 // events, which only a person's input makes. It could change what the
 // bridge reads, though, so the bridge limits what such a script can change:
-// - Everything used later is taken now. Named elements can shadow
-//   properties of document, window and forms (an <img name="getElementById">),
-//   and a script could redefine a getter or a method (KeyboardEvent's key,
-//   Element's getAttribute, Function's call), so events and elements are read
-//   through the getters and methods as they are now, called by Reflect.apply.
+// - Everything it reads events and elements with is taken now. Named
+//   elements can shadow properties of document, window and forms (an <img
+//   name="getElementById">), and a script could redefine a getter or a
+//   method (KeyboardEvent's key, Element's getAttribute, Function's call) or
+//   give an element another prototype, so events and elements are read
+//   through the getters and methods as they are now, called by
+//   Reflect.apply; those go by what an object is, not by its prototype.
 //   (An event's isTrusted is its own, and no script can redefine it.)
+//   Measurements are the exception: the document's size and scroll, and
+//   where a target within the message sits, are read as they are then. A
+//   script changing those could only size the frame or scroll the reader
+//   wrongly.
 // - Its listeners are the window's, capturing, and added before any other:
 //   they hear every event first, so nothing can keep one from them or act on
 //   one before they have.
@@ -54,7 +60,6 @@
   const send = window.parent.postMessage.bind(window.parent);
   const listen = method(EventTarget.prototype.addEventListener);
   const ElementProto = Element.prototype;
-  const isPrototypeOf = method(Object.prototype.isPrototypeOf);
   const closest = method(ElementProto.closest);
   const attribute = method(ElementProto.getAttribute);
   const scrollIntoView = method(ElementProto.scrollIntoView);
@@ -92,8 +97,12 @@
 
   /** The link at or around an event's target, as the reader follows them. */
   const linkOf = (e) => {
-    const target = targetOf(e);
-    return isPrototypeOf(ElementProto, target) ? closest(target, "a[href], area[href]") : null;
+    // closest checks that it's called on an element, and throws if not.
+    try {
+      return closest(targetOf(e), "a[href], area[href]");
+    } catch {
+      return null;
+    }
   };
   const hrefOf = (link) => attribute(link, "href");
 
