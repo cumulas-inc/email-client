@@ -10,7 +10,9 @@ const PREFIX_WILDCARD: bool = true;
 /// KQL for Microsoft Graph `$search`, or `None` for an empty query.
 ///
 /// Terms are joined with `AND`; a word gets a trailing `*` (prefix match),
-/// a phrase is quoted, and fields become KQL properties. Words are
+/// a phrase is quoted, and fields become KQL properties. A word with `..`
+/// in it is quoted too: bare, it is KQL's range operator (`size:1..500`),
+/// which would fail the search or find something else. Words are
 /// lowercased by the parser, so KQL never sees `AND`, `OR`, `NOT` or `NEAR`
 /// as operators, and a leading `-` was trimmed, so nothing excludes. Without
 /// a property, Graph searches from, subject and body.
@@ -27,7 +29,7 @@ pub fn kql(query: &SearchQuery) -> Option<String> {
                 Field::Subject => "subject:",
                 Field::Body => "body:",
             };
-            let value = if term.phrase {
+            let value = if term.phrase || term.text.contains("..") {
                 format!("\"{}\"", term.text.replace('"', ""))
             } else if PREFIX_WILDCARD && term.text.ends_with(char::is_alphanumeric) {
                 format!("{}*", term.text)
@@ -87,6 +89,15 @@ mod tests {
             compiled("has:attachment").as_deref(),
             Some("hasAttachments:true")
         );
+    }
+
+    #[test]
+    fn ranges_are_quoted_as_text() {
+        assert_eq!(
+            compiled("subject:1..5 v1..v2 foo...bar").as_deref(),
+            Some("subject:\"1..5\" AND \"v1..v2\" AND \"foo...bar\"")
+        );
+        assert_eq!(compiled("v1.2").as_deref(), Some("v1.2*"));
     }
 
     #[test]
