@@ -75,9 +75,12 @@ npm run tauri dev     # desktop app with hot reload
 npm run dev           # UI only, in the browser, with demo data (?empty for onboarding)
 ```
 
-To sign in to Microsoft accounts during development, build with
-`CUMULAS_MS_CLIENT_ID=<application id>` or enter a client ID under
-Settings → Microsoft app registration ([setup](docs/microsoft-365.md)).
+Every build, development ones included, signs in to Microsoft accounts with
+Cumulas Mail's published app registration and gets company signatures from
+Cumulas Signatures, with nothing to set. To sign in with another
+registration, build with `CUMULAS_MS_CLIENT_ID=<application id>` or enter its
+client ID under Settings → Microsoft app registration
+([details](docs/microsoft-365.md#registering-the-app-publisher)).
 
 ### Tests
 
@@ -100,8 +103,8 @@ CI runs all of these, plus a Flatpak build.
 
 ## Before release
 
-- Register the Microsoft Entra application, complete publisher verification
-  and test against real Microsoft 365 and Outlook.com accounts.
+- Test sign-in, instant updates and company signatures against real
+  Microsoft 365 and Outlook.com accounts.
 - Make the repository or the screenshots public for the Flathub listing.
 - Submit to Flathub by hand, following
   [Submitting to Flathub](packaging/flatpak/README.md#submitting-to-flathub).
@@ -110,13 +113,6 @@ CI runs all of these, plus a Flatpak build.
   artwork, and no AI agent to open the pull request or write its text. Even
   then, reviewers decide at their discretion and may reject the app because an
   AI agent wrote all of it.
-- Deploy the Cumulas push service at `sync.cumulas.co` and set up its scope
-  on the Entra registration ([steps](docs/microsoft-365.md#instant-updates-the-cumulas-push-service));
-  until then Microsoft accounts check the Inbox every 30 seconds.
-- Pre-authorize Cumulas Mail on Cumulas Signatures' shared app, allow it on
-  the server, and build in `CUMULAS_SIGNATURE_CLIENT_ID`
-  ([steps](docs/microsoft-365.md#setting-it-up-signature-service-operators));
-  builds without the client ID have company signatures off.
 
 Not built yet: saving drafts to the server, conversation threading, recurring
 event editing (single occurrence vs series), CalDAV/CardDAV for IMAP accounts,

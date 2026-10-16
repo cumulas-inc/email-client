@@ -179,9 +179,12 @@ accounts can have their organization's, from Cumulas Signatures (see
 
 - **Configuration** (`signatures/config.rs`): the service's address
   (`CUMULAS_SIGNATURE_URL`) and its shared app's client ID
-  (`CUMULAS_SIGNATURE_CLIENT_ID`), from the environment or the build. The API
-  scope is made from the two, never taken from an answer. Without a client ID
-  the feature is off.
+  (`CUMULAS_SIGNATURE_CLIENT_ID`), from the environment, else the build, else
+  Cumulas Signatures (`signature.cumulas.co`) and its published shared app.
+  That client ID goes with that address only, since the scope names the
+  host: a service elsewhere needs its own, and without one the feature is
+  off, as it is when the client ID is `none`. The API scope is made from the
+  two, never taken from an answer.
 - **The check** (`OrganizationSignatures`, made by the `Connector` for work
   and school accounts only): a token for the API from the account's refresh
   token (`auth::microsoft::ApiTokenSource`, whose refusals never become

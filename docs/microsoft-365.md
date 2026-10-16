@@ -62,10 +62,23 @@ approval.
 
 ## Registering the app (publisher)
 
-The published app needs one multi-tenant app registration, whose
-**Application (client) ID** is compiled in with
-`CUMULAS_MS_CLIENT_ID=<id>` (see the Flatpak manifest). The client ID is not a
-secret.
+The published app has one multi-tenant app registration, Cumulas Mail, from
+the verified publisher Cumulas Inc. Its **Application (client) ID**,
+`10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad`, is built into the app, so builds sign
+in with it without any build settings. The client ID is not a secret.
+
+A build can name another registration instead, at build time:
+`CUMULAS_MS_CLIENT_ID=<id> cargo build --release ...`, or an entry in the
+Flatpak manifest's `build-options.env`. An empty value keeps the published
+registration (the Flatpak manifest's is empty), and `none` builds in no client
+ID: people must then enter one under **Settings → Microsoft app registration**
+before signing in. Any other value that isn't a GUID is ignored, with a
+warning in the log. A client ID entered in Settings takes precedence over the
+built-in one (see
+[Using your organization's own registration](#using-your-organizations-own-registration-it-admins)).
+
+The published registration was set up as follows; another registration needs
+the same steps.
 
 1. In the [Microsoft Entra admin center](https://entra.microsoft.com), go to
    **App registrations → New registration**.
@@ -110,9 +123,9 @@ subscriptions.
 
 ### Setting up the app registration for it (publisher)
 
-These steps are needed once on the published registration. Until they're done,
-everything works as before, with the 30-second Inbox check (see
-[below](#what-users-see-before-it-is-set-up)).
+These steps are done on the published registration, and are needed once on
+any other. Until they're done, everything works as before, with the 30-second
+Inbox check (see [below](#what-users-see-before-it-is-set-up)).
 
 1. **Expose an API → Application ID URI → Add**: keep the suggested
    `api://<client ID>` (the app asks for exactly this form) and save.
@@ -300,25 +313,42 @@ server's public address. For Cumulas Mail:
 2. On the server, add Cumulas Mail's client ID under **Settings → Desktop mail
    apps**. Until then the service answers 403 `app-not-allowed`.
 
+For `signature.cumulas.co`, both are done for the published registration.
+
 Organizations that sign in with [their own registration](#using-your-organizations-own-registration-it-admins)
 of Cumulas Mail need its client ID added in both places too.
 
 ### Building it in
 
-- `CUMULAS_SIGNATURE_CLIENT_ID`: the shared app's client ID (a GUID).
-  Without it, company signatures are off: every account shows them as
-  unsupported, and the app never asks Microsoft or the service for them.
+Cumulas Signatures is built in: with nothing set, the app asks
+`https://signature.cumulas.co` for signatures, with the scope of its published
+shared app, whose client ID is `da27f705-3818-4ca0-9b5d-7781405ea54e`. Two
+variables change that:
+
 - `CUMULAS_SIGNATURE_URL`: the service's address, `https://signature.cumulas.co`
   unless set. As with `CUMULAS_SYNC_URL`, it must start with `https://`
   (`http://` only for `localhost`, `127.0.0.1` and `[::1]`) and carry no user
   name, query or fragment; any other value is ignored, with a warning in the
   log. The scope follows its host, so the shared app must expose
   `api://<that host>/<client ID>`.
+- `CUMULAS_SIGNATURE_CLIENT_ID`: the shared app's client ID (a GUID). Unless
+  set, the published shared app's is used, but only with Cumulas Signatures'
+  own address: that app exposes its API at `signature.cumulas.co` alone, so
+  with another address it would make a scope nobody exposes. A service at
+  another address therefore needs its client ID here; without one, company
+  signatures are off, with a warning in the log. `none` turns company
+  signatures off: every account shows them as unsupported, and the app never
+  asks Microsoft or the service for them. An empty value counts as not set,
+  and any other value that isn't a GUID is ignored, with a warning in the
+  log.
 
 Both are read at build time (`CUMULAS_SIGNATURE_CLIENT_ID=<id> cargo build
 --release ...`, or the Flatpak manifest's `build-options.env`, where the
-client ID is empty) and at run time, which takes precedence:
-`flatpak run --env=CUMULAS_SIGNATURE_URL=https://signature.example.org co.cumulas.Mail`.
+client ID is empty, so the published one applies) and at run time, which
+takes precedence:
+`flatpak run --env=CUMULAS_SIGNATURE_URL=https://signature.example.org --env=CUMULAS_SIGNATURE_CLIENT_ID=<its client ID> co.cumulas.Mail`,
+or `flatpak run --env=CUMULAS_SIGNATURE_CLIENT_ID=none co.cumulas.Mail` to
+turn company signatures off for that run.
 
 ## Using your organization's own registration (IT admins)
 
