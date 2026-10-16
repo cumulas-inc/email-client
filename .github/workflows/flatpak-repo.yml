@@ -1,6 +1,6 @@
 # Builds Cumulas Mail for x86_64 and aarch64 and publishes it to the
 # self-hosted Flatpak repository at https://flatpak.cumulas.co (GitHub Pages),
-# branch "stable". Release tags publish. Pull requests that touch the
+# branch "stable". Release tags (vMAJOR.MINOR.PATCH) publish. Pull requests that touch the
 # packaging, and manual runs unless asked to publish, are dry runs: the same
 # steps, signed with a throwaway key, and nothing deployed. Every run
 # installs the result from a local copy of the site before anything is
@@ -14,7 +14,9 @@ name: Flatpak repository
 
 on:
   push:
-    tags: ["v*"]
+    # Releases only: vMAJOR.MINOR.PATCH, no pre-releases (a filter pattern,
+    # not a regular expression: "+" repeats, "." is a dot).
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       publish:
@@ -65,11 +67,6 @@ jobs:
             push)
               publish=true
               label=$GITHUB_REF_NAME
-              version=$(sed -n '/<release version="/{s/.*<release version="\([^"]*\)".*/\1/p;q}' \
-                packaging/flatpak/co.cumulas.Mail.metainfo.xml)
-              if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-                echo "::warning::The newest release in co.cumulas.Mail.metainfo.xml is $version, not ${GITHUB_REF_NAME#v}: software centers will show $version and its notes."
-              fi
               ;;
             workflow_dispatch)
               publish=$PUBLISH_INPUT
@@ -91,6 +88,18 @@ jobs:
           else
             echo "Dry run for $label: signed with a throwaway key, not deployed" >>"$GITHUB_STEP_SUMMARY"
           fi
+      # A tag publishes only if it's the highest release tag and the newest
+      # release in the metainfo. The publish job checks again, for runs whose
+      # failed jobs are re-run after a newer tag.
+      - &check-release
+        name: Check that this is the newest release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[].ref | ltrimstr("refs/tags/")' |
+            packaging/flatpak/repo/check-release.sh "$GITHUB_REF_NAME"
 
   # Manual dry runs of the default branch also check the signing key, the
   # secret of the flatpak-signing environment: imported into a scratch GnuPG
@@ -221,6 +230,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - *check-release
       - &setup
         uses: ./.github/actions/setup-flatpak-builder
         with:

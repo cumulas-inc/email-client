@@ -118,11 +118,14 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
 
 ### What's published, and when
 
-- **Every `v*` tag** publishes. Add the release to
-  `co.cumulas.Mail.metainfo.xml` first: software centers show its version and
-  notes, and the workflow warns when they don't match the tag. A manual run
-  (Actions → Flatpak repository → Run workflow) publishes the default branch
-  only with **Publish** ticked.
+- **Release tags** publish: `vMAJOR.MINOR.PATCH`, such as `v1.2.0`
+  (pre-releases such as `v1.2.0-rc.1` don't start the workflow). The tag must
+  be the highest release tag, so that an older one never replaces newer
+  builds, and the newest `<release>` in `co.cumulas.Mail.metainfo.xml` must be
+  its version, since software centers show that release's version and notes:
+  add the release there before tagging. Otherwise the run stops before it
+  builds (`repo/check-release.sh`). A manual run (Actions → Flatpak repository
+  → Run workflow) publishes the default branch only with **Publish** ticked.
 - **Dry runs**: pull requests that touch `packaging/flatpak/`,
   `.github/actions/` or the workflow, and manual runs without Publish, run the
   same steps with a throwaway key and deploy nothing. A manual dry run of the
@@ -314,7 +317,9 @@ repository after 3 more publishes.
 
 Nothing is deployed until every step has passed, the install tests included,
 so the site stays as it was. Fix the cause and run the workflow again ("Re-run
-failed jobs" reuses the builds for 3 days).
+failed jobs" reuses the builds for 3 days). Only the newest release tag
+publishes: once a higher tag exists, an older tag's run stops at its release
+check, re-runs included.
 
 - **The published repository can't be read** (DNS, TLS, an HTTP error, a
   missing object, a history that stops short of the builds it keeps): the
@@ -337,5 +342,4 @@ failed jobs" reuses the builds for 3 days).
   within minutes of the last one may mirror the cached copy. Its deploy then
   finds the published repository changed and stops (above).
 - **A newer tag** waiting behind a running publish replaces an older waiting
-  one (GitHub keeps one waiting run per group): run that one again if it
-  should still go out.
+  one (GitHub keeps one waiting run per group), which couldn't publish anyway.

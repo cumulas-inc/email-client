@@ -2,6 +2,8 @@
 # Tests the repository scripts end to end without building the app, with
 # fake builds and a fake Flathub served from 127.0.0.1:
 #
+#  - check-release.sh lets only the highest vMAJOR.MINOR.PATCH tag publish,
+#    and only when it's the metainfo's newest release;
 #  - signing-key.sh imports the key whose public half is committed, and
 #    refuses a missing, empty, expired or different public key, a private key
 #    with a passphrase, and more than one key;
@@ -107,6 +109,31 @@ wait_for() {
   done
   die "Nothing answers at $1."
 }
+
+# --- Release tags ---------------------------------------------------------------
+
+metainfo() { # VERSION... → a metainfo with these releases, newest first
+  local version
+  {
+    printf '<?xml version="1.0"?>\n<component type="desktop-application">\n  <releases>\n'
+    for version in "$@"; do
+      printf '    <release version="%s" date="2026-01-01">\n      <description><p>Notes</p></description>\n    </release>\n' "$version"
+    done
+    printf '  </releases>\n</component>\n'
+  } >"$work/metainfo.xml"
+}
+release_check() { # TAG → check-release.sh, with these tags in the repository
+  printf '%s\n' v0.9.0 v1.2.0 v1.9.0 v1.10.0 v1.11.0-rc.1 nightly |
+    "$here/check-release.sh" "$1" "$work/metainfo.xml"
+}
+metainfo 1.10.0 1.9.0
+expect_success "release: the highest release tag, the metainfo's newest release" release_check v1.10.0
+expect_error "release: a tag below the highest (by version, not text)" "v1.10.0 is" release_check v1.9.0
+expect_error "release: a pre-release tag" "isn't a release tag" release_check v1.11.0-rc.1
+metainfo 1.11.0 1.10.0
+expect_success "release: a tag above the ones listed" release_check v1.11.0
+expect_error "release: a tag that isn't the metainfo's newest release" "newest release in" \
+  release_check v1.10.0
 
 # --- Signing keys -------------------------------------------------------------
 
