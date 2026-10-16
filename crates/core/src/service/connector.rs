@@ -23,7 +23,7 @@ use crate::push::relay::{self, HttpRelay, Relay};
 use crate::push::supervisor::{MICROSOFT_POLL, UNSUPPORTED_POLL};
 use crate::secrets::{SecretStore, keys};
 use crate::signatures::client::SignatureClient;
-use crate::signatures::config::SignatureService;
+use crate::signatures::config::{NO_CLIENT_ID, SIGNATURE_CLIENT_ID_VAR, SignatureService};
 use crate::signatures::{HttpOrganizationSignatures, OrganizationSignatures};
 use crate::store::Store;
 
@@ -82,9 +82,9 @@ pub trait Connector: Send + Sync {
     ) -> Result<SignInResult>;
 
     /// Asks a Microsoft 365 work account's organization for its signature
-    /// (Cumulas Signatures); `None` when the app can't (it was built
-    /// without the service's client ID). Only asked for work and school
-    /// accounts.
+    /// (Cumulas Signatures); `None` when the app can't (company signatures
+    /// are off for this build or run, see [`SignatureService::configured`]).
+    /// Only asked for work and school accounts.
     fn organization_signatures(
         &self,
         _account: &Account,
@@ -101,7 +101,7 @@ pub struct LiveConnector {
     /// account.
     relay: OnceLock<Arc<dyn Relay>>,
     /// The signature service and its API's scope, read on first use; `None`
-    /// when the build has no client ID for it.
+    /// when company signatures are off.
     signatures: OnceLock<Option<(String, Arc<SignatureClient>)>>,
 }
 
@@ -246,7 +246,8 @@ impl Connector for LiveConnector {
             .get_or_init(|| {
                 let Some(service) = SignatureService::configured() else {
                     tracing::info!(
-                        "company signatures are off: no client ID for the signature service"
+                        "company signatures are off: {SIGNATURE_CLIENT_ID_VAR} is `{NO_CLIENT_ID}`, \
+                         or names no client ID for the signature service"
                     );
                     return None;
                 };

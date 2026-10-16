@@ -36,8 +36,9 @@ pub struct AppInfo {
     /// `sync.cumulas.co`), for the privacy note.
     sync_server: String,
     /// The host of the service company signatures come from (normally
-    /// `signature.cumulas.co`); `None` when this build has none, and
-    /// company signatures are off.
+    /// `signature.cumulas.co`); `None` when company signatures are off
+    /// (`CUMULAS_SIGNATURE_CLIENT_ID` is `none`, or another service has no
+    /// client ID).
     signature_server: Option<String>,
 }
 
