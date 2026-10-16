@@ -694,6 +694,10 @@ pub struct OrganizationSignature {
     /// The last check failed (no network, the service unavailable): `state`
     /// is what was known before.
     pub stale: bool,
+    /// The earliest that checking now would ask the organization: a minute
+    /// after the last check ended, and not before the service said to wait
+    /// until. `None` when it would at once.
+    pub checkable_at: Option<DateTime<Utc>>,
 }
 
 /// An account's signatures: the person's own and the organization's.
@@ -1325,6 +1329,7 @@ mod tests {
                 on_replies: false,
                 checked_at: None,
                 stale: true,
+                checkable_at: Some("2026-10-15T09:01:00Z".parse::<DateTime<Utc>>().unwrap()),
             },
         };
         assert_eq!(
@@ -1339,6 +1344,7 @@ mod tests {
                     "onReplies": false,
                     "checkedAt": null,
                     "stale": true,
+                    "checkableAt": "2026-10-15T09:01:00Z",
                 },
             })
         );

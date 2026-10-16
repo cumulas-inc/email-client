@@ -211,8 +211,10 @@ accounts can have their organization's, from Cumulas Signatures (see
   allowed the app, 30 minutes after a failure (or at the `Retry-After`), at
   once after a sign-in whatever was said and when the network is back, by
   the wall clock and sleeping a minute at most. One check runs per account
-  at a time, at most one a minute. A removed account is remembered, so no
-  check starts for it again, even from a list of accounts taken before.
+  at a time, at most one a minute; what the UI gets says when asking now
+  would next reach the service (`checkableAt`). A removed account is
+  remembered, so no check starts for it again, even from a list of
+  accounts taken before.
 - **Compose** (`get_compose_signature`): the organization's signature (on
   replies and forwards only if it says so); nothing when its server adds it
   on send, or on a reply or forward that the server leaves unsigned; else

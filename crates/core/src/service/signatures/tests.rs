@@ -269,6 +269,7 @@ async fn accounts_outside_organizations_never_reach_the_network() {
                 on_replies: false,
                 checked_at: None,
                 stale: false,
+                checkable_at: None,
             }
         );
         let checked = s
@@ -388,6 +389,8 @@ async fn only_answers_change_what_is_known_of_the_organization() {
             on_replies: true,
             checked_at: Some(epoch()),
             stale: false,
+            // Not again within the minute.
+            checkable_at: Some(epoch() + Duration::minutes(1)),
         }
     );
     assert_eq!(s.sink.count(), 1);
@@ -414,6 +417,7 @@ async fn only_answers_change_what_is_known_of_the_organization() {
         failed,
         OrganizationSignature {
             stale: true,
+            checkable_at: Some(epoch() + Duration::seconds(61 + 60)),
             ..first.clone()
         }
     );
@@ -1071,6 +1075,7 @@ async fn failed_checks_go_again_when_the_network_is_back_or_the_service_says() {
             on_replies: false,
             checked_at: Some(epoch() + Duration::seconds(16 + 40 * 60 + 2 * 3600)),
             stale: false,
+            checkable_at: None,
         }
     );
     s.service.shutdown().await;
@@ -1191,6 +1196,95 @@ async fn a_wait_asked_for_just_before_the_clock_was_set_back_holds() {
         .organization;
     assert_eq!(s.organization.calls(), 0);
     assert!(checked.stale);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_ui_is_told_when_checking_now_would_ask() {
+    let s = setup();
+    let account = work_account(&s);
+    let checkable_at = |s: &Setup| s.organization_state(&account).checkable_at;
+    // Never checked: at once.
+    assert_eq!(checkable_at(&s), None);
+
+    // Just after a failed check: a minute after it, whatever time it is.
+    s.organization.answer(failure(None));
+    let failed = s
+        .service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap()
+        .organization;
+    assert!(failed.stale);
+    assert_eq!(failed.checkable_at, Some(epoch() + Duration::minutes(1)));
+    sleep(30).await;
+    assert_eq!(checkable_at(&s), Some(epoch() + Duration::minutes(1)));
+    // Checking before then doesn't ask, and says so.
+    let early = s
+        .service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap()
+        .organization;
+    assert_eq!(s.organization.calls(), 1);
+    assert_eq!(early.checkable_at, Some(epoch() + Duration::minutes(1)));
+    sleep(31).await;
+    assert_eq!(checkable_at(&s), None);
+
+    // The service asks to wait ten minutes: until then.
+    s.organization
+        .answer(failure(Some(StdDuration::from_secs(10 * 60))));
+    let busy = s
+        .service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap()
+        .organization;
+    let retry_at = epoch() + Duration::seconds(61) + Duration::minutes(10);
+    assert_eq!(busy.checkable_at, Some(retry_at));
+    sleep(5 * 60).await;
+    assert_eq!(checkable_at(&s), Some(retry_at));
+    sleep(5 * 60).await;
+    assert_eq!(checkable_at(&s), None);
+    // An answer: a minute after it, then at once.
+    s.organization
+        .answer(signature("<p>Org</p>", true, "\"1\""));
+    let answered = s
+        .service
+        .check_organization_signature(&account.id)
+        .await
+        .unwrap()
+        .organization;
+    assert_eq!(s.organization.calls(), 3);
+    assert_eq!(answered.checkable_at, Some(retry_at + Duration::minutes(1)));
+    sleep(60).await;
+    assert_eq!(checkable_at(&s), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_asked_for_while_the_clock_was_ahead_is_not_told() {
+    let s = setup();
+    for (ahead, told) in [(Duration::seconds(1), true), (Duration::days(3), false)] {
+        let account = work_account(&s);
+        let at = epoch() + ahead;
+        let stored = StoredOrganizationSignature {
+            scope: Some(SCOPE.into()),
+            state: OrganizationSignatureState::NotUsed,
+            checked_at: Some(at),
+            attempted_at: Some(at),
+            stale: true,
+            retry_at: Some(at + Duration::hours(1)),
+            ..Default::default()
+        };
+        s.service
+            .store()
+            .save_organization_signature(&account.id, &stored)
+            .unwrap();
+        assert_eq!(
+            s.organization_state(&account).checkable_at,
+            told.then_some(at + Duration::hours(1)),
+            "{ahead}"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

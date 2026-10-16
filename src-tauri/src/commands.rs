@@ -350,8 +350,10 @@ pub async fn update_own_signature(
 }
 
 /// Asks the account's organization for its signature now, unless it was
-/// asked in the last minute. A failure for the network or the service
-/// isn't an error: the result says what was known, marked stale.
+/// asked in the last minute (or the service asked to wait): the result's
+/// `organization.checkableAt` says until when. A failure for the network
+/// or the service isn't an error: the result says what was known, marked
+/// stale.
 #[tauri::command]
 pub async fn check_organization_signature(
     state: State<'_, AppState>,

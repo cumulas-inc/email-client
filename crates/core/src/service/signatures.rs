@@ -364,7 +364,10 @@ fn visible(
 
 /// What the UI and the composer get of it: its signature sanitized again
 /// by this version of the app.
-fn public(o: StoredOrganizationSignature) -> OrganizationSignature {
+fn public(
+    o: StoredOrganizationSignature,
+    checkable_at: Option<DateTime<Utc>>,
+) -> OrganizationSignature {
     let ready = o.state == OrganizationSignatureState::Ready;
     OrganizationSignature {
         state: o.state,
@@ -378,6 +381,7 @@ fn public(o: StoredOrganizationSignature) -> OrganizationSignature {
         on_replies: o.on_replies && o.state.is_managed(),
         checked_at: o.checked_at,
         stale: o.stale,
+        checkable_at,
     }
 }
 
@@ -388,6 +392,7 @@ fn unsupported() -> OrganizationSignature {
         on_replies: false,
         checked_at: None,
         stale: false,
+        checkable_at: None,
     }
 }
 
@@ -599,7 +604,11 @@ impl CoreService {
     fn account_signature(&self, account: &Account) -> Result<AccountSignature> {
         let stored = self.store.account_signatures(&account.id)?;
         let organization = match self.organization_service(account) {
-            Some(service) => public(effective(stored.organization, service.scope())),
+            Some(service) => {
+                let organization = effective(stored.organization, service.scope());
+                let checkable_at = self.checkable_at(&account.id, &organization);
+                public(organization, checkable_at)
+            }
             None => unsupported(),
         };
         Ok(AccountSignature {
@@ -634,15 +643,25 @@ impl CoreService {
     /// Whether a check may start now: none ended in the last minute, and
     /// the service didn't ask to wait.
     fn may_check_now(&self, account_id: &str, scope: &str) -> Result<bool> {
-        if !self.signatures.cooling(account_id).is_zero() {
-            return Ok(false);
-        }
         let stored = effective(
             self.store.account_signatures(account_id)?.organization,
             scope,
         );
+        Ok(self.checkable_at(account_id, &stored).is_none())
+    }
+
+    /// When a check may start, by the wall clock: a minute after the last
+    /// ended, and not before the service said (unless it said so while the
+    /// clock was ahead). `None` when it may now.
+    fn checkable_at(
+        &self,
+        account_id: &str,
+        stored: &StoredOrganizationSignature,
+    ) -> Option<DateTime<Utc>> {
         let now = self.signatures.now();
-        Ok(retry_at(&stored, now).is_none_or(|at| at <= now))
+        let cooling = Duration::from_std(self.signatures.cooling(account_id)).unwrap_or_default();
+        let at = retry_at(stored, now).map_or(now + cooling, |at| at.max(now + cooling));
+        (at > now).then_some(at)
     }
 
     /// Starts a check of the account's organization signature on its own
