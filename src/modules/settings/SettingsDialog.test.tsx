@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { MockBackend } from "../../api/mock";
 import { qk } from "../../api/queries";
@@ -1066,6 +1066,39 @@ describe("Signatures", () => {
       await within(work).findByText(/^Couldn't check for your organization's signature yet/),
     ).toBeInTheDocument();
     expect(within(work).queryByText(/Checking for your organization/)).not.toBeInTheDocument();
+  });
+
+  it("doesn't ask again, or say it's checking, within a minute of a failed check", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ signature: "unreachable" });
+    const check = vi.spyOn(backend, "checkOrganizationSignature");
+    openAt("signatures", backend);
+    const caption = /^Couldn't check for your organization's signature yet/;
+    let work = await screen.findByRole("region", { name: /^Alex Morgan/ });
+    expect(await within(work).findByText(caption)).toBeInTheDocument();
+    expect(check).toHaveBeenCalledTimes(1);
+    await user.click(within(settingsDialog()).getByRole("button", { name: "Close" }));
+
+    // Opened again at once: asking now wouldn't ask the organization, so
+    // it isn't asked, and what the failed check said shows from the start.
+    act(() => useAppStore.getState().openSettings("signatures"));
+    work = screen.getByRole("region", { name: /^Alex Morgan/ });
+    expect(within(work).getByText(caption)).toBeInTheDocument();
+    expect(within(work).queryByText(/Checking for your organization/)).not.toBeInTheDocument();
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(within(work).getByText(caption)).toBeInTheDocument();
+    expect(within(work).queryByText(/Checking for your organization/)).not.toBeInTheDocument();
+    expect(check).toHaveBeenCalledTimes(1);
+    await user.click(within(settingsDialog()).getByRole("button", { name: "Close" }));
+
+    // A minute later, opening asks it again.
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
+    onTestFinished(() => now.mockRestore());
+    act(() => useAppStore.getState().openSettings("signatures"));
+    work = screen.getByRole("region", { name: /^Alex Morgan/ });
+    expect(within(work).getByText(/Checking for your organization/)).toBeInTheDocument();
+    await waitFor(() => expect(check).toHaveBeenCalledTimes(2));
+    expect(await within(work).findByText(caption)).toBeInTheDocument();
   });
 
   it("asks only organizations that sign, or might, again on opening", async () => {

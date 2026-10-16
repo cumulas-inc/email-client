@@ -102,9 +102,12 @@ function AccountSignatures({ account }: { account: Account }) {
  * Whether opening Settings asks the organization again: when its last answer
  * is getting old, or the last check failed. Not one that said it doesn't
  * sign the account's mail: the app asks that once a day, and at sign-in.
+ * Nor while asking wouldn't ask it yet (a check ended in the last minute,
+ * or its service said to wait): it would only show "Checking…" for nothing.
  */
-function recheckDue({ state, checkedAt, stale }: OrganizationSignature): boolean {
+function recheckDue({ state, checkedAt, stale, checkableAt }: OrganizationSignature): boolean {
   if (state === "unsupported" || state === "notUsed") return false;
+  if (checkableAt && new Date(checkableAt).getTime() > Date.now()) return false;
   const age = checkedAt ? Date.now() - new Date(checkedAt).getTime() : Infinity;
   return stale || age > RECHECK_MS;
 }
