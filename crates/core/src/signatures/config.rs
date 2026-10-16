@@ -3,6 +3,8 @@
 //! build time, else Cumulas Signatures and its published shared app. A
 //! client ID of `none` turns company signatures off.
 
+use std::sync::LazyLock;
+
 use url::Url;
 
 /// Where Cumulas Signatures runs, unless the build or the environment says
@@ -42,11 +44,15 @@ pub struct SignatureService {
 
 impl SignatureService {
     /// The service configured for this run; `None` when company signatures
-    /// are off (see [`signature_client_id`]).
+    /// are off (see [`signature_client_id`]). Worked out once, so that a bad
+    /// value is warned about once rather than at every check.
     pub fn configured() -> Option<Self> {
-        let url = signature_url();
-        let client_id = signature_client_id(&url)?;
-        Self::new(url, client_id)
+        static CONFIGURED: LazyLock<Option<SignatureService>> = LazyLock::new(|| {
+            let url = signature_url();
+            let client_id = signature_client_id(&url)?;
+            SignatureService::new(url, client_id)
+        });
+        CONFIGURED.clone()
     }
 
     fn new(url: String, client_id: String) -> Option<Self> {
@@ -79,7 +85,9 @@ pub fn signature_url() -> String {
 
 /// The client ID of the app registration of the signature service at
 /// `url` (see [`signature_url`]): the `CUMULAS_SIGNATURE_CLIENT_ID`
-/// environment variable, else the one built in with the same variable, else
+/// environment variable, else the one built in with the same variable
+/// (only while `url` is the service the build names too: a build's client
+/// ID belongs to the build's service), else
 /// [`PUBLISHED_SIGNATURE_CLIENT_ID`] when `url` is Cumulas Signatures'.
 /// `None`, and company signatures off, when the first of the two that is
 /// set says `none`, or when neither names a client ID and `url` is another
@@ -87,7 +95,10 @@ pub fn signature_url() -> String {
 /// doesn't expose. A value that isn't a GUID is ignored, with a warning.
 pub fn signature_client_id(url: &str) -> Option<String> {
     let runtime = std::env::var(SIGNATURE_CLIENT_ID_VAR).ok();
-    resolve_client_id(runtime.as_deref(), BUILT_IN_CLIENT_ID, url)
+    let build_url = BUILT_IN_URL
+        .and_then(|built| usable_signature_url(built.trim()))
+        .unwrap_or_else(|| DEFAULT_SIGNATURE_URL.to_owned());
+    resolve_client_id(runtime.as_deref(), BUILT_IN_CLIENT_ID, url, &build_url)
 }
 
 /// The API's delegated scope:
@@ -152,11 +163,26 @@ fn usable_signature_url(text: &str) -> Option<String> {
     (secure && plain).then(|| text.trim_end_matches('/').to_owned())
 }
 
-fn resolve_client_id(runtime: Option<&str>, built_in: Option<&str>, url: &str) -> Option<String> {
+/// `build_url` is the address the build alone would use: the build's
+/// client ID goes with it, and is left out when the environment points the
+/// app at another service.
+fn resolve_client_id(
+    runtime: Option<&str>,
+    built_in: Option<&str>,
+    url: &str,
+    build_url: &str,
+) -> Option<String> {
     for (candidate, origin) in [(runtime, "the environment"), (built_in, "the build")] {
         let Some(candidate) = candidate.map(str::trim).filter(|c| !c.is_empty()) else {
             continue;
         };
+        if origin == "the build" && !same_origin(url, build_url) {
+            tracing::warn!(
+                "ignoring the signature service's client ID from the build: it is for \
+                 {build_url}, and this run uses {url}"
+            );
+            continue;
+        }
         if candidate.eq_ignore_ascii_case(NO_CLIENT_ID) {
             return None;
         }
@@ -182,8 +208,14 @@ fn resolve_client_id(runtime: Option<&str>, built_in: Option<&str>, url: &str) -
 /// port; the path doesn't change the scope), the one service whose shared
 /// app is [`PUBLISHED_SIGNATURE_CLIENT_ID`].
 fn is_published_service(url: &str) -> bool {
+    same_origin(url, DEFAULT_SIGNATURE_URL)
+}
+
+/// Whether two addresses have the same scheme, host and port (or are the
+/// same text).
+fn same_origin(a: &str, b: &str) -> bool {
     let origin = |url: &str| Url::parse(url).ok().map(|url| url.origin());
-    origin(url).is_some() && origin(url) == origin(DEFAULT_SIGNATURE_URL)
+    a == b || (origin(a).is_some() && origin(a) == origin(b))
 }
 
 #[cfg(test)]
@@ -191,6 +223,11 @@ mod tests {
     use super::*;
 
     const ID: &str = "99999999-8888-7777-6666-555555555555";
+
+    /// The client ID for `url`, in a build made for the same service.
+    fn resolve(runtime: Option<&str>, built_in: Option<&str>, url: &str) -> Option<String> {
+        resolve_client_id(runtime, built_in, url, url)
+    }
 
     #[test]
     fn the_address_comes_from_the_environment_then_the_build() {
@@ -248,22 +285,21 @@ mod tests {
             (Some(" "), Some("")),
         ] {
             assert_eq!(
-                resolve_client_id(runtime, built_in, DEFAULT_SIGNATURE_URL).as_deref(),
+                resolve(runtime, built_in, DEFAULT_SIGNATURE_URL).as_deref(),
                 published,
                 "{runtime:?} {built_in:?}"
             );
         }
         assert_eq!(
-            resolve_client_id(None, Some(ID), DEFAULT_SIGNATURE_URL).as_deref(),
+            resolve(None, Some(ID), DEFAULT_SIGNATURE_URL).as_deref(),
             Some(ID)
         );
         assert_eq!(
-            resolve_client_id(Some(&ID.to_uppercase()), Some("x"), DEFAULT_SIGNATURE_URL)
-                .as_deref(),
+            resolve(Some(&ID.to_uppercase()), Some("x"), DEFAULT_SIGNATURE_URL).as_deref(),
             Some(ID)
         );
         assert_eq!(
-            resolve_client_id(Some(""), Some(ID), DEFAULT_SIGNATURE_URL).as_deref(),
+            resolve(Some(""), Some(ID), DEFAULT_SIGNATURE_URL).as_deref(),
             Some(ID)
         );
     }
@@ -271,48 +307,39 @@ mod tests {
     #[test]
     fn none_turns_company_signatures_off() {
         for none in ["none", "NONE", " None "] {
-            assert_eq!(
-                resolve_client_id(None, Some(none), DEFAULT_SIGNATURE_URL),
-                None
-            );
-            assert_eq!(
-                resolve_client_id(Some(none), Some(ID), DEFAULT_SIGNATURE_URL),
-                None
-            );
+            assert_eq!(resolve(None, Some(none), DEFAULT_SIGNATURE_URL), None);
+            assert_eq!(resolve(Some(none), Some(ID), DEFAULT_SIGNATURE_URL), None);
         }
         // The environment comes first, so it can turn them on in a build
         // that has them off.
         assert_eq!(
-            resolve_client_id(Some(ID), Some("none"), DEFAULT_SIGNATURE_URL).as_deref(),
+            resolve(Some(ID), Some("none"), DEFAULT_SIGNATURE_URL).as_deref(),
             Some(ID)
         );
-        assert_eq!(
-            resolve_client_id(Some(""), Some("none"), DEFAULT_SIGNATURE_URL),
-            None
-        );
+        assert_eq!(resolve(Some(""), Some("none"), DEFAULT_SIGNATURE_URL), None);
     }
 
     #[test]
     fn a_client_id_that_isnt_a_guid_is_ignored() {
         assert_eq!(
-            resolve_client_id(Some("not-a-guid"), Some(ID), DEFAULT_SIGNATURE_URL).as_deref(),
+            resolve(Some("not-a-guid"), Some(ID), DEFAULT_SIGNATURE_URL).as_deref(),
             Some(ID)
         );
         assert_eq!(
-            resolve_client_id(Some("{x}"), None, DEFAULT_SIGNATURE_URL).as_deref(),
+            resolve(Some("{x}"), None, DEFAULT_SIGNATURE_URL).as_deref(),
             Some(PUBLISHED_SIGNATURE_CLIENT_ID)
         );
         assert_eq!(
-            resolve_client_id(None, Some("off"), DEFAULT_SIGNATURE_URL).as_deref(),
+            resolve(None, Some("off"), DEFAULT_SIGNATURE_URL).as_deref(),
             Some(PUBLISHED_SIGNATURE_CLIENT_ID)
         );
         // Ignored, so the build's `none` still holds.
         assert_eq!(
-            resolve_client_id(Some("x"), Some("none"), DEFAULT_SIGNATURE_URL),
+            resolve(Some("x"), Some("none"), DEFAULT_SIGNATURE_URL),
             None
         );
         assert_eq!(
-            resolve_client_id(Some("x"), None, "https://signature.example.org"),
+            resolve(Some("x"), None, "https://signature.example.org"),
             None
         );
         assert!(is_guid(PUBLISHED_SIGNATURE_CLIENT_ID));
@@ -329,7 +356,7 @@ mod tests {
             "https://signature.cumulas.co/base",
         ] {
             assert_eq!(
-                resolve_client_id(None, None, url).as_deref(),
+                resolve(None, None, url).as_deref(),
                 Some(PUBLISHED_SIGNATURE_CLIENT_ID),
                 "{url}"
             );
@@ -344,25 +371,17 @@ mod tests {
             "http://localhost:8787",
             "not a url",
         ] {
-            assert_eq!(resolve_client_id(None, None, url), None, "{url}");
-            assert_eq!(resolve_client_id(Some(""), Some(""), url), None, "{url}");
-            assert_eq!(
-                resolve_client_id(None, Some(ID), url).as_deref(),
-                Some(ID),
-                "{url}"
-            );
-            assert_eq!(
-                resolve_client_id(Some(ID), None, url).as_deref(),
-                Some(ID),
-                "{url}"
-            );
+            assert_eq!(resolve(None, None, url), None, "{url}");
+            assert_eq!(resolve(Some(""), Some(""), url), None, "{url}");
+            assert_eq!(resolve(None, Some(ID), url).as_deref(), Some(ID), "{url}");
+            assert_eq!(resolve(Some(ID), None, url).as_deref(), Some(ID), "{url}");
         }
     }
 
     #[test]
     fn with_nothing_set_signatures_come_from_cumulas_signatures() {
         let url = resolve_signature_url(None, Some(""));
-        let client_id = resolve_client_id(None, Some(""), &url).unwrap();
+        let client_id = resolve(None, Some(""), &url).unwrap();
         let service = SignatureService::new(url, client_id).unwrap();
         assert_eq!(service.host(), "signature.cumulas.co");
         assert_eq!(
@@ -401,6 +420,34 @@ mod tests {
         assert_eq!(
             service.scope,
             format!("api://signature.example.org:8443/{ID}/access_as_user")
+        );
+    }
+
+    #[test]
+    fn the_builds_client_id_goes_with_the_builds_service() {
+        let other = "https://signature.example.org";
+        // Built for another service, run against Cumulas Signatures: the
+        // build's client ID isn't that service's, so the published one is
+        // used.
+        assert_eq!(
+            resolve_client_id(None, Some(ID), DEFAULT_SIGNATURE_URL, other).as_deref(),
+            Some(PUBLISHED_SIGNATURE_CLIENT_ID)
+        );
+        // Built for Cumulas Signatures, run against another service: no
+        // client ID for it, so company signatures are off...
+        assert_eq!(
+            resolve_client_id(None, Some(ID), other, DEFAULT_SIGNATURE_URL),
+            None
+        );
+        // ...unless the environment names one too.
+        assert_eq!(
+            resolve_client_id(Some(ID), Some("none"), other, DEFAULT_SIGNATURE_URL).as_deref(),
+            Some(ID)
+        );
+        // The same service at either: the build's client ID applies.
+        assert_eq!(
+            resolve_client_id(None, Some(ID), other, &format!("{other}/")).as_deref(),
+            Some(ID)
         );
     }
 }
