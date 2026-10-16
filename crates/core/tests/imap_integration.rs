@@ -949,6 +949,101 @@ async fn core_server_search_end_to_end() {
     assert!(again.message_ids.is_empty(), "{:?}", again.message_ids);
 }
 
+/// New mail a server search finds before a sync does: the sync still
+/// alerts for it, and drops it when another client expunged it meanwhile.
+#[tokio::test]
+async fn new_mail_found_by_a_search_before_the_sync() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let credentials = config.fresh_mailbox().await;
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let secrets = Arc::new(MemorySecretStore::default());
+    let sink = Arc::new(RecordingSink::default());
+    let service = CoreService::new(
+        store.clone(),
+        secrets.clone(),
+        Arc::new(LiveConnector::new(store, secrets)),
+        sink.clone(),
+    );
+    let account = service
+        .add_imap_account(NewImapAccount {
+            display_name: "Search Tester".into(),
+            email: credentials.email.clone(),
+            password: credentials.password.clone(),
+            settings: credentials.settings.clone(),
+        })
+        .await
+        .expect("add the account");
+    service.sync_account(&account.id).await.expect("sync");
+
+    config
+        .deliver(&credentials.email, "Fresh zebracorn news")
+        .await;
+    config
+        .deliver(&credentials.email, "Fresh zebracorn offer")
+        .await;
+    let mut found = None;
+    for _ in 0..40 {
+        let result = service
+            .search_server("fresh", "zebracorn", &account.id, false)
+            .await
+            .expect("server search");
+        if result.message_ids.len() == 2 {
+            found = Some(result);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let found = found.expect("both new messages found on the server");
+    let offer = service
+        .store()
+        .get_message_summaries(&found.message_ids)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.subject == "Fresh zebracorn offer")
+        .unwrap();
+
+    let mut other = config.other_device(&credentials).await;
+    other.select("INBOX").await.expect("select");
+    other
+        .run_command_and_check_ok(format!(
+            "UID STORE {} +FLAGS.SILENT (\\Deleted)",
+            uid_of(&offer)
+        ))
+        .await
+        .expect("flag deleted");
+    other
+        .run_command_and_check_ok("EXPUNGE")
+        .await
+        .expect("expunge");
+    let _ = other.logout().await;
+
+    service.sync_account(&account.id).await.expect("sync again");
+    assert_eq!(*sink.new_mail.lock().unwrap(), ["Fresh zebracorn news"]);
+    assert!(service.store().get_message_summary(&offer.id).is_err());
+    let inbox = service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Inbox)
+        .unwrap()
+        .unwrap();
+    let listed: Vec<String> = service
+        .list_messages(&inbox.id, &Default::default())
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|m| m.subject)
+        .collect();
+    assert!(
+        listed.contains(&"Fresh zebracorn news".to_owned()),
+        "{listed:?}"
+    );
+    assert!(
+        !listed.contains(&"Fresh zebracorn offer".to_owned()),
+        "{listed:?}"
+    );
+}
+
 // --- push ----------------------------------------------------------------------
 
 impl Config {

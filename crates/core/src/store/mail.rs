@@ -102,8 +102,8 @@ pub struct FolderUnreadDelta {
 /// What applying a folder sync changed in the store.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BatchOutcome {
-    /// Messages that were not stored before (candidates for new-mail
-    /// notifications).
+    /// Messages that were not stored before, or only as server search
+    /// results (candidates for new-mail notifications).
     pub inserted: Vec<MessageSummary>,
     /// Local ids of stored messages that were unread and are now read.
     pub became_read: Vec<String>,
@@ -272,6 +272,8 @@ fn index_message(
 struct Previous {
     is_read: bool,
     folder_id: String,
+    /// Stored as a search result.
+    search_only: bool,
 }
 
 /// How [`upsert_summary`] treats a row server search fetched.
@@ -298,7 +300,7 @@ fn upsert_summary(
     let previous = tx
         .query_row(
             "SELECT is_read, folder_id, subject, from_name, from_address, to_json, cc_json,
-                    preview, content_json IS NOT NULL
+                    preview, content_json IS NOT NULL, search_only
              FROM messages WHERE id = ?1",
             [&m.id],
             |r| {
@@ -315,6 +317,7 @@ fn upsert_summary(
                     Previous {
                         is_read: r.get(0)?,
                         folder_id: r.get(1)?,
+                        search_only: r.get(9)?,
                     },
                     text_changed || preview_changed,
                 ))
@@ -707,6 +710,11 @@ impl Store {
                 outcome.inserted.push(m.clone());
                 continue;
             };
+            // New to the sync, though a search found it first: new mail
+            // all the same, if it is recent (the alert decides).
+            if previous.search_only {
+                outcome.inserted.push(m.clone());
+            }
             if previous.folder_id != m.folder_id
                 && !outcome.moved_from.contains(&previous.folder_id)
             {
@@ -1947,8 +1955,11 @@ mod tests {
             .unwrap();
         assert_eq!(stored.added, 1);
         let outcome = apply(&store, &inbox, upserts(&[&found]));
-        assert!(outcome.inserted.is_empty(), "not new mail");
+        // New to the sync: a candidate for a new-mail alert.
+        assert_eq!(outcome.inserted, std::slice::from_ref(&found));
         assert_eq!(search_state(&store, &found.id), Some((false, None)));
+        let outcome = apply(&store, &inbox, upserts(&[&found]));
+        assert!(outcome.inserted.is_empty(), "not new twice");
         // Synced now: it goes when it leaves the window.
         let outcome = apply(
             &store,

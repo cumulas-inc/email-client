@@ -1883,6 +1883,30 @@ async fn a_search_answered_before_a_deletion_doesnt_bring_it_back() {
     }
 }
 
+/// New mail a server search finds before a sync does is still new mail to
+/// the sync; old mail it finds never is.
+#[tokio::test]
+async fn new_mail_found_by_a_search_first_still_alerts() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    add_message(&h, &account, "INBOX", "INBOX:3", "Fresh zebracorn");
+    on_server_only(&h, &account, "INBOX", "INBOX:4", "Old zebracorn", 400);
+    let found = h
+        .service
+        .search_server("s", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    assert_eq!(found.added, 2);
+    // A sync of a window that now reaches the old one too.
+    {
+        let mut server = h.server.lock().unwrap();
+        let old = server.server_only.remove("INBOX:4").unwrap();
+        server.messages.insert("INBOX:4".into(), old);
+    }
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(*h.sink.new_mail.lock().unwrap(), ["Fresh zebracorn"]);
+}
+
 #[tokio::test]
 async fn search_results_are_pruned_even_when_the_sync_fails() {
     let h = harness();
