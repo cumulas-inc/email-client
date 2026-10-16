@@ -334,7 +334,8 @@ that.
    `.flatpakref`.
 4. Once a publish signed with the new key is out, delete
    `cumulas-flatpak-previous.gpg`. The builds signed with the old key leave the
-   repository after 3 more publishes.
+   repository once 3 publishes (`KEEP_BUILDS`) have been signed with the new
+   key: that first one and the 2 after it.
 
 People who didn't check for updates during phase 1 get a GPG signature error
 from phase 2 on, and have to remove and add the remote as below.
