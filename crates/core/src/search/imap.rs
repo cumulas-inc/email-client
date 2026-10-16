@@ -73,6 +73,12 @@ impl ImapCriteria {
         self.has_attachment
     }
 
+    /// Whether every string goes quoted, with no literal: the command can
+    /// be sent whole, with others, without waiting for the server.
+    pub fn is_quoted(&self) -> bool {
+        self.keys.iter().all(|(_, value)| quotable(value))
+    }
+
     /// The command's segments after `UID SEARCH `. A string that isn't
     /// plain ASCII goes as a literal, and makes the command say `CHARSET
     /// UTF-8`; ASCII-only queries never do, as some servers support no
@@ -81,10 +87,19 @@ impl ImapCriteria {
     /// the next segment, to be sent after the server's continuation. Keys
     /// any of which may match are `OR`ed.
     pub fn render(&self, literals: Literals) -> Vec<String> {
+        self.render_below(literals, None)
+    }
+
+    /// [`ImapCriteria::render`] for the messages whose UIDs are below
+    /// `below`, when set (more than 1).
+    pub fn render_below(&self, literals: Literals, below: Option<u32>) -> Vec<String> {
         let mut segments = Vec::new();
         let mut current = String::new();
         if self.keys.iter().any(|(_, value)| !value.is_ascii()) {
             current.push_str("CHARSET UTF-8 ");
+        }
+        if let Some(below) = below {
+            let _ = write!(current, "UID 1:{} ", below.saturating_sub(1).max(1));
         }
         for (keys, value) in &self.keys {
             for _ in 1..keys.len() {
@@ -232,6 +247,22 @@ mod tests {
         assert_eq!(
             rendered("subject:日本", Literals::NonSync),
             ["CHARSET UTF-8 SUBJECT {6+}\r\n日本 UNDELETED"]
+        );
+    }
+
+    #[test]
+    fn only_quoted_criteria_go_whole() {
+        let criteria = |input: &str| ImapCriteria::new(&SearchQuery::parse(input)).unwrap();
+        assert!(criteria("from:megan \"q3 plan\" has:attachment").is_quoted());
+        assert!(!criteria("café").is_quoted());
+    }
+
+    #[test]
+    fn older_matches_are_asked_for_by_uid() {
+        let criteria = ImapCriteria::new(&SearchQuery::parse("subject:é")).unwrap();
+        assert_eq!(
+            criteria.render_below(Literals::Sync, Some(301)),
+            ["CHARSET UTF-8 UID 1:300 SUBJECT {2}", "é UNDELETED"]
         );
     }
 

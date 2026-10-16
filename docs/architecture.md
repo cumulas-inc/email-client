@@ -284,9 +284,12 @@ way the app does.
 **On the server** (`MailProvider::search`, `service/search.rs`):
 `search_server` asks one account for one page (50 messages) at a time. Graph
 searches every folder with `GET /me/messages?$search=` (which takes no
-`$filter` or `$orderby`) and pages by its own next links; IMAP searches each
-folder in turn, keeps the newest 200 matches of each (2,000 in all) and
-pages through them by date. A search id names the search over every account:
+`$filter` or `$orderby`) and pages by its own next links. IMAP asks about 25
+folders per round trip, pipelined (`EXAMINE` and `UID SEARCH` for each, then
+the arrival dates of their newest 200 matches), and pages through what it
+found by date; a page spends 20 seconds at most looking, and the cursor
+keeps the folders it didn't get to, and the older matches of busier
+folders (`UID 1:n`), for the pages after. A search id names the search over every account:
 a new one cancels the one before, whose pending calls come back `cancelled`
 and store nothing. A page may take 45 seconds. An account's failure comes back
 in its result, never as an error, so it doesn't hide the others' results or

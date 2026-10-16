@@ -1,15 +1,23 @@
 //! Searching every folder on the server (`UID SEARCH`).
 //!
-//! The first page searches each folder in turn and keeps the newest matches
-//! of all (the candidates, by date); each page then fetches the summaries
-//! of the next candidates. The cursor carries the candidates, so later
-//! pages ask the server for nothing but those summaries. Each folder, and
-//! each page's fetch from a folder, holds the account's session on its own,
-//! so syncs and opening messages go on between them.
+//! A search looks in each folder once, taking its newest matches (by UID),
+//! and pages through all it found by date. Folders go to the server in
+//! batches, pipelined: `EXAMINE` and `UID SEARCH` for every folder of a
+//! batch in one round trip, then the dates of their matches in another,
+//! where one folder at a time took three. Each batch holds the account's
+//! session on its own, so syncs and opening messages go on between them.
+//!
+//! A page spends [`SEARCH_TIME`] at most looking: what it found by then is
+//! the page, and the cursor keeps the folders it didn't get to, and the
+//! older matches of folders with more than [`MAX_PER_FOLDER`], for the
+//! pages after it. The cursor carries the matches found too, so later pages
+//! ask the server for nothing but their summaries, and those folders.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 
 use super::connection::ImapSession;
 use super::sync::{Target, fetch_summaries};
@@ -20,28 +28,50 @@ use crate::providers::SearchPage;
 use crate::search::SearchQuery;
 use crate::search::imap::{ImapCriteria, Literals};
 
-/// The newest matches kept of each folder.
-const MAX_CANDIDATES_PER_FOLDER: usize = 200;
-/// The newest matches kept of all.
-const MAX_CANDIDATES: usize = 2000;
+/// The newest matches taken from a folder at a time; older ones wait for a
+/// later page.
+const MAX_PER_FOLDER: usize = 200;
+/// Matches held before folders not searched yet wait for a later page.
+const MAX_HELD: usize = 2000;
+/// Folders asked about in one round trip.
+const FOLDERS_PER_TRIP: usize = 25;
+/// How long a page may spend looking through folders, well within the 45
+/// seconds a page may take, its summaries included.
+const SEARCH_TIME: Duration = Duration::from_secs(20);
 
 /// A message that matched: its folder, UIDVALIDITY, UID and the date it
 /// arrived (`INTERNALDATE`, as Unix seconds) when the server said.
 type Candidate = (String, u32, u32, Option<i64>);
 
-/// What the next page needs: every candidate, and where the page starts.
+/// A folder still to look in, and the UID its matches must be below when
+/// its newest were taken already.
+type Pending = (String, Option<u32>);
+
+/// What the next page needs: the matches found and not shown yet, and the
+/// folders still to look in, those never searched first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Cursor {
     v: u32,
     c: Vec<Candidate>,
-    p: usize,
+    f: Vec<Pending>,
 }
 
 impl Cursor {
+    fn new(folders: &[Folder]) -> Self {
+        Self {
+            v: 2,
+            c: Vec::new(),
+            f: folders
+                .iter()
+                .map(|f| (f.remote_id.clone(), None))
+                .collect(),
+        }
+    }
+
     fn parse(text: &str) -> Result<Self> {
         serde_json::from_str::<Self>(text)
             .ok()
-            .filter(|c| c.v == 1 && c.p <= c.c.len())
+            .filter(|c| c.v == 2)
             .ok_or_else(|| Error::invalid_input("Not a search of this account."))
     }
 
@@ -51,59 +81,138 @@ impl Cursor {
 }
 
 /// Newest first; those without a date last; then by UID, highest first.
-/// Folders keep their order among equals (the sort is stable). At most
-/// [`MAX_CANDIDATES`].
-fn order(candidates: &mut Vec<Candidate>) {
+/// Folders keep their order among equals (the sort is stable).
+fn order(candidates: &mut [Candidate]) {
     candidates.sort_by(|a, b| {
         b.3.is_some()
             .cmp(&a.3.is_some())
             .then(b.3.cmp(&a.3))
             .then(b.2.cmp(&a.2))
     });
-    candidates.truncate(MAX_CANDIDATES);
 }
 
-/// The matches in one folder, the newest [`MAX_CANDIDATES_PER_FOLDER`].
-async fn search_folder(
+/// What one folder of a batch gave: its newest matches, and the UID older
+/// ones are below, if there are more.
+type Found = (Vec<Candidate>, Option<u32>);
+
+/// A folder's UIDVALIDITY, its newest matching UIDs, and the UID older ones
+/// are below, if there are more.
+type Newest = (u32, Vec<u32>, Option<u32>);
+
+/// Looks in each folder of `batch`: which messages match, the newest
+/// [`MAX_PER_FOLDER`] of each, and when they arrived. Per folder, what it
+/// found or why it couldn't; the outer error means the connection failed.
+async fn search_batch(
     session: &mut ImapSession,
-    folder: &Folder,
     criteria: &ImapCriteria,
-) -> Result<Vec<Candidate>> {
-    // EXAMINE, for a current message count and UIDVALIDITY even when the
-    // folder is selected already.
-    let info = session.select(&folder.remote_id, false).await?;
-    if info.exists == 0 {
-        return Ok(Vec::new());
-    }
-    let literals = if session.has_capability("LITERAL+") || session.has_capability("LITERAL-") {
+    batch: &[Pending],
+) -> Result<Vec<Result<Found>>> {
+    let literals = if criteria.is_quoted()
+        || session.has_capability("LITERAL+")
+        || session.has_capability("LITERAL-")
+    {
         Literals::NonSync
     } else {
         Literals::Sync
     };
-    let mut uids = session
-        .uid_search_segments(&criteria.render(literals))
-        .await?;
-    uids.sort_unstable_by(|a, b| b.cmp(a));
-    uids.dedup();
-    uids.truncate(MAX_CANDIDATES_PER_FOLDER);
-    if uids.is_empty() {
-        return Ok(Vec::new());
+    let matched: Vec<Result<(u32, Vec<u32>)>> = match literals {
+        Literals::NonSync => {
+            let jobs: Vec<(String, String)> = batch
+                .iter()
+                .map(|(mailbox, below)| {
+                    let criteria = criteria.render_below(literals, *below).concat();
+                    (mailbox.clone(), format!("UID SEARCH {criteria}"))
+                })
+                .collect();
+            session
+                .examine_each(&jobs)
+                .await?
+                .into_iter()
+                .map(|run| run.map(|run| (run.info.uid_validity, run.uids)))
+                .collect()
+        }
+        // A literal waits for the server's go-ahead: a folder at a time.
+        Literals::Sync => {
+            let mut matched = Vec::with_capacity(batch.len());
+            for (mailbox, below) in batch {
+                let searched: Result<(u32, Vec<u32>)> = async {
+                    // EXAMINE, for the current UIDVALIDITY even when the
+                    // folder is selected already.
+                    let info = session.select(mailbox, false).await?;
+                    let segments = criteria.render_below(literals, *below);
+                    let uids = session.uid_search_segments(&segments).await?;
+                    Ok((info.uid_validity, uids))
+                }
+                .await;
+                match searched {
+                    Err(e) if !matches!(e.code, ErrorCode::Provider | ErrorCode::Unsupported) => {
+                        return Err(e);
+                    }
+                    searched => matched.push(searched),
+                }
+            }
+            matched
+        }
+    };
+
+    // The newest of each folder, and when they arrived: one more trip.
+    let mut kept: Vec<Result<Newest>> = Vec::with_capacity(batch.len());
+    for ((_, below), matched) in batch.iter().zip(matched) {
+        kept.push(matched.map(|(uid_validity, mut uids)| {
+            uids.sort_unstable_by(|a, b| b.cmp(a));
+            uids.dedup();
+            // `1:n` matches the highest UID too when that is lower than 1.
+            if let Some(below) = below {
+                uids.retain(|uid| uid < below);
+            }
+            let more_below = uids
+                .get(MAX_PER_FOLDER)
+                .and(uids.get(MAX_PER_FOLDER - 1))
+                .copied()
+                .filter(|&lowest| lowest > 1);
+            uids.truncate(MAX_PER_FOLDER);
+            (uid_validity, uids, more_below)
+        }));
     }
-    let dates: HashMap<u32, i64> = session
-        .uid_fetch(&uid_set(&uids), "(UID INTERNALDATE)")
-        .await?
-        .into_iter()
-        .filter_map(|m| Some((m.uid, m.internal_date?.timestamp())))
+    let jobs: Vec<(String, String)> = batch
+        .iter()
+        .zip(&kept)
+        .filter_map(|((mailbox, _), kept)| match kept {
+            Ok((_, uids, _)) if !uids.is_empty() => Some((
+                mailbox.clone(),
+                format!("UID FETCH {} (UID INTERNALDATE)", uid_set(uids)),
+            )),
+            _ => None,
+        })
         .collect();
-    Ok(uids
-        .into_iter()
-        .map(|uid| {
-            (
-                folder.remote_id.clone(),
-                info.uid_validity,
-                uid,
-                dates.get(&uid).copied(),
-            )
+    let mut dated = session.examine_each(&jobs).await?.into_iter();
+    Ok(batch
+        .iter()
+        .zip(kept)
+        .map(|((mailbox, _), kept)| {
+            let (uid_validity, uids, more_below) = kept?;
+            if uids.is_empty() {
+                return Ok((Vec::new(), None));
+            }
+            let dates: HashMap<u32, i64> = match dated.next() {
+                Some(Ok(run)) if run.info.uid_validity == uid_validity => run
+                    .fetched
+                    .into_iter()
+                    .filter_map(|m| Some((m.uid, m.internal_date?.timestamp())))
+                    .collect(),
+                // Renumbered meanwhile: these UIDs name other messages now.
+                Some(Ok(_)) => return Ok((Vec::new(), None)),
+                // Without dates, they come last.
+                Some(Err(_)) | None => HashMap::new(),
+            };
+            let candidates = uids
+                .into_iter()
+                .map(|uid| {
+                    let date = dates.get(&uid).copied();
+                    (mailbox.clone(), uid_validity, uid, date)
+                })
+                .collect();
+            Ok((candidates, more_below))
         })
         .collect())
 }
@@ -138,18 +247,18 @@ impl ImapProvider {
         let Some(criteria) = ImapCriteria::new(query) else {
             return Ok(SearchPage::default());
         };
-        let cursor = match cursor {
+        let mut cursor = match cursor {
             Some(text) => Cursor::parse(text)?,
-            None => Cursor {
-                v: 1,
-                c: self.candidates(&criteria, folders).await?,
-                p: 0,
-            },
+            None => Cursor::new(folders),
         };
-        let end = (cursor.p + limit.max(1) as usize).min(cursor.c.len());
+        let limit = limit.max(1) as usize;
+        self.look(&criteria, folders, &mut cursor, limit, SEARCH_TIME)
+            .await?;
+        order(&mut cursor.c);
+        let page: Vec<Candidate> = cursor.c.drain(..limit.min(cursor.c.len())).collect();
         // The page's candidates by folder, in the order they come.
         let mut groups: Vec<(&str, u32, Vec<u32>)> = Vec::new();
-        for (mailbox, uid_validity, uid, _) in &cursor.c[cursor.p..end] {
+        for (mailbox, uid_validity, uid, _) in &page {
             match groups
                 .iter_mut()
                 .find(|(m, v, _)| m == mailbox && v == uid_validity)
@@ -176,41 +285,82 @@ impl ImapProvider {
             messages.retain(|m| m.has_attachments);
         }
         messages.sort_by_key(|m| std::cmp::Reverse(m.received_at));
-        let next = (end < cursor.c.len()).then(|| Cursor { p: end, ..cursor }.encode());
+        let next = (!cursor.c.is_empty() || !cursor.f.is_empty()).then(|| cursor.encode());
         Ok(SearchPage { messages, next })
     }
 
-    /// Searches each folder, in the order given, and keeps the newest
-    /// matches. A folder the server refuses to search is skipped; the first
-    /// such refusal is the error when every folder refused.
-    async fn candidates(
+    /// Looks in the folders the cursor has left, in turn, adding what they
+    /// match to its candidates: every folder never searched, unless
+    /// [`MAX_HELD`] are held or `time` is up, and older matches of a folder
+    /// only while the page needs them. A folder the server refuses to
+    /// search is skipped; the first refusal is the error when every folder
+    /// refused. A failure of the connection once some folders were
+    /// searched ends the looking, keeping the rest for the next page.
+    async fn look(
         &self,
         criteria: &ImapCriteria,
         folders: &[Folder],
-    ) -> Result<Vec<Candidate>> {
-        let mut candidates = Vec::new();
+        cursor: &mut Cursor,
+        limit: usize,
+        time: Duration,
+    ) -> Result<()> {
+        let started = Instant::now();
         let mut searched = false;
         let mut refused: Option<Error> = None;
-        for folder in folders {
-            match with_session!(self, |session| search_folder(session, folder, criteria)) {
-                Ok(found) => {
-                    searched = true;
-                    candidates.extend(found);
+        while started.elapsed() < time {
+            let mut batch: Vec<Pending> = Vec::new();
+            while batch.len() < FOLDERS_PER_TRIP {
+                let Some((_, below)) = cursor.f.first() else {
+                    break;
+                };
+                let wanted = match below {
+                    None => cursor.c.len() < MAX_HELD,
+                    Some(_) => cursor.c.len() < limit,
+                };
+                if !wanted {
+                    break;
                 }
-                Err(e) if e.code == ErrorCode::Provider => {
-                    tracing::warn!("searching folder {} failed: {e}", folder.remote_id);
-                    refused.get_or_insert(e);
+                let pending = cursor.f.remove(0);
+                // A folder removed since the first page is gone.
+                if folders.iter().any(|f| f.remote_id == pending.0) {
+                    batch.push(pending);
                 }
-                // The connection, the sign-in or the charset: the same for
-                // every folder.
-                Err(e) => return Err(e),
+            }
+            if batch.is_empty() {
+                break;
+            }
+            let results =
+                match with_session!(self, |session| search_batch(session, criteria, &batch)) {
+                    Ok(results) => results,
+                    Err(e) if searched => {
+                        tracing::warn!("searching the folders stopped: {e}");
+                        cursor.f.splice(0..0, batch);
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                };
+            for (pending, result) in batch.into_iter().zip(results) {
+                match result {
+                    Ok((candidates, more_below)) => {
+                        searched = true;
+                        cursor.c.extend(candidates);
+                        if let Some(below) = more_below {
+                            cursor.f.push((pending.0, Some(below)));
+                        }
+                    }
+                    Err(e) if e.code == ErrorCode::Provider => {
+                        tracing::warn!("searching folder {} failed: {e}", pending.0);
+                        refused.get_or_insert(e);
+                    }
+                    // The charset: the same for every folder.
+                    Err(e) => return Err(e),
+                }
             }
         }
         if let Some(e) = refused.filter(|_| !searched) {
             return Err(e);
         }
-        order(&mut candidates);
-        Ok(candidates)
+        Ok(())
     }
 }
 
@@ -225,28 +375,377 @@ mod tests {
     use crate::model::{ImapSettings, TlsMode};
     use crate::providers::imap::ImapCredentials;
 
+    /// A mailbox on a loopback server, with `LITERAL+`: folders (name,
+    /// UIDVALIDITY, messages by UID with their arrival in Unix seconds),
+    /// where every message matches any search but for the UIDs asked for.
+    /// A folder's name, UIDVALIDITY and messages (UID, arrival).
+    type FakeFolder = (String, u32, Vec<(u32, i64)>);
+
+    #[derive(Default)]
+    struct Mailbox {
+        folders: Vec<FakeFolder>,
+        /// Folders EXAMINE refuses.
+        refused: Vec<String>,
+        /// Connections drop at the EXAMINE after this many, from then on.
+        cut_after: Option<usize>,
+        /// How long the server takes to answer.
+        delay: Duration,
+    }
+
+    /// What the server saw.
+    #[derive(Default)]
+    struct Seen {
+        /// Times it answered what had come (the client's round trips).
+        turns: usize,
+        examines: usize,
+        searches: Vec<String>,
+    }
+
+    /// The server's answer to one command line.
+    fn answer(mailbox: &Mailbox, selected: &mut Option<usize>, line: &str) -> String {
+        let (tag, command) = line.split_once(' ').unwrap();
+        let name = command.split(' ').next().unwrap().to_ascii_uppercase();
+        let folder = selected.map(|i| &mailbox.folders[i]);
+        match name.as_str() {
+            "CAPABILITY" => format!("* CAPABILITY IMAP4rev1 LITERAL+\r\n{tag} OK done"),
+            "EXAMINE" => {
+                let wanted = command[8..].trim_matches('"');
+                *selected = mailbox.folders.iter().position(|f| f.0 == wanted);
+                match *selected {
+                    Some(i) if !mailbox.refused.iter().any(|r| r == wanted) => {
+                        let (_, validity, messages) = &mailbox.folders[i];
+                        format!(
+                            "* {} EXISTS\r\n* OK [UIDVALIDITY {validity}] ok\r\n\
+                             * OK [UIDNEXT 9999] ok\r\n{tag} OK [READ-ONLY] done",
+                            messages.len()
+                        )
+                    }
+                    _ => {
+                        *selected = None;
+                        format!("{tag} NO no such folder")
+                    }
+                }
+            }
+            "UID" if command.starts_with("UID SEARCH") => match folder {
+                Some((_, _, messages)) => {
+                    let below = command
+                        .split_once("UID 1:")
+                        .map(|(_, rest)| rest.split(' ').next().unwrap().parse::<u32>().unwrap());
+                    let uids: Vec<String> = messages
+                        .iter()
+                        .map(|(uid, _)| *uid)
+                        .filter(|uid| below.is_none_or(|n| *uid <= n))
+                        .map(|uid| uid.to_string())
+                        .collect();
+                    format!("* SEARCH {}\r\n{tag} OK done", uids.join(" "))
+                }
+                None => format!("{tag} BAD no mailbox selected"),
+            },
+            "UID" => match folder {
+                Some((_, _, messages)) => {
+                    let set = command.split(' ').nth(2).unwrap();
+                    let wanted = |uid: u32| {
+                        set.split(',').any(|range| match range.split_once(':') {
+                            Some((a, b)) => {
+                                (a.parse().unwrap()..=b.parse().unwrap()).contains(&uid)
+                            }
+                            None => range.parse::<u32>().unwrap() == uid,
+                        })
+                    };
+                    let mut out = String::new();
+                    for (seq, (uid, at)) in messages.iter().enumerate() {
+                        if wanted(*uid) {
+                            let date = chrono::DateTime::from_timestamp(*at, 0).unwrap();
+                            out.push_str(&format!(
+                                "* {} FETCH (UID {uid} INTERNALDATE \"{}\")\r\n",
+                                seq + 1,
+                                date.format("%d-%b-%Y %H:%M:%S +0000")
+                            ));
+                        }
+                    }
+                    format!("{out}{tag} OK done")
+                }
+                None => format!("{tag} BAD no mailbox selected"),
+            },
+            "LOGOUT" => format!("* BYE\r\n{tag} OK bye"),
+            _ => format!("{tag} OK done"),
+        }
+    }
+
+    /// Serves `mailbox` on a loopback port. What arrives within 20 ms of
+    /// what came before is one turn, answered at once.
+    async fn serve(mailbox: Mailbox) -> (ImapProvider, Arc<Mutex<Seen>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let mailbox = Arc::new(mailbox);
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let (mailbox, seen) = (mailbox.clone(), log.clone());
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut read = BufReader::new(read);
+                    write.write_all(b"* OK ready\r\n").await.unwrap();
+                    let mut selected = None;
+                    let mut partial = String::new();
+                    loop {
+                        let mut lines = Vec::new();
+                        if read.read_line(&mut partial).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        lines.push(std::mem::take(&mut partial));
+                        while let Ok(Ok(n)) = tokio::time::timeout(
+                            Duration::from_millis(20),
+                            read.read_line(&mut partial),
+                        )
+                        .await
+                        {
+                            if n == 0 {
+                                break;
+                            }
+                            lines.push(std::mem::take(&mut partial));
+                        }
+                        tokio::time::sleep(mailbox.delay).await;
+                        let mut reply = String::new();
+                        {
+                            let mut seen = seen.lock().unwrap();
+                            seen.turns += 1;
+                            for line in &lines {
+                                let line = line.trim_end();
+                                if line.contains(" EXAMINE ") {
+                                    seen.examines += 1;
+                                    if mailbox.cut_after.is_some_and(|n| seen.examines > n) {
+                                        return;
+                                    }
+                                }
+                                if line.contains(" UID SEARCH ") {
+                                    seen.searches.push(line.to_owned());
+                                }
+                                reply.push_str(&answer(&mailbox, &mut selected, line));
+                                reply.push_str("\r\n");
+                            }
+                        }
+                        if write.write_all(reply.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let credentials = ImapCredentials {
+            settings: ImapSettings {
+                imap_host: "127.0.0.1".into(),
+                imap_port: port,
+                imap_tls: TlsMode::None,
+                smtp_host: "127.0.0.1".into(),
+                smtp_port: 1,
+                smtp_tls: TlsMode::None,
+                username: "me".into(),
+            },
+            password: "secret".into(),
+            display_name: "Me".into(),
+            email: "me@example.com".into(),
+        };
+        (ImapProvider::new("acct", credentials), seen)
+    }
+
+    /// `n` folders `F0`… of `messages` messages each, the newest the highest
+    /// UID; UIDVALIDITY 100 + the folder's number.
+    fn folders(n: u32, messages: u32) -> Vec<FakeFolder> {
+        (0..n)
+            .map(|i| {
+                let messages = (1..=messages)
+                    .map(|uid| (uid, 1_700_000_000 + i64::from(uid) * 60 + i64::from(i)))
+                    .collect();
+                (format!("F{i}"), 100 + i, messages)
+            })
+            .collect()
+    }
+
+    fn stored(mailbox: &Mailbox) -> Vec<Folder> {
+        mailbox
+            .folders
+            .iter()
+            .map(|(name, _, _)| Folder {
+                id: format!("folder-{name}"),
+                account_id: "acct".into(),
+                remote_id: name.clone(),
+                parent_id: None,
+                name: name.clone(),
+                role: crate::model::FolderRole::Other,
+                unread_count: 0,
+                total_count: 0,
+            })
+            .collect()
+    }
+
+    fn criteria() -> ImapCriteria {
+        ImapCriteria::new(&SearchQuery::parse("zebracorn")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn folders_are_searched_a_batch_per_round_trip() {
+        let mailbox = Mailbox {
+            folders: folders(30, 2),
+            ..Default::default()
+        };
+        let folders = stored(&mailbox);
+        let (provider, seen) = serve(mailbox).await;
+        let mut cursor = Cursor::new(&folders);
+        provider
+            .look(&criteria(), &folders, &mut cursor, 50, SEARCH_TIME)
+            .await
+            .unwrap();
+        assert!(cursor.f.is_empty(), "{:?}", cursor.f);
+        assert_eq!(cursor.c.len(), 60);
+        // Each match with its folder's UIDVALIDITY and its arrival.
+        for (mailbox, validity, uid, date) in &cursor.c {
+            let i: u32 = mailbox[1..].parse().unwrap();
+            assert_eq!(*validity, 100 + i);
+            assert_eq!(
+                *date,
+                Some(1_700_000_000 + i64::from(*uid) * 60 + i64::from(i))
+            );
+        }
+        // Logging in, then two trips for each batch of 25 folders: one
+        // folder at a time took three trips each, 90 in all.
+        let seen = seen.lock().unwrap();
+        assert!(seen.turns <= 2 + 2 * 2, "{} turns", seen.turns);
+        assert_eq!(seen.searches.len(), 30);
+    }
+
+    #[tokio::test]
+    async fn a_page_out_of_time_leaves_the_rest_for_the_next() {
+        let mailbox = Mailbox {
+            folders: folders(60, 1),
+            delay: Duration::from_millis(100),
+            ..Default::default()
+        };
+        let folders = stored(&mailbox);
+        let (provider, _) = serve(mailbox).await;
+        let time = Duration::from_millis(150);
+        let mut cursor = Cursor::new(&folders);
+        provider
+            .look(&criteria(), &folders, &mut cursor, 50, time)
+            .await
+            .unwrap();
+        // The first batch, then time was up.
+        assert_eq!(cursor.c.len(), FOLDERS_PER_TRIP);
+        assert_eq!(cursor.f.len(), 60 - FOLDERS_PER_TRIP);
+        assert!(cursor.f.iter().all(|(_, below)| below.is_none()));
+        assert_eq!(cursor.f[0].0, format!("F{FOLDERS_PER_TRIP}"));
+        // The next page goes on where it stopped.
+        provider
+            .look(&criteria(), &folders, &mut cursor, 50, time)
+            .await
+            .unwrap();
+        assert_eq!(cursor.c.len(), 2 * FOLDERS_PER_TRIP);
+        assert_eq!(cursor.f.len(), 60 - 2 * FOLDERS_PER_TRIP);
+    }
+
+    #[tokio::test]
+    async fn older_matches_of_a_busy_folder_come_on_later_pages() {
+        let mailbox = Mailbox {
+            folders: folders(1, 450),
+            ..Default::default()
+        };
+        let folders = stored(&mailbox);
+        let (provider, seen) = serve(mailbox).await;
+        let mut cursor = Cursor::new(&folders);
+        let look = async |cursor: &mut Cursor| {
+            provider
+                .look(&criteria(), &folders, cursor, 50, SEARCH_TIME)
+                .await
+                .unwrap()
+        };
+        look(&mut cursor).await;
+        let uids = |cursor: &Cursor| -> (u32, u32) {
+            let uids: Vec<u32> = cursor.c.iter().map(|c| c.2).collect();
+            (*uids.iter().max().unwrap(), *uids.iter().min().unwrap())
+        };
+        assert_eq!(cursor.c.len(), MAX_PER_FOLDER);
+        assert_eq!(uids(&cursor), (450, 251));
+        assert_eq!(cursor.f, [("F0".to_owned(), Some(251))]);
+        // While the page has enough, the older ones wait.
+        look(&mut cursor).await;
+        assert_eq!(cursor.c.len(), MAX_PER_FOLDER);
+        // Shown: the next 200, then the last 50.
+        cursor.c.clear();
+        look(&mut cursor).await;
+        assert_eq!(uids(&cursor), (250, 51));
+        assert_eq!(cursor.f, [("F0".to_owned(), Some(51))]);
+        cursor.c.clear();
+        look(&mut cursor).await;
+        assert_eq!((cursor.c.len(), uids(&cursor)), (50, (50, 1)));
+        assert!(cursor.f.is_empty());
+        let searches = seen.lock().unwrap().searches.clone();
+        assert!(
+            searches[1].contains(" UID SEARCH UID 1:250 "),
+            "{searches:?}"
+        );
+        assert!(
+            searches[2].contains(" UID SEARCH UID 1:50 "),
+            "{searches:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_folder_is_skipped_and_a_cut_keeps_what_was_found() {
+        let mailbox = Mailbox {
+            folders: folders(60, 2),
+            refused: vec!["F1".into()],
+            // The first batch's two trips, then the connection drops, and
+            // drops again when it is made anew.
+            cut_after: Some(2 * FOLDERS_PER_TRIP - 1),
+            ..Default::default()
+        };
+        let folders = stored(&mailbox);
+        let (provider, _) = serve(mailbox).await;
+        let mut cursor = Cursor::new(&folders);
+        provider
+            .look(&criteria(), &folders, &mut cursor, 50, SEARCH_TIME)
+            .await
+            .unwrap();
+        assert_eq!(cursor.c.len(), 2 * (FOLDERS_PER_TRIP - 1));
+        assert!(cursor.c.iter().all(|c| c.0 != "F1"));
+        assert_eq!(cursor.f.len(), 60 - FOLDERS_PER_TRIP);
+        assert_eq!(cursor.f[0].0, format!("F{FOLDERS_PER_TRIP}"));
+
+        // Before anything was found, the failure is the answer.
+        let mut cursor = Cursor::new(&folders);
+        let error = provider
+            .look(&criteria(), &folders, &mut cursor, 50, SEARCH_TIME)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Network);
+    }
+
     #[test]
     fn cursors_round_trip_and_reject_others() {
         let cursor = Cursor {
-            v: 1,
+            v: 2,
             c: vec![
                 ("INBOX".into(), 7, 42, Some(1_700_000_000)),
                 ("Archive/\"2023\"".into(), 9, 3, None),
             ],
-            p: 1,
+            f: vec![("Sent".into(), None), ("INBOX".into(), Some(12))],
         };
         let text = cursor.encode();
         assert_eq!(
             text,
-            r#"{"v":1,"c":[["INBOX",7,42,1700000000],["Archive/\"2023\"",9,3,null]],"p":1}"#
+            r#"{"v":2,"c":[["INBOX",7,42,1700000000],["Archive/\"2023\"",9,3,null]],"f":[["Sent",null],["INBOX",12]]}"#
         );
         assert_eq!(Cursor::parse(&text).unwrap(), cursor);
         for other in [
             "",
             "https://graph.microsoft.com/v1.0/me/messages?$skip=50",
-            r#"{"v":2,"c":[],"p":0}"#,
-            r#"{"v":1,"c":[],"p":1}"#,
-            r#"{"v":1,"c":[["INBOX",1,2]],"p":0}"#,
+            r#"{"v":1,"c":[],"p":0}"#,
+            r#"{"v":2,"c":[],"f":[["INBOX"]]}"#,
+            r#"{"v":2,"c":[["INBOX",1,2]],"f":[]}"#,
         ] {
             assert_eq!(
                 Cursor::parse(other).unwrap_err().code,
@@ -282,12 +781,6 @@ mod tests {
                 ("Archive", 4),
             ]
         );
-        let mut many: Vec<Candidate> = (0..2500)
-            .map(|uid| ("INBOX".into(), 1, uid, Some(i64::from(uid))))
-            .collect();
-        order(&mut many);
-        assert_eq!(many.len(), MAX_CANDIDATES);
-        assert_eq!(many[0].2, 2499);
     }
 
     /// A loopback server without `LITERAL+` that answers one search for

@@ -290,6 +290,17 @@ pub(super) struct MailboxInfo {
     pub highest_modseq: Option<u64>,
 }
 
+/// What `EXAMINE` and a command after it reported in one mailbox; see
+/// [`ImapSession::examine_each`].
+#[derive(Debug, Default)]
+pub(super) struct MailboxRun {
+    pub info: MailboxInfo,
+    /// What `SEARCH` found.
+    pub uids: Vec<u32>,
+    /// What `FETCH` returned.
+    pub fetched: Vec<FetchedMessage>,
+}
+
 #[derive(Debug)]
 struct Selected {
     mailbox: String,
@@ -918,6 +929,78 @@ impl ImapSession {
         })
         .await?;
         Ok(uids)
+    }
+
+    /// Runs a command in each mailbox, after `EXAMINE`ing it: all pipelined,
+    /// one round trip for all of them where one at a time takes two each.
+    /// The commands (a `UID SEARCH` or a `UID FETCH`) must not need the
+    /// server's go-ahead (no synchronizing literals). Per mailbox, what came
+    /// back, or why it failed (`Unsupported` for a charset the server
+    /// doesn't know); the outer error means the connection failed.
+    pub(super) async fn examine_each(
+        &mut self,
+        jobs: &[(String, String)],
+    ) -> Result<Vec<Result<MailboxRun>>> {
+        let mut commands = Vec::with_capacity(jobs.len() * 2);
+        for (mailbox, command) in jobs {
+            commands.push(format!("EXAMINE {}", quote(mailbox)?));
+            commands.push(command.clone());
+        }
+        // Whichever mailbox ends up selected, `open` selects its own again.
+        self.selected = None;
+        let mut runs: Vec<MailboxRun> = jobs.iter().map(|_| MailboxRun::default()).collect();
+        let mut bad_charset = vec![false; commands.len()];
+        // Commands complete in order, so what comes before the n-th tagged
+        // completion answers the n-th command.
+        let mut completed = 0;
+        let results = self
+            .run(&commands, |response| {
+                let Some(run) = runs.get_mut(completed / 2) else {
+                    return;
+                };
+                match response {
+                    Response::Done { outcome, .. } => {
+                        bad_charset[completed] =
+                            matches!(outcome.code, Some(ResponseCode::BadCharset(_)));
+                        completed += 1;
+                    }
+                    Response::Data {
+                        status: Status::Ok,
+                        outcome,
+                    } => {
+                        if let Some(ResponseCode::UidValidity(v)) = outcome.code {
+                            run.info.uid_validity = v;
+                        }
+                    }
+                    Response::MailboxData(MailboxDatum::Exists(n)) => run.info.exists = *n,
+                    Response::MailboxData(MailboxDatum::Search(found)) => {
+                        run.uids.extend_from_slice(found);
+                    }
+                    Response::Fetch(_, attributes) => {
+                        run.fetched.extend(FetchedMessage::parse(attributes));
+                    }
+                    _ => {}
+                }
+            })
+            .await?;
+        let mut results = results.into_iter();
+        Ok(runs
+            .into_iter()
+            .enumerate()
+            .map(|(i, run)| {
+                let examined = results.next().unwrap_or(Ok(()));
+                let ran = results.next().unwrap_or(Ok(()));
+                // A command after a failed EXAMINE ran in no mailbox (or, on
+                // a lax server, the one before): its answer is ignored.
+                examined?;
+                if bad_charset[2 * i + 1] {
+                    return Err(Error::unsupported(
+                        "This mail server can't search for these characters.",
+                    ));
+                }
+                ran.map(|()| run)
+            })
+            .collect())
     }
 
     /// `UID SEARCH` in the selected mailbox, sent in `segments` (see
