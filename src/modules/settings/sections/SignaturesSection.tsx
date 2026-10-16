@@ -57,20 +57,21 @@ export function SignaturesSection() {
 function AccountSignatures({ account }: { account: Account }) {
   const titleId = useId();
   const { data: signature, isError } = useAccountSignature(account.id);
-  const { mutate: checkNow, isPending: checking } = useCheckOrganizationSignature();
+  const { mutate: checkNow, isPending, isIdle } = useCheckOrganizationSignature();
 
-  // Ask the organization again when its last answer is getting old, or the
-  // last check failed. Not one that said it doesn't sign the account's mail:
-  // the app asks that once a day, and at sign-in.
+  // Whether this opening asks the organization again, decided on the first
+  // answer shown. Until that check starts, the account already reads as
+  // being checked, so it goes straight to "Checking…" rather than showing
+  // the last answer for a moment first.
+  const [recheck, setRecheck] = useState<boolean>();
+  if (signature && recheck === undefined) setRecheck(recheckDue(signature.organization));
   const asked = useRef(false);
   useEffect(() => {
-    if (!signature || asked.current) return;
+    if (!recheck || asked.current) return;
     asked.current = true;
-    const { state, checkedAt, stale } = signature.organization;
-    if (state === "unsupported" || state === "notUsed") return;
-    const age = checkedAt ? Date.now() - new Date(checkedAt).getTime() : Infinity;
-    if (stale || age > RECHECK_MS) checkNow(account.id);
-  }, [signature, checkNow, account.id]);
+    checkNow(account.id);
+  }, [recheck, checkNow, account.id]);
+  const checking = isPending || (recheck === true && isIdle);
 
   let body;
   if (isError) {
@@ -95,6 +96,17 @@ function AccountSignatures({ account }: { account: Account }) {
       <div className="settings-card signature-card">{body}</div>
     </section>
   );
+}
+
+/**
+ * Whether opening Settings asks the organization again: when its last answer
+ * is getting old, or the last check failed. Not one that said it doesn't
+ * sign the account's mail: the app asks that once a day, and at sign-in.
+ */
+function recheckDue({ state, checkedAt, stale }: OrganizationSignature): boolean {
+  if (state === "unsupported" || state === "notUsed") return false;
+  const age = checkedAt ? Date.now() - new Date(checkedAt).getTime() : Infinity;
+  return stale || age > RECHECK_MS;
 }
 
 /** What the account's organization said; `checking` while Settings asks it again. */

@@ -1033,6 +1033,33 @@ describe("Signatures", () => {
     expect(within(work).getByTitle("Signature")).toBeInTheDocument();
   });
 
+  it("goes straight to checking an organization it asks again, then to the answer", async () => {
+    const backend = new MockBackend({ signature: "unreachable" });
+    const original = backend.checkOrganizationSignature.bind(backend);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let shownFirst = "";
+    vi.spyOn(backend, "checkOrganizationSignature").mockImplementation(async (accountId) => {
+      // Asked right after the first render that shows the account.
+      shownFirst = screen.getByRole("region", { name: /^Alex Morgan/ }).textContent ?? "";
+      await held;
+      return original(accountId);
+    });
+    openAt("signatures", backend);
+    const work = await screen.findByRole("region", { name: /^Alex Morgan/ });
+    await waitFor(() => expect(shownFirst).not.toBe(""));
+    // Not what the failed check said first, then "Checking…".
+    expect(shownFirst).toContain("Checking for your organization's signature…");
+    expect(shownFirst).not.toContain("Couldn't check");
+    expect(within(work).getByText(/Checking for your organization/)).toBeInTheDocument();
+
+    release();
+    expect(
+      await within(work).findByText(/^Couldn't check for your organization's signature yet/),
+    ).toBeInTheDocument();
+    expect(within(work).queryByText(/Checking for your organization/)).not.toBeInTheDocument();
+  });
+
   it("asks only organizations that sign, or might, again on opening", async () => {
     const backend = new MockBackend({ signature: "notUsed" });
     const check = vi.spyOn(backend, "checkOrganizationSignature");
