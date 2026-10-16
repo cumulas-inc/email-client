@@ -13,6 +13,9 @@ REPO_URL="$SITE_URL/repo/"
 REMOTE_NAME=cumulas
 # Builds kept per architecture: the newest and the ones before it.
 KEEP_BUILDS=3
+# The group of the repository's config in which update-repo.sh records how
+# many builds each ref keeps (REF=BUILDS), for the next publish's mirror.sh.
+KEPT_BUILDS_GROUP="cumulas kept-builds"
 # The architectures the workflow builds and publishes.
 ARCHES="x86_64 aarch64"
 FLATHUB_REPO_FILE=https://dl.flathub.org/repo/flathub.flatpakrepo

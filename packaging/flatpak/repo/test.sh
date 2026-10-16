@@ -12,10 +12,14 @@
 #    repository with a missing object or summary, one without the app, one
 #    whose summary isn't signed with a key it trusts, and one whose history
 #    stops short (a warning in a dry run), unless its config says it keeps
-#    fewer builds (after KEEP_BUILDS is raised);
+#    fewer builds of that ref (after KEEP_BUILDS is raised);
 #  - five publishes in a row (mirror, add-builds, update-repo, assemble-site,
 #    then "deploy") keep the last KEEP_BUILDS builds of each ref, with their
-#    history, static deltas and appstream data, and leave .Debug out;
+#    history, static deltas and appstream data, record in the repository's
+#    config how many each keeps, and leave .Debug out;
+#  - raising KEEP_BUILDS from 2 to 4 after three publishes: the publishes
+#    after it carry on, the history growing by a build each, and so does one
+#    after a publish that left a ref out;
 #  - a key rotation: a client that trusts the current key updates from a
 #    publish signed with it that carries the next key (phase 1), then from
 #    one signed with the next key only (phase 2), and the next publishes'
@@ -231,8 +235,8 @@ mirror() {
 }
 
 # A build as flatpak-builder --repo --default-branch=stable leaves it: the
-# app, its Locale extension and its debug info.
-make_build() { # REPO ARCH VERSION
+# app, its Locale extension (unless --no-locale) and its debug info.
+make_build() { # REPO ARCH VERSION [--no-locale]
   local repo=$1 arch=$2 version=$3 dir
   dir=$(mktemp -d "$work/build.XXXXXX")
   mkdir -p "$dir/app/files/bin" "$dir/app/files/share/app-info/xmls" "$dir/app/export" \
@@ -255,8 +259,10 @@ EOF
   printf '[Runtime]\nname=%s.Debug\n' "$APP_ID" >"$dir/debug/metadata"
   printf '%s\n' "$version" >"$dir/debug/files/version"
   flatpak build-export --arch="$arch" --no-update-summary "$repo" "$dir/app" "$BRANCH" >/dev/null
-  flatpak build-export --runtime --files=files --arch="$arch" --no-update-summary \
-    "$repo" "$dir/locale" "$BRANCH" >/dev/null
+  if [ "${4:-}" != --no-locale ]; then
+    flatpak build-export --runtime --files=files --arch="$arch" --no-update-summary \
+      "$repo" "$dir/locale" "$BRANCH" >/dev/null
+  fi
   flatpak build-export --runtime --files=files --arch="$arch" --no-update-summary \
     "$repo" "$dir/debug" "$BRANCH" >/dev/null
 }
@@ -289,6 +295,11 @@ subject() {
 }
 has_commit() { # REPO COMMIT
   [ -n "$2" ] && [ -e "$1/objects/${2:0:2}/${2:2}.commit" ]
+}
+# REPO keeps BUILDS builds of REF, and its config says so (update-repo.sh).
+keeps() { # REPO REF BUILDS
+  [ "$(ref_history "$1" "$2" | wc -l)" = "$3" ] &&
+    [ "$(ostree --repo="$1" config --group="$KEPT_BUILDS_GROUP" get "$2" 2>/dev/null)" = "$3" ]
 }
 
 declare -A commits=()
@@ -329,8 +340,8 @@ for round in 1 2 3 4 5; do
   kept=$((round < KEEP_BUILDS ? round : KEEP_BUILDS))
   for arch in "$native" "$other"; do
     for ref in "app/$APP_ID/$arch/$BRANCH" "runtime/$APP_ID.Locale/$arch/$BRANCH"; do
-      check "publish $round: $ref keeps $kept build(s)" \
-        test "$(ref_history "$dir/site/repo" "$ref" | wc -l)" = "$kept"
+      check "publish $round: $ref keeps $kept build(s), and the repository's config says so" \
+        keeps "$dir/site/repo" "$ref" "$kept"
     done
     head=$(ostree --repo="$dir/site/repo" rev-parse "app/$APP_ID/$arch/$BRANCH")
     commits[$arch.$round]=$head
@@ -379,8 +390,6 @@ check "site: index.html has no scripts" test -z "$(grep -i '<script' "$site/inde
 check "site: index.html loads nothing from elsewhere" \
   test -z "$(grep -Ei '(src|srcset)="(https?:)?//|<link[^>]*href="(https?:)?//|@import|url\(' "$site/index.html" || true)"
 check "site: the icon is there" test -s "$site/logo.svg"
-check "site: the repository's config records KEEP_BUILDS" \
-  grep -qx "keep-builds=$KEEP_BUILDS" "$site/repo/config"
 
 # --- What clients see -----------------------------------------------------------
 
@@ -460,17 +469,30 @@ fi
 
 # After KEEP_BUILDS is raised, the published refs have fewer builds until
 # enough are published, and the published config says so.
+record_builds() { # REPO BUILDS: its config says each ref keeps BUILDS, or nothing if empty
+  local ref
+  for ref in $(managed_refs "$1"); do
+    if [ -n "$2" ]; then
+      ostree --repo="$1" config --group="$KEPT_BUILDS_GROUP" set "$ref" "$2"
+    else
+      ostree --repo="$1" config --group="$KEPT_BUILDS_GROUP" unset "$ref"
+    fi
+  done
+}
 mkdir -p "$work/www/raised"
 cp -a "$site/." "$work/www/raised/"
 ostree --repo="$work/www/raised/repo" prune --refs-only --depth=$((KEEP_BUILDS - 2)) >/dev/null
-ostree --repo="$work/www/raised/repo" config set cumulas.keep-builds $((KEEP_BUILDS - 1))
+record_builds "$work/www/raised/repo" $((KEEP_BUILDS - 1))
 expect_success "mirror: a published history as long as its config says, shorter than KEEP_BUILDS" \
   mirror "$work/mirror-raised" "$www/raised/repo"
 check "mirror: ... all of that history" \
   test "$(ref_history "$work/mirror-raised" "app/$APP_ID/$native/$BRANCH" | wc -l)" = $((KEEP_BUILDS - 1))
-ostree --repo="$work/www/raised/repo" config set cumulas.keep-builds "$KEEP_BUILDS"
+record_builds "$work/www/raised/repo" "$KEEP_BUILDS"
 expect_error "mirror: the same history, when its config says it keeps KEEP_BUILDS" \
   "history stops after $((KEEP_BUILDS - 1)) build" mirror "$work/mirror-raised-2" "$www/raised/repo"
+record_builds "$work/www/raised/repo" ""
+expect_error "mirror: the same history, when its config says nothing (KEEP_BUILDS, then)" \
+  "history stops after $((KEEP_BUILDS - 1)) build" mirror "$work/mirror-raised-3" "$www/raised/repo"
 
 error_port=$(free_port)
 python3 -c '
@@ -500,6 +522,49 @@ else
   fail "mirror: an unreachable host, in a dry run, starts empty"
   cat "$work/output" >&2
 fi
+
+# --- Raising KEEP_BUILDS ---------------------------------------------------------
+
+# These scripts as they'd be committed with KEEP_BUILDS at 2, then at 4.
+for keep in 2 4; do
+  mkdir -p "$work/keep-$keep"
+  cp -a "$here/." "$work/keep-$keep/"
+  sed -i "s/^KEEP_BUILDS=[0-9]*\$/KEEP_BUILDS=$keep/" "$work/keep-$keep/common.sh"
+  grep -qx "KEEP_BUILDS=$keep" "$work/keep-$keep/common.sh" ||
+    die "Setting KEEP_BUILDS in a copy of common.sh failed."
+done
+# Publishes a build for this architecture on top of the repository at
+# $work/www/raise with the scripts that keep KEEP builds, and deploys it there.
+raise_publish() { # ROUND KEEP [MAKE-BUILD-OPTION]
+  local round=$1 scripts="$work/keep-$2" dir="$work/raise$1"
+  mkdir -p "$dir"
+  "$scripts/mirror.sh" --gpg-import "$keys/signer.gpg" "$dir/repo" "$www/raise/repo" >/dev/null &&
+    make_build "$dir/build" "$native" "raise$round" "${@:3}" &&
+    "$scripts/add-builds.sh" --gpg-homedir "$keys/signer" --gpg-key "$signer" \
+      --subject "Test build raise$round" "$dir/repo" "$dir/build" &&
+    "$scripts/update-repo.sh" --gpg-homedir "$keys/signer" --gpg-key "$signer" "$dir/repo" &&
+    "$here/assemble-site.sh" "$dir/repo" "$keys/signer.gpg" "$dir/site" &&
+    ln -sfn "$dir/site" "$work/www/raise"
+}
+# The publish of ROUND keeps APP builds of the app and LOCALE of its Locale
+# extension, and its config says so.
+raise_kept() { # ROUND APP LOCALE
+  keeps "$work/raise$1/site/repo" "app/$APP_ID/$native/$BRANCH" "$2" &&
+    keeps "$work/raise$1/site/repo" "runtime/$APP_ID.Locale/$native/$BRANCH" "$3"
+}
+
+for round in 1 2 3; do
+  expect_success "raise: publish $round, keeping 2 builds" raise_publish "$round" 2
+done
+check "raise: after 3 publishes keeping 2, each ref has 2" raise_kept 3 2 2
+expect_success "raise: publish 4, keeping 4 builds, mirrors the 2 published" raise_publish 4 4
+check "raise: ... and keeps 3" raise_kept 4 3 3
+expect_success "raise: publish 5, without the Locale extension, mirrors the 3 published" \
+  raise_publish 5 4 --no-locale
+check "raise: ... and keeps 4 of the app, still 3 of the Locale extension" raise_kept 5 4 3
+expect_success "raise: publish 6 mirrors the 4 published of the app, 3 of the Locale extension" \
+  raise_publish 6 4
+check "raise: ... and keeps 4 of each" raise_kept 6 4 4
 
 # --- Rotating the signing key ----------------------------------------------------
 

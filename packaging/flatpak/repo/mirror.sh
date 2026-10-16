@@ -18,7 +18,8 @@
 #   mirrored. Any failure on the way fails the script, and so does a history
 #   that stops short: ostree takes a parent commit that can't be fetched for
 #   the start of the history, so a ref with fewer builds than the published
-#   repository keeps, whose oldest commit names a parent, lost some.
+#   repository keeps of it (as its config records, update-repo.sh), whose
+#   oldest commit names a parent, lost some.
 # - URL/summary and URL/config both answer 404: nothing has been published
 #   yet, and DEST starts empty.
 # - Anything else (another HTTP status, a TLS or DNS error, a repository with
@@ -140,26 +141,37 @@ summary_sha256=$(sha256sum "$summary" | cut -d ' ' -f 1)
 ostree --repo="$dest" remote delete published >&2
 ostree --repo="$dest" fsck --quiet >&2 || die "The mirror of $url is corrupt."
 
-# How many builds of each ref the published repository keeps: KEEP_BUILDS,
-# or fewer when KEEP_BUILDS was raised since, as update-repo.sh records it in
-# the repository's config.
+# How many builds of each ref the published repository keeps, as
+# update-repo.sh records them in its config: fewer than KEEP_BUILDS until a
+# ref has had that many publishes, and for a while after KEEP_BUILDS is
+# raised. KEEP_BUILDS for a ref it records nothing for.
 published_config=$(curl --silent --show-error --fail --location --connect-timeout 20 \
   --max-time 120 --retry 3 --retry-delay 5 "$url/config") ||
   die "Reading $url/config failed; check the site and run again."
-published_keep=$(printf '%s\n' "$published_config" |
-  awk -F= '/^\[/ { section = $0; next } section == "[cumulas]" && $1 == "keep-builds" { print $2; exit }')
-case "$published_keep" in
-  '' | *[!0-9]*) expected=$KEEP_BUILDS ;;
-  *) expected=$((published_keep < KEEP_BUILDS ? published_keep : KEEP_BUILDS)) ;;
-esac
+recorded_builds() { # REF
+  printf '%s\n' "$published_config" |
+    awk -F= -v group="[$KEPT_BUILDS_GROUP]" -v ref="$1" \
+      '/^\[/ { section = $0; next } section == group && $1 == ref { print $2; exit }'
+}
 
 for ref in "${refs[@]}"; do
   mapfile -t history < <(ref_history "$dest" "$ref")
-  log "$ref: ${#history[@]} build(s) mirrored"
+  recorded=$(recorded_builds "$ref")
+  case "$recorded" in
+    '' | *[!0-9]*)
+      expected=$KEEP_BUILDS
+      basis="KEEP_BUILDS in common.sh; its config records nothing for this ref"
+      ;;
+    *)
+      expected=$((recorded < KEEP_BUILDS ? recorded : KEEP_BUILDS))
+      basis="as its config records"
+      ;;
+  esac
+  log "$ref: ${#history[@]} build(s) mirrored, $expected expected"
   oldest=${history[${#history[@]} - 1]}
   if [ "${#history[@]}" -lt "$expected" ] &&
     parent=$(ostree --repo="$dest" rev-parse "$oldest^" 2>/dev/null); then
-    message="$ref: the published history stops after ${#history[@]} build(s), at a commit whose parent (${parent:0:12}) can't be fetched, but the published repository keeps $expected (KEEP_BUILDS in common.sh, or the keep-builds its config records when that's fewer, as after KEEP_BUILDS is raised). Publishing would drop the builds before it: check the site and run again."
+    message="$ref: the published history stops after ${#history[@]} build(s), at a commit whose parent (${parent:0:12}) can't be fetched, but the published repository keeps $expected ($basis). Publishing would drop the builds before it: check the site and run again."
     if $dry_run; then warn "$message"; else die "$message"; fi
   fi
 done

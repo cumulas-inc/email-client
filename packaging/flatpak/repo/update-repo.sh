@@ -2,8 +2,8 @@
 # Brings the repository's metadata up to date after add-builds.sh: the
 # appstream branches that software centers read, static deltas for quick
 # updates, pruning to the last KEEP_BUILDS builds of each ref, and a signed
-# summary. Records KEEP_BUILDS in the repository's config for the next
-# publish's mirror.sh, then checks the result.
+# summary. Checks the result, and records how many builds each ref keeps in
+# the repository's config, for the next publish's mirror.sh.
 #
 # Usage: update-repo.sh --gpg-homedir DIR --gpg-key FINGERPRINT
 #          [--next-key PUBLIC-KEY] REPO
@@ -63,9 +63,6 @@ flatpak build-update-repo \
   --gpg-homedir="$gpg_homedir" --gpg-sign="$gpg_key" \
   "${next_args[@]}" \
   "$repo"
-# How many builds the next publish's mirror.sh should find for each ref.
-ostree --repo="$repo" config set cumulas.keep-builds "$KEEP_BUILDS"
-
 # Check what clients and the next publish rely on.
 if [ ! -s "$repo/summary" ] || [ ! -s "$repo/summary.sig" ]; then
   die "$repo has no signed summary."
@@ -83,6 +80,11 @@ for ref in "${refs[@]}"; do
   [ "$builds" -le "$KEEP_BUILDS" ] || die "$ref keeps $builds builds after pruning; expected at most $KEEP_BUILDS."
   # A from-scratch delta is named after the commit alone.
   printf '%s\n' "$deltas" | grep -qx "$head" || die "$ref has no static delta for its newest commit $head."
+  # What the next publish's mirror.sh should find: the builds the ref has,
+  # not KEEP_BUILDS. They differ until a ref has had KEEP_BUILDS publishes,
+  # and for a while after KEEP_BUILDS is raised, or for a ref that a publish
+  # left out.
+  ostree --repo="$repo" config --group="$KEPT_BUILDS_GROUP" set "$ref" "$builds"
   log "$ref: $head, $builds build(s) kept"
 done
 for arch in $(printf '%s\n' "${refs[@]}" | grep "^app/" | cut -d/ -f3 | sort -u); do

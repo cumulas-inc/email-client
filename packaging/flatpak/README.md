@@ -169,7 +169,10 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
 
 - **Kept**: up to the last 3 builds of each architecture (`KEEP_BUILDS` in
   `repo/common.sh`), fewer after the first releases or if the history ever has
-  to start over (see [When a publish fails](#when-a-publish-fails)). While an
+  to start over (see [When a publish fails](#when-a-publish-fails)). After
+  `KEEP_BUILDS` is raised, the history grows by a build with each publish until
+  it gets there: each publish records how many builds of each ref it keeps in
+  the repository's config, and the next one expects that many. While an
   earlier build is there, people can go back to it:
   `flatpak remote-info --log cumulas co.cumulas.Mail` lists them and
   `flatpak update --commit=COMMIT co.cumulas.Mail` installs one. Debug info
