@@ -157,8 +157,8 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
   4. assembles the site (`repo/assemble-site.sh`);
   5. installs the app from a local copy of the site on both architectures, from
      the `.flatpakrepo` and from the `.flatpakref` (`repo/smoke-test.sh`);
-  6. and only then deploys the site to Pages, if the published repository is
-     still the one it mirrored;
+  6. and only then, when publishing, deploys the site to Pages, if the
+     published repository is still the one it mirrored;
   7. then waits until Pages serves the new summary, adds the remote from the
      live `.flatpakrepo` and finds the app on both architectures
      (`repo/verify-live.sh`), and reports the type the `.flatpakref` is served
@@ -167,11 +167,19 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
   `repo/test.sh` runs steps 1–5 and 7 against fake builds, as part of every
   run.
 
-- **Kept**: the last 3 builds of each architecture (`KEEP_BUILDS` in
-  `repo/common.sh`), so people can go back to an earlier one:
+- **Kept**: up to the last 3 builds of each architecture (`KEEP_BUILDS` in
+  `repo/common.sh`), fewer after the first releases or if the history ever has
+  to start over (see [When a publish fails](#when-a-publish-fails)). While an
+  earlier build is there, people can go back to it:
   `flatpak remote-info --log cumulas co.cumulas.Mail` lists them and
   `flatpak update --commit=COMMIT co.cumulas.Mail` installs one. Debug info
   (`.Debug`) isn't published, to stay well under GitHub Pages' 1 GB limit.
+- **Hosting**: GitHub Pages publishes sites of up to 1 GB, with a soft
+  bandwidth limit of about 100 GB a month; a site that keeps going over it may
+  be slowed down or asked to move. If downloads outgrow it, move the site to
+  another static host or a CDN (it's plain files) and point
+  `flatpak.cumulas.co` at it: people's remotes keep working, since the URL and
+  the key stay the same. The deploy and live check jobs are what would change.
 
 | On the site                  | What it is                                   |
 | ---------------------------- | -------------------------------------------- |

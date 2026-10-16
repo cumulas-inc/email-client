@@ -17,8 +17,9 @@ React, packaged with Flatpak as `co.cumulas.Mail`.
 
 ## Install
 
-Releases of Cumulas Mail are published as a Flatpak at **<https://flatpak.cumulas.co>**,
-for x86_64 and aarch64: open that page and click Install, or run:
+From the first release, Cumulas Mail is published as a Flatpak at
+**<https://flatpak.cumulas.co>**, for x86_64 and aarch64: open that page and
+click Install, or run:
 
 ```sh
 flatpak remote-add --if-not-exists cumulas https://flatpak.cumulas.co/cumulas.flatpakrepo
@@ -121,8 +122,11 @@ CI runs all of these, plus a Flatpak build.
 - Test sign-in, instant updates and company signatures against real
   Microsoft 365 and Outlook.com accounts.
 - Make the repository or the screenshots public for the Flathub listing.
-- Set up the [self-hosted Flatpak repository](packaging/flatpak/README.md#setting-it-up)
-  (signing key, DNS, GitHub Pages) before the first release tag.
+- Finish [setting up the self-hosted Flatpak repository](packaging/flatpak/README.md#setting-it-up)
+  before the first release tag: the signing key, DNS and GitHub Pages are
+  done; the `flatpak-signing` environment (with the secret moved into it), the
+  release tag ruleset and the `github-pages` tag rule remain, then a manual dry
+  run of `main` to check the key.
 - Submit to Flathub by hand, following
   [Submitting to Flathub](packaging/flatpak/README.md#submitting-to-flathub).
   Flathub's Generative AI policy needs a person to write the Flathub manifest,
