@@ -35,6 +35,7 @@ import { Menu } from "../../components/Menu";
 import { SearchField } from "../../components/SearchField";
 import { PaneSpinner, Spinner } from "../../components/Spinner";
 import { formatCount } from "../../lib/format";
+import { openAddAccount } from "../settings/addAccountStore";
 import type { MailActions } from "./actions";
 import { exactCount } from "./counts";
 import { listGroup } from "./dates";
@@ -171,6 +172,29 @@ function SelectionBar({ ids, actions, folders, messages }: SelectionBarProps) {
         <Trash2 size={16} />
       </button>
     </div>
+  );
+}
+
+/**
+ * For an account whose sign-in a server search found broken: Microsoft's
+ * sign-in again, as in Settings, or Settings for an IMAP account's password.
+ */
+function SignInAgain({ account, describedBy }: { account: Account; describedBy: string }) {
+  const openSettings = useAppStore((s) => s.openSettings);
+  const microsoft = account.kind === "microsoft";
+  return (
+    <button
+      type="button"
+      className="btn btn--subtle btn--sm"
+      aria-describedby={describedBy}
+      onClick={() =>
+        microsoft
+          ? openAddAccount({ step: "microsoft", email: account.email, autoStart: true })
+          : openSettings("accounts")
+      }
+    >
+      {microsoft ? "Sign in again" : "Account settings"}
+    </button>
   );
 }
 
@@ -597,17 +621,25 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
               Couldn't search <bdi>{accountName(a.accountId)}</bdi> on the server.{" "}
               {a.error?.message}
             </p>
-            <button
-              type="button"
-              className={clsx("btn btn--subtle btn--sm", a.retrying && "btn--busy")}
-              aria-describedby={`mail-search-error-${i}`}
-              aria-disabled={a.retrying || undefined}
-              aria-busy={a.retrying || undefined}
-              onClick={a.retrying ? undefined : () => server.retry(a.accountId)}
-            >
-              {a.retrying && <LoaderCircle size={14} className="spin" aria-hidden="true" />}
-              {a.retrying ? "Trying again…" : "Try again"}
-            </button>
+            {a.error?.code === "authRequired" && !a.retrying ? (
+              // Trying again can't help: the sign-in must be fixed first.
+              <SignInAgain
+                account={accountById.get(a.accountId)!}
+                describedBy={`mail-search-error-${i}`}
+              />
+            ) : (
+              <button
+                type="button"
+                className={clsx("btn btn--subtle btn--sm", a.retrying && "btn--busy")}
+                aria-describedby={`mail-search-error-${i}`}
+                aria-disabled={a.retrying || undefined}
+                aria-busy={a.retrying || undefined}
+                onClick={a.retrying ? undefined : () => server.retry(a.accountId)}
+              >
+                {a.retrying && <LoaderCircle size={14} className="spin" aria-hidden="true" />}
+                {a.retrying ? "Trying again…" : "Try again"}
+              </button>
+            )}
           </div>
         ))}
       </div>

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MockBackend } from "../../api/mock";
 import type { Settings } from "../../api/types";
 import { useAppStore } from "../../app/store";
+import { useAddAccountRequest } from "../settings/addAccountStore";
 import { messageBridgeUrl } from "./bodyHtml";
 import { useMailStore } from "./mailStore";
 import {
@@ -974,6 +975,39 @@ describe("Search", () => {
     await expectResults(...Array.from({ length: 130 }, () => /Purchase order 4500/));
     expect(screen.queryByRole("button", { name: "Show more results" })).not.toBeInTheDocument();
     await waitFor(() => expect(announced()).toBe("130 results."));
+  });
+
+  it("offers to sign in again, not to try again, when an account's sign-in failed", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const work = (await backend.listAccounts()).find((a) => a.kind === "microsoft")!;
+    const home = (await backend.listAccounts()).find((a) => a.kind === "imap")!;
+    backend.failServerSearch(work.id, {
+      code: "authRequired",
+      message: "Microsoft did not accept the sign-in. Sign in again.",
+    });
+    backend.failServerSearch(home.id, {
+      code: "authRequired",
+      message: "The IMAP server rejected the password.",
+    });
+    await renderMail({ backend });
+    await setSearch("lisbon");
+    await waitFor(() =>
+      expect(
+        screen.getAllByText(/Couldn't search/, { selector: ".mail-search-error p" }),
+      ).toHaveLength(2),
+    );
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Sign in again" }));
+    expect(useAppStore.getState().addAccountOpen).toBe(true);
+    expect(useAddAccountRequest.getState().request).toEqual({
+      step: "microsoft",
+      email: work.email,
+      autoStart: true,
+    });
+    await user.click(screen.getByRole("button", { name: "Account settings" }));
+    expect(useAppStore.getState().settingsOpen).toBe("accounts");
   });
 
   it("keeps the keyboard on Show more results, and at the end once all are shown", async () => {
