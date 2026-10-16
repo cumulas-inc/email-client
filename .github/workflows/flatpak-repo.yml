@@ -89,8 +89,9 @@ jobs:
             echo "Dry run for $label: signed with a throwaway key, not deployed" >>"$GITHUB_STEP_SUMMARY"
           fi
       # A tag publishes only if it's the highest release tag and the newest
-      # release in the metainfo. The publish job checks again, for runs whose
-      # failed jobs are re-run after a newer tag.
+      # release in the metainfo. Every other job waits for this one, so a tag
+      # that can't publish stops the run before it builds. The publish job
+      # checks again, for runs whose failed jobs are re-run after a newer tag.
       - &check-release
         name: Check that this is the newest release
         if: github.event_name == 'push'
@@ -130,6 +131,7 @@ jobs:
 
   scripts:
     name: Repository scripts (fake builds)
+    needs: mode
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -147,6 +149,7 @@ jobs:
 
   sources:
     name: Offline sources
+    needs: mode
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
