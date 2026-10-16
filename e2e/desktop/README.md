@@ -17,7 +17,14 @@ shows its address, and the frame keeps its document. It sends a message over
 SMTP and checks its delivery and the copy in Sent. It types a signature into Settings →
 Signatures (the signature editor is a sandboxed frame), adds a word to it in
 a new message and checks that the delivered HTML has it, edited, in its
-`cumulas-signature` block under the body. Then it closes the window (as a window manager
+`cumulas-signature` block under the body. It searches mail: by the start of a
+word, and with `from:`, and the Flagged filter says it hides the result; and
+for a message from long before the sync window (`seed_mail.py` puts it into
+the Inbox over IMAP with an arrival date 400 days ago), which only a search of
+the whole mailbox on the server finds: it shows labeled with its folder, and
+opens (and is never notified as new mail). Of 55 old purchase orders, 50 come
+first and the rest with "Show more results"; one of them is flagged, replied
+to, archived and deleted, each checked on the server. Then it closes the window (as a window manager
 would, with `WM_DELETE_WINDOW`) and, with the app running in the background,
 checks the desktop side against a fake notification server
 (`fake_notifications.py`, on the test's session bus): mail delivered over SMTP
@@ -28,8 +35,8 @@ the window, and a notification goes once its message is read elsewhere.
 Events starting in a minute (made through the app's commands) remind at once:
 the reminder's notification has Snooze and Dismiss, which work without the
 window. Finally it restarts the app to check that the account, cache and
-keyring password persist, and that the dismissed reminder doesn't go off
-again.
+keyring password persist, that the message the server search found is still
+on the device (the syncs since kept it), and that the dismissed reminder doesn't go off again.
 
 Without a StatusNotifier host on the test's bus, the app shows no tray icon;
 starting without crashing with libayatana-appindicator installed is part of the

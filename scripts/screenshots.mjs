@@ -138,6 +138,12 @@ const scenes = [
     async run(page, shot) {
       await page.locator("#global-search").fill("atlas");
       await page.getByRole("listbox", { name: "Search results" }).waitFor();
+      // Once the servers have answered too: the list announces the count
+      // only then.
+      await page
+        .locator('section[aria-label="Message list"] > p[role=status]')
+        .filter({ hasText: /results?\.$/ })
+        .waitFor({ state: "attached" });
       await openMessage(page, "Customer announcement draft for Atlas");
       await shot("mail-search");
     },

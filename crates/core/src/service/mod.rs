@@ -10,6 +10,7 @@ mod connector;
 mod mail;
 mod pim;
 mod reminders;
+mod search;
 mod signatures;
 mod sync;
 pub(crate) mod targeted;
@@ -26,6 +27,10 @@ pub use connector::{
     PushSource, builtin_microsoft_client_id,
 };
 pub use mail::Attachment;
+pub use search::{
+    LOCAL_SEARCH_LIMIT, MAX_INCLUDED_IDS, MAX_SEARCH_ROWS_PER_ACCOUNT, SEARCH_RESULT_TTL_DAYS,
+    SERVER_SEARCH_PAGE, SERVER_SEARCH_TIMEOUT,
+};
 pub use targeted::SyncScope;
 
 use crate::error::{Error, ErrorCode, Result};
@@ -99,6 +104,8 @@ pub struct CoreService {
     reminders: reminders::ReminderHub,
     /// Company signatures: checks in progress and when the next are due.
     signatures: Arc<signatures::SignatureHub>,
+    /// The server search in progress, and those that ended.
+    searches: Mutex<search::Registry>,
 }
 
 impl CoreService {
@@ -121,6 +128,7 @@ impl CoreService {
             push: PushHub::default(),
             reminders: reminders::ReminderHub::default(),
             signatures: Arc::default(),
+            searches: Mutex::default(),
         }
     }
 

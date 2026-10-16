@@ -1,11 +1,22 @@
-"""Delivers a few realistic messages to the test mailbox over SMTP."""
+"""Delivers a few realistic messages to the test mailbox over SMTP, and puts
+an old one, from before the app's sync window, straight into it over IMAP."""
 
+import imaplib
 import smtplib
 import sys
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.utils import format_datetime
+
+# Older than the app's sync window (90 days): only a search of the whole
+# mailbox on the server finds it.
+OLD_MESSAGE_DAYS = 400
+# Old purchase orders, more than one page of a server search (50): the
+# newest is "Old purchase order 4500001", a year old.
+PURCHASE_ORDERS = 55
 
 
-def main(host: str, port: int) -> None:
+def main(host: str, port: int, imap_port: int) -> None:
     html = EmailMessage()
     html["From"] = "Bob Builder <bob@example.com>"
     html["To"] = "Alice Example <alice@example.com>"
@@ -51,6 +62,28 @@ def main(host: str, port: int) -> None:
         for message in (html, with_attachment, links):
             smtp.send_message(message)
 
+    received = datetime.now(timezone.utc) - timedelta(days=OLD_MESSAGE_DAYS)
+    old = EmailMessage()
+    old["From"] = "Bob Builder <bob@example.com>"
+    old["To"] = "Alice Example <alice@example.com>"
+    old["Subject"] = "Old zebracorn invoice"
+    old["Date"] = format_datetime(received)
+    old.set_content("The zebracorn invoice from last year, for your records.")
+    with imaplib.IMAP4(host, imap_port) as imap:
+        imap.login("alice", "secret")
+        # The sync window goes by the server's arrival date (INTERNALDATE),
+        # which APPEND sets.
+        imap.append("INBOX", "", imaplib.Time2Internaldate(received), old.as_bytes())
+        for n in range(1, PURCHASE_ORDERS + 1):
+            ordered = datetime.now(timezone.utc) - timedelta(days=365 + n)
+            order = EmailMessage()
+            order["From"] = "Bob Builder <bob@example.com>"
+            order["To"] = "Alice Example <alice@example.com>"
+            order["Subject"] = f"Old purchase order {4500000 + n}"
+            order["Date"] = format_datetime(ordered)
+            order.set_content(f"Purchase order {4500000 + n} is confirmed.")
+            imap.append("INBOX", "", imaplib.Time2Internaldate(ordered), order.as_bytes())
+
 
 if __name__ == "__main__":
-    main(sys.argv[1], int(sys.argv[2]))
+    main(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 3143)

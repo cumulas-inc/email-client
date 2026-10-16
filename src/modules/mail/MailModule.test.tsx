@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MockBackend } from "../../api/mock";
 import type { Settings } from "../../api/types";
 import { useAppStore } from "../../app/store";
+import { useAddAccountRequest } from "../settings/addAccountStore";
 import { messageBridgeUrl } from "./bodyHtml";
 import { useMailStore } from "./mailStore";
 import {
@@ -691,7 +692,426 @@ describe("Keyboard", () => {
   });
 });
 
+/** The search results' rows. */
+function results() {
+  return within(screen.getByRole("listbox", { name: "Search results" })).getAllByRole("option");
+}
+
+/** Waits until the search results are rows matching these names, in order. */
+async function expectResults(...names: RegExp[]) {
+  await waitFor(() => {
+    const options = results();
+    expect(options.map((o) => o.getAttribute("aria-label"))).toEqual(
+      names.map(() => expect.any(String)),
+    );
+    names.forEach((name, i) => expect(options[i]!.getAttribute("aria-label")).toMatch(name));
+  });
+}
+
+/** What the message list's live region last said. */
+function announced() {
+  const list = screen.getByRole("region", { name: "Message list" });
+  return list.querySelector(":scope > p[role=status]")!.textContent;
+}
+
+/** Whether `text` was ever on the page, from now on. */
+function watchFor(text: string): () => boolean {
+  let seen = false;
+  const look = () => {
+    seen ||= document.body.textContent?.includes(text) ?? false;
+  };
+  const observer = new MutationObserver(look);
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  return () => {
+    look();
+    observer.disconnect();
+    return seen;
+  };
+}
+
+/** A search error row's text. */
+function failureRow() {
+  return screen.queryByText(/Couldn't search/, { selector: ".mail-search-error p" });
+}
+
 describe("Search", () => {
+  it("finds by operator, by the start of words and inside subjects", async () => {
+    const backend = new MockBackend();
+    const fromPriya = await backend.searchMessages("from:priya");
+    await renderMail({ backend });
+
+    await setSearch("from:priya");
+    await expectResults(
+      ...fromPriya.map((m) => new RegExp(m.subject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))),
+    );
+    results().forEach((o) => expect(o.getAttribute("aria-label")).toMatch(/Priya Raman/));
+
+    await setSearch('subject:"launch checklist"');
+    await expectResults(CHECKLIST);
+    await setSearch("lisb");
+    await expectResults(/Your trip to Lisbon/);
+    await setSearch("isbo");
+    await expectResults(/Your trip to Lisbon/);
+  });
+
+  it("says when Unread or Flagged hides results, and shows them all in one click", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const fromPriya = await backend.searchMessages("from:priya");
+    const unread = fromPriya.filter((m) => !m.isRead);
+    const fromJonas = await backend.searchMessages("from:jonas");
+    expect(unread.length).toBeGreaterThan(0);
+    expect(fromJonas.every((m) => m.isRead)).toBe(true);
+    await renderMail({ backend });
+    await user.click(screen.getByRole("button", { name: "Unread" }));
+    const list = screen.getByRole("region", { name: "Message list" });
+
+    // Some hidden: the title says how many are listed, of how many.
+    await setSearch("from:priya");
+    await expectResults(...unread.map(() => /^Unread/));
+    expect(
+      within(list).getByText(new RegExp(`^${unread.length} unread of ${fromPriya.length} results`)),
+    ).toHaveTextContent(`${unread.length} unread of ${fromPriya.length} results for “from:priya”`);
+
+    // All hidden: not "No results", but what the filter did.
+    await setSearch("from:jonas");
+    expect(await screen.findByText("No unread results")).toBeInTheDocument();
+    expect(
+      screen.getByText(`None of the ${fromJonas.length} results for “from:jonas” are unread.`),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No results")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show all results" }));
+    await expectResults(...fromJonas.map(() => /Jonas Becker/));
+    expect(useMailStore.getState().filter).toBe("all");
+    expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "Flagged" }));
+    await setSearch("lisbon");
+    expect(await screen.findByText("No flagged results")).toBeInTheDocument();
+    expect(screen.getByText("The only result for “lisbon” isn't flagged.")).toBeInTheDocument();
+  });
+
+  it("says what the filter hides only about the results of the text they are for", async () => {
+    const user = userEvent.setup();
+    // Slow enough that the next text's results take a moment.
+    const backend = new MockBackend({ latency: 60 });
+    await renderMail({ backend });
+    await user.click(screen.getByRole("button", { name: "Unread" }));
+    await setSearch("from:jonas");
+    expect(await screen.findByText("No unread results")).toBeInTheDocument();
+    const claimed = watchFor("for “from:pri” are unread");
+
+    await setSearch("from:pri");
+    await waitFor(() => expect(announced()).toMatch(/^\d+ unread of \d+ results\.$/));
+    // None of Jonas's results being unread was never said of Priya's.
+    expect(claimed()).toBe(false);
+    expect(document.querySelector(".mail-list__count")).toHaveTextContent(/for “from:pri”$/);
+  });
+
+  it("searches the whole mailbox on the servers, and what it finds acts like any message", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const resume = backend.pauseServerSearch();
+    await renderMail({ backend });
+    const sawNoResults = watchFor("No results");
+
+    // Nothing on the device: the servers are being asked, and it says so.
+    await setSearch("invoice");
+    expect(
+      await screen.findByText("Searching your whole mailbox…", { selector: ".empty-state__title" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Nothing on this computer matches “invoice”."),
+    ).toBeInTheDocument();
+    expect(announced()).toBe("Searching your whole mailbox…");
+
+    resume();
+    const results = await screen.findByRole("listbox", { name: "Search results" });
+    const hit = await within(results).findByRole("option", { name: /Northwind invoice 2023-118/ });
+    expect(hit.getAttribute("aria-label")).toMatch(/Archive · Alex Morgan$/);
+    await waitFor(() => expect(announced()).toBe("1 result."));
+    expect(screen.queryByText("Searching your whole mailbox…")).not.toBeInTheDocument();
+    expect(sawNoResults()).toBe(false);
+
+    // Opened, flagged and moved like any other message.
+    await openMessage(user, /Northwind invoice 2023-118/);
+    const frame = await screen.findByTitle(/^Message: Northwind invoice 2023-118/);
+    expect(frame.getAttribute("srcdoc")).toContain("Payment terms are 30 days");
+    const id = (await backend.searchMessages("invoice"))[0]!.id;
+    await user.click(within(row(/Northwind invoice/)).getByRole("button", { name: "Flag" }));
+    expect(row(/Northwind invoice/).getAttribute("aria-label")).toMatch(/Flagged/);
+    await waitFor(async () => expect((await backend.getMessage(id)).isFlagged).toBe(true));
+    await user.click(toolbarButton("Move to"));
+    await user.click(screen.getByRole("menuitem", { name: "Inbox" }));
+    await waitFor(() =>
+      expect(row(/Northwind invoice/).getAttribute("aria-label")).toMatch(/Inbox · Alex Morgan$/),
+    );
+    await waitFor(async () => expect((await backend.getMessage(id)).folderId).toBe("w-inbox"));
+  });
+
+  it("keeps what this device found when an account's server can't be searched", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    backend.failServerSearch("acct-home", {
+      code: "network",
+      message: "Could not reach imap.morgan-family.example.",
+    });
+    await renderMail({ backend });
+
+    await setSearch("lisbon");
+    expect(
+      await screen.findByText(/Couldn't search/, { selector: ".mail-search-error p" }),
+    ).toHaveTextContent(
+      "Couldn't search Alex (Personal) on the server. Could not reach imap.morgan-family.example.",
+    );
+    await expectResults(/Your trip to Lisbon/);
+    await waitFor(() =>
+      expect(announced()).toBe("1 result. Couldn't search Alex (Personal) on the server."),
+    );
+    expect(document.querySelector(".mail-list__count")).toHaveAttribute("title", "1 result");
+
+    // With nothing found, it says nothing was found on this device.
+    await setSearch("zebras");
+    expect(await screen.findByText("No results")).toBeInTheDocument();
+    expect(
+      screen.getByText("We didn't find anything for “zebras” on this computer."),
+    ).toBeInTheDocument();
+    expect(failureRow()).toBeInTheDocument();
+
+    // Back online: trying again finds the photos only its server has.
+    backend.failServerSearch("acct-home", null);
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await expectResults(/Safari photos from Etosha.*Inbox · Alex \(Personal\)$/);
+    expect(failureRow()).not.toBeInTheDocument();
+  });
+
+  it("shows the servers' progress in the title, and an account not searched above the results", async () => {
+    const backend = new MockBackend();
+    backend.failServerSearch("acct-home", {
+      code: "network",
+      message: "Could not reach imap.morgan-family.example.",
+    });
+    const many = await backend.searchMessages("alex");
+    expect(many.length).toBeGreaterThan(20);
+    const resume = backend.pauseServerSearch();
+    await renderMail({ backend });
+    await setSearch("alex");
+    const listbox = await screen.findByRole("listbox", { name: "Search results" });
+    await waitFor(() => expect(results()).toHaveLength(many.length));
+    // Beside the count, so the rows don't move when it goes.
+    const subtitle = document.querySelector(".mail-list__subtitle")!;
+    await waitFor(() => expect(subtitle).toHaveTextContent(/Searching your whole mailbox…$/));
+    expect(listbox.previousElementSibling).toBeNull();
+
+    resume();
+    await waitFor(() => expect(subtitle).not.toHaveTextContent("Searching"));
+    // However long the list, the account that wasn't searched is above it.
+    const note = await waitFor(() => failureRow()!);
+    expect(listbox.previousElementSibling).toContainElement(note);
+    expect(note).toHaveTextContent("Couldn't search Alex (Personal) on the server.");
+  });
+
+  it("never shows the servers as busy for single letters typed over a longer search", async () => {
+    const backend = new MockBackend();
+    await renderMail({ backend });
+    await setSearch("lisbon");
+    await expectResults(/Your trip to Lisbon/);
+    await waitFor(() => expect(announced()).toBe("1 result."));
+    const searchServer = vi.spyOn(backend, "searchServer");
+    const sawBusy = watchFor("Searching your whole mailbox…");
+
+    await setSearch("l");
+    await waitFor(() => expect(announced()).toMatch(/^\d+ results\.$/));
+    await setSearch("from:l");
+    await waitFor(() => expect(announced()).toMatch(/^\d+ results?\.$/));
+    expect(sawBusy()).toBe(false);
+    expect(searchServer).not.toHaveBeenCalled();
+  });
+
+  it("says a message found on the server is no longer there when it went, and drops it", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const { client } = await renderMail({ backend });
+    // As the app does when the backend says mail changed.
+    backend.onDataChanged(() => void client.invalidateQueries({ queryKey: ["mail"] }));
+    await setSearch("invoice");
+    await expectResults(/Northwind invoice 2023-118/);
+    const [found] = await backend.searchMessages("invoice");
+    backend.removeFromServer(found!.id);
+
+    await user.click(row(/Northwind invoice 2023-118/));
+    expect(await screen.findByText("Couldn't open this message")).toBeInTheDocument();
+    expect(screen.getByText("This message is no longer on the server.")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole("option", { name: /Northwind invoice/ })).not.toBeInTheDocument(),
+    );
+    expect(await backend.searchMessages("invoice")).toEqual([]);
+  });
+
+  it("counts only the latest search when the text changes while the servers search", async () => {
+    const backend = new MockBackend();
+    const resume = backend.pauseServerSearch();
+    const searches: [id: string, text: string][] = [];
+    const canceled: string[] = [];
+    const searchServer = backend.searchServer.bind(backend);
+    backend.searchServer = (id, text, ...rest) => {
+      searches.push([id, text]);
+      return searchServer(id, text, ...rest);
+    };
+    const cancelServerSearch = backend.cancelServerSearch.bind(backend);
+    backend.cancelServerSearch = (id) => {
+      canceled.push(id);
+      return cancelServerSearch(id);
+    };
+    await renderMail({ backend });
+
+    await setSearch("offsite");
+    await waitFor(() => expect(searches.map(([, text]) => text)).toContain("offsite"));
+    const first = searches[0]![0];
+    await setSearch("offsite kickoff");
+    await waitFor(() => expect(searches.map(([, text]) => text)).toContain("offsite kickoff"));
+    expect(canceled).toContain(first);
+    resume();
+
+    await expectResults(/Kickoff notes from the 2022 offsite/);
+    // What only the first search would have found was neither shown nor stored.
+    expect(screen.queryByRole("option", { name: /Offsite venue options/ })).not.toBeInTheDocument();
+    expect(await backend.searchMessages("venue")).toEqual([]);
+  });
+
+  it("shows more results from the servers on request", async () => {
+    const user = userEvent.setup();
+    await renderMail({ backend: new MockBackend({ worst: true }) });
+    await setSearch('subject:"purchase order"');
+    await expectResults(...Array.from({ length: 50 }, () => /Purchase order 4500/));
+    // The servers have more: the count says it is so far. (The worst-case
+    // data's account whose sync fails can't be searched either.)
+    const unsearched = "Couldn't search J on the server.";
+    await waitFor(() => expect(announced()).toBe(`50 results so far. ${unsearched}`));
+    expect(document.querySelector(".mail-list__count")).toHaveTextContent(
+      '50 results so far for “subject:"purchase order"”',
+    );
+    // A button after the list, not an option in it.
+    const listbox = screen.getByRole("listbox", { name: "Search results" });
+    expect(within(listbox).queryByRole("button", { name: "Show more results" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Show more results" }));
+    await expectResults(...Array.from({ length: 100 }, () => /Purchase order 4500/));
+    await user.click(screen.getByRole("button", { name: "Show more results" }));
+    await expectResults(...Array.from({ length: 130 }, () => /Purchase order 4500/));
+    expect(screen.queryByRole("button", { name: "Show more results" })).not.toBeInTheDocument();
+    await waitFor(() => expect(announced()).toBe(`130 results. ${unsearched}`));
+  });
+
+  it("offers to sign in again, not to try again, when an account's sign-in failed", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const work = (await backend.listAccounts()).find((a) => a.kind === "microsoft")!;
+    const home = (await backend.listAccounts()).find((a) => a.kind === "imap")!;
+    backend.failServerSearch(work.id, {
+      code: "authRequired",
+      message: "Microsoft did not accept the sign-in. Sign in again.",
+    });
+    backend.failServerSearch(home.id, {
+      code: "authRequired",
+      message: "The IMAP server rejected the password.",
+    });
+    await renderMail({ backend });
+    await setSearch("lisbon");
+    await waitFor(() =>
+      expect(
+        screen.getAllByText(/Couldn't search/, { selector: ".mail-search-error p" }),
+      ).toHaveLength(2),
+    );
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Sign in again" }));
+    expect(useAppStore.getState().addAccountOpen).toBe(true);
+    expect(useAddAccountRequest.getState().request).toEqual({
+      step: "microsoft",
+      email: work.email,
+      autoStart: true,
+    });
+    await user.click(screen.getByRole("button", { name: "Account settings" }));
+    expect(useAppStore.getState().settingsOpen).toBe("accounts");
+  });
+
+  it("stops offering more once as many results have come as the list shows", async () => {
+    const backend = new MockBackend();
+    // A server with ever more hits: a thousand ids at once, as if from many pages.
+    const hits = Array.from({ length: 1000 }, (_, i) => `hit-${i}`);
+    backend.searchServer = async (searchId, _text, accountId) => ({
+      searchId,
+      accountId,
+      status: "done",
+      messageIds: accountId === "acct-work" ? hits : [],
+      added: 0,
+      hasMore: true,
+      error: null,
+    });
+    await renderMail({ backend });
+    await setSearch("lisbon");
+    expect(
+      await screen.findByText(
+        "The servers found more than can be shown. Add words to narrow the search.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show more results" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the keyboard on Show more results, and at the end once all are shown", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ worst: true });
+    await renderMail({ backend });
+    await setSearch('subject:"purchase order"');
+    const pages = (n: number) => Array.from({ length: n }, () => /Purchase order 4500/);
+    await expectResults(...pages(50));
+    const more = screen.getByRole("button", { name: "Show more results" });
+    more.focus();
+
+    const resume = backend.pauseServerSearch();
+    await user.keyboard("{Enter}");
+    // Busy where it was, and still where the keyboard is.
+    expect(more).toHaveAccessibleName("Loading more results…");
+    expect(more).toHaveAttribute("aria-busy", "true");
+    expect(more).toHaveFocus();
+    resume();
+    await expectResults(...pages(100));
+    expect(more).toHaveAccessibleName("Show more results");
+    expect(more).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    await expectResults(...pages(130));
+    const end = await screen.findByText("No more results.");
+    await waitFor(() => expect(end).toHaveFocus());
+  });
+
+  it("keeps the keyboard on Try again while it tries, and in the search box once it worked", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    backend.failServerSearch("acct-home", {
+      code: "network",
+      message: "Could not reach imap.morgan-family.example.",
+    });
+    await renderMail({ backend });
+    await setSearch("zebras");
+    expect(await screen.findByText("No results")).toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: "Try again" });
+    retry.focus();
+
+    backend.failServerSearch("acct-home", null);
+    const resume = backend.pauseServerSearch();
+    await user.keyboard("{Enter}");
+    expect(retry).toHaveAccessibleName("Trying again…");
+    expect(retry).toHaveFocus();
+    resume();
+    await expectResults(/Safari photos from Etosha/);
+    expect(failureRow()).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("searchbox", { name: "Search mail" })).toHaveFocus(),
+    );
+  });
+
   it("shows results with their folder and account", async () => {
     const user = userEvent.setup();
     await renderMail();

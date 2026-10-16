@@ -872,6 +872,8 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures",
+ "icu_normalizer",
+ "icu_properties",
  "lettre",
  "mail-parser",
  "oo7",

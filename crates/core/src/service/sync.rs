@@ -68,6 +68,10 @@ impl CoreService {
         let account = self.store.get_account(account_id)?;
 
         let result = self.run_sync(&account).await;
+        // Whatever became of the sync: a folder that keeps failing, or an
+        // account whose sign-in expired, must not keep search results past
+        // their time.
+        self.prune_search_results(account_id);
         if let Err(e) = &result
             && is_server_busy(e)
         {
@@ -169,10 +173,10 @@ impl CoreService {
     }
 
     /// Syncs one folder's messages into the store, raises notifications for
-    /// new mail and withdraws those for mail read or removed elsewhere.
-    /// A `targeted` sync also refreshes the folder's counts when messages
-    /// changed, and those of folders messages moved in from, since it
-    /// doesn't list the folders.
+    /// new mail and withdraws those for mail read, moved or removed
+    /// elsewhere. A `targeted` sync also refreshes the folder's counts when
+    /// messages changed, and those of folders messages moved in from or out
+    /// to, since it doesn't list the folders.
     pub(super) async fn sync_one_folder(
         &self,
         account: &Account,
@@ -192,8 +196,10 @@ impl CoreService {
         let outcome = self.store.apply_message_batch(folder, &batch)?;
         if targeted && outcome.changes_counts() {
             let mut folders = vec![folder.clone()];
-            for id in &outcome.moved_from {
-                folders.push(self.store.get_folder(id)?);
+            for id in outcome.moved_from.iter().chain(&outcome.moved_to) {
+                if folders.iter().all(|f| &f.id != id) {
+                    folders.push(self.store.get_folder(id)?);
+                }
             }
             for folder in &folders {
                 match providers.mail.folder_counts(folder).await {
@@ -226,6 +232,7 @@ impl CoreService {
             .became_read
             .iter()
             .chain(&outcome.removed)
+            .chain(&outcome.moved_out)
             .cloned()
             .collect();
         if !settled.is_empty() {
@@ -236,6 +243,7 @@ impl CoreService {
         let changed = !batch.upserts.is_empty()
             || !batch.flag_updates.is_empty()
             || !outcome.removed.is_empty()
+            || !batch.moved_out.is_empty()
             || batch.full_resync;
         if !targeted || changed {
             self.notify(&[DataKind::Mail], Some(&account.id));

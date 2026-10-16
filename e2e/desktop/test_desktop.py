@@ -2,7 +2,8 @@
 tauri-driver: add an IMAP account, read mail (following, pointing at and
 pressing shortcuts in a message, whose own script never runs; pointing at a
 link again in a reading font chosen in Settings), send mail,
-set up a signature and send it, edited; then, with the window
+set up a signature and send it, edited; search mail, with operators, and
+find and open a message only the server has; then, with the window
 closed to the background, get notified of new mail (pushed over IMAP IDLE),
 open a message from its notification, use its buttons, and see notifications
 go once their mail is read elsewhere; get an event's reminder, snooze one and
@@ -159,20 +160,26 @@ def test() -> None:
     driver = start()
     try:
         first_run(driver)
+        search(driver)
         background_and_notifications(driver, notifications)
         dismissed = reminders(driver, notifications)
+        # What the server search found is old mail, not new.
+        found = [n for n in notifications.notified if n["body"] == OLD_SUBJECT]
+        assert not found, f"notified of a message the search found: {found}"
     except Exception:
         shot(driver, "failure")
         raise
     finally:
         driver.quit()
 
-    # Restart: the account, cache and keyring password survive, and the
-    # dismissed reminder stays dismissed.
+    # Restart: the account, cache and keyring password survive, the message
+    # the server search found is still on the device (syncs since kept it),
+    # and the dismissed reminder stays dismissed.
     driver = start()
     try:
         wait_for(lambda: len(message_rows(driver)) >= 2, timeout=60, what="messages after restart")
         shot(driver, "06-after-restart")
+        assert subjects(local_search(driver, "zebracorn")) == [OLD_SUBJECT], "the server's find went"
         wait_for(lambda: invoke(driver, "list_active_reminders") is not None, what="reminders")
         active = invoke(driver, "list_active_reminders")
         assert all(r["title"] != dismissed for r in active), active
@@ -591,6 +598,192 @@ def signature(driver) -> None:
     assert lines == ["Alice Example", "Example Corp Labs"], (lines, html)
     # Under the body, as Outlook puts it.
     assert html.index("With a signature below.") < html.index("cumulas-signature"), html
+
+
+# --- search -------------------------------------------------------------------------
+
+# Seeded over IMAP with an arrival date before the sync window (seed_mail.py):
+# only a search of the whole mailbox on the server finds it.
+OLD_SUBJECT = "Old zebracorn invoice"
+
+
+def local_search(driver, text: str) -> list[dict]:
+    """What a search finds on this device alone (the app's local search)."""
+    return invoke(driver, "search_messages", {"text": text})
+
+
+def subjects(messages: list[dict]) -> list[str]:
+    return [m["subject"] for m in messages]
+
+
+def search_results(driver) -> list[str]:
+    """The accessible names of the rows in the search results."""
+    lists = driver.find_elements(By.CSS_SELECTOR, "[role=listbox][aria-label='Search results']")
+    return [
+        o.get_attribute("aria-label") or ""
+        for listbox in lists
+        for o in listbox.find_elements(By.CSS_SELECTOR, "[role=option]")
+    ]
+
+
+def results_are(driver, expected: list[str]):
+    """The results show exactly these subjects (each in a row's name)."""
+
+    def check():
+        names = search_results(driver)
+        if len(names) != len(expected):
+            return None
+        return names if all(any(s in name for name in names) for s in expected) else None
+
+    return check
+
+
+def announced(driver) -> str:
+    """What the message list last told screen readers about the search."""
+    return driver.execute_script(
+        "const p = document.querySelector('section[aria-label=\"Message list\"] > p[role=status]');"
+        "return p ? p.textContent : null;"
+    )
+
+
+def search_settled(driver, announcement: str) -> None:
+    """The search is over, as the list announces once every server answered
+    and the results are this text's; then a painted frame, so a screenshot
+    shows it."""
+    seen = []
+
+    def settled():
+        seen.append(announced(driver))
+        return seen[-1] == announcement
+
+    try:
+        wait_for(settled, what=f"the search to settle on {announcement!r}")
+    except AssertionError as e:
+        raise AssertionError(f"{e} (it said {seen[-1:]!r})") from None
+    next_frame(driver)
+
+
+def next_frame(driver) -> None:
+    """Waits until the page has painted again."""
+    driver.execute_async_script(
+        "const done = arguments[0];"
+        "requestAnimationFrame(() => requestAnimationFrame(() => done(true)));"
+    )
+
+
+def click_in_view(driver, element: WebElement) -> None:
+    """Clicks `element` once scrolled to and laid out: rows use
+    content-visibility, so those scrolled to take their real height only
+    then, and a click aimed before would land where the element was."""
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'})", element)
+    next_frame(driver)
+    element.click()
+
+
+def toolbar_button(driver, name: str) -> WebElement:
+    """A button of the open message's toolbar."""
+    return wait_for(
+        lambda: driver.find_element(
+            By.CSS_SELECTOR, f"[role=toolbar][aria-label='Message actions'] button[aria-label={quote(name)}]"
+        ),
+        what=f"the message's {name} button",
+    )
+
+
+def search(driver) -> None:
+    """The search box finds words by their start, and from:, subject: and
+    the like narrow it (they used to find nothing), and filters say what
+    they hide. A message from before the sync window, on the server only,
+    shows up as the server is searched, labeled with its folder, and opens
+    like any other; more than a page of them shows on request, and one is
+    flagged, replied to, archived and deleted like any other."""
+    box = driver.find_element(By.CSS_SELECTOR, "input[aria-label='Search mail']")
+    type_into(box, "quarter")
+    wait_for(results_are(driver, ["Quarterly numbers"]), what="a result for a word's start")
+    search_settled(driver, "1 result.")
+    shot(driver, "search-results")
+
+    # Flagged hides it, and says so, rather than "No results".
+    button(driver, "Flagged").click()
+    by_text(driver, "No flagged results")
+    by_text(driver, "The only result for “quarter” isn't flagged.")
+    button(driver, "Show all results").click()
+    wait_for(results_are(driver, ["Quarterly numbers"]), what="the result shown again")
+
+    type_into(box, "from:bob contract")
+    wait_for(results_are(driver, ["Signed contract"]), what="a result for from: and a word")
+
+    # Not on the device: the sync window ends long after it arrived.
+    assert local_search(driver, "zebracorn") == [], "the old message was synced"
+    type_into(box, "zebracorn")
+    names = wait_for(results_are(driver, [OLD_SUBJECT]), what="the server's find")
+    assert "Inbox" in names[0], names
+    search_settled(driver, "1 result.")
+    shot(driver, "search-server")
+
+    # It opens like any other message: its body comes from the server.
+    by_text(driver, OLD_SUBJECT).click()
+    by_text(driver, OLD_SUBJECT, "h1")
+    wait_for(
+        lambda: "for your records"
+        in (driver.find_element(By.CSS_SELECTOR, ".mail-reader").get_attribute("textContent") or ""),
+        what="the old message's body",
+    )
+    # Now on the device, found by local search alone.
+    assert subjects(local_search(driver, "zebracorn")) == [OLD_SUBJECT]
+
+    search_more_and_act(driver)
+
+    box = driver.find_element(By.CSS_SELECTOR, "input[aria-label='Search mail']")
+    box.click()
+    box.send_keys(Keys.ESCAPE)
+    wait_for(lambda: not search_results(driver), what="the search to clear")
+
+
+def search_more_and_act(driver) -> None:
+    """55 old purchase orders (seed_mail.py): 50 come first, "so far", the
+    rest on request. One of them is flagged, replied to, archived and
+    deleted, each on the server too."""
+    box = driver.find_element(By.CSS_SELECTOR, "input[aria-label='Search mail']")
+    type_into(box, "purchase order")
+    search_settled(driver, "50 results so far.")
+    shot(driver, "search-more")
+    click_in_view(driver, button(driver, "Show more results"))
+    search_settled(driver, "55 results.")
+    by_text(driver, "No more results.")
+
+    subject = "Old purchase order 4500001"
+    click_in_view(driver, by_text(driver, subject))
+    by_text(driver, subject, "h1")
+    toolbar_button(driver, "Flag").click()
+    wait_for(lambda: "\\Flagged" in (alice_flags(subject) or ""), what="the flag on the server")
+
+    button(driver, "Reply").click()
+    editor = wait_for(
+        lambda: driver.find_element(By.CSS_SELECTOR, ".mail-compose .mail-editor [contenteditable=true]"),
+        what="the reply's editor",
+    )
+    editor.click()
+    editor.send_keys("Received, thanks.")
+    button(driver, "Send").click()
+    wait_for(lambda: bob_has(f"Re: {subject}"), timeout=30, what="the reply delivered to bob")
+
+    toolbar_button(driver, "Archive").click()
+    wait_for(
+        lambda: alice_flags(subject, "Archive") is not None and alice_flags(subject) is None,
+        what="the order archived on the server",
+    )
+    # Its rows, not the reply's.
+    def rows() -> list[str]:
+        return [n for n in search_results(driver) if subject in n and f"Re: {subject}" not in n]
+
+    # Still a result, now in Archive.
+    wait_for(lambda: any("Archive" in n for n in rows()), what="the order listed in Archive")
+    click_in_view(driver, by_text(driver, subject))
+    by_text(driver, subject, "h1")
+    toolbar_button(driver, "Delete").click()
+    wait_for(lambda: alice_flags(subject, "Archive") is None, what="the order deleted on the server")
+    wait_for(lambda: not rows(), what="its row gone")
 
 
 # --- new mail in the background ------------------------------------------------

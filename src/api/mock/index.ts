@@ -22,6 +22,8 @@ import type {
   PushStatus,
   RemindersChangedEvent,
   ReplyKind,
+  ServerSearchResult,
+  ServerSearchStatus,
   Settings,
   SnoozeFor,
   SyncStatus,
@@ -29,6 +31,7 @@ import type {
 } from "../types";
 import { cleanFamily } from "../../lib/fonts";
 import { type MockState, createDemoState, recount } from "./data";
+import { isEmptySearch, isNarrowEnoughForServers, matchesSearch, parseSearch } from "./searchQuery";
 import { createWorstState } from "./worst";
 
 const DEFAULT_SETTINGS: Settings = {
@@ -140,6 +143,20 @@ const REMOTE_IMG = /<img\b[^>]*\bsrc=["']https?:[^"']*["'][^>]*>/gi;
 function newestFirst(a: { receivedAt: string }, b: { receivedAt: string }) {
   return b.receivedAt.localeCompare(a.receivedAt);
 }
+
+/** Like the core's searches: newest first, then by id. */
+function searchOrder(a: Message, b: Message) {
+  return newestFirst(a, b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/** Like the core: what a local search returns from the index (server hits come on top). */
+const LOCAL_SEARCH_LIMIT = 200;
+/** Like the core: how many server hits a local search takes in. */
+const MAX_INCLUDED_IDS = 1000;
+/** Like the core: a server search's page, per account. */
+const SERVER_SEARCH_PAGE = 50;
+/** Like the core: how many ended search ids are remembered. */
+const RETIRED_SEARCHES = 32;
 
 // The demo's text size (see setZoom). CSS zoom on the root scales the page,
 // but media queries and viewport units go on measuring the whole window,
@@ -267,6 +284,8 @@ export type DemoPush = "consent" | "refused" | "unreachable";
 export interface MockOptions {
   /** Artificial latency in ms for every call (default 0). */
   latency?: number;
+  /** How long a server search takes, in ms (default: `latency`). */
+  serverSearchLatency?: number;
   /** Start without any accounts (shows onboarding). */
   empty?: boolean;
   /** Start with worst-case data (long, empty, huge and non-Latin values). */
@@ -275,6 +294,8 @@ export interface MockOptions {
   push?: DemoPush;
   /** Show the Microsoft account's company signature in this state. */
   signature?: DemoSignature;
+  /** IMAP accounts' server searches fail, as with an unreachable server (`?searchfail`). */
+  searchFail?: boolean;
   /** Add a task reminder that went off 12 minutes ago (`?reminders`), besides the events' own. */
   overdueReminder?: boolean;
   /** What the desktop reports (the tray, the portal…). */
@@ -359,9 +380,29 @@ export class MockBackend implements Backend {
   private signatureChecks = new Map<string, number>();
   /** Until when each account's organization's service said to wait (ms). */
   private signatureRetries = new Map<string, number>();
+  private serverSearchLatency: number;
+  /**
+   * The current server search, like the core's: a new id replaces it,
+   * canceling the old one. Per account, the matches its next page takes from.
+   */
+  private serverSearch: { id: string; rest: Map<string, string[]> } | null = null;
+  /**
+   * Ids of searches that ended, like the core's: a call for one that comes
+   * late is canceled instead of replacing the search that followed it.
+   */
+  private retiredSearches: string[] = [];
+  /** Holds server searches while set (pauseServerSearch). */
+  private serverSearchGate: Promise<void> | null = null;
+  /** Messages opened: local search looks in their text, in the others' previews. */
+  private opened = new Set<string>();
+  /** Messages deleted on the server unbeknownst to the app (removeFromServer). */
+  private goneFromServer = new Set<string>();
+  /** How each account's server search fails, when it does (failServerSearch). */
+  private serverSearchFailures = new Map<string, BackendError>();
 
   constructor(options: MockOptions = {}) {
     this.latency = options.latency ?? 0;
+    this.serverSearchLatency = options.serverSearchLatency ?? this.latency;
     this.state = options.empty
       ? emptyState()
       : options.worst
@@ -387,6 +428,18 @@ export class MockBackend implements Backend {
       }
     }
     if (options.signature && microsoft) this.demoSignature(microsoft.id, options.signature);
+    // An account whose sync fails can't be searched on its server either
+    // (`?worst`), as in the app.
+    for (const account of this.state.accounts) {
+      if (account.syncError || (options.searchFail && account.kind === "imap")) {
+        const host =
+          account.settings.kind === "imap" ? account.settings.imapHost : "Microsoft Graph";
+        this.serverSearchFailures.set(account.id, {
+          code: "network",
+          message: `Could not reach ${host}.`,
+        });
+      }
+    }
     if (options.overdueReminder) {
       const metrics = this.state.tasks.find((t) => t.title === "Send Q3 metrics to Dana");
       if (metrics) metrics.reminderAt = new Date(Date.now() - 12 * 60_000).toISOString();
@@ -609,6 +662,7 @@ export class MockBackend implements Backend {
     s.accounts = s.accounts.filter((a) => a.id !== accountId);
     s.folders = s.folders.filter((f) => f.accountId !== accountId);
     s.messages = s.messages.filter((m) => m.accountId !== accountId);
+    s.serverMessages = s.serverMessages?.filter((m) => m.accountId !== accountId);
     s.calendars = s.calendars.filter((c) => c.accountId !== accountId);
     s.events = s.events.filter((e) => e.accountId !== accountId);
     s.contacts = s.contacts.filter((c) => c.accountId !== accountId);
@@ -963,31 +1017,168 @@ export class MockBackend implements Backend {
     };
   }
 
-  async searchMessages(text: string, accountId?: string) {
+  /**
+   * Like the core: the messages the index finds (word prefixes, and inside
+   * subjects and senders), at most 200, plus the ones server searches found.
+   */
+  async searchMessages(text: string, accountId?: string, includeIds: string[] = []) {
     await this.delay();
-    const terms = text.toLowerCase().split(/\s+/).filter(Boolean);
-    if (terms.length === 0) return [];
-    return this.state.messages
-      .filter((m) => !accountId || m.accountId === accountId)
-      .filter((m) => {
-        const haystack = [
-          m.subject,
-          m.from?.name,
-          m.from?.address,
-          ...m.to.map((t) => `${t.name ?? ""} ${t.address}`),
-          m.bodyText,
-        ]
-          .join(" ")
-          .toLowerCase();
-        return terms.every((t) => haystack.includes(t));
-      })
-      .sort(newestFirst)
-      .map(summary);
+    const query = parseSearch(text);
+    const inAccount = (m: Message) => !accountId || m.accountId === accountId;
+    // As the app's index: a message's text once it was opened, its preview
+    // before.
+    const indexed = (m: Message) => (this.opened.has(m.id) ? m : { ...m, bodyText: null });
+    const found = isEmptySearch(query)
+      ? []
+      : this.state.messages
+          .filter((m) => inAccount(m) && matchesSearch(query, indexed(m), { infix: true }))
+          .sort(searchOrder)
+          .slice(0, LOCAL_SEARCH_LIMIT);
+    const ids = new Set(found.map((m) => m.id));
+    const included = new Set(includeIds.slice(0, MAX_INCLUDED_IDS));
+    for (const m of this.state.messages) {
+      if (included.has(m.id) && !ids.has(m.id) && inAccount(m)) {
+        ids.add(m.id);
+        found.push(m);
+      }
+    }
+    return found.sort(searchOrder).map(summary);
+  }
+
+  /**
+   * Like the core: searches one account's mail on its "server" (what is on
+   * the device and `serverMessages`, matched as Graph does by the start of
+   * words, or as IMAP does anywhere in them), a page at a time, and brings
+   * what it finds onto the device.
+   */
+  async searchServer(
+    searchId: string,
+    text: string,
+    accountId: string,
+    more = false,
+  ): Promise<ServerSearchResult> {
+    if (!searchId || searchId.length > 100) fail("invalidInput", "Invalid search.");
+    this.account(accountId);
+    const answer = (
+      status: ServerSearchStatus,
+      result: Partial<ServerSearchResult> = {},
+    ): ServerSearchResult => ({
+      searchId,
+      accountId,
+      status,
+      messageIds: [],
+      added: 0,
+      hasMore: false,
+      error: null,
+      ...result,
+    });
+    const query = parseSearch(text);
+    // Like the core, before the search is started: it cancels nothing.
+    if (!isNarrowEnoughForServers(query)) return answer("done");
+    if (this.retiredSearches.includes(searchId)) return answer("cancelled");
+    if (this.serverSearch?.id !== searchId) {
+      this.retireServerSearch();
+      this.serverSearch = { id: searchId, rest: new Map() };
+    }
+    const search = this.serverSearch;
+
+    if (this.serverSearchLatency > 0) {
+      await new Promise((r) => setTimeout(r, this.serverSearchLatency));
+    }
+    while (this.serverSearchGate) await this.serverSearchGate;
+    if (this.serverSearch !== search) return answer("cancelled");
+    const failure = this.serverSearchFailures.get(accountId);
+    if (failure) return answer("failed", { error: clone(failure) });
+
+    let matches: string[];
+    if (more) {
+      const rest = search.rest.get(accountId);
+      if (!rest) return answer("done");
+      matches = rest;
+    } else {
+      // Graph matches words by their start; IMAP's SEARCH, anywhere.
+      const options = { infix: false, substrings: this.account(accountId).kind === "imap" };
+      matches = [...this.state.messages, ...(this.state.serverMessages ?? [])]
+        .filter((m) => m.accountId === accountId && matchesSearch(query, m, options))
+        .sort(searchOrder)
+        .map((m) => m.id);
+    }
+    const page = matches.slice(0, SERVER_SEARCH_PAGE);
+    const rest = matches.slice(SERVER_SEARCH_PAGE);
+    if (rest.length > 0) search.rest.set(accountId, rest);
+    else search.rest.delete(accountId);
+
+    const messageIds: string[] = [];
+    let added = 0;
+    const server = this.state.serverMessages ?? [];
+    for (const id of page) {
+      const index = server.findIndex((m) => m.id === id);
+      if (index >= 0) {
+        // Stored now; the folder's count already had it.
+        this.state.messages.push(...server.splice(index, 1));
+        added += 1;
+        messageIds.push(id);
+      } else if (this.state.messages.some((m) => m.id === id)) {
+        messageIds.push(id);
+      }
+    }
+    if (added > 0) this.emit(["mail"], accountId);
+    return answer("done", { messageIds, added, hasMore: rest.length > 0 });
+  }
+
+  async cancelServerSearch(searchId: string) {
+    if (this.serverSearch?.id === searchId) this.retireServerSearch();
+    // Canceled before it started: it never will.
+    else this.rememberRetiredSearch(searchId);
+  }
+
+  private retireServerSearch() {
+    if (!this.serverSearch) return;
+    this.rememberRetiredSearch(this.serverSearch.id);
+    this.serverSearch = null;
+  }
+
+  private rememberRetiredSearch(searchId: string) {
+    if (this.retiredSearches.includes(searchId)) return;
+    if (this.retiredSearches.length === RETIRED_SEARCHES) this.retiredSearches.shift();
+    this.retiredSearches.push(searchId);
+  }
+
+  /** Holds server searches until the returned function is called (tests). */
+  pauseServerSearch(): () => void {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    this.serverSearchGate = gate;
+    return () => {
+      if (this.serverSearchGate === gate) this.serverSearchGate = null;
+      release();
+    };
+  }
+
+  /**
+   * Deletes a message on the "server" behind the app's back (tests): as in
+   * the core, opening it then removes it here and fails with notFound.
+   */
+  removeFromServer(messageId: string): void {
+    this.goneFromServer.add(messageId);
+  }
+
+  /** Makes the account's server searches fail with `error`, or succeed again with null. */
+  failServerSearch(accountId: string, error: BackendError | null): void {
+    if (error) this.serverSearchFailures.set(accountId, error);
+    else this.serverSearchFailures.delete(accountId);
   }
 
   async getMessage(messageId: string, allowRemote = false) {
     await this.delay();
+    if (this.goneFromServer.delete(messageId)) {
+      const gone = this.message(messageId);
+      this.state.messages = this.state.messages.filter((m) => m.id !== messageId);
+      this.emit(["mail"], gone.accountId);
+      fail("notFound", "This message is no longer on the server.");
+    }
     const m = clone(this.message(messageId));
+    this.opened.add(messageId);
     const allow = allowRemote || this.settings.remoteContent === "allow";
     if (m.bodyHtml && !allow && REMOTE_IMG.test(m.bodyHtml)) {
       m.bodyHtml = m.bodyHtml.replace(REMOTE_IMG, "");

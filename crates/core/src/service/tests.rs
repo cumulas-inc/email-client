@@ -15,7 +15,7 @@ use crate::error::ErrorCode;
 use crate::model::{
     AccountSettings, AttachmentMeta, EmailAddress, EventDraft, Folder, FolderRole,
     ImapAccountUpdate, ImapSettings, Importance, Message, MessageQuery, MessageSummary,
-    OutgoingMessage, ShowAs, TaskDraft, TaskPatch, TaskStatus,
+    OutgoingMessage, ServerSearchStatus, ShowAs, TaskDraft, TaskPatch, TaskStatus,
 };
 use crate::providers::{
     ChangeSubscriptions, FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator,
@@ -35,6 +35,8 @@ pub(crate) struct FakeServer {
     pub fail_sync: bool,
     /// Every message sync fails with this.
     pub failure: Option<Error>,
+    /// Syncs of this folder (by remote id) fail.
+    pub failing_folder: Option<String>,
     /// How often folder counts were asked for.
     pub count_requests: usize,
     /// How often the Inbox's messages were asked for.
@@ -46,6 +48,20 @@ pub(crate) struct FakeServer {
     /// (`watching`), the operations connection is refused.
     pub one_free_slot: bool,
     pub watching: Arc<AtomicUsize>,
+    /// Messages (folder, remote id) the next sync of the folder reports as
+    /// moved out of it, as Graph's does after looking up its removals.
+    pub moves: Vec<(String, String)>,
+    /// Messages outside the sync window, by remote id: server search finds
+    /// them, syncs don't.
+    pub server_only: HashMap<String, (String, MessageSummary)>,
+    /// Server searches wait for this, when set.
+    pub search_gate: Option<Arc<tokio::sync::Notify>>,
+    /// Server searches say when their answer is ready, then wait for
+    /// `search_hold` before giving it, when set.
+    pub search_answered: Option<Arc<tokio::sync::Notify>>,
+    pub search_hold: Option<Arc<tokio::sync::Notify>>,
+    /// Server searches of these accounts fail so.
+    pub search_failures: HashMap<String, Error>,
     next_uid: u32,
 }
 
@@ -149,21 +165,34 @@ impl MailProvider for FakeMail {
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
-        let server = self.server.lock().unwrap();
+        let mut server = self.server.lock().unwrap();
         if server.fail_sync {
             return Err(Error::new(ErrorCode::AuthRequired, "token expired"));
         }
         if let Some(e) = &server.failure {
             return Err(e.clone());
         }
+        if server.failing_folder.as_ref() == Some(&folder.remote_id) {
+            return Err(Error::provider("This folder can't be synced."));
+        }
+        let upserts = server
+            .messages
+            .values()
+            .filter(|(f, _)| *f == folder.remote_id)
+            .map(|(_, m)| m.clone())
+            .collect();
+        let (moves, others): (Vec<_>, Vec<_>) = std::mem::take(&mut server.moves)
+            .into_iter()
+            .partition(|(from, _)| *from == folder.remote_id);
+        server.moves = others;
         Ok(MessageBatch {
-            upserts: server
-                .messages
-                .values()
-                .filter(|(f, _)| *f == folder.remote_id)
-                .map(|(_, m)| m.clone())
+            upserts,
+            // Like a delta: what changed, not the whole folder.
+            full_resync: moves.is_empty(),
+            moved_out: moves
+                .iter()
+                .map(|(_, remote)| server.messages[remote].1.clone())
                 .collect(),
-            full_resync: true,
             sync_state: Some("state".into()),
             ..Default::default()
         })
@@ -190,13 +219,14 @@ impl MailProvider for FakeMail {
     }
 
     async fn fetch_message(&self, m: &MessageLocator) -> Result<MessageContent> {
-        assert!(
-            self.server
-                .lock()
-                .unwrap()
-                .messages
-                .contains_key(&m.remote_id)
-        );
+        {
+            let server = self.server.lock().unwrap();
+            if !server.messages.contains_key(&m.remote_id)
+                && !server.server_only.contains_key(&m.remote_id)
+            {
+                return Err(Error::not_found("message"));
+            }
+        }
         Ok(MessageContent {
             body_html: Some(
                 r#"<p>Hello <img src="https://tracker.example/p.gif"></p><script>x()</script>"#
@@ -265,12 +295,82 @@ impl MailProvider for FakeMail {
         Ok(())
     }
 
+    /// Every term somewhere in the subject, preview or sender, newest
+    /// first; the cursor is where the next page starts.
+    async fn search(
+        &self,
+        query: &crate::search::SearchQuery,
+        _folders: &[Folder],
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<crate::providers::SearchPage> {
+        let gate = self.server.lock().unwrap().search_gate.clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        let (page, answered, hold) = {
+            let server = self.server.lock().unwrap();
+            (
+                self.search_page(&server, query, cursor, limit),
+                server.search_answered.clone(),
+                server.search_hold.clone(),
+            )
+        };
+        if let Some(answered) = answered {
+            answered.notify_one();
+        }
+        if let Some(hold) = hold {
+            hold.notified().await;
+        }
+        page
+    }
+
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {
         if message.reply_to_message_id.is_some() {
             assert!(original.is_some());
         }
         self.server.lock().unwrap().sent.push(message.clone());
         Ok(())
+    }
+}
+
+impl FakeMail {
+    /// See `search` above.
+    fn search_page(
+        &self,
+        server: &FakeServer,
+        query: &crate::search::SearchQuery,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<crate::providers::SearchPage> {
+        if let Some(e) = server.search_failures.get(&self.account_id) {
+            return Err(e.clone());
+        }
+        let matches = |m: &MessageSummary| {
+            let from = m
+                .from
+                .as_ref()
+                .map(|f| format!("{f:?}"))
+                .unwrap_or_default();
+            let text = format!("{} {} {from}", m.subject, m.preview).to_lowercase();
+            query.terms.iter().all(|t| text.contains(&t.text))
+                && (!query.has_attachment || m.has_attachments)
+        };
+        let mut found: Vec<MessageSummary> = server
+            .messages
+            .values()
+            .chain(server.server_only.values())
+            .map(|(_, m)| m)
+            .filter(|m| m.account_id == self.account_id && matches(m))
+            .cloned()
+            .collect();
+        found.sort_by(|a, b| b.received_at.cmp(&a.received_at).then(a.id.cmp(&b.id)));
+        let start: usize = cursor.map_or(0, |c| c.parse().unwrap());
+        let end = (start + limit as usize).min(found.len());
+        Ok(crate::providers::SearchPage {
+            messages: found[start..end].to_vec(),
+            next: (end < found.len()).then(|| end.to_string()),
+        })
     }
 }
 
@@ -711,7 +811,7 @@ async fn sync_failure_is_recorded_on_the_account() {
 async fn reading_a_message_fetches_sanitises_and_caches_it() {
     let h = harness();
     let account = account_with_mail(&h).await;
-    let id = h.service.search_messages("welcome", None).unwrap()[0]
+    let id = h.service.search_messages("welcome", None, &[]).unwrap()[0]
         .id
         .clone();
 
@@ -818,7 +918,7 @@ async fn flags_moves_and_deletes_go_to_server_then_store() {
 async fn sending_validates_recipients_and_links_replies() {
     let h = harness();
     let account = account_with_mail(&h).await;
-    let original = h.service.search_messages("invoice", None).unwrap()[0]
+    let original = h.service.search_messages("invoice", None, &[]).unwrap()[0]
         .id
         .clone();
     let mut message = OutgoingMessage {
@@ -1305,6 +1405,556 @@ async fn mail_moved_in_elsewhere_refreshes_both_folders_counts() {
     assert_eq!((archive.unread_count, archive.total_count), (0, 0));
     // A message moved in isn't new mail.
     assert!(h.sink.new_mail.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_targeted_sync_after_a_move_refreshes_both_folders() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let welcome = local_id(&account.id, EntityKind::Message, "INBOX:1");
+    // Read here, so its body is stored.
+    h.service.get_message(&welcome, false).await.unwrap();
+    // Moved to the Archive on the phone (keeping its id, as on Graph);
+    // only the Inbox is synced.
+    {
+        let mut server = h.server.lock().unwrap();
+        let (folder, message) = server.messages.get_mut("INBOX:1").unwrap();
+        *folder = "Archive".into();
+        message.folder_id = local_id(&account.id, EntityKind::Folder, "Archive");
+        server.moves.push(("INBOX".into(), "INBOX:1".into()));
+    }
+    h.service
+        .sync_targets(&account.id, SyncScope::inbox())
+        .await
+        .unwrap();
+    let store = h.service.store();
+    let archive = store
+        .find_folder_by_role(&account.id, FolderRole::Archive)
+        .unwrap()
+        .unwrap();
+    let moved = store.get_message_summary(&welcome).unwrap();
+    assert_eq!(moved.folder_id, archive.id);
+    assert!(store.get_message_content(&welcome).unwrap().is_some());
+    // Both folders' counts came from the server.
+    let inbox = inbox(&h, &account);
+    assert_eq!((inbox.unread_count, inbox.total_count), (1, 1));
+    assert_eq!((archive.unread_count, archive.total_count), (1, 1));
+    assert_eq!(h.server.lock().unwrap().count_requests, 2);
+    // Its new-mail notification can go.
+    assert_eq!(*h.sink.settled.lock().unwrap(), [welcome]);
+}
+
+// --- server search ---------------------------------------------------------------
+
+/// A message only on the server, received `days_ago`.
+fn on_server_only(
+    h: &Harness,
+    account: &Account,
+    folder: &str,
+    remote: &str,
+    subject: &str,
+    days_ago: i64,
+) -> String {
+    let mut m = summary(&account.id, folder, remote, subject);
+    m.received_at = Utc::now() - Duration::days(days_ago);
+    let id = m.id.clone();
+    h.server
+        .lock()
+        .unwrap()
+        .server_only
+        .insert(remote.into(), (folder.into(), m));
+    id
+}
+
+fn local_ids(h: &Harness, text: &str, include: &[String]) -> Vec<String> {
+    h.service
+        .search_messages(text, None, include)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn server_search_stores_results_outside_the_window_and_local_search_includes_them() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let old = on_server_only(
+        &h,
+        &account,
+        "Archive",
+        "Archive:7",
+        "Old zebracorn invoice",
+        400,
+    );
+    assert!(local_ids(&h, "zebracorn", &[]).is_empty());
+
+    let found = h
+        .service
+        .search_server("s-1", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert_eq!(found.message_ids, [old.as_str()]);
+    assert_eq!((found.added, found.has_more), (1, false));
+    assert!(found.error.is_none());
+    assert_eq!(found.search_id, "s-1");
+    assert_eq!(found.account_id, account.id);
+
+    // Stored and indexed: a store row like any other, in its folder.
+    assert_eq!(
+        local_ids(&h, "zebracorn", &found.message_ids),
+        [old.as_str()]
+    );
+    assert_eq!(local_ids(&h, "zebracorn", &[]), [old.as_str()]);
+    let archive = h
+        .service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Archive)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        h.service
+            .store()
+            .get_message_summary(&old)
+            .unwrap()
+            .folder_id,
+        archive.id
+    );
+    // Found again: nothing new.
+    let again = h
+        .service
+        .search_server("s-1", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    assert_eq!((again.message_ids.len(), again.added), (1, 0));
+    // A full sync of a window without it keeps it.
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(local_ids(&h, "zebracorn", &[]), [old]);
+
+    let json = serde_json::to_value(&found).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "searchId": "s-1",
+            "accountId": account.id,
+            "status": "done",
+            "messageIds": found.message_ids,
+            "added": 1,
+            "hasMore": false,
+            "error": null,
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_new_search_cancels_the_previous_one() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    on_server_only(
+        &h,
+        &account,
+        "Archive",
+        "Archive:7",
+        "Old zebracorn invoice",
+        400,
+    );
+    h.server.lock().unwrap().search_gate = Some(Arc::new(tokio::sync::Notify::new()));
+    let first = h
+        .service
+        .search_server("a", "zebracorn", &account.id, false);
+    let second = async {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        h.server.lock().unwrap().search_gate = None;
+        h.service
+            .search_server("b", "zebracorn", &account.id, false)
+            .await
+    };
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap();
+    assert_eq!(first.status, ServerSearchStatus::Cancelled);
+    assert!(first.message_ids.is_empty() && first.error.is_none());
+    let second = second.unwrap();
+    assert_eq!(second.status, ServerSearchStatus::Done);
+    // Nothing of the first was stored: the second added it.
+    assert_eq!(second.added, 1);
+    // A call for the first arriving late doesn't replace the second.
+    let late = h
+        .service
+        .search_server("a", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    assert_eq!(late.status, ServerSearchStatus::Cancelled);
+    let more = h
+        .service
+        .search_server("b", "zebracorn", &account.id, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        (more.status, more.message_ids.len()),
+        (ServerSearchStatus::Done, 0)
+    );
+}
+
+#[tokio::test]
+async fn cancel_server_search_cancels_pending_calls() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let old = on_server_only(
+        &h,
+        &account,
+        "Archive",
+        "Archive:7",
+        "Old zebracorn invoice",
+        400,
+    );
+    let gate = Arc::new(tokio::sync::Notify::new());
+    h.server.lock().unwrap().search_gate = Some(gate.clone());
+    let pending = h
+        .service
+        .search_server("a", "zebracorn", &account.id, false);
+    let cancel = async {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        h.service.cancel_server_search("a");
+        // The server answering now changes nothing.
+        gate.notify_waiters();
+    };
+    let (pending, ()) = tokio::join!(pending, cancel);
+    assert_eq!(pending.unwrap().status, ServerSearchStatus::Cancelled);
+    assert!(h.service.store().get_message_summary(&old).is_err());
+    h.server.lock().unwrap().search_gate = None;
+    let again = h
+        .service
+        .search_server("a", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    assert_eq!(again.status, ServerSearchStatus::Cancelled);
+    // Canceled before it started, a search never starts.
+    h.service.cancel_server_search("c");
+    let early = h
+        .service
+        .search_server("c", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    assert_eq!(early.status, ServerSearchStatus::Cancelled);
+    assert!(h.service.store().get_message_summary(&old).is_err());
+}
+
+#[tokio::test]
+async fn server_search_errors_are_per_account() {
+    let h = harness();
+    let work = account_with_mail(&h).await;
+    let home = h
+        .service
+        .add_imap_account(new_imap_account("home@example.com"))
+        .await
+        .unwrap();
+    h.server.lock().unwrap().search_failures.insert(
+        home.id.clone(),
+        Error::network("Could not reach imap.example.com."),
+    );
+    let (work_result, home_result) = tokio::join!(
+        h.service.search_server("s", "invoice", &work.id, false),
+        h.service.search_server("s", "invoice", &home.id, false),
+    );
+    let work_result = work_result.unwrap();
+    assert_eq!(work_result.status, ServerSearchStatus::Done);
+    assert_eq!(work_result.message_ids.len(), 1);
+    let home_result = home_result.unwrap();
+    assert_eq!(home_result.status, ServerSearchStatus::Failed);
+    let error = home_result.error.clone().unwrap();
+    assert_eq!(error.code, ErrorCode::Network);
+    let json = serde_json::to_value(&home_result).unwrap();
+    assert_eq!(
+        json["error"],
+        serde_json::json!({ "code": "network", "message": "Could not reach imap.example.com." })
+    );
+    assert_eq!(json["status"], "failed");
+    assert_eq!(json["messageIds"], serde_json::json!([]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn server_search_times_out() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    h.server.lock().unwrap().search_gate = Some(Arc::new(tokio::sync::Notify::new()));
+    let started = tokio::time::Instant::now();
+    let result = h
+        .service
+        .search_server("s", "invoice", &account.id, false)
+        .await
+        .unwrap();
+    assert_eq!(result.status, ServerSearchStatus::Failed);
+    let error = result.error.unwrap();
+    assert_eq!(error.code, ErrorCode::Network);
+    // The UI's Try again button says the rest.
+    assert_eq!(
+        error.message,
+        "The server didn't answer in time; it may be busy."
+    );
+    assert!(started.elapsed() >= SERVER_SEARCH_TIMEOUT);
+    assert!(started.elapsed() < std::time::Duration::from_secs(46));
+}
+
+#[tokio::test]
+async fn show_more_continues_from_the_cursor_and_stops() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    for i in 0..60 {
+        on_server_only(
+            &h,
+            &account,
+            "Archive",
+            &format!("Archive:{i}"),
+            &format!("Purchase order {i}"),
+            100 + i,
+        );
+    }
+    let search = |more| h.service.search_server("s", "purchase", &account.id, more);
+    let first = search(false).await.unwrap();
+    assert_eq!(
+        (first.message_ids.len(), first.added, first.has_more),
+        (50, 50, true)
+    );
+    let second = search(true).await.unwrap();
+    assert_eq!(
+        (second.message_ids.len(), second.added, second.has_more),
+        (10, 10, false)
+    );
+    assert!(
+        second
+            .message_ids
+            .iter()
+            .all(|id| !first.message_ids.contains(id))
+    );
+    let third = search(true).await.unwrap();
+    assert_eq!(third.status, ServerSearchStatus::Done);
+    assert!(third.message_ids.is_empty() && !third.has_more);
+    // Every one is a search result now, newest first.
+    let all: Vec<String> = first
+        .message_ids
+        .into_iter()
+        .chain(second.message_ids)
+        .collect();
+    assert_eq!(local_ids(&h, "purchase", &[]).len(), 60);
+    assert_eq!(local_ids(&h, "", &all), all);
+}
+
+#[tokio::test]
+async fn an_empty_or_too_broad_query_is_done_with_nothing() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    for text in ["", "  ", "to:", "has:pdf", "a b", "from:a"] {
+        let result = h
+            .service
+            .search_server("s", text, &account.id, false)
+            .await
+            .unwrap();
+        assert_eq!(result.status, ServerSearchStatus::Done, "{text:?}");
+        assert!(result.message_ids.is_empty() && !result.has_more);
+    }
+}
+
+#[tokio::test]
+async fn unknown_account_rejects() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let error = h
+        .service
+        .search_server("s", "invoice", "nobody", false)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+    for id in [String::new(), "x".repeat(101)] {
+        let error = h
+            .service
+            .search_server(&id, "invoice", &account.id, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+    }
+    let longest = "x".repeat(100);
+    assert!(
+        h.service
+            .search_server(&longest, "invoice", &account.id, false)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn opening_a_search_result_touches_it_and_a_gone_one_is_removed() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let kept = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
+    let gone = on_server_only(
+        &h,
+        &account,
+        "Archive",
+        "Archive:8",
+        "Zebracorn invoice",
+        401,
+    );
+    let found = h
+        .service
+        .search_server("s", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    assert_eq!(found.message_ids, [kept.clone(), gone.clone()]);
+    // Long unseen, then opened: kept by the pruning that follows a sync.
+    h.service
+        .store()
+        .execute_for_tests("UPDATE messages SET search_seen_at = 0 WHERE search_only = 1");
+    let message = h.service.get_message(&kept, false).await.unwrap();
+    assert!(message.body_html.unwrap().contains("Hello"));
+
+    // Deleted on the server, outside the window: noticed when opened. The
+    // folder's counts are the server's, which may not count it any more.
+    h.server.lock().unwrap().server_only.remove("Archive:8");
+    let archive = h
+        .service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Archive)
+        .unwrap()
+        .unwrap();
+    h.service
+        .store()
+        .set_folder_counts(&archive.id, 3, 10)
+        .unwrap();
+    let error = h.service.get_message(&gone, false).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+    assert_eq!(error.message, "This message is no longer on the server.");
+    assert!(h.service.store().get_message_summary(&gone).is_err());
+    assert!(h.sink.settled.lock().unwrap().contains(&gone));
+    let archive = h.service.store().get_folder(&archive.id).unwrap();
+    assert_eq!((archive.unread_count, archive.total_count), (3, 10));
+
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(local_ids(&h, "zebracorn", &[]), [kept]);
+}
+
+#[tokio::test]
+async fn stale_search_results_are_pruned_after_sync() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let stale = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
+    let fresh = on_server_only(&h, &account, "INBOX", "INBOX:70", "Zebracorn invoice", 300);
+    h.service
+        .search_server("s", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    let fifteen_days_ago = (Utc::now() - Duration::days(SEARCH_RESULT_TTL_DAYS + 1)).timestamp();
+    h.service.store().execute_for_tests(&format!(
+        "UPDATE messages SET search_seen_at = {fifteen_days_ago} WHERE remote_id = 'Archive:7'"
+    ));
+    let inbox_before = inbox(&h, &account);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert!(h.service.store().get_message_summary(&stale).is_err());
+    assert!(h.service.store().get_message_summary(&fresh).is_ok());
+    let inbox_after = inbox(&h, &account);
+    assert_eq!(inbox_before.total_count, inbox_after.total_count);
+}
+
+/// The user deletes a message while a server search whose answer lists it
+/// is on its way: the answer, stored after, doesn't bring it back.
+#[tokio::test]
+async fn a_search_answered_before_a_deletion_doesnt_bring_it_back() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let answered = Arc::new(tokio::sync::Notify::new());
+    let hold = Arc::new(tokio::sync::Notify::new());
+    {
+        let mut server = h.server.lock().unwrap();
+        server.search_answered = Some(answered.clone());
+        server.search_hold = Some(hold.clone());
+    }
+    let invoice = local_id(&account.id, EntityKind::Message, "INBOX:2");
+    let search = h.service.search_server("s", "invoice", &account.id, false);
+    let delete = async {
+        answered.notified().await;
+        h.service
+            .delete_messages(std::slice::from_ref(&invoice))
+            .await
+            .unwrap();
+        hold.notify_one();
+    };
+    let (found, ()) = tokio::join!(search, delete);
+    let found = found.unwrap();
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert!(found.message_ids.is_empty(), "{:?}", found.message_ids);
+    // Only its copy in Trash, before and after a sync.
+    let trash = h
+        .service
+        .store()
+        .find_folder_by_role(&account.id, FolderRole::Trash)
+        .unwrap()
+        .unwrap();
+    for _ in 0..2 {
+        assert!(h.service.store().get_message_summary(&invoice).is_err());
+        let hits = h.service.search_messages("invoice", None, &[]).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].folder_id, trash.id);
+        h.service.sync_account(&account.id).await.unwrap();
+    }
+}
+
+/// New mail a server search finds before a sync does is still new mail to
+/// the sync; old mail it finds never is.
+#[tokio::test]
+async fn new_mail_found_by_a_search_first_still_alerts() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    add_message(&h, &account, "INBOX", "INBOX:3", "Fresh zebracorn");
+    on_server_only(&h, &account, "INBOX", "INBOX:4", "Old zebracorn", 400);
+    let found = h
+        .service
+        .search_server("s", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    assert_eq!(found.added, 2);
+    // A sync of a window that now reaches the old one too.
+    {
+        let mut server = h.server.lock().unwrap();
+        let old = server.server_only.remove("INBOX:4").unwrap();
+        server.messages.insert("INBOX:4".into(), old);
+    }
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(*h.sink.new_mail.lock().unwrap(), ["Fresh zebracorn"]);
+}
+
+#[tokio::test]
+async fn search_results_are_pruned_even_when_the_sync_fails() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let stale = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
+    h.service
+        .search_server("s", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    h.service
+        .store()
+        .execute_for_tests("UPDATE messages SET search_seen_at = 0 WHERE search_only = 1");
+    // One folder keeps failing while the others sync.
+    h.server.lock().unwrap().failing_folder = Some("Archive".into());
+    assert!(h.service.sync_account(&account.id).await.is_err());
+    assert!(h.service.store().get_message_summary(&stale).is_err());
+
+    // Nor does a sign-in that expired keep them.
+    h.service
+        .search_server("t", "zebracorn", &account.id, false)
+        .await
+        .unwrap();
+    h.service
+        .store()
+        .execute_for_tests("UPDATE messages SET search_seen_at = 0 WHERE search_only = 1");
+    h.server.lock().unwrap().fail_sync = true;
+    let error = h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::AuthRequired);
+    assert!(h.service.store().get_message_summary(&stale).is_err());
 }
 
 /// A service with background work and a scripted push watcher.

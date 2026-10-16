@@ -28,9 +28,13 @@ pub(crate) use self::connection::is_server_busy;
 pub use self::idle::{IdleConfig, ImapIdleWatcher};
 
 use self::connection::{ImapSession, MailboxInfo, quote};
-use super::{FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SyncWindow};
+use super::{
+    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SearchPage,
+    SyncWindow,
+};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Folder, ImapSettings, Message, OutgoingMessage};
+use crate::search::SearchQuery;
 
 /// UIDs per `UID STORE`/`MOVE`/`COPY`/`EXPUNGE` command, keeping command
 /// lines well below server limits.
@@ -71,6 +75,9 @@ macro_rules! with_session {
         }
     }};
 }
+
+// After `with_session!`, which it uses.
+mod search;
 
 impl ImapProvider {
     pub fn new(account_id: impl Into<String>, credentials: ImapCredentials) -> Self {
@@ -160,7 +167,12 @@ pub async fn test_connection(credentials: &ImapCredentials) -> Result<()> {
 
 /// Builds the remote id of a message.
 fn remote_id(mailbox: &str, uid_validity: u32, uid: u32) -> String {
-    format!("{mailbox}{ID_SEPARATOR}{uid_validity}{ID_SEPARATOR}{uid}")
+    format!("{}{uid}", remote_id_prefix(mailbox, uid_validity))
+}
+
+/// What the remote ids of a mailbox's messages start with, before the UID.
+fn remote_id_prefix(mailbox: &str, uid_validity: u32) -> String {
+    format!("{mailbox}{ID_SEPARATOR}{uid_validity}{ID_SEPARATOR}")
 }
 
 /// A message's address on the server, parsed from its remote id.
@@ -511,6 +523,16 @@ impl MailProvider for ImapProvider {
         with_session!(self, |session| delete_messages(session, messages))
     }
 
+    async fn search(
+        &self,
+        query: &SearchQuery,
+        folders: &[Folder],
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<SearchPage> {
+        self.search_mailbox(query, folders, cursor, limit).await
+    }
+
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {
         let built = smtp::build_message(&self.credentials, message, original)?;
         let raw = built.formatted();
@@ -541,6 +563,21 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn numbered_ids_cover_a_mailbox_s_uids_from_one_up() {
+        let from_5 = crate::providers::NumberedIds {
+            prefix: remote_id_prefix("INBOX", 7),
+            from: 5,
+        };
+        assert!(from_5.contains(&remote_id("INBOX", 7, 5)));
+        assert!(from_5.contains(&remote_id("INBOX", 7, 4_000_000_000)));
+        assert!(!from_5.contains(&remote_id("INBOX", 7, 4)));
+        assert!(!from_5.contains(&remote_id("INBOX", 8, 9)));
+        assert!(!from_5.contains(&remote_id("INBOX/Sub", 7, 9)));
+        assert!(!from_5.contains(&format!("{}+9", remote_id_prefix("INBOX", 7))));
+        assert!(!from_5.contains(&remote_id_prefix("INBOX", 7)));
     }
 
     #[test]

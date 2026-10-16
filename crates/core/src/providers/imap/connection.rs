@@ -290,6 +290,17 @@ pub(super) struct MailboxInfo {
     pub highest_modseq: Option<u64>,
 }
 
+/// What `EXAMINE` and a command after it reported in one mailbox; see
+/// [`ImapSession::examine_each`].
+#[derive(Debug, Default)]
+pub(super) struct MailboxRun {
+    pub info: MailboxInfo,
+    /// What `SEARCH` found.
+    pub uids: Vec<u32>,
+    /// What `FETCH` returned.
+    pub fetched: Vec<FetchedMessage>,
+}
+
 #[derive(Debug)]
 struct Selected {
     mailbox: String,
@@ -918,6 +929,144 @@ impl ImapSession {
         })
         .await?;
         Ok(uids)
+    }
+
+    /// Runs a command in each mailbox, after `EXAMINE`ing it: all pipelined,
+    /// one round trip for all of them where one at a time takes two each.
+    /// The commands (a `UID SEARCH` or a `UID FETCH`) must not need the
+    /// server's go-ahead (no synchronizing literals). Per mailbox, what came
+    /// back, or why it failed (`Unsupported` for a charset the server
+    /// doesn't know); the outer error means the connection failed.
+    pub(super) async fn examine_each(
+        &mut self,
+        jobs: &[(String, String)],
+    ) -> Result<Vec<Result<MailboxRun>>> {
+        let mut commands = Vec::with_capacity(jobs.len() * 2);
+        for (mailbox, command) in jobs {
+            commands.push(format!("EXAMINE {}", quote(mailbox)?));
+            commands.push(command.clone());
+        }
+        // Whichever mailbox ends up selected, `open` selects its own again.
+        self.selected = None;
+        let mut runs: Vec<MailboxRun> = jobs.iter().map(|_| MailboxRun::default()).collect();
+        let mut bad_charset = vec![false; commands.len()];
+        // Commands complete in order, so what comes before the n-th tagged
+        // completion answers the n-th command.
+        let mut completed = 0;
+        let results = self
+            .run(&commands, |response| {
+                let Some(run) = runs.get_mut(completed / 2) else {
+                    return;
+                };
+                match response {
+                    Response::Done { outcome, .. } => {
+                        bad_charset[completed] =
+                            matches!(outcome.code, Some(ResponseCode::BadCharset(_)));
+                        completed += 1;
+                    }
+                    Response::Data {
+                        status: Status::Ok,
+                        outcome,
+                    } => {
+                        if let Some(ResponseCode::UidValidity(v)) = outcome.code {
+                            run.info.uid_validity = v;
+                        }
+                    }
+                    Response::MailboxData(MailboxDatum::Exists(n)) => run.info.exists = *n,
+                    Response::MailboxData(MailboxDatum::Search(found)) => {
+                        run.uids.extend_from_slice(found);
+                    }
+                    Response::Fetch(_, attributes) => {
+                        run.fetched.extend(FetchedMessage::parse(attributes));
+                    }
+                    _ => {}
+                }
+            })
+            .await?;
+        let mut results = results.into_iter();
+        Ok(runs
+            .into_iter()
+            .enumerate()
+            .map(|(i, run)| {
+                let examined = results.next().unwrap_or(Ok(()));
+                let ran = results.next().unwrap_or(Ok(()));
+                // A command after a failed EXAMINE ran in no mailbox (or, on
+                // a lax server, the one before): its answer is ignored.
+                examined?;
+                if bad_charset[2 * i + 1] {
+                    return Err(Error::unsupported(
+                        "This mail server can't search for these characters.",
+                    ));
+                }
+                ran.map(|()| run)
+            })
+            .collect())
+    }
+
+    /// `UID SEARCH` in the selected mailbox, sent in `segments` (see
+    /// [`crate::search::imap::ImapCriteria::render`]): each after the first
+    /// once the server asks for the literal the previous one announced. A
+    /// server that doesn't know the charset gives an `Unsupported` error.
+    pub(super) async fn uid_search_segments(&mut self, segments: &[String]) -> Result<Vec<u32>> {
+        let Some((first, rest)) = segments.split_first() else {
+            return Ok(Vec::new());
+        };
+        let command = format!("UID SEARCH {first}");
+        self.healthy = false;
+        self.last_used = Instant::now();
+        let tag = self
+            .session
+            .run_command(&command)
+            .await
+            .map_err(imap_failure)?;
+        let mut rest = rest.iter();
+        let mut uids = Vec::new();
+        let mut farewell: Option<String> = None;
+        loop {
+            let data = match self.session.read_response().await {
+                Ok(Some(data)) => data,
+                Ok(None) => return Err(closed(&farewell)),
+                Err(e) => return Err(io_failure(e)),
+            };
+            match data.parsed() {
+                Response::Continue(_) => {
+                    let Some(segment) = rest.next() else {
+                        return Err(Error::provider(
+                            "The IMAP server asked for more of a search than there was.",
+                        ));
+                    };
+                    self.session
+                        .run_command_untagged(segment)
+                        .await
+                        .map_err(imap_failure)?;
+                }
+                Response::MailboxData(MailboxDatum::Search(found)) => {
+                    uids.extend_from_slice(found);
+                }
+                Response::Done {
+                    tag: done,
+                    status,
+                    outcome,
+                } if *done == tag => {
+                    // Complete either way, even when refused before every
+                    // literal was sent: the session stays usable.
+                    self.healthy = true;
+                    self.last_used = Instant::now();
+                    if matches!(outcome.code, Some(ResponseCode::BadCharset(_))) {
+                        return Err(Error::unsupported(
+                            "This mail server can't search for these characters.",
+                        ));
+                    }
+                    check_status(&command, status, outcome.information.as_deref())?;
+                    return Ok(uids);
+                }
+                Response::Data {
+                    status: Status::Bye,
+                    outcome,
+                } => farewell = outcome.information.as_deref().map(str::to_owned),
+                _ => {}
+            }
+        }
     }
 
     /// `UID FETCH` in the selected mailbox. Unsolicited `FETCH` responses for
