@@ -158,14 +158,15 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
   5. installs the app from a local copy of the site on both architectures, from
      the `.flatpakrepo` and from the `.flatpakref` (`repo/smoke-test.sh`);
   6. and only then, when publishing, deploys the site to Pages, if the
-     published repository is still the one it mirrored;
+     published repository is still the one it mirrored
+     (`repo/check-live-summary.sh`);
   7. then waits until Pages serves the new summary, adds the remote from the
      live `.flatpakrepo` and finds the app on both architectures
      (`repo/verify-live.sh`), and reports the type the `.flatpakref` is served
      as.
 
-  `repo/test.sh` runs steps 1–5 and 7 against fake builds, as part of every
-  run.
+  `repo/test.sh` runs these steps against fake builds, all but the deploy
+  itself, as part of every run.
 
 - **Kept**: up to the last 3 builds of each architecture (`KEEP_BUILDS` in
   `repo/common.sh`), fewer after the first releases or if the history ever has

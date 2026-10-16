@@ -53,7 +53,6 @@ jobs:
     outputs:
       publish: ${{ steps.mode.outputs.publish }}
       label: ${{ steps.mode.outputs.label }}
-      repo-url: ${{ steps.mode.outputs.repo-url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -83,7 +82,6 @@ jobs:
           {
             echo "publish=$publish"
             echo "label=$label"
-            echo "repo-url=$REPO_URL"
           } >>"$GITHUB_OUTPUT"
           if [ "$publish" = true ]; then
             echo "Publishing $label to $SITE_URL" >>"$GITHUB_STEP_SUMMARY"
@@ -389,36 +387,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The site adds to the history this run mirrored. If anything was
       # deployed since (a run of another tag, an older run re-run), deploying
-      # it would drop that. A new query string gets past Pages' cache.
+      # it would drop that.
       - name: Check that the published repository hasn't changed since
         env:
           MIRRORED_SUMMARY: ${{ needs.publish.outputs.mirrored-summary }}
-          REPO_URL: ${{ needs.mode.outputs.repo-url }}
-        run: |
-          status=$(curl --silent --show-error --location --connect-timeout 20 --max-time 120 \
-            --retry 3 --retry-delay 5 --output "$RUNNER_TEMP/summary" --write-out '%{http_code}' \
-            "${REPO_URL}summary?run=$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT.$RANDOM")
-          case "$status" in
-            200) live=$(sha256sum "$RUNNER_TEMP/summary" | cut -d ' ' -f 1) ;;
-            404) live=none ;;
-            *)
-              echo "::error::${REPO_URL}summary answers HTTP $status; not deploying over it."
-              exit 1
-              ;;
-          esac
-          if [ -z "$MIRRORED_SUMMARY" ] || [ "$live" != "$MIRRORED_SUMMARY" ]; then
-            echo "::error::The published repository changed since this run mirrored it (summary ${MIRRORED_SUMMARY:-unknown}, now $live): deploying would drop what was published in between. Run the newest release tag's workflow again, all jobs."
-            exit 1
-          fi
-          echo "The published summary is still $live, the one this run added to."
+        run: packaging/flatpak/repo/check-live-summary.sh "$MIRRORED_SUMMARY"
       - id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 

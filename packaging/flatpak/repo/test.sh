@@ -24,6 +24,9 @@
 #    publish signed with it that carries the next key (phase 1), then from
 #    one signed with the next key only (phase 2), and the next publishes'
 #    mirrors trust what they must;
+#  - check-live-summary.sh lets a deploy go ahead only when the published
+#    summary is still the one mirrored, or there's still none (404), and
+#    stops it on any other summary, a server error or no answer;
 #  - verify-live.sh finds the deployed summary and the app on a "live" site,
 #    and gives up on a summary that isn't the deployed one;
 #  - smoke-test.sh installs the last one from the .flatpakrepo and the
@@ -656,6 +659,29 @@ for file in "$REMOTE_NAME.flatpakrepo" "$APP_ID.flatpakref"; do
   sed "s|^Url=.*|Url=$www/verify/repo/|" "$site/$file" >"$work/www/verify/$file"
 done
 deployed=$(sha256sum <"$site/repo/summary" | cut -d ' ' -f 1)
+other_summary=$(sha256sum <"$site/repo/config" | cut -d ' ' -f 1)
+
+# Before a deploy: is what's published still what the run mirrored?
+check_live() { # URL MIRRORED-SUMMARY
+  "$here/check-live-summary.sh" --url "$1" "$2"
+}
+expect_success "check-live-summary: the published summary is still the one mirrored" \
+  check_live "$www/verify/repo" "$deployed"
+expect_error "check-live-summary: a published summary that isn't the one mirrored" \
+  "changed since this run mirrored it" check_live "$www/verify/repo" "$other_summary"
+expect_success "check-live-summary: nothing published (404), and nothing mirrored" \
+  check_live "$www/nothing-published/repo" none
+expect_error "check-live-summary: nothing published (404), but a summary mirrored" \
+  "changed since this run mirrored it" check_live "$www/nothing-published/repo" "$deployed"
+expect_error "check-live-summary: a summary published, but nothing mirrored" \
+  "changed since this run mirrored it" check_live "$www/verify/repo" none
+expect_error "check-live-summary: no mirrored summary given" \
+  "changed since this run mirrored it" check_live "$www/verify/repo" ""
+expect_error "check-live-summary: a server error" "answers HTTP 500" \
+  check_live "http://127.0.0.1:$error_port/repo" none
+expect_error "check-live-summary: an unreachable host" "Fetching .* failed" \
+  check_live "http://127.0.0.1:$unused_port/repo" none
+
 if "$here/verify-live.sh" --site "$www/verify" --timeout 5 "$deployed" >"$work/report" 2>"$work/output"; then
   pass "verify-live: the deployed site"
   for arch in $ARCHES; do
@@ -668,7 +694,7 @@ else
   cat "$work/output" >&2
 fi
 expect_error "verify-live: a summary that isn't the deployed one" "still isn't the one deployed" \
-  "$here/verify-live.sh" --site "$www/verify" --timeout 1 "$(sha256sum <"$site/repo/config" | cut -d ' ' -f 1)"
+  "$here/verify-live.sh" --site "$www/verify" --timeout 1 "$other_summary"
 
 # --- Installing -----------------------------------------------------------------
 
