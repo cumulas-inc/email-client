@@ -16,7 +16,9 @@
 #
 # Usage: test.sh
 # Needs flatpak, ostree, gpg, python3 and curl. Your own Flatpak
-# installations are left alone: it uses a temporary FLATPAK_USER_DIR.
+# installations are left alone: it uses a temporary FLATPAK_USER_DIR. The
+# test keys' GnuPG homes go in /tmp whatever TMPDIR is: gpg-agent puts its
+# sockets there, and a socket's path can't be much longer than 100 bytes.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -27,6 +29,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 unset GITHUB_ACTIONS FLATPAK_GPG_PRIVATE_KEY
 
 work=$(mktemp -d)
+keys=$(mktemp -d /tmp/flatpak-test-keys.XXXXXX)
 servers=()
 gnupg_homes=()
 cleanup() {
@@ -38,7 +41,7 @@ cleanup() {
   for home in "${gnupg_homes[@]}"; do
     "$here/signing-key.sh" remove "$home" 2>/dev/null || true
   done
-  rm -rf -- "$work"
+  rm -rf -- "$work" "$keys"
 }
 trap cleanup EXIT
 export FLATPAK_USER_DIR="$work/flatpak-user"
@@ -91,28 +94,35 @@ wait_for() {
 
 # --- Signing keys -------------------------------------------------------------
 
-new_key() { # NAME → $work/keys/NAME (GNUPGHOME), NAME.gpg (public key), NAME.fpr
+# Runs gpg, and stops the test with gpg's messages if it fails: a key the
+# test needs that can't be made would only show up as checks failing later.
+gpg_or_die() { # WHAT GPG-ARGUMENT...
+  local what=$1
+  shift
+  gpg "$@" 2>"$work/gpg.log" || die "$what failed: $(cat "$work/gpg.log")"
+}
+new_key() { # NAME → $keys/NAME (GNUPGHOME), NAME.gpg (public key), NAME.fpr
   local name=$1
-  mkdir -p "$work/keys"
-  gnupg_homes+=("$work/keys/$name")
-  "$here/signing-key.sh" throwaway "$work/keys/$name" "$work/keys/$name.gpg" >"$work/keys/$name.fpr" 2>/dev/null
+  gnupg_homes+=("$keys/$name")
+  "$here/signing-key.sh" throwaway "$keys/$name" "$keys/$name.gpg" >"$keys/$name.fpr" 2>"$work/gpg.log" ||
+    die "Generating the test key '$name' failed: $(cat "$work/gpg.log")"
 }
 secret_of() {
-  gpg --homedir "$work/keys/$1" --batch --armor --export-secret-keys 2>/dev/null
+  gpg_or_die "Exporting the test key '$1'" --homedir "$keys/$1" --batch --armor --export-secret-keys
 }
 import_key() { # SECRET PUBLIC-KEY → imports into a new GNUPGHOME
-  local home="$work/keys/import.$RANDOM$RANDOM"
+  local home="$keys/import.$RANDOM$RANDOM"
   gnupg_homes+=("$home")
   FLATPAK_GPG_PRIVATE_KEY=$1 "$here/signing-key.sh" import "$home" "$2"
 }
 
 new_key signer
 new_key other
-signer=$(cat "$work/keys/signer.fpr")
+signer=$(cat "$keys/signer.fpr")
 signer_secret=$(secret_of signer)
 
-expect_success "check: a committed public key" "$here/signing-key.sh" check "$work/keys/signer.gpg"
-if import_key "$signer_secret" "$work/keys/signer.gpg" >"$work/imported" 2>"$work/output"; then
+expect_success "check: a committed public key" "$here/signing-key.sh" check "$keys/signer.gpg"
+if import_key "$signer_secret" "$keys/signer.gpg" >"$work/imported" 2>"$work/output"; then
   check "import: the key that matches the committed public key, printing its fingerprint" \
     test "$(cat "$work/imported")" = "$signer"
 else
@@ -120,44 +130,49 @@ else
   cat "$work/output" >&2
 fi
 expect_failure "import: a different committed public key" \
-  import_key "$signer_secret" "$work/keys/other.gpg"
+  import_key "$signer_secret" "$keys/other.gpg"
 expect_failure "import: no committed public key" \
-  import_key "$signer_secret" "$work/keys/missing.gpg"
-: >"$work/keys/empty.gpg"
+  import_key "$signer_secret" "$keys/missing.gpg"
+: >"$keys/empty.gpg"
 expect_failure "import: an empty committed public key" \
-  import_key "$signer_secret" "$work/keys/empty.gpg"
-expect_failure "import: no private key" import_key "" "$work/keys/signer.gpg"
-expect_failure "import: something that isn't a key" import_key "not a key" "$work/keys/signer.gpg"
-cat "$work/keys/signer.gpg" "$work/keys/other.gpg" >"$work/keys/both.gpg"
-expect_failure "check: two public keys" "$here/signing-key.sh" check "$work/keys/both.gpg"
+  import_key "$signer_secret" "$keys/empty.gpg"
+expect_failure "import: no private key" import_key "" "$keys/signer.gpg"
+expect_failure "import: something that isn't a key" import_key "not a key" "$keys/signer.gpg"
+cat "$keys/signer.gpg" "$keys/other.gpg" >"$keys/both.gpg"
+expect_failure "check: two public keys" "$here/signing-key.sh" check "$keys/both.gpg"
 expect_failure "import: two private keys" \
-  import_key "$signer_secret"$'\n'"$(secret_of other)" "$work/keys/signer.gpg"
-printf '%s\n' "$signer_secret" >"$work/keys/secret.asc"
+  import_key "$signer_secret"$'\n'"$(secret_of other)" "$keys/signer.gpg"
+printf '%s\n' "$signer_secret" >"$keys/secret.asc"
 expect_failure "check: a private key committed as the public key" \
-  "$here/signing-key.sh" check "$work/keys/secret.asc"
+  "$here/signing-key.sh" check "$keys/secret.asc"
 
-mkdir -m 700 "$work/keys/protected"
-gnupg_homes+=("$work/keys/protected")
-gpg --homedir "$work/keys/protected" --batch --pinentry-mode loopback --passphrase secret \
-  --quick-generate-key "Protected <protected@example.com>" rsa2048 sign 1d 2>/dev/null
-gpg --homedir "$work/keys/protected" --batch --export >"$work/keys/protected.gpg"
+mkdir -m 700 "$keys/protected"
+gnupg_homes+=("$keys/protected")
+gpg_or_die "Generating a key with a passphrase" --homedir "$keys/protected" --batch \
+  --pinentry-mode loopback --passphrase secret \
+  --quick-generate-key "Protected <protected@example.com>" rsa2048 sign 1d
+gpg_or_die "Exporting the key with a passphrase" --homedir "$keys/protected" --batch \
+  --export >"$keys/protected.gpg"
+protected_secret=$(gpg_or_die "Exporting the private key with a passphrase" \
+  --homedir "$keys/protected" --batch --pinentry-mode loopback --passphrase secret \
+  --armor --export-secret-keys)
 expect_failure "import: a private key with a passphrase" import_key \
-  "$(gpg --homedir "$work/keys/protected" --batch --pinentry-mode loopback --passphrase secret \
-    --armor --export-secret-keys 2>/dev/null)" "$work/keys/protected.gpg"
+  "$protected_secret" "$keys/protected.gpg"
 
-mkdir -m 700 "$work/keys/expired"
-gnupg_homes+=("$work/keys/expired")
-gpg --homedir "$work/keys/expired" --batch --passphrase '' \
-  --quick-generate-key "Expired <expired@example.com>" rsa2048 sign seconds=1 2>/dev/null
-gpg --homedir "$work/keys/expired" --batch --export >"$work/keys/expired.gpg"
+mkdir -m 700 "$keys/expired"
+gnupg_homes+=("$keys/expired")
+gpg_or_die "Generating an expiring key" --homedir "$keys/expired" --batch --passphrase '' \
+  --quick-generate-key "Expired <expired@example.com>" rsa2048 sign seconds=1
+gpg_or_die "Exporting the expiring key" --homedir "$keys/expired" --batch \
+  --export >"$keys/expired.gpg"
 sleep 2
-expect_failure "check: an expired public key" "$here/signing-key.sh" check "$work/keys/expired.gpg"
+expect_failure "check: an expired public key" "$here/signing-key.sh" check "$keys/expired.gpg"
 
-mkdir -p "$work/keys/not-empty"
-touch "$work/keys/not-empty/file"
+mkdir -p "$keys/not-empty"
+touch "$keys/not-empty/file"
 expect_failure "import: into a GNUPGHOME that isn't empty" \
   env FLATPAK_GPG_PRIVATE_KEY="$signer_secret" "$here/signing-key.sh" import \
-  "$work/keys/not-empty" "$work/keys/signer.gpg"
+  "$keys/not-empty" "$keys/signer.gpg"
 
 # --- Fake builds, a fake Flathub and the "published" site ------------------------
 
@@ -205,12 +220,12 @@ mkdir -p "$work/runtime/files" "$work/runtime/usr"
 printf '[Runtime]\nname=org.gnome.Platform\nruntime=org.gnome.Platform/%s/50\nsdk=org.gnome.Sdk/%s/50\n' \
   "$native" "$native" >"$work/runtime/metadata"
 printf 'fake runtime\n' >"$work/runtime/usr/README"
-flatpak build-export --runtime --arch="$native" --gpg-homedir="$work/keys/signer" \
+flatpak build-export --runtime --arch="$native" --gpg-homedir="$keys/signer" \
   --gpg-sign="$signer" "$work/www/flathub/repo" "$work/runtime" 50 >/dev/null
-flatpak build-update-repo --gpg-homedir="$work/keys/signer" --gpg-sign="$signer" \
+flatpak build-update-repo --gpg-homedir="$keys/signer" --gpg-sign="$signer" \
   "$work/www/flathub/repo" >/dev/null
 printf '[Flatpak Repo]\nTitle=Fake Flathub\nUrl=%s/flathub/repo/\nGPGKey=%s\n' \
-  "$www" "$(base64 -w 0 "$work/keys/signer.gpg")" >"$work/www/flathub/flathub.flatpakrepo"
+  "$www" "$(base64 -w 0 "$keys/signer.gpg")" >"$work/www/flathub/flathub.flatpakrepo"
 
 # --- Five publishes in a row ------------------------------------------------------
 
@@ -243,12 +258,12 @@ for round in 1 2 3 4 5; do
   make_build "$dir/build-$native" "$native" "$round"
   make_build "$dir/build-$other" "$other" "$round"
   expect_success "publish $round: add-builds" "$here/add-builds.sh" \
-    --gpg-homedir "$work/keys/signer" --gpg-key "$signer" --subject "Test build $round" \
+    --gpg-homedir "$keys/signer" --gpg-key "$signer" --subject "Test build $round" \
     "$dir/repo" "$dir/build-$native" "$dir/build-$other"
   expect_success "publish $round: update-repo" "$here/update-repo.sh" \
-    --gpg-homedir "$work/keys/signer" --gpg-key "$signer" "$dir/repo"
+    --gpg-homedir "$keys/signer" --gpg-key "$signer" "$dir/repo"
   expect_success "publish $round: assemble-site" "$here/assemble-site.sh" \
-    "$dir/repo" "$work/keys/signer.gpg" "$dir/site"
+    "$dir/repo" "$keys/signer.gpg" "$dir/site"
   [ -d "$dir/site" ] || break
   # (Before anything opens the copy with ostree, which makes them again.)
   check "publish $round: no ostree working files in the site" \

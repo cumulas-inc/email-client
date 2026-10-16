@@ -34,13 +34,20 @@ site=$3
 
 fingerprint=$("$here/signing-key.sh" check "$public_key")
 
-scratch=$(mktemp -d)
-trap 'rm -rf -- "$scratch"' EXIT
+# A GnuPG home in /tmp whatever TMPDIR is: gpg starts gpg-agent even to
+# import a public key, and fails when the agent's socket path is too long.
+scratch=$(mktemp -d /tmp/assemble-site.XXXXXXXX)
+cleanup() {
+  gpgconf --homedir "$scratch" --kill all 2>/dev/null || true
+  rm -rf -- "$scratch"
+}
+trap cleanup EXIT
 chmod 700 "$scratch"
 mkdir -p "$site"
 
 # The key as clients get it: binary, without third-party signatures.
-gpg --homedir "$scratch" --batch --import "$public_key" 2>/dev/null
+errors=$(gpg --homedir "$scratch" --batch --import "$public_key" 2>&1 >/dev/null) ||
+  die "Importing $public_key failed: $errors"
 gpg --homedir "$scratch" --batch --export --export-options export-minimal "$fingerprint" \
   >"$site/cumulas-flatpak.gpg"
 gpg_key=$(base64 -w 0 "$site/cumulas-flatpak.gpg")

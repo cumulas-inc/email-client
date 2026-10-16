@@ -31,9 +31,15 @@ usage() {
 }
 
 # Keyrings for reading and verifying public keys; they never hold the
-# private key.
-scratch=$(mktemp -d)
+# private key. In /tmp whatever TMPDIR is: gpg starts gpg-agent even to
+# import a public key, and fails when the agent's socket, in the GnuPG home,
+# would have a path longer than about 100 bytes.
+scratch=$(mktemp -d /tmp/signing-key.XXXXXXXX)
 cleanup() {
+  local home
+  for home in "$scratch"/gnupg.*; do
+    [ ! -d "$home" ] || gpgconf --homedir "$home" --kill all 2>/dev/null || true
+  done
   rm -rf -- "$scratch"
 }
 trap cleanup EXIT
@@ -123,7 +129,8 @@ cmd_import() {
   errors=$(gpg --homedir "$home" --batch --pinentry-mode error --local-user "$expected" \
     --detach-sign --output "$data.sig" "$data" 2>&1 >/dev/null) ||
     die "Signing with FLATPAK_GPG_PRIVATE_KEY failed: it must have no passphrase and a signing key that hasn't expired. $errors"
-  gpg --homedir "$verify_home" --batch --import "$public_key" 2>/dev/null
+  errors=$(gpg --homedir "$verify_home" --batch --import "$public_key" 2>&1 >/dev/null) ||
+    die "Importing $public_key failed: $errors"
   status=$(gpg --homedir "$verify_home" --batch --status-fd 1 --verify "$data.sig" "$data" 2>/dev/null) || true
   primary=$(printf '%s\n' "$status" | awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $NF }')
   if ! printf '%s\n' "$status" | grep -q '^\[GNUPG:\] GOODSIG ' || [ "$primary" != "$expected" ]; then
