@@ -963,13 +963,15 @@ export class MockBackend implements Backend {
     };
   }
 
-  async searchMessages(text: string, accountId?: string) {
+  async searchMessages(text: string, accountId?: string, includeIds: string[] = []) {
     await this.delay();
     const terms = text.toLowerCase().split(/\s+/).filter(Boolean);
-    if (terms.length === 0) return [];
+    const included = new Set(includeIds);
     return this.state.messages
       .filter((m) => !accountId || m.accountId === accountId)
       .filter((m) => {
+        if (included.has(m.id)) return true;
+        if (terms.length === 0) return false;
         const haystack = [
           m.subject,
           m.from?.name,
@@ -984,6 +986,23 @@ export class MockBackend implements Backend {
       .sort(newestFirst)
       .map(summary);
   }
+
+  /** Every message the demo has is on this device: the servers find nothing more. */
+  async searchServer(searchId: string, _text: string, accountId: string) {
+    await this.delay();
+    this.account(accountId);
+    return {
+      searchId,
+      accountId,
+      status: "done" as const,
+      messageIds: [],
+      added: 0,
+      hasMore: false,
+      error: null,
+    };
+  }
+
+  async cancelServerSearch() {}
 
   async getMessage(messageId: string, allowRemote = false) {
     await this.delay();

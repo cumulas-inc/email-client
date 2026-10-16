@@ -119,6 +119,26 @@ export interface MessagePage {
   total: number;
 }
 
+/**
+ * How a server search ended: the server answered (perhaps with nothing), a
+ * newer search replaced it or it was canceled (nothing was stored), or the
+ * server couldn't be asked or failed (`error` says why).
+ */
+export type ServerSearchStatus = "done" | "cancelled" | "failed";
+
+/** One page of one account's server search. */
+export interface ServerSearchResult {
+  searchId: string;
+  accountId: string;
+  status: ServerSearchStatus;
+  /** Local ids found on this page, newest first; all stored now (getMessage etc. work). */
+  messageIds: string[];
+  /** How many weren't on this device before. */
+  added: number;
+  hasMore: boolean;
+  error: BackendError | null;
+}
+
 export interface OutgoingAttachment {
   name: string;
   contentType: string;
