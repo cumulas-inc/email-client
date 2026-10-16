@@ -230,6 +230,8 @@ pub fn run() {
             commands::list_folders,
             commands::list_messages,
             commands::search_messages,
+            commands::search_server,
+            commands::cancel_server_search,
             commands::get_message,
             commands::set_read,
             commands::set_flagged,
