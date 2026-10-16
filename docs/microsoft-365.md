@@ -246,8 +246,8 @@ For each work or school account, the app:
    account error: the Graph sync reports sign-in problems on its own.
 3. With a token, calls `GET <service>/apps/signature`, sending the last
    answer's ETag in `If-None-Match` and following no redirects. The token
-   names the person and their organization; nothing else is sent: no mail,
-   contacts or recipients. The app keeps the answer: the signature
+   names the person and their organization. No mail, contacts or recipients
+   are sent. The app keeps the answer: the signature
    (`"source": "app"`), added on send (`"relay"`), or none (`"none"`, and 404
    `not-managed` or `not-set-up`), with `applyToReplies`, which says for
    `app` and `relay` alike whether replies and forwards are signed too. 403
@@ -267,16 +267,16 @@ another sanitizer is asked for without it, so it comes again in full. A check
 that fails keeps the last answer, marked stale, so a signature keeps working
 offline.
 
-| When the app asks                |                                                                                                                                                                   |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| About 15 seconds after it starts | Each work or school account that was never checked, whose last check failed, or whose organization signs its mail.                                                |
-| Every 6 hours                    | While the organization signs the account's mail (the app adds the signature, or the relay does on send).                                                          |
-| Every 24 hours                   | While the organization doesn't use the service (Microsoft refused), has no signature for the person, or hasn't allowed the app; not at each start.                |
-| 30 minutes after a failure       | Or when the service's `Retry-After` says (at most 6 hours), or as soon as the network is back.                                                                    |
-| Right after signing in           | Whatever the last answer. Signing in again picks up consent the organization gave meanwhile.                                                                      |
-| When starting a message          | Waits up to 4 seconds for an account never checked; checks again in the background while the organization signs the mail and its last answer is over an hour old. |
-| When Settings → Signatures opens | Each account whose last answer is over 10 minutes old, unless it was that the organization doesn't use the service or has no signature for the person.            |
-| When asked to check now          | At most once a minute, and not before the service's `Retry-After`.                                                                                                |
+| When the app asks                |                                                                                                                                                                                                                                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| About 15 seconds after it starts | Each work or school account that was never checked, whose last check failed, or whose organization signs its mail.                                                                                                                                                             |
+| Every 6 hours                    | While the organization signs the account's mail (the app adds the signature, or the relay does on send).                                                                                                                                                                       |
+| Every 24 hours                   | While the organization doesn't use the service (Microsoft refused), has no signature for the person, or hasn't allowed the app; not at each start.                                                                                                                             |
+| 30 minutes after a failure       | Or when the service's `Retry-After` says (at most 6 hours), or as soon as the network is back.                                                                                                                                                                                 |
+| Right after signing in           | Whatever the last answer. Signing in again picks up consent the organization gave meanwhile.                                                                                                                                                                                   |
+| When starting a message          | Waits up to 4 seconds for an account never checked; checks again in the background while the organization signs the mail and its last answer is over an hour old.                                                                                                              |
+| When Settings → Signatures opens | Each account whose last answer is over 10 minutes old or whose last check failed, unless that answer was that the organization doesn't sign the person's mail (it doesn't use the service or has no signature for them): that one is asked only every 24 hours and at sign-in. |
+| When asked to check now          | At most once a minute, and not before the service's `Retry-After`.                                                                                                                                                                                                             |
 
 Times go by the wall clock, so a check due while the computer slept comes
 within a minute of waking, and a day-long wait counts across restarts.

@@ -3,13 +3,16 @@
 //!
 //! Nothing to set up: for each such account the app asks Microsoft for a
 //! token for the signature service's API (`api://<host>/<client
-//! id>/access_as_user`, see [`config`]). Microsoft gives one only in
-//! organizations that have added the Cumulas Signatures app in Microsoft
-//! 365: those that use it now, used it before and kept the app, or where
-//! someone signed in to the service. In other organizations it refuses (the
-//! API isn't in the tenant) and nothing reaches the service. With a token,
-//! the app asks the service for the person's signature ([`client`]); the
-//! token names the person and their organization, and nothing else is sent.
+//! id>/access_as_user`, see [`config`]). Microsoft gives Cumulas Mail one
+//! only in organizations that have added the Cumulas Signatures app in
+//! Microsoft 365. That includes organizations that use it now, used it
+//! before and kept the app, or where someone signed in to the service. The
+//! app then sends that token, which names the person and their
+//! organization, to the service to get the person's signature
+//! ([`client`]). No mail, contacts or recipients are sent. In other
+//! organizations Microsoft refuses (the API isn't in the tenant) and nothing
+//! is sent.
+//!
 //! The answer is the signature, that the organization's mail server adds it
 //! on send, or that there's none for them. Personal Microsoft accounts and
 //! IMAP accounts never take part.

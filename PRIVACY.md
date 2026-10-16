@@ -11,7 +11,7 @@ signature when your organization sets one up there.
 Cumulas Mail has no telemetry, no analytics, no crash reporting and no
 advertising, and you don't need a Cumulas account.
 
-_Last updated: October 15, 2026._
+_Last updated: October 16, 2026._
 
 ## What the app keeps on your computer
 
@@ -162,9 +162,12 @@ that answer:
 - **After a check that failed** (no network, say): 30 minutes later (or when
   the service asks), when the network comes back, and when the app next
   starts.
-- **Whatever the answer**: right after you sign in; and when you open
-  **Settings → Signatures**, if the last answer is more than 10 minutes old
-  and wasn't that your organization doesn't sign your mail.
+- **Whatever the answer**: right after you sign in.
+- **When you open Settings → Signatures**: if the last answer is more than
+  10 minutes old or the last check failed, unless that answer was that your
+  organization doesn't sign your mail (Microsoft refused, or the service has
+  no signature for you): your organization is then asked again only once a
+  day and when you sign in.
 
 Pictures in a company signature, such as a logo, load from where your
 organization keeps them (usually `signature.cumulas.co`) when the app shows
