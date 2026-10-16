@@ -148,9 +148,14 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
   5. installs the app from a local copy of the site on both architectures, from
      the `.flatpakrepo` and from the `.flatpakref` (`repo/smoke-test.sh`);
   6. and only then deploys the site to Pages, if the published repository is
-     still the one it mirrored.
+     still the one it mirrored;
+  7. then waits until Pages serves the new summary, adds the remote from the
+     live `.flatpakrepo` and finds the app on both architectures
+     (`repo/verify-live.sh`), and reports the type the `.flatpakref` is served
+     as.
 
-  `repo/test.sh` runs steps 1–5 against fake builds, as part of every run.
+  `repo/test.sh` runs steps 1–5 and 7 against fake builds, as part of every
+  run.
 
 - **Kept**: the last 3 builds of each architecture (`KEEP_BUILDS` in
   `repo/common.sh`), so people can go back to an earlier one:
@@ -349,8 +354,13 @@ check, re-runs included.
   deploying would drop it, so the deploy stops. Run the newest release tag's
   workflow again, all jobs.
 - **GitHub Pages caches files for up to 10 minutes**: people may get the
-  previous build for a few minutes after a publish, and a publish that starts
-  within minutes of the last one may mirror the cached copy. Its deploy then
-  finds the published repository changed and stops (above).
+  previous build for a few minutes after a publish. The run's last job waits
+  for that, so a publish queued behind it mirrors the new site; one that
+  mirrors a cached copy anyway finds, at its deploy, that the published
+  repository changed, and stops (above).
+- **The live site check fails** after the deploy: the site is out, but Pages
+  didn't serve the new summary within 10 minutes, or the app can't be found
+  through the live `.flatpakrepo`. Check Pages and the site, then re-run that
+  job.
 - **A newer tag** waiting behind a running publish replaces an older waiting
   one (GitHub keeps one waiting run per group), which couldn't publish anyway.

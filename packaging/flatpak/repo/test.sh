@@ -20,6 +20,8 @@
 #    publish signed with it that carries the next key (phase 1), then from
 #    one signed with the next key only (phase 2), and the next publishes'
 #    mirrors trust what they must;
+#  - verify-live.sh finds the deployed summary and the app on a "live" site,
+#    and gives up on a summary that isn't the deployed one;
 #  - smoke-test.sh installs the last one from the .flatpakrepo and the
 #    .flatpakref.
 #
@@ -579,6 +581,29 @@ expect_success "rotation: once a publish with the next key is out, the mirror ne
   rotation_publish rotation3 next
 expect_success "rotation: the client updates again" client update --noninteractive
 check "rotation: ... to that build" test "$(client_commit)" = "$(site_commit "$work/rotation3/site")"
+
+# --- The live site, after a deploy -------------------------------------------------
+
+# The last publish, with its install files pointing at the local server.
+mkdir -p "$work/www/verify"
+ln -s "$site/repo" "$work/www/verify/repo"
+for file in "$REMOTE_NAME.flatpakrepo" "$APP_ID.flatpakref"; do
+  sed "s|^Url=.*|Url=$www/verify/repo/|" "$site/$file" >"$work/www/verify/$file"
+done
+deployed=$(sha256sum <"$site/repo/summary" | cut -d ' ' -f 1)
+if "$here/verify-live.sh" --site "$www/verify" --timeout 5 "$deployed" >"$work/report" 2>"$work/output"; then
+  pass "verify-live: the deployed site"
+  for arch in $ARCHES; do
+    check "verify-live: reports the $arch build" grep -q "^| $arch | commit " "$work/report"
+  done
+  check "verify-live: reports the .flatpakref's Content-Type" \
+    grep -q "^\`$APP_ID.flatpakref\` is served as \`[^\`]" "$work/report"
+else
+  fail "verify-live: the deployed site"
+  cat "$work/output" >&2
+fi
+expect_error "verify-live: a summary that isn't the deployed one" "still isn't the one deployed" \
+  "$here/verify-live.sh" --site "$www/verify" --timeout 1 "$(sha256sum <"$site/repo/config" | cut -d ' ' -f 1)"
 
 # --- Installing -----------------------------------------------------------------
 

@@ -13,6 +13,8 @@ REPO_URL="$SITE_URL/repo/"
 REMOTE_NAME=cumulas
 # Builds kept per architecture: the newest and the ones before it.
 KEEP_BUILDS=3
+# The architectures the workflow builds and publishes.
+ARCHES="x86_64 aarch64"
 FLATHUB_REPO_FILE=https://dl.flathub.org/repo/flathub.flatpakrepo
 
 REPO_TITLE=Cumulas

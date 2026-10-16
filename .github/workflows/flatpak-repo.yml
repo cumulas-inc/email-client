@@ -222,6 +222,7 @@ jobs:
     environment: flatpak-signing
     outputs:
       mirrored-summary: ${{ steps.mirror.outputs.summary-sha256 }}
+      deployed-summary: ${{ steps.site.outputs.summary-sha256 }}
     env:
       PUBLISH: "true"
       LABEL: ${{ needs.mode.outputs.label }}
@@ -286,9 +287,11 @@ jobs:
         if: always() && env.SIGNING_GNUPGHOME != ''
         run: packaging/flatpak/repo/signing-key.sh remove "$SIGNING_GNUPGHOME"
       - &assemble-site
+        id: site
         name: Assemble the site
         run: |
           packaging/flatpak/repo/assemble-site.sh repo "$SIGNING_PUBLIC_KEY" site
+          echo "summary-sha256=$(sha256sum site/repo/summary | cut -d ' ' -f 1)" >>"$GITHUB_OUTPUT"
           {
             echo "| Ref | Commit | Builds kept |"
             echo "| --- | --- | --- |"
@@ -416,3 +419,27 @@ jobs:
           echo "The published summary is still $live, the one this run added to."
       - id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  # Once Pages serves the deployed summary (its cache keeps files for up to
+  # 10 minutes), adds the remote from the live .flatpakrepo and finds the app
+  # on both architectures, as people will. A publish waiting behind this run
+  # starts after it, so it mirrors what was just deployed.
+  verify:
+    name: Check the live site
+    needs: [publish, deploy]
+    if: ${{ !cancelled() && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-flatpak-builder
+        with:
+          free-disk-space: "false"
+      - name: Wait for the deployed summary, then read the app from the live site
+        env:
+          DEPLOYED_SUMMARY: ${{ needs.publish.outputs.deployed-summary }}
+        run: packaging/flatpak/repo/verify-live.sh "$DEPLOYED_SUMMARY" | tee -a "$GITHUB_STEP_SUMMARY"
