@@ -529,7 +529,7 @@ pub async fn watch(app: AppHandle) {
                 }
                 tokio::select! {
                     () = tokio::time::sleep(retry_after(attempt)) => {}
-                    () = portal_changed(&mut owners) => {}
+                    () = portal_changed(&mut owners, true) => {}
                 }
                 attempt = attempt.saturating_add(1);
                 continue;
@@ -576,7 +576,9 @@ async fn follow_reports(
                     return;
                 }
             },
-            () = portal_changed(owners) => {
+            // Not when it starts, which making the monitor may have done:
+            // once there's a monitor, the portal going shows first.
+            () = portal_changed(owners, false) => {
                 tracing::info!("the Flatpak portal restarted; watching for updates again");
                 return;
             }
@@ -603,19 +605,28 @@ async fn follow_portal() -> Option<zbus::fdo::NameOwnerChangedStream> {
     }
 }
 
-/// Returns when the Flatpak portal's owner changes: it stopped, started or
-/// was replaced. Never, when that can't be followed.
+/// Returns when the Flatpak portal's owner changes: it stopped or was
+/// replaced, or it started, if `starts`. Never, when that can't be
+/// followed.
 #[cfg(target_os = "linux")]
-async fn portal_changed(owners: &mut Option<zbus::fdo::NameOwnerChangedStream>) {
+async fn portal_changed(owners: &mut Option<zbus::fdo::NameOwnerChangedStream>, starts: bool) {
     use futures::StreamExt;
 
     if let Some(changes) = owners {
-        if changes.next().await.is_some() {
-            return;
+        while let Some(change) = changes.next().await {
+            if starts || !portal_started(&change) {
+                return;
+            }
         }
         *owners = None;
     }
     std::future::pending().await
+}
+
+/// The change is the portal starting: it had no owner.
+#[cfg(target_os = "linux")]
+fn portal_started(change: &zbus::fdo::NameOwnerChanged) -> bool {
+    change.args().is_ok_and(|args| args.old_owner().is_none())
 }
 
 /// The error says watching can never work here: there's no Flatpak
@@ -1395,6 +1406,27 @@ mod tests {
         for e in &later {
             assert!(!gives_up(e), "{e}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_portal_starting_is_told_apart_from_it_going() {
+        let change = |old: &str, new: &str| {
+            let signal = zbus::Message::signal(
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+                "NameOwnerChanged",
+            )
+            .unwrap()
+            .build(&(PORTAL, old, new))
+            .unwrap();
+            zbus::fdo::NameOwnerChanged::from_message(signal).unwrap()
+        };
+        // Activated, by the first attempt to watch, say.
+        assert!(portal_started(&change("", ":1.5")));
+        // Stopped, or replaced: the monitor is gone.
+        assert!(!portal_started(&change(":1.5", "")));
+        assert!(!portal_started(&change(":1.5", ":1.6")));
     }
 
     #[cfg(target_os = "linux")]
