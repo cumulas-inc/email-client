@@ -9,7 +9,7 @@ import { useBackendEvents } from "../../app/useBackendEvents";
 import { useToasts } from "../../components/toast";
 import { renderWithBackend } from "../../test/render";
 import { AddAccountDialog } from "./AddAccountDialog";
-import { openTurnOn, useAddAccountRequest } from "./addAccountStore";
+import { openAddAccount, openTurnOn, useAddAccountRequest } from "./addAccountStore";
 import { useFeatureChangeToasts } from "./featureToasts";
 
 const EMAIL = "alex.morgan@acme.example";
@@ -76,6 +76,19 @@ describe("useFeatureChangeToasts", () => {
     // Time for the watcher to see it too.
     await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
     expect(messages()).toEqual([`Turned on calendar for ${EMAIL}.`]);
+  });
+
+  it("doesn't announce refused features as back when signing in again checks them", async () => {
+    // Tasks: the other tests here turn the calendar on, which is remembered for a while.
+    const backend = new MockBackend({ refused: ["tasks"] });
+    const { work } = await watch(backend);
+
+    act(() => openAddAccount({ step: "microsoft", email: EMAIL, autoStart: true }));
+    await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
+    await waitFor(() => expect(work().refusedFeatures).toEqual([]));
+    // Time for the watcher to see it too.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(messages()).toEqual([`You're signed in again as ${EMAIL}.`]);
   });
 
   it("says nothing about accounts added or removed", async () => {

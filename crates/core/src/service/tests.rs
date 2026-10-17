@@ -4959,18 +4959,51 @@ async fn a_refused_feature_returns_after_sign_in_retry_new_grant_or_a_day() {
 
     // A day later.
     let h = harness();
-    let (account, _) = refused_calendar(&h).await;
-    let a_day_ago = (Utc::now() - Duration::hours(25)).to_rfc3339();
-    h.service.store().execute_for_tests(&format!(
-        "UPDATE accounts SET microsoft_grant =
-           json_set(microsoft_grant, '$.refusedAt', '{a_day_ago}')"
-    ));
+    let (account, pim) = refused_calendar(&h).await;
+    let a_day_ago = Utc::now() - Duration::hours(25);
+    let refused_a_day_ago = || {
+        h.service.store().execute_for_tests(&format!(
+            "UPDATE accounts SET microsoft_grant =
+               json_set(microsoft_grant, '$.refusedAt', '{}')",
+            a_day_ago.to_rfc3339()
+        ))
+    };
+    // Still refused: checked again, and refused as of now. Only the
+    // refusal and the sync's end are told, so nobody sees the calendar
+    // look back on in between.
+    refused_a_day_ago();
+    pim.refused.lock().unwrap().push(AccountFeature::Calendar);
+    let notified = accounts_notified(&h, &account);
+    h.service.sync_account(&account.id).await.unwrap();
+    let grant = h.service.store().microsoft_grant(&account.id).unwrap();
+    let grant = grant.unwrap();
+    assert_eq!(grant.refused, [AccountFeature::Calendar]);
+    assert!(grant.refused_at.unwrap() > a_day_ago);
+    assert_eq!(cached(&h, &account).0, 0);
+    assert_eq!(accounts_notified(&h, &account), notified + 2);
+    // Back: told at the sync's end.
+    refused_a_day_ago();
+    pim.refused.lock().unwrap().clear();
     let notified = accounts_notified(&h, &account);
     h.service.sync_account(&account.id).await.unwrap();
     assert!(account_of(&h, &account).refused_features.is_empty());
     assert_eq!(cached(&h, &account).0, 2);
-    // Expired, and the sync's end.
-    assert_eq!(accounts_notified(&h, &account), notified + 2);
+    assert_eq!(accounts_notified(&h, &account), notified + 1);
+
+    // Not while the sign-in is gone: the calendar wasn't checked.
+    let h = harness();
+    let (account, _) = refused_calendar(&h).await;
+    h.service.store().execute_for_tests(&format!(
+        "UPDATE accounts SET microsoft_grant =
+           json_set(microsoft_grant, '$.refusedAt', '{}')",
+        a_day_ago.to_rfc3339()
+    ));
+    h.server.lock().unwrap().failure = Some(Error::auth_required("Sign in again."));
+    h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(
+        account_of(&h, &account).refused_features,
+        [AccountFeature::Calendar]
+    );
 }
 
 #[tokio::test]

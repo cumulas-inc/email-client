@@ -132,11 +132,6 @@ impl CoreService {
 
     async fn run_sync(&self, account: &Account) -> Result<()> {
         self.progress(account, "Connecting…");
-        if account.kind == AccountKind::Microsoft
-            && self.store.expire_refused(&account.id, REFUSED_RETRY)?
-        {
-            self.notify(&[DataKind::Accounts], Some(&account.id));
-        }
         let providers = self.providers_for(&account.id).await?;
         let mail = self.sync_mail(account, &providers).await;
         if let Err(e) = &mail {
@@ -146,6 +141,12 @@ impl CoreService {
                 return mail;
             }
             tracing::warn!("mail sync for account {} failed: {e}", account.id);
+        }
+        // Features Microsoft 365 refused a day ago or more are tried again
+        // below. Nobody hears of it until the sync's end, or until a feature
+        // is refused again: in between, the feature would look back on.
+        if account.kind == AccountKind::Microsoft {
+            self.store.expire_refused(&account.id, REFUSED_RETRY)?;
         }
         // The token refresh during the mail sync may have recorded a new grant.
         let account = &self.store.get_account(&account.id)?;

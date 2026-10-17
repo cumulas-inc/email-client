@@ -57,6 +57,12 @@ export function useAddMicrosoftAccount() {
     onSuccess: (account, { permissions }) => {
       // Before the account changes anywhere, so its own toast is the only one.
       if (permissions?.kind === "feature") noteFeatureTurnedOn(account.id, permissions.feature);
+      // A sign-in checks refused features again, as Check again does: the
+      // notice going away says one is back, a sync that's refused again says so.
+      const before = client
+        .getQueryData<Account[]>(qk.accounts())
+        ?.find((a) => a.id === account.id);
+      for (const f of before?.refusedFeatures ?? []) noteFeatureTurnedOn(account.id, f);
       upsertAccount(client, account);
       refreshEverything(client);
     },
