@@ -11,12 +11,20 @@ pub enum ErrorCode {
     /// Stored credentials are missing or were rejected; the user must sign in again.
     AuthRequired,
     /// The user's organization does not allow users to consent to this app.
-    /// `details` carries `{ adminConsentUrl, tenant }`.
+    /// `details` carries `{ adminConsentUrl, tenant, canRequestApproval,
+    /// adminPageUrl }`.
     AdminConsentRequired,
     /// The user declined the permission prompt.
     ConsentDeclined,
     /// Sign-in was canceled or timed out before the browser redirected back.
     SignInCancelled,
+    /// The organization's settings block this sign-in in a way approving the app
+    /// doesn't fix (except `appNotSetUp`): `details` carries
+    /// `{ reason, aadsts, tenant, adminPageUrl, adminConsentUrl? }`.
+    SignInBlocked,
+    /// A Microsoft account's optional feature can't be used:
+    /// `details` carries `{ feature, accountId, reason }`.
+    PermissionRequired,
     /// A required setting (e.g. the Microsoft client id) is missing.
     NotConfigured,
     /// Could not reach the server.

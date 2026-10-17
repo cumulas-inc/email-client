@@ -815,6 +815,7 @@ mod reminder_tests {
             &self,
             _: &BrowserOpener,
             _: Option<&str>,
+            _: &[String],
             _: bool,
         ) -> cumulas_core::Result<SignInResult> {
             Err(cumulas_core::Error::new(self.0, "unreachable"))

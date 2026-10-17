@@ -105,7 +105,9 @@ pub(crate) mod test_support {
     use chrono::Utc;
 
     use super::Store;
-    use crate::model::{Account, AccountKind, AccountSettings, ImapSettings, TlsMode};
+    use crate::model::{
+        Account, AccountKind, AccountSettings, ImapSettings, MicrosoftSettings, TlsMode,
+    };
 
     impl Store {
         /// Runs `sql` on the database, for tests that need it in a state
@@ -134,6 +136,19 @@ pub(crate) mod test_support {
             created_at: Utc::now(),
             last_synced_at: None,
             sync_error: None,
+            needs_permission: vec![],
+            refused_features: vec![],
+        }
+    }
+
+    pub fn microsoft_account(id: &str) -> Account {
+        Account {
+            kind: AccountKind::Microsoft,
+            settings: AccountSettings::Microsoft(MicrosoftSettings {
+                tenant_id: "11111111-2222-3333-4444-555555555555".into(),
+                user_id: format!("user-{id}"),
+            }),
+            ..imap_account(id)
         }
     }
 }

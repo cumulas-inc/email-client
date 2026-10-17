@@ -270,6 +270,10 @@ const MIGRATIONS: &[&str] = &[
         DELETE FROM messages_infix WHERE rowid = old.fts_rowid;
     END;
     "#,
+    // 6: what each Microsoft account was granted (JSON, see MicrosoftGrant); NULL until first recorded.
+    r#"
+    ALTER TABLE accounts ADD COLUMN microsoft_grant TEXT;
+    "#,
 ];
 
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
@@ -414,6 +418,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_grant_migration_keeps_accounts_as_they_were() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        {
+            // A database as the previous version left it, with a Microsoft
+            // account.
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..5] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 5).unwrap();
+            conn.execute_batch(
+                r#"INSERT INTO accounts VALUES ('a', 'microsoft', 'A', 'a@contoso.com', '#000',
+                     '{"kind":"microsoft","tenantId":"t","userId":"u"}', 0, NULL, NULL);"#,
+            )
+            .unwrap();
+        }
+        let store = crate::store::Store::open(&path).unwrap();
+        let account = store.get_account("a").unwrap();
+        assert!(account.needs_permission.is_empty());
+        assert!(account.refused_features.is_empty());
+        assert_eq!(store.microsoft_grant("a").unwrap(), None);
+        drop(store);
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version as usize, MIGRATIONS.len());
+        let grant: Option<String> = conn
+            .query_row("SELECT microsoft_grant FROM accounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(grant, None);
+    }
+
     /// Ids of the messages whose rows in `table` match `query`.
     fn matching(conn: &Connection, table: &str, query: &str) -> Vec<String> {
         let mut stmt = conn
@@ -485,7 +524,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version as usize, MIGRATIONS.len());
 
         // The fetched body was kept (the latest row), else the preview.
         assert_eq!(matching(&conn, "messages_fts", "body : pineapple"), ["m1"]);

@@ -5,10 +5,11 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use cumulas_core::model::{
-    Account, AccountSignature, ActiveReminder, Calendar, ComposeSignature, Contact, ContactDraft,
-    EmailAddress, Event, EventDraft, EventResponse, Folder, ImapAccountUpdate, Message,
-    MessagePage, MessageQuery, MessageSummary, NewImapAccount, OutgoingMessage, ReplyKind,
-    ServerSearchResult, Settings, Snooze, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
+    Account, AccountSignature, ActiveReminder, AdminConsentLink, Calendar, ComposeSignature,
+    Contact, ContactDraft, EmailAddress, Event, EventDraft, EventResponse, Folder,
+    ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount,
+    OutgoingMessage, PermissionRequest, ReplyKind, ServerSearchResult, Settings, Snooze,
+    SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::push::PushStatus;
 use cumulas_core::service::builtin_microsoft_client_id;
@@ -109,11 +110,14 @@ pub async fn add_imap_account(
     Ok(account)
 }
 
+/// Signs in to a Microsoft account in the browser, asking for `permissions`
+/// (everything when `null`), then syncs it.
 #[tauri::command]
 pub async fn add_microsoft_account(
     app: AppHandle,
     state: State<'_, AppState>,
     login_hint: Option<String>,
+    permissions: Option<PermissionRequest>,
 ) -> Result<Account> {
     let opener = app.clone();
     let open_browser = move |url: &str| {
@@ -124,7 +128,11 @@ pub async fn add_microsoft_account(
     };
     let account = state
         .service
-        .add_microsoft_account(&open_browser, login_hint.as_deref())
+        .add_microsoft_account(
+            &open_browser,
+            login_hint.as_deref(),
+            permissions.unwrap_or_default(),
+        )
         .await?;
     spawn_sync(&state, &account.id);
     Ok(account)
@@ -134,6 +142,33 @@ pub async fn add_microsoft_account(
 #[tauri::command]
 pub fn cancel_microsoft_sign_in(state: State<'_, AppState>) {
     state.service.cancel_microsoft_sign_in();
+}
+
+/// The link an administrator approves Cumulas Mail with, for an account's
+/// organization or the one of the address being signed in with.
+#[tauri::command]
+pub async fn microsoft_admin_consent(
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+    login_hint: Option<String>,
+) -> Result<AdminConsentLink> {
+    let service = state.service.clone();
+    blocking(move || service.microsoft_admin_consent(account_id.as_deref(), login_hint.as_deref()))
+        .await
+}
+
+/// Checks a Microsoft account's refused features again ("Check again"),
+/// then syncs it.
+#[tauri::command]
+pub async fn retry_microsoft_features(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<()> {
+    let service = state.service.clone();
+    let id = account_id.clone();
+    blocking(move || service.retry_microsoft_features(&id)).await?;
+    spawn_sync(&state, &account_id);
+    Ok(())
 }
 
 /// Updates an IMAP account's password and/or servers, then syncs it.

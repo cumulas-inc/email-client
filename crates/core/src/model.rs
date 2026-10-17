@@ -117,6 +117,89 @@ pub struct Account {
     pub last_synced_at: Option<DateTime<Utc>>,
     /// Last sync error, cleared on the next successful sync.
     pub sync_error: Option<String>,
+    /// Microsoft accounts: optional features whose permission Microsoft
+    /// hasn't granted, in enum order. Empty for IMAP accounts and for
+    /// accounts whose grant isn't recorded yet.
+    #[serde(default)]
+    pub needs_permission: Vec<AccountFeature>,
+    /// Microsoft accounts: optional features that have their permission but
+    /// that Microsoft 365 refused (never `mailboxSettings`), in enum order.
+    /// Empty for IMAP.
+    #[serde(default)]
+    pub refused_features: Vec<AccountFeature>,
+}
+
+/// An optional part of a Microsoft account that needs a permission of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccountFeature {
+    Calendar,
+    Contacts,
+    Tasks,
+    MailboxSettings,
+}
+
+impl AccountFeature {
+    /// Every feature, in display order.
+    pub const ALL: [AccountFeature; 4] = [
+        AccountFeature::Calendar,
+        AccountFeature::Contacts,
+        AccountFeature::Tasks,
+        AccountFeature::MailboxSettings,
+    ];
+
+    /// What the feature is called in messages: "the {noun} of {email}".
+    pub fn noun(self) -> &'static str {
+        match self {
+            AccountFeature::Calendar => "calendar",
+            AccountFeature::Contacts => "contacts",
+            AccountFeature::Tasks => "tasks",
+            AccountFeature::MailboxSettings => "mailbox time zone",
+        }
+    }
+}
+
+/// What a Microsoft sign-in asks permission for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PermissionRequest {
+    /// Mail and every optional feature: adding an account.
+    #[default]
+    All,
+    /// Mail only ("Try with mail only").
+    MailOnly,
+    /// What the account has now; everything for an account without a
+    /// record ("Sign in again").
+    Current,
+    /// What the account has now, plus one more feature ("Turn on").
+    Feature { feature: AccountFeature },
+}
+
+/// What a Microsoft account was granted, as stored in
+/// `accounts.microsoft_grant`. Never sent to the UI.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MicrosoftGrant {
+    /// Graph permissions Microsoft last said the account has, unqualified
+    /// (`Mail.ReadWrite`), never the OpenID Connect scopes.
+    pub scopes: Vec<String>,
+    /// Features Microsoft Graph refused (403 on the listing) although their
+    /// permission was granted.
+    pub refused: Vec<AccountFeature>,
+    /// When `refused` last gained a feature.
+    pub refused_at: Option<DateTime<Utc>>,
+}
+
+/// Where an administrator approves Cumulas Mail for an organization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminConsentLink {
+    pub admin_consent_url: String,
+    /// The organization: a tenant id or domain, or `organizations`.
+    pub tenant: String,
+    /// The page for IT administrators; only for the published app
+    /// registration.
+    pub admin_page_url: Option<String>,
 }
 
 /// Input for adding an IMAP/SMTP account. The password is moved straight into
@@ -1414,6 +1497,68 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ReplyKind>(r#""replyAll""#).unwrap(),
             ReplyKind::ReplyAll
+        );
+    }
+
+    #[test]
+    fn permission_shapes_match_the_ui() {
+        use serde_json::json;
+        for (request, wire) in [
+            (PermissionRequest::All, json!({ "kind": "all" })),
+            (PermissionRequest::MailOnly, json!({ "kind": "mailOnly" })),
+            (PermissionRequest::Current, json!({ "kind": "current" })),
+            (
+                PermissionRequest::Feature {
+                    feature: AccountFeature::MailboxSettings,
+                },
+                json!({ "kind": "feature", "feature": "mailboxSettings" }),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(request).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<PermissionRequest>(wire).unwrap(),
+                request
+            );
+        }
+        assert_eq!(PermissionRequest::default(), PermissionRequest::All);
+        assert_eq!(
+            serde_json::to_value(AccountFeature::ALL).unwrap(),
+            json!(["calendar", "contacts", "tasks", "mailboxSettings"])
+        );
+        // Enum order is the display order.
+        let mut sorted = AccountFeature::ALL;
+        sorted.sort();
+        assert_eq!(sorted, AccountFeature::ALL);
+
+        let grant = MicrosoftGrant {
+            scopes: vec!["User.Read".into()],
+            refused: vec![AccountFeature::Tasks],
+            refused_at: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&grant).unwrap(),
+            json!({ "scopes": ["User.Read"], "refused": ["tasks"], "refusedAt": null })
+        );
+        // Missing fields take their defaults.
+        assert_eq!(
+            serde_json::from_str::<MicrosoftGrant>(r#"{"scopes":["User.Read"]}"#).unwrap(),
+            MicrosoftGrant {
+                refused: vec![],
+                ..grant
+            }
+        );
+        let link = AdminConsentLink {
+            admin_consent_url: "https://login.microsoftonline.com/x".into(),
+            tenant: "organizations".into(),
+            admin_page_url: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&link).unwrap(),
+            json!({
+                "adminConsentUrl": "https://login.microsoftonline.com/x",
+                "tenant": "organizations",
+                "adminPageUrl": null,
+            })
         );
     }
 }

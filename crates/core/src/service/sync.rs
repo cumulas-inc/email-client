@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 
+use super::permissions::is_listing_refusal;
 use super::{CoreService, ProviderSet, SyncScope, alerts};
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{Account, DataKind, Folder, SyncState, SyncStatus};
+use crate::model::{Account, AccountFeature, AccountKind, DataKind, Folder, SyncState, SyncStatus};
 use crate::providers::SyncWindow;
 use crate::providers::imap::is_server_busy;
 use crate::store::BatchOutcome;
@@ -17,6 +18,9 @@ const MAIL_MAX_PER_FOLDER: u32 = 500;
 /// Calendar window kept in sync in the background (the UI can request others).
 const CALENDAR_PAST_DAYS: i64 = 31;
 const CALENDAR_FUTURE_DAYS: i64 = 180;
+/// How long a feature Microsoft 365 refused stays refused before a full
+/// sync tries it again, picking up a license or mailbox fixed meanwhile.
+const REFUSED_RETRY: Duration = Duration::hours(24);
 
 impl CoreService {
     /// Syncs every account; errors are recorded per account, not returned.
@@ -92,7 +96,11 @@ impl CoreService {
             }
             Err(e) => {
                 let message = match e.code {
-                    ErrorCode::AuthRequired => {
+                    // Unless the error says why the sign-in is gone (the
+                    // organization's settings keep the person out).
+                    ErrorCode::AuthRequired
+                        if e.details.as_ref().is_none_or(|d| d.get("reason").is_none()) =>
+                    {
                         format!("Sign in again to keep {} up to date.", account.email)
                     }
                     _ => e.message.clone(),
@@ -124,8 +132,24 @@ impl CoreService {
 
     async fn run_sync(&self, account: &Account) -> Result<()> {
         self.progress(account, "Connecting…");
+        if account.kind == AccountKind::Microsoft
+            && self.store.expire_refused(&account.id, REFUSED_RETRY)?
+        {
+            self.notify(&[DataKind::Accounts], Some(&account.id));
+        }
         let providers = self.providers_for(&account.id).await?;
-        self.sync_mail(account, &providers).await?;
+        let mail = self.sync_mail(account, &providers).await;
+        if let Err(e) = &mail {
+            // The sign-in is gone, or the keyring can't be read: the rest
+            // would fail the same way (and ask to unlock the keyring again).
+            if matches!(e.code, ErrorCode::AuthRequired | ErrorCode::Storage) {
+                return mail;
+            }
+            tracing::warn!("mail sync for account {} failed: {e}", account.id);
+        }
+        // The token refresh during the mail sync may have recorded a new grant.
+        let account = &self.store.get_account(&account.id)?;
+        let providers = self.providers_for(&account.id).await?;
         // Calendar, contacts and tasks failures should not hide mail errors and
         // vice versa, but one failing module must not stop the others.
         let mut first_error: Option<Error> = None;
@@ -142,7 +166,7 @@ impl CoreService {
             first_error.get_or_insert(e);
         }
         self.prune_reminders();
-        first_error.map_or(Ok(()), Err)
+        mail.and(first_error.map_or(Ok(()), Err))
     }
 
     async fn sync_mail(&self, account: &Account, providers: &ProviderSet) -> Result<()> {
@@ -252,7 +276,7 @@ impl CoreService {
     }
 
     async fn sync_calendar(&self, account: &Account, providers: &ProviderSet) -> Result<()> {
-        if providers.calendar.is_some() {
+        if providers.calendar.is_some() && can_use(account, AccountFeature::Calendar) {
             self.progress(account, "Syncing calendars…");
         }
         self.refresh_calendars(account, providers).await
@@ -268,7 +292,10 @@ impl CoreService {
         let Some(provider) = &providers.calendar else {
             return Ok(());
         };
-        let calendars = provider.list_calendars().await?;
+        let listed = provider.list_calendars().await;
+        let Some(calendars) = self.listed(account, AccountFeature::Calendar, listed)? else {
+            return Ok(());
+        };
         self.store.replace_calendars(&account.id, &calendars)?;
         let today = Utc::now()
             .date_naive()
@@ -278,7 +305,19 @@ impl CoreService {
         let start = today - Duration::days(CALENDAR_PAST_DAYS);
         let end = today + Duration::days(CALENDAR_FUTURE_DAYS);
         for calendar in &calendars {
-            let events = provider.list_events(calendar, start, end).await?;
+            let events = match provider.list_events(calendar, start, end).await {
+                Ok(events) => events,
+                // About this calendar alone, such as one shared with the
+                // account that it may no longer read.
+                Err(e) if is_listing_refusal(&e) => {
+                    tracing::info!(
+                        "skipping a calendar of account {} that Microsoft 365 refused to read",
+                        account.id
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             self.store
                 .replace_events_in_range(&calendar.id, start, end, &events)?;
         }
@@ -291,8 +330,13 @@ impl CoreService {
         let Some(provider) = &providers.contacts else {
             return Ok(());
         };
-        self.progress(account, "Syncing contacts…");
-        let contacts = provider.list_contacts().await?;
+        if can_use(account, AccountFeature::Contacts) {
+            self.progress(account, "Syncing contacts…");
+        }
+        let listed = provider.list_contacts().await;
+        let Some(contacts) = self.listed(account, AccountFeature::Contacts, listed)? else {
+            return Ok(());
+        };
         self.store.replace_contacts(&account.id, &contacts)?;
         self.notify(&[DataKind::Contacts], Some(&account.id));
         Ok(())
@@ -302,16 +346,62 @@ impl CoreService {
         let Some(provider) = &providers.tasks else {
             return Ok(());
         };
-        self.progress(account, "Syncing tasks…");
-        let lists = provider.list_task_lists().await?;
+        if can_use(account, AccountFeature::Tasks) {
+            self.progress(account, "Syncing tasks…");
+        }
+        let listed = provider.list_task_lists().await;
+        let Some(lists) = self.listed(account, AccountFeature::Tasks, listed)? else {
+            return Ok(());
+        };
         self.store.replace_task_lists(&account.id, &lists)?;
         for list in &lists {
-            let tasks = provider.list_tasks(list).await?;
+            let tasks = match provider.list_tasks(list).await {
+                Ok(tasks) => tasks,
+                // About this list alone, such as one shared with the account.
+                Err(e) if is_listing_refusal(&e) => {
+                    tracing::info!(
+                        "skipping a task list of account {} that Microsoft 365 refused to read",
+                        account.id
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             self.store.replace_tasks(&list.id, &tasks)?;
         }
         self.notify(&[DataKind::Tasks], Some(&account.id));
         Ok(())
     }
+
+    /// A feature's top-level listing, or `None` when the account can't use
+    /// the feature: without its permission its cache goes, and when
+    /// Microsoft 365 refuses the listing (HTTP 403) the feature is marked
+    /// refused. Neither is a sync error.
+    fn listed<T>(
+        &self,
+        account: &Account,
+        feature: AccountFeature,
+        listed: Result<Vec<T>>,
+    ) -> Result<Option<Vec<T>>> {
+        match listed {
+            Ok(items) => Ok(Some(items)),
+            Err(e) if e.code == ErrorCode::PermissionRequired => {
+                self.drop_feature_data(account, feature)?;
+                Ok(None)
+            }
+            Err(e) if account.kind == AccountKind::Microsoft && is_listing_refusal(&e) => {
+                self.refuse_feature(account, feature)?;
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Whether the account may use a feature now (it says nothing of
+/// providers the account doesn't have).
+fn can_use(account: &Account, feature: AccountFeature) -> bool {
+    !account.needs_permission.contains(&feature) && !account.refused_features.contains(&feature)
 }
 
 /// Logs a failed sync without the user name an authentication error names.

@@ -1,12 +1,13 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{Store, from_ts, ts};
+use crate::auth::microsoft::{self, legacy_graph_scopes};
 use crate::error::{Error, Result};
-use crate::model::{Account, AccountKind, AccountSettings};
+use crate::model::{Account, AccountFeature, AccountKind, AccountSettings, MicrosoftGrant};
 
-const COLUMNS: &str =
-    "id, kind, display_name, email, color, settings_json, created_at, last_synced_at, sync_error";
+const COLUMNS: &str = "id, kind, display_name, email, color, settings_json, created_at, \
+                       last_synced_at, sync_error, microsoft_grant";
 
 fn kind_str(kind: AccountKind) -> &'static str {
     match kind {
@@ -21,13 +22,25 @@ fn row_to_account(row: &Row<'_>) -> rusqlite::Result<Account> {
     let settings: AccountSettings = serde_json::from_str(&settings_json).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
     })?;
+    let kind = if kind == "microsoft" {
+        AccountKind::Microsoft
+    } else {
+        AccountKind::Imap
+    };
+    let id: String = row.get(0)?;
+    let (needs_permission, refused_features) = match kind {
+        AccountKind::Microsoft => {
+            let grant = parse_grant(&id, row.get(9)?);
+            (
+                microsoft::needs_permission(grant.as_ref()),
+                microsoft::refused_features(grant.as_ref()),
+            )
+        }
+        AccountKind::Imap => (Vec::new(), Vec::new()),
+    };
     Ok(Account {
-        id: row.get(0)?,
-        kind: if kind == "microsoft" {
-            AccountKind::Microsoft
-        } else {
-            AccountKind::Imap
-        },
+        id,
+        kind,
         display_name: row.get(2)?,
         email: row.get(3)?,
         color: row.get(4)?,
@@ -35,14 +48,62 @@ fn row_to_account(row: &Row<'_>) -> rusqlite::Result<Account> {
         created_at: from_ts(row.get(6)?),
         last_synced_at: row.get::<_, Option<i64>>(7)?.map(from_ts),
         sync_error: row.get(8)?,
+        needs_permission,
+        refused_features,
     })
+}
+
+/// A stored grant. One that can't be read counts as not recorded (every
+/// permission), never as nothing granted, which would gate every feature.
+fn parse_grant(account_id: &str, json: Option<String>) -> Option<MicrosoftGrant> {
+    let json = json?;
+    match serde_json::from_str(&json) {
+        Ok(grant) => Some(grant),
+        Err(e) => {
+            tracing::warn!("ignoring the unreadable grant of account {account_id}: {e}");
+            None
+        }
+    }
+}
+
+/// The account's grant, read on `conn`; `Ok(None)` when it has none or is
+/// gone (`exists` tells which).
+fn read_grant(conn: &Connection, id: &str) -> Result<(bool, Option<MicrosoftGrant>)> {
+    let json: Option<Option<String>> = conn
+        .query_row(
+            "SELECT microsoft_grant FROM accounts WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match json {
+        Some(json) => (true, parse_grant(id, json)),
+        None => (false, None),
+    })
+}
+
+fn write_grant(conn: &Connection, id: &str, grant: &MicrosoftGrant) -> Result<()> {
+    conn.execute(
+        "UPDATE accounts SET microsoft_grant = ?2 WHERE id = ?1",
+        params![id, super::to_json(grant)],
+    )?;
+    Ok(())
+}
+
+/// What the UI shows of a grant: the features needing permission and those
+/// refused.
+fn shown(grant: Option<&MicrosoftGrant>) -> (Vec<AccountFeature>, Vec<AccountFeature>) {
+    (
+        microsoft::needs_permission(grant),
+        microsoft::refused_features(grant),
+    )
 }
 
 impl Store {
     pub fn insert_account(&self, account: &Account) -> Result<()> {
         self.conn().execute(
             &format!(
-                "INSERT INTO accounts ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                "INSERT INTO accounts ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)"
             ),
             params![
                 account.id,
@@ -118,12 +179,127 @@ impl Store {
         )?;
         Ok(())
     }
+
+    // --- what Microsoft accounts were granted ----------------------------------
+    //
+    // Each read-modify-write holds the connection throughout, so two never
+    // interleave. An account that is gone is left alone.
+
+    /// What a Microsoft account was granted; `None` when nothing was
+    /// recorded yet (or the account is gone).
+    pub fn microsoft_grant(&self, id: &str) -> Result<Option<MicrosoftGrant>> {
+        Ok(read_grant(&self.conn(), id)?.1)
+    }
+
+    /// Records what a sign-in was granted. Nothing is refused any more: a
+    /// sign-in checks every feature again.
+    pub fn set_sign_in_grant(&self, id: &str, scopes: &[String]) -> Result<()> {
+        let conn = self.conn();
+        if !read_grant(&conn, id)?.0 {
+            return Ok(());
+        }
+        let grant = MicrosoftGrant {
+            scopes: scopes.to_vec(),
+            refused: Vec::new(),
+            refused_at: None,
+        };
+        write_grant(&conn, id, &grant)
+    }
+
+    /// Records the Graph permissions a token refresh says the account has.
+    /// A refused feature whose permission newly appears is checked again.
+    /// Returns whether what the UI shows changed.
+    pub fn record_granted_scopes(&self, id: &str, scopes: &[String]) -> Result<bool> {
+        let conn = self.conn();
+        let (exists, old) = read_grant(&conn, id)?;
+        if !exists {
+            return Ok(false);
+        }
+        let refused = match &old {
+            None => Vec::new(),
+            Some(old) => old
+                .refused
+                .iter()
+                .copied()
+                .filter(|f| {
+                    let scope = microsoft::feature_scope(*f);
+                    let had = old.scopes.iter().any(|s| s.eq_ignore_ascii_case(scope));
+                    let has = scopes.iter().any(|s| s.eq_ignore_ascii_case(scope));
+                    had || !has
+                })
+                .collect(),
+        };
+        let grant = MicrosoftGrant {
+            scopes: scopes.to_vec(),
+            refused_at: old
+                .as_ref()
+                .and_then(|o| o.refused_at)
+                .filter(|_| !refused.is_empty()),
+            refused,
+        };
+        write_grant(&conn, id, &grant)?;
+        Ok(shown(old.as_ref()) != shown(Some(&grant)))
+    }
+
+    /// Marks a feature refused by Microsoft 365, as of now. Without a
+    /// record, the account has what every account had before grants were
+    /// recorded. Returns whether what the UI shows changed.
+    pub fn refuse_feature(&self, id: &str, feature: AccountFeature) -> Result<bool> {
+        let conn = self.conn();
+        let (exists, old) = read_grant(&conn, id)?;
+        if !exists {
+            return Ok(false);
+        }
+        let mut grant = old.clone().unwrap_or_else(|| MicrosoftGrant {
+            scopes: legacy_graph_scopes(),
+            ..MicrosoftGrant::default()
+        });
+        if !grant.refused.contains(&feature) {
+            grant.refused.push(feature);
+            grant.refused.sort();
+            grant.refused_at = Some(Utc::now());
+        }
+        write_grant(&conn, id, &grant)?;
+        Ok(shown(old.as_ref()) != shown(Some(&grant)))
+    }
+
+    /// Checks every refused feature again. Returns whether what the UI
+    /// shows changed.
+    pub fn clear_refused(&self, id: &str) -> Result<bool> {
+        self.clear_refused_if(id, |_| true)
+    }
+
+    /// Checks the refused features again once they were refused more than
+    /// `max_age` ago. Returns whether what the UI shows changed.
+    pub fn expire_refused(&self, id: &str, max_age: chrono::Duration) -> Result<bool> {
+        let now = Utc::now();
+        self.clear_refused_if(id, |grant| {
+            grant.refused_at.is_none_or(|at| now - at > max_age)
+        })
+    }
+
+    fn clear_refused_if(&self, id: &str, due: impl Fn(&MicrosoftGrant) -> bool) -> Result<bool> {
+        let conn = self.conn();
+        let Some(old) = read_grant(&conn, id)?.1 else {
+            return Ok(false);
+        };
+        if old.refused.is_empty() || !due(&old) {
+            return Ok(false);
+        }
+        let grant = MicrosoftGrant {
+            refused: Vec::new(),
+            refused_at: None,
+            ..old.clone()
+        };
+        write_grant(&conn, id, &grant)?;
+        Ok(shown(Some(&old)) != shown(Some(&grant)))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::test_support::imap_account;
+    use crate::store::test_support::{imap_account, microsoft_account};
 
     #[test]
     fn account_crud() {
@@ -145,5 +321,170 @@ mod tests {
 
         store.delete_account("a1").unwrap();
         assert!(store.list_accounts().unwrap().is_empty());
+    }
+
+    fn scopes(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn mail_only() -> Vec<String> {
+        scopes(&["User.Read", "Mail.ReadWrite", "Mail.Send"])
+    }
+
+    fn shown_of(store: &Store, id: &str) -> (Vec<AccountFeature>, Vec<AccountFeature>) {
+        let account = store.get_account(id).unwrap();
+        (account.needs_permission, account.refused_features)
+    }
+
+    #[test]
+    fn grants_start_unrecorded_and_follow_sign_ins() {
+        use AccountFeature::*;
+        let store = Store::open_in_memory().unwrap();
+        store.insert_account(&microsoft_account("m")).unwrap();
+        assert_eq!(store.microsoft_grant("m").unwrap(), None);
+        assert_eq!(shown_of(&store, "m"), (vec![], vec![]));
+
+        store.set_sign_in_grant("m", &mail_only()).unwrap();
+        assert_eq!(
+            shown_of(&store, "m"),
+            (AccountFeature::ALL.to_vec(), vec![])
+        );
+        let with_tasks = [mail_only(), scopes(&["Tasks.ReadWrite"])].concat();
+        store.set_sign_in_grant("m", &with_tasks).unwrap();
+        assert!(store.refuse_feature("m", Tasks).unwrap());
+        assert_eq!(
+            shown_of(&store, "m"),
+            (vec![Calendar, Contacts, MailboxSettings], vec![Tasks])
+        );
+        // A sign-in checks everything again.
+        store.set_sign_in_grant("m", &with_tasks).unwrap();
+        let grant = store.microsoft_grant("m").unwrap().unwrap();
+        assert_eq!(grant.scopes, with_tasks);
+        assert!(grant.refused.is_empty());
+        assert_eq!(grant.refused_at, None);
+
+        // Renaming or recoloring keeps it.
+        let mut account = store.get_account("m").unwrap();
+        account.display_name = "Renamed".into();
+        account.color = "#123456".into();
+        store.update_account(&account).unwrap();
+        assert_eq!(
+            store.microsoft_grant("m").unwrap().unwrap().scopes,
+            with_tasks
+        );
+
+        // IMAP accounts never show any.
+        store.insert_account(&imap_account("i")).unwrap();
+        store.execute_for_tests(
+            r#"UPDATE accounts SET microsoft_grant = '{"scopes":[]}' WHERE id = 'i'"#,
+        );
+        assert_eq!(shown_of(&store, "i"), (vec![], vec![]));
+
+        // A gone account is left alone.
+        store.set_sign_in_grant("gone", &mail_only()).unwrap();
+        assert!(!store.record_granted_scopes("gone", &mail_only()).unwrap());
+        assert!(!store.refuse_feature("gone", Tasks).unwrap());
+        assert!(!store.clear_refused("gone").unwrap());
+        assert_eq!(store.microsoft_grant("gone").unwrap(), None);
+    }
+
+    #[test]
+    fn recorded_grants_check_a_refused_feature_again_only_when_its_permission_appears() {
+        use AccountFeature::*;
+        let store = Store::open_in_memory().unwrap();
+        store.insert_account(&microsoft_account("m")).unwrap();
+        let everything = legacy_graph_scopes();
+        // From nothing recorded to everything: nothing the UI shows changes.
+        assert!(!store.record_granted_scopes("m", &everything).unwrap());
+        assert!(store.refuse_feature("m", Calendar).unwrap());
+        assert!(store.refuse_feature("m", Contacts).unwrap());
+        let refused_at = store.microsoft_grant("m").unwrap().unwrap().refused_at;
+        assert!(refused_at.is_some());
+        // The same again: unchanged, and still refused.
+        assert!(!store.record_granted_scopes("m", &everything).unwrap());
+        assert_eq!(shown_of(&store, "m"), (vec![], vec![Calendar, Contacts]));
+        // Calendars taken away: needs permission now, rather than refused.
+        let without_calendar: Vec<String> = everything
+            .iter()
+            .filter(|s| *s != "Calendars.ReadWrite")
+            .cloned()
+            .collect();
+        assert!(store.record_granted_scopes("m", &without_calendar).unwrap());
+        assert_eq!(shown_of(&store, "m"), (vec![Calendar], vec![Contacts]));
+        // Given back: checked again; Contacts, granted all along, stays refused.
+        assert!(store.record_granted_scopes("m", &everything).unwrap());
+        let grant = store.microsoft_grant("m").unwrap().unwrap();
+        assert_eq!(grant.refused, [Contacts]);
+        assert_eq!(grant.refused_at, refused_at);
+        assert_eq!(shown_of(&store, "m"), (vec![], vec![Contacts]));
+        // Spelled another way, it is the same permission.
+        let lower: Vec<String> = everything.iter().map(|s| s.to_ascii_lowercase()).collect();
+        assert!(!store.record_granted_scopes("m", &lower).unwrap());
+        // The last refused feature checked again clears when.
+        store.record_granted_scopes("m", &mail_only()).unwrap();
+        store.record_granted_scopes("m", &everything).unwrap();
+        let grant = store.microsoft_grant("m").unwrap().unwrap();
+        assert!(grant.refused.is_empty());
+        assert_eq!(grant.refused_at, None);
+    }
+
+    #[test]
+    fn refusing_without_a_record_starts_from_the_legacy_grant() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_account(&microsoft_account("m")).unwrap();
+        let before = Utc::now();
+        assert!(store.refuse_feature("m", AccountFeature::Tasks).unwrap());
+        let grant = store.microsoft_grant("m").unwrap().unwrap();
+        assert_eq!(grant.scopes, legacy_graph_scopes());
+        assert_eq!(grant.refused, [AccountFeature::Tasks]);
+        assert!(grant.refused_at.unwrap() >= before - chrono::Duration::seconds(1));
+        assert_eq!(shown_of(&store, "m"), (vec![], vec![AccountFeature::Tasks]));
+        // Again: nothing changes.
+        assert!(!store.refuse_feature("m", AccountFeature::Tasks).unwrap());
+    }
+
+    #[test]
+    fn refused_features_clear_on_request_or_once_old() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_account(&microsoft_account("m")).unwrap();
+        let day = chrono::Duration::hours(24);
+        assert!(!store.clear_refused("m").unwrap());
+        assert!(!store.expire_refused("m", day).unwrap());
+
+        store.refuse_feature("m", AccountFeature::Calendar).unwrap();
+        // Refused just now: kept.
+        assert!(!store.expire_refused("m", day).unwrap());
+        assert_eq!(shown_of(&store, "m").1, [AccountFeature::Calendar]);
+        assert!(store.clear_refused("m").unwrap());
+        assert_eq!(shown_of(&store, "m"), (vec![], vec![]));
+        assert!(!store.clear_refused("m").unwrap());
+
+        // Refused more than a day ago: expired.
+        store.refuse_feature("m", AccountFeature::Calendar).unwrap();
+        let old = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        store.execute_for_tests(&format!(
+            "UPDATE accounts SET microsoft_grant = json_set(microsoft_grant, '$.refusedAt', '{old}')"
+        ));
+        assert!(store.expire_refused("m", day).unwrap());
+        let grant = store.microsoft_grant("m").unwrap().unwrap();
+        assert!(grant.refused.is_empty());
+        assert_eq!(grant.refused_at, None);
+        assert_eq!(grant.scopes, legacy_graph_scopes());
+    }
+
+    #[test]
+    fn an_unreadable_grant_counts_as_not_recorded() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_account(&microsoft_account("m")).unwrap();
+        store.execute_for_tests("UPDATE accounts SET microsoft_grant = 'not json' WHERE id = 'm'");
+        assert_eq!(store.microsoft_grant("m").unwrap(), None);
+        // Every permission, not none.
+        assert_eq!(shown_of(&store, "m"), (vec![], vec![]));
+        // What's recorded next replaces it.
+        store.record_granted_scopes("m", &mail_only()).unwrap();
+        assert_eq!(
+            store.microsoft_grant("m").unwrap().unwrap().scopes,
+            mail_only()
+        );
     }
 }

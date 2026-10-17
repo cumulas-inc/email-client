@@ -5,7 +5,8 @@ use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 use super::CoreService;
-use crate::error::{Error, Result};
+use super::permissions::is_listing_refusal;
+use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
     Attendee, AttendeeKind, Calendar, Contact, ContactDraft, DataKind, EntityKind, Event,
     EventDraft, EventResponse, Importance, ResponseStatus, Task, TaskDraft, TaskList, TaskPatch,
@@ -157,7 +158,20 @@ impl CoreService {
             let Some(provider) = self.providers_for(&calendar.account_id).await?.calendar else {
                 continue;
             };
-            let events = provider.list_events(&calendar, start, end).await?;
+            let events = match provider.list_events(&calendar, start, end).await {
+                Ok(events) => events,
+                // The account can't use its calendar now (the next sync
+                // drops it), or can't read this one: the others still count.
+                Err(e) if e.code == ErrorCode::PermissionRequired || is_listing_refusal(&e) => {
+                    tracing::info!(
+                        "skipping a calendar of account {} that can't be read ({:?})",
+                        calendar.account_id,
+                        e.code
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             self.store
                 .replace_events_in_range(&calendar.id, start, end, &events)?;
         }

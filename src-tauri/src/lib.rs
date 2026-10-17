@@ -201,6 +201,8 @@ pub fn run() {
             commands::add_imap_account,
             commands::add_microsoft_account,
             commands::cancel_microsoft_sign_in,
+            commands::microsoft_admin_consent,
+            commands::retry_microsoft_features,
             commands::update_imap_account,
             commands::update_account,
             commands::remove_account,

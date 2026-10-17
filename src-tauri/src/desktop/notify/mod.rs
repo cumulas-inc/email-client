@@ -821,6 +821,8 @@ pub(crate) mod tests {
             created_at: Utc::now(),
             last_synced_at: None,
             sync_error: None,
+            needs_permission: vec![],
+            refused_features: vec![],
         }
     }
 
