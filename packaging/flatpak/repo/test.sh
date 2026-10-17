@@ -17,6 +17,9 @@
 #    then "deploy") keep the last KEEP_BUILDS builds of each ref, with their
 #    history, static deltas and appstream data, record in the repository's
 #    config how many each keeps, and leave .Debug out;
+#  - the assembled site's page for IT administrators matches the app's
+#    approval link and permissions, and shows each answer Microsoft can
+#    bring an administrator back with (check-admin-consent.sh);
 #  - raising KEEP_BUILDS from 2 to 4 after three publishes: the publishes
 #    after it carry on, the history growing by a build each, and so does one
 #    after a publish that left a ref out;
@@ -33,7 +36,7 @@
 #    .flatpakref.
 #
 # Usage: test.sh
-# Needs flatpak, ostree, gpg, python3 and curl. Your own Flatpak
+# Needs flatpak, ostree, gpg, python3, curl and node. Your own Flatpak
 # installations are left alone: it uses a temporary FLATPAK_USER_DIR. The
 # test keys' GnuPG homes go in /tmp whatever TMPDIR is: gpg-agent puts its
 # sockets there, and a socket's path can't be much longer than 100 bytes.
@@ -393,6 +396,8 @@ check "site: index.html has no scripts" test -z "$(grep -i '<script' "$site/inde
 check "site: index.html loads nothing from elsewhere" \
   test -z "$(grep -Ei '(src|srcset)="(https?:)?//|<link[^>]*href="(https?:)?//|@import|url\(' "$site/index.html" || true)"
 check "site: the icon is there" test -s "$site/logo.svg"
+expect_success "site: the page for IT administrators matches the app" \
+  "$here/check-admin-consent.sh" "$site/admin-consent/index.html"
 
 # --- What clients see -----------------------------------------------------------
 

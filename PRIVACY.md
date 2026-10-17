@@ -11,7 +11,7 @@ signature when your organization sets one up there.
 Cumulas Mail has no telemetry, no analytics, no crash reporting and no
 advertising, and you don't need a Cumulas account.
 
-_Last updated: October 16, 2026._
+_Last updated: October 17, 2026._
 
 ## What the app keeps on your computer
 
@@ -90,6 +90,17 @@ accounts use:
 - **IMAP accounts**: the IMAP and SMTP servers you set up, with the password
   you gave. To show new mail within seconds, the app keeps a second
   connection open to your IMAP server (IMAP IDLE).
+
+**When an administrator approves Cumulas Mail** for their organization with
+the app's approval link, Microsoft then sends their browser to
+`https://flatpak.cumulas.co/admin-consent/`, a static page on GitHub Pages,
+with the result in the address: that it was approved or Microsoft's error,
+the organization's tenant ID and the permissions they approved. The page
+reads it in the browser to show the result and sends nothing anywhere, and
+its links don't pass the address on; Cumulas doesn't receive it. GitHub,
+which serves the page, may log the request, as its
+[privacy statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement)
+describes.
 
 When you search your mail, the words you type go to the mail servers of your
 accounts (Microsoft, or your IMAP server), so that each can search your whole

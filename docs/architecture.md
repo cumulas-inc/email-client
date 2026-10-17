@@ -357,11 +357,17 @@ and Flagged filters apply to results too, and say so when they hide some.
 
 ## Microsoft 365 permissions
 
-The app requests only delegated permissions that users can grant themselves:
-`User.Read`, `offline_access`, `Mail.ReadWrite`, `Mail.Send`,
-`MailboxSettings.Read`, `Calendars.ReadWrite`, `Contacts.ReadWrite`,
-`Tasks.ReadWrite`. Whether a user may consent is the organization's policy;
-when it is blocked the app shows an admin-consent link to forward to IT. See
+The app requests only delegated permissions: `User.Read`, `offline_access`,
+`Mail.ReadWrite` and `Mail.Send` for mail (`CORE_SCOPES` in
+`auth/microsoft.rs`), and one optional permission per feature
+(`OPTIONAL_SCOPES`): `MailboxSettings.Read`, `Calendars.ReadWrite`,
+`Contacts.ReadWrite`, `Tasks.ReadWrite`. Whether people may grant them is the
+organization's policy, and under Microsoft's default since late 2025 an
+administrator usually has to approve the app first; the app then shows an
+approval link to forward to IT, and can sign in with mail only. What each
+account was granted is recorded (`accounts.microsoft_grant`). A feature
+without its permission, or one Microsoft 365 refuses, gets a provider that
+fails with `permissionRequired`, and its cached data is dropped. See
 [microsoft-365.md](microsoft-365.md).
 
 ## Data on disk

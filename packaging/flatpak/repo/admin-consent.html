@@ -1,0 +1,722 @@
+<!doctype html>
+<!-- Where Microsoft brings an administrator back after approving Cumulas Mail,
+     and the page for IT administrators. A small inline script shows the
+     result Microsoft puts in the address, with textContent only. Nothing is
+     loaded from elsewhere and nothing is sent anywhere. assemble-site.sh
+     publishes it as admin-consent/index.html; check-admin-consent.sh checks
+     it against the app (the approval link, the permissions) and runs the
+     script against each answer Microsoft can send. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <!-- The address can carry the organization's tenant ID: links don't pass it on. -->
+    <meta name="referrer" content="no-referrer" />
+    <meta
+      name="description"
+      content="How Microsoft 365 administrators approve Cumulas Mail for their organization."
+    />
+    <title>Approve Cumulas Mail for your organization</title>
+    <link rel="icon" href="../logo.svg" type="image/svg+xml" />
+    <style>
+      /* The install page's (index.html), plus the result panels and tables. */
+      :root {
+        color-scheme: light;
+        --font-sans: "Inter Variable", "Inter", "Cantarell", "Noto Sans", system-ui, sans-serif;
+        --font-serif: "Charis SIL", "Charter", "Bitstream Charter", Georgia, serif;
+        --font-mono: "JetBrains Mono", "Source Code Pro", ui-monospace, monospace;
+        --bg-app: #efede8;
+        --bg-app-glow: #f5f4f0;
+        --bg-surface: #ffffff;
+        --bg-sunken: #f5f4f1;
+        --fg-primary: #1d1c1a;
+        --fg-secondary: #57534c;
+        --fg-tertiary: #716c63;
+        --fg-link: #0a6f6a;
+        --border-default: #e1ddd5;
+        --brand: #0b7a75;
+        --brand-hover: #096560;
+        --brand-pressed: #07524e;
+        --on-brand: #ffffff;
+        --focus-ring: #0b7a75;
+        --warning: #a8560e;
+        --warning-subtle: #fcf0e2;
+        --success: #2d7a3a;
+        --success-subtle: #e5f2e3;
+        --shadow-card:
+          0 0 0 1px rgba(29, 28, 26, 0.06), 0 1px 2px rgba(29, 28, 26, 0.05),
+          0 12px 32px -16px rgba(29, 28, 26, 0.18);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color-scheme: dark;
+          --bg-app: #181715;
+          --bg-app-glow: #1c1b19;
+          --bg-surface: #22211e;
+          --bg-sunken: #1d1c1a;
+          --fg-primary: #edebe6;
+          --fg-secondary: #bbb6ac;
+          --fg-tertiary: #9a948a;
+          --fg-link: #5cc6bb;
+          --border-default: #3a3732;
+          --brand: #168078;
+          --brand-hover: #1c9087;
+          --brand-pressed: #126a63;
+          --focus-ring: #5cc6bb;
+          --warning: #eba25c;
+          --warning-subtle: #3a2a1a;
+          --success: #7cc489;
+          --success-subtle: #1f3122;
+          --shadow-card:
+            0 0 0 1px rgba(255, 255, 255, 0.055), 0 1px 2px rgba(0, 0, 0, 0.3),
+            0 10px 28px -12px rgba(0, 0, 0, 0.55);
+        }
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
+      html {
+        background: var(--bg-app);
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        padding: 48px 16px;
+        font-family: var(--font-sans);
+        font-size: 15px;
+        line-height: 1.55;
+        color: var(--fg-primary);
+        background:
+          radial-gradient(1200px 500px at 15% -10%, var(--bg-app-glow), transparent 70%),
+          var(--bg-app);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 40px;
+        border-radius: 12px;
+        background: var(--bg-surface);
+        box-shadow: var(--shadow-card);
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        margin-bottom: 32px;
+      }
+
+      header img {
+        flex: none;
+      }
+
+      h1,
+      h2 {
+        font-family: var(--font-serif);
+        font-weight: 700;
+        line-height: 1.2;
+        margin: 0;
+      }
+
+      h1 {
+        font-size: 30px;
+        letter-spacing: -0.005em;
+      }
+
+      h2 {
+        font-size: 19px;
+        margin-bottom: 8px;
+      }
+
+      h3 {
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.4;
+        margin: 20px 0 6px;
+      }
+
+      p,
+      ol {
+        margin: 0 0 12px;
+      }
+
+      ol {
+        padding-left: 22px;
+      }
+
+      li + li {
+        margin-top: 8px;
+      }
+
+      .summary {
+        margin: 4px 0 0;
+        color: var(--fg-secondary);
+      }
+
+      section {
+        padding: 24px 0;
+        border-top: 1px solid var(--border-default);
+      }
+
+      section:first-of-type {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      a {
+        color: var(--fg-link);
+        text-underline-offset: 2px;
+      }
+
+      a:focus-visible,
+      summary:focus-visible {
+        outline: 2px solid var(--focus-ring);
+        outline-offset: 2px;
+        border-radius: 4px;
+      }
+
+      .approve {
+        display: inline-flex;
+        align-items: center;
+        height: 44px;
+        padding: 0 24px;
+        margin-bottom: 12px;
+        border-radius: 10px;
+        background: var(--brand);
+        color: var(--on-brand);
+        font-weight: 600;
+        text-decoration: none;
+        box-shadow:
+          0 1px 2px rgba(0, 0, 0, 0.15),
+          inset 0 1px 0 rgba(255, 255, 255, 0.15);
+        transition: background-color 120ms ease;
+      }
+
+      .approve:hover {
+        background: var(--brand-hover);
+      }
+
+      .approve:active {
+        background: var(--brand-pressed);
+      }
+
+      .note {
+        color: var(--fg-secondary);
+      }
+
+      /* What Microsoft said when it brought the administrator back, and the
+         note for browsers without JavaScript. */
+      .result {
+        margin: 0 0 32px;
+        padding: 16px 20px 4px;
+        border-radius: 10px;
+        background: var(--bg-sunken);
+        border: 1px solid var(--border-default);
+      }
+
+      .result--approved {
+        background: var(--success-subtle);
+        border-color: transparent;
+        border-left: 3px solid var(--success);
+      }
+
+      .result--failed {
+        background: var(--warning-subtle);
+        border-color: transparent;
+        border-left: 3px solid var(--warning);
+      }
+
+      .result--failed p:first-of-type {
+        overflow-wrap: anywhere;
+      }
+
+      pre,
+      code {
+        font-family: var(--font-mono);
+        font-size: 13px;
+      }
+
+      /* Commands and links wrap rather than scroll, so all of them shows. */
+      pre {
+        margin: 0 0 8px;
+        padding: 10px 12px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        border-radius: 8px;
+        background: var(--bg-sunken);
+        border: 1px solid var(--border-default);
+      }
+
+      .link pre code {
+        user-select: all;
+      }
+
+      /* A script keeps its lines: it scrolls sideways where it doesn't fit. */
+      pre.script {
+        white-space: pre;
+        overflow-wrap: normal;
+        overflow-x: auto;
+      }
+
+      p code,
+      li code,
+      td code {
+        overflow-wrap: anywhere;
+      }
+
+      details {
+        margin: 0 0 12px;
+      }
+
+      summary {
+        cursor: pointer;
+        color: var(--fg-link);
+        margin-bottom: 8px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 4px 0 16px;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        padding: 8px 12px 8px 0;
+        text-align: left;
+        vertical-align: top;
+        border-top: 1px solid var(--border-default);
+      }
+
+      td:last-child,
+      th:last-child {
+        padding-right: 0;
+      }
+
+      thead th {
+        border-top: 0;
+        padding-top: 0;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--fg-tertiary);
+      }
+
+      th[scope="colgroup"] {
+        padding-top: 16px;
+        font-weight: 600;
+        color: var(--fg-secondary);
+      }
+
+      td:first-child {
+        width: 45%;
+      }
+
+      footer {
+        padding-top: 24px;
+        border-top: 1px solid var(--border-default);
+        font-size: 13px;
+        color: var(--fg-tertiary);
+      }
+
+      footer nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 20px;
+        margin-bottom: 8px;
+      }
+
+      @media (max-width: 560px) {
+        body {
+          padding: 16px;
+        }
+
+        main {
+          padding: 24px 20px;
+        }
+
+        header {
+          gap: 16px;
+        }
+
+        header img {
+          width: 56px;
+          height: 56px;
+        }
+
+        h1 {
+          font-size: 26px;
+        }
+
+        .result {
+          padding: 14px 16px 2px;
+        }
+
+        /* Each permission above what it's for. */
+        thead {
+          display: none;
+        }
+
+        tr,
+        th,
+        td {
+          display: block;
+        }
+
+        td:first-child {
+          width: auto;
+          padding-bottom: 0;
+        }
+
+        td + td {
+          border-top: 0;
+          padding-top: 2px;
+          color: var(--fg-secondary);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="../logo.svg" alt="" width="72" height="72" />
+        <div>
+          <h1 id="page-title">Approve Cumulas Mail</h1>
+          <p class="summary">For Microsoft 365 administrators</p>
+        </div>
+      </header>
+
+      <div id="approved" class="result result--approved" hidden>
+        <p>
+          People in your organization can now sign in to Cumulas Mail. If someone asked you to
+          approve it, let them know: in Cumulas Mail they select <strong>Try again</strong> (or
+          <strong>Turn on</strong> for calendar, contacts or tasks). People who already use Cumulas
+          Mail get the new permissions by themselves within a couple of hours.
+        </p>
+        <p><a href="./">Information for administrators</a></p>
+      </div>
+
+      <div id="failed" class="result result--failed" hidden>
+        <h2>Cumulas Mail wasn't approved</h2>
+        <p>
+          Microsoft said: <span id="failed-description"></span> (<code id="failed-error"></code>)
+        </p>
+        <p id="failed-declined" hidden>
+          You didn't accept, so nothing changed. To approve Cumulas Mail, select
+          <strong>Approve for your organization</strong> below, then <strong>Accept</strong>.
+        </p>
+        <p id="failed-other" hidden>
+          Sign in with an account that has one of the roles listed under
+          <strong>Approve it for everyone</strong>, then select
+          <strong>Approve for your organization</strong> again.
+        </p>
+      </div>
+
+      <div id="admin">
+        <noscript>
+          <p class="result">
+            Did Microsoft just bring you back here after you selected Accept? If Microsoft showed no
+            error, Cumulas Mail is approved, and people can select Try again in Cumulas Mail.
+          </p>
+        </noscript>
+
+        <section>
+          <h2>What Cumulas Mail is</h2>
+          <p>
+            Cumulas Mail is an open-source (GPL-3.0-or-later) email, calendar, contacts and tasks
+            app for Linux from Cumulas Inc, a Microsoft-verified publisher. It signs in with
+            Microsoft's own page in the person's web browser and never sees their password.
+          </p>
+          <p>
+            Application (client) ID <code>10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad</code>, publisher ID
+            <code>7118869</code>.
+          </p>
+        </section>
+
+        <section>
+          <h2>What it can access</h2>
+          <p>
+            Only delegated permissions: Cumulas Mail acts as the signed-in person and reaches their
+            own mail, calendar, contacts and tasks, never anyone else's.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Permission</th>
+                <th scope="col">What it's for</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th colspan="2" scope="colgroup">For mail</th>
+              </tr>
+              <tr>
+                <td><code>openid</code>, <code>profile</code>, <code>email</code></td>
+                <td>Signing in</td>
+              </tr>
+              <tr>
+                <td><code>offline_access</code></td>
+                <td>Staying signed in (refresh token)</td>
+              </tr>
+              <tr>
+                <td><code>User.Read</code></td>
+                <td>Showing the person's name and address</td>
+              </tr>
+              <tr>
+                <td><code>Mail.ReadWrite</code></td>
+                <td>Reading, searching, flagging, moving and deleting mail</td>
+              </tr>
+              <tr>
+                <td><code>Mail.Send</code></td>
+                <td>Sending mail</td>
+              </tr>
+            </tbody>
+            <tbody>
+              <tr>
+                <th colspan="2" scope="colgroup">
+                  For calendar, contacts, tasks and time zone (optional)
+                </th>
+              </tr>
+              <tr>
+                <td><code>MailboxSettings.Read</code></td>
+                <td>Time zone and mailbox preferences</td>
+              </tr>
+              <tr>
+                <td><code>Calendars.ReadWrite</code></td>
+                <td>Calendar views, creating events, meeting responses</td>
+              </tr>
+              <tr>
+                <td><code>Contacts.ReadWrite</code></td>
+                <td>Contacts and address autocomplete</td>
+              </tr>
+              <tr>
+                <td><code>Tasks.ReadWrite</code></td>
+                <td>Microsoft To Do lists and tasks</td>
+              </tr>
+            </tbody>
+            <tbody>
+              <tr>
+                <th colspan="2" scope="colgroup">For instant updates (Cumulas Mail's own API)</th>
+              </tr>
+              <tr>
+                <td><code>Sync.Receive</code></td>
+                <td>
+                  Instant updates through the Cumulas push service, which receives change notices
+                  without content and gets no access to the mailbox
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            Mail stays on the person's computer and goes only between it and Microsoft 365. The app
+            sends no telemetry. See the
+            <a href="https://github.com/cumulas-inc/email-client/blob/main/PRIVACY.md"
+              >privacy policy</a
+            >.
+          </p>
+          <p>
+            Calendar, contacts, tasks and mailbox settings are optional: people can start with mail
+            if your settings allow it, and turn the rest on later.
+          </p>
+        </section>
+
+        <section>
+          <h2>Approve it for everyone</h2>
+          <a
+            class="approve"
+            href="https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&amp;scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&amp;redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F"
+            >Approve for your organization</a
+          >
+          <p>
+            Sign in with a Global Administrator, Privileged Role Administrator, Cloud Application
+            Administrator or Application Administrator account. Afterwards Microsoft brings you back
+            to this page.
+          </p>
+          <details class="link">
+            <summary>Copy the link to open it in another browser</summary>
+            <pre><code>https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&amp;scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&amp;redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F</code></pre>
+          </details>
+
+          <h3>Or in the Microsoft Entra admin center</h3>
+          <p>
+            Entra ID → Enterprise apps → All applications → Cumulas Mail → Security → Permissions →
+            Grant admin consent for &lt;your organization&gt;. Cumulas Mail is listed there once
+            someone in your organization has approved it; if it isn't listed, use the Approve button
+            above. The Grant admin consent button grants the permissions listed on Cumulas Mail's
+            app registration; the Approve button above grants exactly the ones in this table.
+          </p>
+        </section>
+
+        <section>
+          <h2>Approving requests from people</h2>
+          <p>
+            With the admin consent workflow on, people can ask for approval on Microsoft's sign-in
+            page. To approve a request: Entra ID → Enterprise apps → Activity → Admin consent
+            requests → My Pending → Cumulas Mail → Review permissions and consent → Accept.
+          </p>
+          <p>
+            People get an email when you respond if email notifications are on. You may see two
+            requests for Cumulas Mail; approve both. Reviewers only see requests made after they
+            became reviewers.
+          </p>
+        </section>
+
+        <section>
+          <h2>Let people approve Cumulas Mail for themselves</h2>
+          <p>
+            Under Microsoft's default consent settings, people can't approve mail, calendar,
+            contacts or tasks permissions for apps themselves. Two ways to let them approve Cumulas
+            Mail:
+          </p>
+          <ol>
+            <li>
+              <strong>A custom app consent policy for just this app.</strong> Create a permission
+              grant policy that includes delegated permissions for client application ID
+              <code>10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad</code> (or publisher ID
+              <code>7118869</code>), and add it to the default user role's assigned policies,
+              alongside the existing ones: don't replace them. With Microsoft Graph PowerShell
+              (check it in a test tenant first):
+              <pre
+                class="script"
+              ><code>Connect-MgGraph -Scopes "Policy.ReadWrite.PermissionGrant", `
+  "Policy.ReadWrite.Authorization"
+
+# A policy for Cumulas Mail's delegated permissions only
+New-MgPolicyPermissionGrantPolicy -Id "cumulas-mail" `
+  -DisplayName "Cumulas Mail" `
+  -Description "People may approve Cumulas Mail themselves."
+New-MgPolicyPermissionGrantPolicyInclude `
+  -PermissionGrantPolicyId "cumulas-mail" `
+  -PermissionType "delegated" `
+  -ClientApplicationIds "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad"
+# Or -ClientApplicationPublisherIds "7118869": every app
+# from Cumulas Inc.
+
+# Add it to the policies already assigned; don't replace them.
+$roles = Get-MgPolicyAuthorizationPolicy |
+  Select-Object -ExpandProperty DefaultUserRolePermissions
+$assigned = @($roles.PermissionGrantPoliciesAssigned) +
+  "ManagePermissionGrantsForSelf.cumulas-mail"
+$update = @{ PermissionGrantPoliciesAssigned = $assigned }
+Update-MgPolicyAuthorizationPolicy `
+  -DefaultUserRolePermissions $update</code></pre>
+            </li>
+            <li>
+              <strong>Low-impact classification.</strong> In Entra ID → Enterprise apps → Consent
+              and permissions → User consent settings, select "Allow user consent for apps from
+              verified publishers, for selected permissions". Then, under Permission
+              classifications, classify the Microsoft Graph permissions above as low impact. The
+              trade-off: it applies to every verified publisher's app that asks for those
+              permissions, not only Cumulas Mail, and it replaces Microsoft's managed setting for
+              other apps too.
+            </li>
+          </ol>
+        </section>
+
+        <section>
+          <h2>If people still can't sign in</h2>
+          <p>
+            <strong>Not assigned (AADSTS50105).</strong> Cumulas Mail requires assignment in your
+            organization. Assign people or groups under Enterprise apps → Cumulas Mail → Users and
+            groups → Add user/group.
+          </p>
+          <p>
+            <strong>App disabled or blocked (AADSTS7000112).</strong> Cumulas Mail is turned off for
+            sign-in, for example after a consent request was blocked. Turn it back on under
+            Enterprise apps → Cumulas Mail → Properties → Enabled for users to sign in.
+          </p>
+          <p>
+            <strong>App not set up (AADSTS65005).</strong> Your organization is missing something
+            Cumulas Mail needs. Approving it with the button above usually fixes this.
+          </p>
+          <p>
+            <strong>Service not enabled (AADSTS650052).</strong> Your organization hasn't subscribed
+            to or enabled a service Cumulas Mail needs, usually Exchange Online. Check the
+            subscription and the person's license.
+          </p>
+          <p>
+            <strong>Security info (AADSTS53004, 53010).</strong> The person has to finish setting up
+            their sign-in security info, such as multifactor authentication, which Microsoft
+            couldn't do during this sign-in.
+          </p>
+          <p>
+            <strong>Conditional Access (AADSTS53000–53003, 530xxx).</strong> A sign-in rule didn't
+            allow the sign-in. The Entra sign-in logs show which policy applied. Rules that require
+            a compliant or managed device may not be met by Cumulas Mail, which signs in through the
+            person's web browser on Linux.
+          </p>
+        </section>
+
+        <section>
+          <h2>Your own app registration</h2>
+          <p>
+            Organizations can also register Cumulas Mail in their own tenant and have people use
+            that registration instead: see
+            <a
+              href="https://github.com/cumulas-inc/email-client/blob/main/docs/microsoft-365.md#using-your-organizations-own-registration-it-admins"
+              >Using your organization's own registration</a
+            >. This page and its Approve button are for Cumulas Mail's published registration only.
+          </p>
+        </section>
+      </div>
+
+      <footer>
+        <nav aria-label="About Cumulas Mail">
+          <a href="../">Install Cumulas Mail</a>
+          <a href="https://github.com/cumulas-inc/email-client">Source code</a>
+          <a href="https://github.com/cumulas-inc/email-client/blob/main/LICENSE"
+            >License: GPL-3.0-or-later</a
+          >
+          <a href="https://github.com/cumulas-inc/email-client/blob/main/PRIVACY.md"
+            >Privacy policy</a
+          >
+        </nav>
+        <p>
+          Cumulas Mail is in early development. It is an independent project, not affiliated with
+          Microsoft.
+        </p>
+      </footer>
+    </main>
+    <script>
+      // Microsoft brings an administrator back with the result in the address
+      // (v2 admin consent): admin_consent=True, with tenant and scope when
+      // approved, or error and error_description when not. An error wins.
+      {
+        const params = new URLSearchParams(location.search);
+        const element = (id) => document.getElementById(id);
+        const error = params.get("error");
+        if (error !== null) {
+          const description = (params.get("error_description") || "")
+            .split(/\r|\n/)[0]
+            .trim()
+            .slice(0, 500);
+          const declined = error === "access_denied" || description.startsWith("AADSTS65004");
+          element("failed").hidden = false;
+          element("failed-error").textContent = error;
+          element("failed-description").textContent = description || "Microsoft didn't say why.";
+          element("failed-declined").hidden = !declined;
+          element("failed-other").hidden = declined;
+          document.title = "Cumulas Mail wasn't approved";
+        } else if ((params.get("admin_consent") || "").toLowerCase() === "true") {
+          element("approved").hidden = false;
+          element("admin").hidden = true;
+          element("page-title").textContent = "Cumulas Mail is approved";
+          document.title = "Cumulas Mail is approved";
+        }
+      }
+    </script>
+  </body>
+</html>

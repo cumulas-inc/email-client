@@ -185,13 +185,20 @@ this repository, so it uses `co.cumulas.Mail.yml` as it is.
   `flatpak.cumulas.co` at it: people's remotes keep working, since the URL and
   the key stay the same. The deploy and live check jobs are what would change.
 
-| On the site                  | What it is                                   |
-| ---------------------------- | -------------------------------------------- |
-| `repo/`                      | The Flatpak (ostree) repository              |
-| `cumulas.flatpakrepo`        | Adds the remote (`flatpak remote-add`)       |
-| `co.cumulas.Mail.flatpakref` | Installs the app in one click                |
-| `cumulas-flatpak.gpg`        | The public key the repository is signed with |
-| `index.html`, `logo.svg`     | The install page (`repo/index.html`)         |
+| On the site                  | What it is                                                 |
+| ---------------------------- | ---------------------------------------------------------- |
+| `repo/`                      | The Flatpak (ostree) repository                            |
+| `cumulas.flatpakrepo`        | Adds the remote (`flatpak remote-add`)                     |
+| `co.cumulas.Mail.flatpakref` | Installs the app in one click                              |
+| `cumulas-flatpak.gpg`        | The public key the repository is signed with               |
+| `index.html`, `logo.svg`     | The install page (`repo/index.html`)                       |
+| `admin-consent/`             | The page for IT administrators (`repo/admin-consent.html`) |
+
+Microsoft brings administrators back to `admin-consent/` after they approve
+Cumulas Mail, so its address is registered on the app registration and built
+into the app (see [Microsoft 365](../../docs/microsoft-365.md#approving-cumulas-mail-it-admins)).
+`repo/check-admin-consent.sh` checks the page against the app's approval link
+and permissions in CI and in `repo/test.sh`.
 
 ### Installing
 

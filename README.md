@@ -115,6 +115,7 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                                  # core, Graph (mock server), IMAP units
 CUMULAS_TEST_IMAP=1 cargo test -p cumulas-core --test imap_integration   # needs GreenMail, see the test file
 e2e/desktop/run.sh                                      # real app via tauri-driver, see e2e/desktop/README.md
+packaging/flatpak/repo/check-admin-consent.sh           # the IT admin page against the app's approval link
 ```
 
 CI runs all of these, plus a Flatpak build.
@@ -124,6 +125,7 @@ CI runs all of these, plus a Flatpak build.
 - [Privacy policy](PRIVACY.md)
 - [Architecture](docs/architecture.md)
 - [Microsoft 365: permissions, admin consent, app registration](docs/microsoft-365.md)
+- IT administrators: [approving Cumulas Mail](https://flatpak.cumulas.co/admin-consent/)
 - [Flatpak packaging, the flatpak.cumulas.co repository and Flathub submission](packaging/flatpak/README.md)
 
 ## Before release
@@ -132,6 +134,16 @@ CI runs all of these, plus a Flatpak build.
   mailbox (prefix words such as `invoi`, `from:` with part of a name) against
   real Microsoft 365 and Outlook.com accounts.
 - Make the repository or the screenshots public for the Flathub listing.
+- On the published Microsoft app registration, before the next release tag:
+  add the Web redirect URI `https://flatpak.cumulas.co/admin-consent/` and
+  make its API permissions exactly what the app asks for, `Sync.Receive`
+  included ([steps 3 and 4](docs/microsoft-365.md#registering-the-app-publisher)),
+  and confirm publisher ID `7118869`. Then, in a test tenant that never
+  approved Cumulas Mail, open the
+  [approval link](docs/microsoft-365.md#approving-cumulas-mail-it-admins):
+  Microsoft must bring the browser back to that page without an error. If it
+  refuses `Sync.Receive` there, set `ADMIN_LINK_INCLUDES_PUSH` to `false` and
+  drop the scope from the page's and the docs' link.
 - Finish [setting up the self-hosted Flatpak repository](packaging/flatpak/README.md#setting-it-up)
   before the first release tag: the signing key, DNS and GitHub Pages are
   done; the `flatpak-signing` environment (with the secret moved into it), the
