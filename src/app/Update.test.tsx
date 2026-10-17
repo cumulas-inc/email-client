@@ -8,12 +8,13 @@ import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { DEMO_UPDATE_COMMIT, MockBackend, type MockOptions } from "../api/mock";
+import { qk } from "../api/queries";
 import { useModals } from "../components/modals";
 import { useToasts } from "../components/toast";
 import { resetMailStore, useMailStore } from "../modules/mail/mailStore";
 import { loadLazyModules } from "../test/lazyModules";
 import { App } from "./App";
-import { DISMISSED_UPDATE_KEY, useAppStore } from "./store";
+import { DISMISSED_UPDATE_KEY, storedDismissedUpdate, useAppStore } from "./store";
 
 function renderApp(options: MockOptions = { update: "installed" }) {
   const backend = new MockBackend(options);
@@ -241,9 +242,10 @@ describe("an installed update", () => {
     expect(within(menu).getByRole("menuitem", { name: "Restart to update" })).toBeEnabled();
     await user.keyboard("{Escape}");
 
-    // Not again for this version, as long as the device remembers.
+    // Not again for this version, as long as the device remembers: the next
+    // page load reads it (store.test.ts).
     unmount();
-    useAppStore.setState({ dismissedUpdate: window.localStorage.getItem(DISMISSED_UPDATE_KEY) });
+    useAppStore.setState({ dismissedUpdate: storedDismissedUpdate() });
     const { backend } = renderApp();
     await screen.findByRole("button", { name: "Main menu, update installed" });
     await act(() => new Promise((r) => setTimeout(r, 10)));
@@ -362,16 +364,20 @@ describe("an installed update", () => {
 
 describe("after a restart into an update", () => {
   it("says the app was updated, once", async () => {
-    const { unmount } = renderApp({ restartedToUpdate: true });
+    const { backend, unmount } = renderApp({ restartedToUpdate: true });
     await waitFor(() =>
       expect(useToasts.getState().toasts.map((t) => t.message)).toEqual([
         "Updated to version 0.1.0-demo.",
       ]),
     );
     expect(noCard()).not.toBeInTheDocument();
+    // The same page, its app info read again (as a remount would): no
+    // second toast.
     unmount();
-    renderApp({});
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<App backend={backend} queryClient={client} />);
     await screen.findByRole("navigation", { name: "Apps" });
+    await waitFor(() => expect(client.getQueryData(qk.appInfo())).toBeDefined());
     await act(() => new Promise((r) => setTimeout(r, 10)));
     expect(useToasts.getState().toasts).toHaveLength(1);
   });

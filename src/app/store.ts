@@ -13,7 +13,8 @@ export type Leave = "quit" | "restart";
 /** Where the update whose card was put off is kept, per device. */
 export const DISMISSED_UPDATE_KEY = "cumulas.update.dismissed";
 
-function storedDismissedUpdate(): string | null {
+/** The update whose card was put off on this device, as a page load reads it. */
+export function storedDismissedUpdate(): string | null {
   try {
     return window.localStorage.getItem(DISMISSED_UPDATE_KEY);
   } catch {
