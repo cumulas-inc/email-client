@@ -1,7 +1,10 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect } from "react";
 
 import type { Backend } from "../api/backend";
 import { useBackend } from "../api/context";
+import { qk } from "../api/queries";
+import type { UpdateState } from "../api/types";
 import { toast } from "../components/toast";
 import { useMailStore } from "../modules/mail/mailStore";
 import { type Leave, useAppStore } from "./store";
@@ -26,13 +29,20 @@ export function useRestart(): () => void {
 
 function useLeave(how: Leave): () => void {
   const backend = useBackend();
+  const client = useQueryClient();
   return useCallback(() => {
-    if (useMailStore.getState().compose?.dirty) {
+    // While a restart is under way, the unsent message was given up already
+    // (or there was none): asked again, by the tray or a notification, it
+    // leaves without asking, since keeping the message couldn't stop the
+    // restart.
+    const update = client.getQueryData<UpdateState>(qk.updateState());
+    const restarting = update?.kind === "installed" && update.restart === "restarting";
+    if (!restarting && useMailStore.getState().compose?.dirty) {
       useAppStore.getState().setLeaveConfirm(how);
       return;
     }
     leaveNow(backend, how);
-  }, [backend, how]);
+  }, [backend, client, how]);
 }
 
 /** Quits or restarts without asking; a restart that fails says why, and the app keeps running. */

@@ -175,6 +175,29 @@ describe("an installed update", () => {
     );
   });
 
+  it("doesn't ask again while the restart is under way", async () => {
+    const user = userEvent.setup();
+    const { backend } = renderApp();
+    await screen.findByRole("navigation", { name: "Apps" });
+    startUnsentMessage();
+    await user.click(within(await card()).getByRole("button", { name: "Restart" }));
+    const dialog = await screen.findByRole("dialog", { name: "Restart Cumulas Mail?" });
+    await user.click(within(dialog).getByRole("button", { name: "Discard and restart" }));
+    await waitFor(() => expect(backend.calls.restart).toBe(1));
+    await screen.findByRole("button", { name: "Restarting…" });
+
+    // The tray or a notification asks again: the message was given up, and
+    // keeping it now couldn't stop the restart.
+    act(() => backend.requestRestart());
+    await act(() => new Promise((r) => setTimeout(r, 10)));
+    expect(screen.queryByRole("dialog", { name: "Restart Cumulas Mail?" })).not.toBeInTheDocument();
+    expect(backend.calls.restart).toBe(1);
+    // Nor does Quit from the tray: it quits.
+    act(() => backend.requestQuit());
+    await waitFor(() => expect(backend.calls.quit).toBe(1));
+    expect(screen.queryByRole("dialog", { name: "Quit Cumulas Mail?" })).not.toBeInTheDocument();
+  });
+
   it("restarts from the tray the same way", async () => {
     const user = userEvent.setup();
     const { backend } = renderApp();
