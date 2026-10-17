@@ -30,11 +30,12 @@ pub struct WindowState {
     /// Shown (not hidden to the background).
     visible: AtomicBool,
     focused: AtomicBool,
-    /// When the page was asked to quit, while it hasn't said no: it asks
-    /// the user whether to lose an unsent message, or it doesn't answer.
-    /// Cleared when the user keeps the message ([`Self::forget_quit`], from
-    /// `quit_canceled`), and when the window is hidden or gone.
-    quit_asked: Mutex<Option<Instant>>,
+    /// How and when the page was asked to leave (quit or restart), while it
+    /// hasn't said no: it asks the user whether to lose an unsent message,
+    /// or it doesn't answer. Cleared when the user keeps the message
+    /// ([`Self::forget_quit`], from `quit_canceled`), and when the window is
+    /// hidden or gone.
+    quit_asked: Mutex<Option<(Leave, Instant)>>,
 }
 
 impl WindowState {
@@ -49,21 +50,25 @@ impl WindowState {
         self.visible.load(Ordering::Relaxed) && self.focused.load(Ordering::Relaxed)
     }
 
-    /// Asking the page to quit at `now`: false when it was asked already
-    /// and hasn't said no, so it's asking the user (or doesn't answer), and
-    /// Quit again means quit now.
-    fn ask_quit(&self, now: Instant) -> bool {
+    /// Asking the page to leave `how` at `now`: false when it was asked the
+    /// same already and hasn't said no, so it's asking the user (or doesn't
+    /// answer), and Quit again means quit now. Asked the other way, it asks
+    /// again, about that one: the user answered neither.
+    fn ask_quit(&self, how: Leave, now: Instant) -> bool {
         let mut asked = self.quit_asked.lock().unwrap();
-        if asked.take().is_some() {
+        if asked.take().is_some_and(|(was, _)| was == how) {
             return false;
         }
-        *asked = Some(now);
+        *asked = Some((how, now));
         true
     }
 
-    /// The page was asked to quit at `at`, and it's still there.
+    /// The page was asked to leave at `at`, and it's still there.
     fn quit_pending(&self, at: Instant) -> bool {
-        *self.quit_asked.lock().unwrap() == Some(at)
+        self.quit_asked
+            .lock()
+            .unwrap()
+            .is_some_and(|(_, asked)| asked == at)
     }
 
     /// The user kept the unsent message, the app quits, or the page went
@@ -84,16 +89,17 @@ enum Leave {
 /// Quit from outside the page (the tray). The page decides, as for its own
 /// Quit, because it may hold an unsent message and ask first; the window
 /// comes up when it doesn't quit at once. With no page, or Quit again while
-/// it asks (until the user keeps the message: `quit_canceled`), or while it
-/// doesn't answer, the app quits.
+/// it asks about quitting (until the user keeps the message:
+/// `quit_canceled`), or while it doesn't answer, the app quits.
 pub fn quit(app: &AppHandle) {
     leave(app, Leave::Quit, None);
 }
 
 /// Restart to update from outside the page (the tray, a notification's
 /// button), the way [`quit`] quits: the page decides, as for its own
-/// Restart, and with no page, or asked again while it asks, the app
-/// restarts. `activation_token` lets the new window take the focus.
+/// Restart, and with no page, or Restart again while it asks about
+/// restarting, the app restarts. `activation_token` lets the window, or
+/// else the new one, take the focus.
 pub fn restart(app: &AppHandle, activation_token: Option<String>) {
     leave(app, Leave::Restart, activation_token);
 }
@@ -106,14 +112,15 @@ fn leave(app: &AppHandle, how: Leave, activation_token: Option<String>) {
         return;
     };
     let asked = Instant::now();
-    if app.get_webview_window(MAIN).is_none() || !desktop.window.ask_quit(asked) {
+    if app.get_webview_window(MAIN).is_none() || !desktop.window.ask_quit(how, asked) {
         leave_now(app, how, activation_token);
         return;
     }
     let event = match how {
         Leave::Quit => QUIT_REQUESTED,
         Leave::Restart => {
-            // For the page's answer, `restart_app`.
+            // For the page's answer (`restart_app`), or for the window when
+            // the page asks first.
             desktop.update.keep_activation_token(activation_token);
             RESTART_REQUESTED
         }
@@ -127,8 +134,12 @@ fn leave(app: &AppHandle, how: Leave, activation_token: Option<String>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(QUIT_ANSWER).await;
-        if app.state::<Desktop>().window.quit_pending(asked) {
-            show_main(&app, None);
+        let desktop = app.state::<Desktop>();
+        if desktop.window.quit_pending(asked) {
+            // The page asks first: a notification's token brings its window
+            // up, and the new version then starts without one, as after
+            // the page's own Restart.
+            show_main(&app, desktop.update.take_activation_token());
         }
     });
 }
@@ -260,22 +271,43 @@ mod tests {
     fn quit_again_quits_only_while_the_page_asks() {
         let window = WindowState::default();
         let start = Instant::now();
-        assert!(window.ask_quit(start));
+        assert!(window.ask_quit(Leave::Quit, start));
         assert!(window.quit_pending(start));
         // The page asks (an unsent message), for as long as the user takes:
         // Quit again quits.
-        assert!(!window.ask_quit(start + Duration::from_secs(10 * 60)));
+        let much_later = start + Duration::from_secs(10 * 60);
+        assert!(!window.ask_quit(Leave::Quit, much_later));
         assert!(!window.quit_pending(start));
 
         // The user keeps the message (Cancel): the next Quit asks again,
         // however soon.
-        assert!(window.ask_quit(start));
+        assert!(window.ask_quit(Leave::Quit, start));
         window.forget_quit();
         assert!(!window.quit_pending(start));
         let again = start + Duration::from_secs(1);
-        assert!(window.ask_quit(again));
+        assert!(window.ask_quit(Leave::Quit, again));
         assert!(window.quit_pending(again));
         // And Quit while that asks quits.
-        assert!(!window.ask_quit(again + Duration::from_secs(1)));
+        assert!(!window.ask_quit(Leave::Quit, again + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn the_other_way_of_leaving_asks_again() {
+        let window = WindowState::default();
+        let start = Instant::now();
+        let then = start + Duration::from_secs(5);
+        // The page asks whether to quit; Restart meanwhile isn't an answer
+        // to that: the page asks about restarting instead.
+        assert!(window.ask_quit(Leave::Quit, start));
+        assert!(window.ask_quit(Leave::Restart, then));
+        assert!(!window.quit_pending(start));
+        assert!(window.quit_pending(then));
+        // Restart again while that asks restarts.
+        assert!(!window.ask_quit(Leave::Restart, then));
+
+        // The other way round.
+        assert!(window.ask_quit(Leave::Restart, start));
+        assert!(window.ask_quit(Leave::Quit, then));
+        assert!(!window.ask_quit(Leave::Quit, then));
     }
 }

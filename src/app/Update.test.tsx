@@ -189,6 +189,23 @@ describe("an installed update", () => {
     expect(backend.calls.quitCanceled).toBe(0);
   });
 
+  it("asks about restarting when the tray's Restart comes while it asks about quitting", async () => {
+    const user = userEvent.setup();
+    const { backend } = renderApp();
+    await card();
+    startUnsentMessage();
+
+    act(() => backend.requestQuit());
+    await screen.findByRole("dialog", { name: "Quit Cumulas Mail?" });
+    act(() => backend.requestRestart());
+    const dialog = await screen.findByRole("dialog", { name: "Restart Cumulas Mail?" });
+    expect(backend.calls.quit).toBe(0);
+    expect(backend.calls.restart).toBe(0);
+    await user.click(within(dialog).getByRole("button", { name: "Discard and restart" }));
+    await waitFor(() => expect(backend.calls.restart).toBe(1));
+    expect(backend.calls.quit).toBe(0);
+  });
+
   it("goes away with Later until another version is installed", async () => {
     const user = userEvent.setup();
     const { unmount } = renderApp();
