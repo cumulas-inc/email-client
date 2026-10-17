@@ -99,7 +99,10 @@ function Shell() {
       <SettingsDialog />
       <AddAccountDialog />
       <QuitConfirmDialog />
-      <StartAtLoginOffer />
+      {/* Present before a card arrives, so that screen readers announce it. */}
+      <div className="offer-anchor" aria-live="polite">
+        <StartAtLoginOffer />
+      </div>
       <Toaster />
     </div>
   );
