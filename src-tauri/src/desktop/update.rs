@@ -17,6 +17,7 @@
 //!    window. Otherwise, or when the new one exits early or doesn't answer,
 //!    the running instance stays, and Restart can be tried again.
 
+use std::ffi::OsString;
 use std::future::Future;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -175,6 +176,46 @@ impl Updates {
     pub fn take_activation_token(&self) -> Option<String> {
         self.activation_token.lock().unwrap().take()
     }
+
+    /// Changes the state with `change`; the state before and after.
+    fn change(
+        &self,
+        change: impl FnOnce(&UpdateState) -> UpdateState,
+    ) -> (UpdateState, UpdateState) {
+        let mut state = self.state.lock().unwrap();
+        let after = change(&state);
+        (std::mem::replace(&mut *state, after.clone()), after)
+    }
+
+    /// Ends a restart the new version didn't take over: nothing waits for
+    /// its answer anymore, and Restart can be tried again.
+    fn end_restart(&self) -> (UpdateState, UpdateState) {
+        self.handover.lock().unwrap().take();
+        self.change(after_restart_failed)
+    }
+}
+
+/// A restart until the new version takes over. Dropped before that,
+/// however the restart ended (it failed, panicked, or its task was
+/// dropped), it calls `ended`.
+struct Unfinished<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Unfinished<F> {
+    fn new(ended: F) -> Self {
+        Self(Some(ended))
+    }
+
+    fn took_over(mut self) {
+        self.0 = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for Unfinished<F> {
+    fn drop(&mut self) {
+        if let Some(ended) = self.0.take() {
+            ended();
+        }
+    }
 }
 
 fn installed(commit: &str, restart: Restart) -> UpdateState {
@@ -238,12 +279,14 @@ pub(crate) fn restart_args(previous: &str) -> Vec<String> {
 
 /// This instance's language and input method, for the new one: before
 /// flatpak 1.15.6, the portal starts it with its own environment (the
-/// session's activation environment), which may differ.
+/// session's activation environment), which may differ. A variable that
+/// isn't UTF-8 stays behind (`std::env::vars` would panic on it).
 pub(crate) fn carried_env(
-    vars: impl IntoIterator<Item = (String, String)>,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Vec<(String, String)> {
     let mut carried: Vec<(String, String)> = vars
         .into_iter()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, _)| {
             matches!(
                 name.as_str(),
@@ -378,25 +421,27 @@ fn transition(app: &AppHandle, change: impl FnOnce(&UpdateState) -> UpdateState)
     let Some(desktop) = app.try_state::<Desktop>() else {
         return UpdateState::None;
     };
-    let (before, after) = {
-        let mut state = desktop.update.state.lock().unwrap();
-        let after = change(&state);
-        (std::mem::replace(&mut *state, after.clone()), after)
-    };
+    let (before, after) = desktop.update.change(change);
+    announce(app, &before, &after);
+    before
+}
+
+/// Tells the page and the tray that the state changed, and the desktop
+/// when a version was newly installed.
+fn announce(app: &AppHandle, before: &UpdateState, after: &UpdateState) {
     if before == after {
-        return before;
+        return;
     }
-    if let Err(e) = app.emit("update-state", &after) {
+    if let Err(e) = app.emit("update-state", after) {
         tracing::debug!("could not send the update state: {e}");
     }
     tray::update_changed(app);
-    if let UpdateState::Installed { commit, .. } = &after
-        && !matches!(&before, UpdateState::Installed { commit: was, .. } if was == commit)
+    if let UpdateState::Installed { commit, .. } = after
+        && !matches!(before, UpdateState::Installed { commit: was, .. } if was == commit)
     {
         let (app, commit) = (app.clone(), commit.clone());
         tauri::async_runtime::spawn(async move { notify_installed(&app, &commit).await });
     }
-    before
 }
 
 /// Says once per installed version that it's there, while the window isn't
@@ -615,23 +660,15 @@ pub async fn restart(app: &AppHandle, activation_token: Option<String>) -> Resul
         } => return Ok(()),
         UpdateState::Installed { .. } => {}
     }
-    let handed_over = hand_over(app, activation_token).await;
-    let desktop = app.state::<Desktop>();
-    desktop.update.handover.lock().unwrap().take();
-    if let Err(reason) = handed_over {
+    // Whatever stops it from here, even a panic, ends it the same way.
+    let unfinished = Unfinished::new(|| restart_failed(app));
+    if let Err(reason) = hand_over(app, activation_token).await {
         tracing::warn!("couldn't restart into the update: {reason}");
-        transition(app, after_restart_failed);
-        if !desktop.window.visible()
-            && let Err(e) = desktop
-                .notifications
-                .show(&restart_failed_toast(), Vec::new())
-                .await
-        {
-            tracing::info!("could not say the restart failed: {e}");
-        }
         return Err(Error::unsupported(RESTART_FAILED));
     }
+    unfinished.took_over();
     tracing::info!("the new version took over; exiting");
+    let desktop = app.state::<Desktop>();
     desktop.notifications.withdraw(NOTICE_ID).await;
     // Push first, then the name: the new instance starts its own once it
     // has the name, and two never run at once.
@@ -651,6 +688,30 @@ pub async fn restart(app: &AppHandle, activation_token: Option<String>) -> Resul
         app.exit(0);
     }
     Ok(())
+}
+
+/// Ends a restart the new version didn't take over: Restart can be tried
+/// again, and a notification says so while the window isn't visible.
+fn restart_failed(app: &AppHandle) {
+    let Some(desktop) = app.try_state::<Desktop>() else {
+        return;
+    };
+    let (before, after) = desktop.update.end_restart();
+    announce(app, &before, &after);
+    if desktop.window.visible() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let desktop = app.state::<Desktop>();
+        let shown = desktop
+            .notifications
+            .show(&restart_failed_toast(), Vec::new())
+            .await;
+        if let Err(e) = shown {
+            tracing::info!("could not say the restart failed: {e}");
+        }
+    });
 }
 
 /// Starts the installed version through the Flatpak portal, and waits for
@@ -687,7 +748,7 @@ async fn hand_over(
         .receive_spawn_exited()
         .await
         .map_err(|e| format!("can't follow the new version ({e})"))?;
-    let mut env = carried_env(std::env::vars());
+    let mut env = carried_env(std::env::vars_os());
     let options = match &activation_token {
         Some(token) => {
             env.extend(ACTIVATION_ENV.map(|name| (name.to_owned(), token.clone())));
@@ -946,6 +1007,56 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_that_breaks_off_can_be_tried_again() {
+        use futures::FutureExt;
+
+        let updates = Updates::default();
+        updates.change(|_| state("b", Restart::Idle));
+        // As `restart` starts one: the state, the answer waited for.
+        let start = || {
+            updates.change(after_restart_asked);
+            let (answered, answer) = oneshot::channel();
+            *updates.handover.lock().unwrap() = Some(answered);
+            (
+                Unfinished::new(|| {
+                    updates.end_restart();
+                }),
+                answer,
+            )
+        };
+        let ended = |answer: &mut oneshot::Receiver<Handover>| {
+            assert_eq!(updates.state(), state("b", Restart::Failed));
+            assert!(updates.handover.lock().unwrap().is_none());
+            assert!(answer.try_recv().is_err());
+        };
+
+        // A panic on the way (as a variable that isn't UTF-8 once caused).
+        let mut answer = None;
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (_unfinished, waiting) = start();
+            answer = Some(waiting);
+            panic!("on the way");
+        }));
+        assert!(panicked.is_err());
+        ended(answer.as_mut().unwrap());
+
+        // Its task dropped on the way.
+        let mut answer = None;
+        let restarting = async {
+            let (_unfinished, waiting) = start();
+            answer = Some(waiting);
+            std::future::pending::<()>().await;
+        };
+        assert_eq!(restarting.now_or_never(), None);
+        ended(answer.as_mut().unwrap());
+
+        // Taken over: it's the new version's now.
+        let (unfinished, _answer) = start();
+        unfinished.took_over();
+        assert_eq!(updates.state(), state("b", Restart::Restarting));
+    }
+
+    #[test]
     fn retrying_to_watch_backs_off() {
         let minutes = |attempt| retry_after(attempt).as_secs() / 60;
         assert_eq!(minutes(0), 1);
@@ -1026,7 +1137,7 @@ mod tests {
             ("QT_IM_MODULE", "ibus"),
             ("XMODIFIERS", "@im=ibus"),
         ]
-        .map(|(k, v)| (k.to_owned(), v.to_owned()));
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
         let carried = carried_env(vars);
         let names: Vec<&str> = carried.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
@@ -1041,6 +1152,22 @@ mod tests {
             ]
         );
         assert!(carried.contains(&("LANG".into(), "de_DE.UTF-8".into())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_variable_that_isnt_utf8_stays_behind() {
+        use std::os::unix::ffi::OsStringExt;
+
+        // A Latin-1 value, say, from an old shell profile.
+        let latin1 = |text: &[u8]| OsString::from_vec(text.to_vec());
+        let carried = carried_env([
+            (OsString::from("LANG"), latin1(b"de_DE.ISO-8859-1\xe4")),
+            (latin1(b"LC_\xff"), OsString::from("C")),
+            (OsString::from("PATH"), latin1(b"/home/j\xf6rg/bin")),
+            (OsString::from("LC_TIME"), OsString::from("en_GB.UTF-8")),
+        ]);
+        assert_eq!(carried, [("LC_TIME".to_owned(), "en_GB.UTF-8".to_owned())]);
     }
 
     #[test]
