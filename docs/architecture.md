@@ -108,7 +108,9 @@ this sends where.
   closing the window hides it while running in the background is on and
   allowed (the first time, a notification says so); Quit in the main menu
   (`quit_app`) or the tray's menu exits, shutting push down. Ctrl+Q is Mail's
-  Mark as read, as in Outlook.
+  Mark as read, as in Outlook. The tray's Quit asks the page
+  (`quit-requested`), which asks first about an unsent message; its Restart
+  to update asks the page the same way (`restart-requested`).
 - `tray.rs`: a tray icon only where the libayatana-appindicator library loads
   and a StatusNotifier host owns `org.kde.StatusNotifierWatcher` (followed as
   it comes and goes). Its menu opens the app, starts a message, checks mail,
@@ -121,6 +123,19 @@ this sends where.
   the `background-state` event tell Settings.
 - `network.rs`: the NetworkMonitor portal tells the core when the network
   comes and goes (push pauses while offline).
+- `update.rs`: in a Flatpak, the Flatpak portal's update monitor says when a
+  version other than the running one is installed; `get_update_state` and the
+  `update-state` event tell the page, which shows a card once per version, a
+  main menu item and a row in About, and the tray adds Restart to update. A
+  desktop notification says it once per version while the window isn't open.
+  `restart_app` starts the installed version through the portal (`Spawn` with
+  `LatestVersion`, `--restarted-from=<bus name>`) and hands over through the
+  single-instance name: the new instance checks its runtime against
+  `/app/manifest.json` and opens the display, answers `--restart-ready` (or
+  `--restart-refused`) through the single-instance callback, and waits for
+  the old one to shut push down, release the name and exit. An early exit
+  (`SpawnExited`), a refusal or 30 seconds without an answer leave the old one
+  running, and Restart can be tried again.
 
 ## Reminders
 

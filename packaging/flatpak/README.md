@@ -48,7 +48,90 @@ running in the background and starting at login through the Background portal
 (which writes the autostart entry on the host), file pickers through the
 FileChooser portal and links through the OpenURI portal. The
 single-instance check owns `co.cumulas.Mail.SingleInstance`, which the app id
-allows without a permission.
+allows without a permission. Update notices and restarting into a new version
+use the Flatpak portal, which every Flatpak app can reach, and that
+single-instance name: no permission either.
+
+## Updates
+
+People get updates from their software center, which installs Flatpak updates
+on its own, or with `flatpak update`. The app doesn't install them. It keeps
+running in the background, though, so it says when a new version is installed
+and restarts into it (`src-tauri/src/desktop/update.rs`).
+
+- **Noticing.** The Flatpak portal's update monitor (`CreateUpdateMonitor` on
+  `org.freedesktop.portal.Flatpak`) checks every 30 minutes, the first time 30
+  minutes after the app starts, and not at all on a metered connection (unless
+  the portal runs with `--poll-when-metered`). When the installed version
+  isn't the running one, a card in the window's corner says so, once per
+  version (Restart, or Later); the main menu (with a dot on its button), the
+  tray menu (above Quit) and Settings → About keep offering **Restart to
+  update**; and while the window isn't open, one desktop notification per
+  version says so, with a Restart button. Outside a Flatpak, or with a portal
+  without the monitor, nothing shows; a portal that can't be reached is tried
+  again after 1, 5 and then every 30 minutes, and at once when it starts.
+- **Restarting.** It asks first about an unsent message, as Quit does. Then
+  the app asks the portal to start the installed version (`Spawn` with
+  `LatestVersion`, `--restarted-from=<its bus name>`) and hands over to it
+  through the single-instance name: the new instance checks that it can run
+  and says so (`--restart-ready`); the old one shuts push down, releases
+  `co.cumulas.Mail.SingleInstance` and exits; the new one takes the name,
+  opens its window and says "Updated to version …". If the new instance
+  refuses (`--restart-refused`), exits early (`SpawnExited`) or doesn't answer
+  within 30 seconds, the old one keeps running and says it couldn't restart
+  (with a notification when its window isn't open). Restart can be tried
+  again, and quitting and opening the app always works.
+- **The runtime.** `Spawn` starts the new version on the running one's
+  runtime, whatever it was built for. So the new instance compares the runtime
+  its manifest names (`runtime` and `runtime-version` in `/app/manifest.json`,
+  which flatpak-builder writes into every build, Flathub's included) with the
+  one it was started on (`[Application] runtime` in `/.flatpak-info`), and
+  refuses when they differ: after a release that moves to another runtime
+  branch, the app asks for a quit and reopen instead. A build without
+  `/app/manifest.json` isn't checked.
+- **flatpak before 1.15.6** (Ubuntu 24.04, Debian 12) starts the new version
+  with the portal's environment rather than the app's. The app passes its
+  locale and input method on (`LANG`, `LANGUAGE`, `LC_*`, `GTK_IM_MODULE`,
+  `QT_IM_MODULE`, `XMODIFIERS`), and the new instance checks that it can open
+  the display before it says it's ready.
+- **Keep `enableGTKAppId` off** in `src-tauri/tauri.conf.json` (a test checks
+  it): with it on, GTK would make the new instance a remote of the old one's
+  application, and it would exit at once.
+
+### Testing updates by hand
+
+This needs a desktop session with the portal (or `dbus-run-session` and Xvfb).
+
+1. Build into a local repository and install from it:
+
+   ```sh
+   flatpak-builder --user --repo=/tmp/cm-repo --force-clean build-dir co.cumulas.Mail.yml
+   flatpak --user remote-add --no-gpg-verify cm-local /tmp/cm-repo
+   flatpak --user install cm-local co.cumulas.Mail
+   ```
+
+2. Make the portal check every 15 seconds, then start the app:
+   `/usr/libexec/flatpak-portal --replace --verbose --poll-timeout=15 --poll-when-metered &`
+   (the path differs between distributions), then `flatpak run co.cumulas.Mail`.
+3. Change anything, build into the same repository and run
+   `flatpak --user update co.cumulas.Mail`. Within 15 seconds: the card, the
+   dot, the menu and tray items and the About row. With the window closed, one
+   notification, which doesn't come again when `flatpak-portal --replace`
+   reports again.
+4. Restart: the window goes, and the new one comes within a few seconds with
+   "Updated to version …". `flatpak ps --columns=instance,application,commit`
+   shows one instance, on the new commit, and
+   `busctl --user status co.cumulas.Mail.SingleInstance` one owner. Try it from
+   the tray and from the notification's button too, with the app started with
+   `--background`, and with an unsent message (it asks first).
+5. Build with another `runtime-version` (another installed GNOME branch),
+   update, and Restart: "Couldn't restart…" within a second or two, and the app
+   keeps running; quit and open it, and `flatpak ps` shows it on its runtime.
+6. Build with `command:` set to a missing binary: Restart fails at once (the
+   new version exited), not after 30 seconds.
+7. Click the launcher several times during a restart: one instance remains.
+8. Run `flatpak-portal --replace` while the app runs: its log says it watches
+   for updates again, and step 3 still works.
 
 ### For the Flathub review
 

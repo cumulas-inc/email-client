@@ -31,6 +31,11 @@ GitHub Actions workflow; the GNOME runtime comes from Flathub. A submission to
 Flathub itself is planned; whether it's listed there is up to Flathub's
 reviewers. See [Self-hosted repository](packaging/flatpak/README.md#self-hosted-repository-flatpakcumulasco).
 
+Updates come through your software center or `flatpak update`. Cumulas Mail
+keeps running in the background, so it says when a new version is installed
+and restarts into it when you choose Restart (see
+[Updates](packaging/flatpak/README.md#updates)).
+
 ## Features
 
 - **Mail**: folders and favorites, unified inbox, reading pane (right,
