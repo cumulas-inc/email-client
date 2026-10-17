@@ -8,6 +8,7 @@ import { useBackendEvents } from "../../app/useBackendEvents";
 import { useToasts } from "../../components/toast";
 import { Toaster } from "../../components/Toaster";
 import { renderWithBackend } from "../../test/render";
+import { AddAccountDialog } from "../settings/AddAccountDialog";
 import { CalendarModule } from "./CalendarModule";
 import type { CalendarView } from "./layout";
 import { toAllDayIso } from "./dates";
@@ -732,6 +733,32 @@ describe("calendar permission", () => {
     expect(
       within(notice).getByRole("button", { name: `Email IT about calendar for ${EMAIL}` }),
     ).toBeInTheDocument();
+  });
+
+  it("gives the keyboard to New event once the sync after Turn on brings the calendar in", async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({ addAccountOpen: false });
+    const backend = new MockBackend({ missing: ["calendar"] });
+    await backend.removeAccount("acct-home");
+    renderWithBackend(
+      <>
+        <CalendarModule />
+        <Events />
+        <AddAccountDialog />
+      </>,
+      { backend },
+    );
+
+    const newEvent = await screen.findByRole("button", { name: "New event" });
+    await waitFor(() => expect(newEvent).toBeDisabled());
+    await user.click(screen.getByRole("button", { name: `Turn on calendar for ${EMAIL}` }));
+    await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
+    // Until the calendar is in, the sidebar holds the keyboard.
+    const sidebar = screen.getByRole("complementary", { name: "Calendar navigation" });
+    await waitFor(() => expect(sidebar).toHaveFocus());
+    expect(newEvent).toBeDisabled();
+    await waitFor(() => expect(newEvent).toHaveFocus(), { timeout: 3000 });
+    expect(sidebar).not.toHaveAttribute("tabindex");
   });
 
   it("explains an empty calendar that needs permission, once", async () => {

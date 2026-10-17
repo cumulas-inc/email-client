@@ -1,5 +1,5 @@
 import { ExternalLink, LoaderCircle } from "lucide-react";
-import { useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import { useBackend } from "../../api/context";
 import { errorMessage } from "../../api/errors";
@@ -12,7 +12,10 @@ import { MICROSOFT_ERROR_LOOKUP, classifyAadsts, isConsumerAddress } from "./mic
 interface SignInHelpProps {
   /** The address being signed in with, if any. */
   email: string;
-  /** Called before asking anything: the waiting panel stops waiting for the browser. */
+  /**
+   * Called just before showing a result: the waiting panel stops waiting for
+   * the browser. Not when the result can't be had: the sign-in goes on.
+   */
   onCancelFirst?: () => void;
   /** Shows the panel for what Microsoft said, as if the sign-in had failed with it. */
   onResult: (error: BackendError) => void;
@@ -49,13 +52,32 @@ export function SignInHelp({ email, onCancelFirst, onResult }: SignInHelpProps) 
   const [codeError, setCodeError] = useState<string | null>(null);
   const [unknown, setUnknown] = useState<number | null>(null);
   const hint = email.trim() || undefined;
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  /**
+   * Shows a result, once the sign-in in progress (if any) is let go. Not
+   * once this panel has gone: the browser answered (or the sign-in was
+   * canceled or started again) while the link was looked up.
+   */
+  const show = (result: BackendError) => {
+    if (!mounted.current) return;
+    onCancelFirst?.();
+    onResult(result);
+  };
 
   const askForLink = async (canRequestApproval: boolean) => {
     setAsking(true);
     setProblem(null);
     try {
       const link = await backend.microsoftAdminConsent(undefined, hint);
-      onResult(needsApproval(link, canRequestApproval));
+      show(needsApproval(link, canRequestApproval));
     } catch (e) {
       setProblem(errorMessage(e));
     } finally {
@@ -63,10 +85,7 @@ export function SignInHelp({ email, onCancelFirst, onResult }: SignInHelpProps) 
     }
   };
 
-  const adminApproval = () => {
-    onCancelFirst?.();
-    void askForLink(false);
-  };
+  const adminApproval = () => void askForLink(false);
 
   const showWhatToDo = async (e: FormEvent) => {
     e.preventDefault();
@@ -84,15 +103,14 @@ export function SignInHelp({ email, onCancelFirst, onResult }: SignInHelpProps) 
       setUnknown(aadsts);
       return;
     }
-    onCancelFirst?.();
     if (kind.kind === "declined") {
-      onResult({ code: "consentDeclined", message: "" });
+      show({ code: "consentDeclined", message: "" });
     } else if (kind.kind === "adminConsent") {
       await askForLink(kind.canRequestApproval);
     } else {
       // The panel works without the link: only appNotSetUp offers one.
       const link = await backend.microsoftAdminConsent(undefined, hint).catch(() => null);
-      onResult({
+      show({
         code: "signInBlocked",
         message: "",
         details: {

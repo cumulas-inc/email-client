@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useBackend } from "../../api/context";
 import { qk } from "../../api/queries";
@@ -15,7 +15,7 @@ import {
   useAddAccountRequest,
   type AddAccountStep,
 } from "./addAccountStore";
-import { useFocusOnChange, useRestoreFocus } from "./focus";
+import { focusOnceEnabled, useFocusOnChange, useRestoreFocus } from "./focus";
 import { ImapForm } from "./ImapForm";
 import { FEATURE_COPY, featureList } from "./microsoft";
 import { MicrosoftSignIn } from "./MicrosoftSignIn";
@@ -45,6 +45,8 @@ function AddAccountFlow() {
   const [step, setStep] = useState<AddAccountStep>(request.step);
   const [email, setEmail] = useState(request.email ?? "");
   const [phase, setPhase] = useState("form");
+  /** Counts the failed panels: each takes the keyboard, even after another. */
+  const [failures, setFailures] = useState(0);
   const bodyRef = useRef<HTMLDivElement>(null);
   const reauth = request.autoStart === true;
   const [permissions] = useState<PermissionRequest>(
@@ -53,8 +55,12 @@ function AddAccountFlow() {
   const feature = permissions.kind === "feature" ? permissions.feature : null;
 
   useEffect(() => resetAddAccountRequest(), []);
-  useRestoreFocus(request.returnFocusTo);
-  useFocusOnChange(bodyRef, `${step}:${phase}`);
+  useRestoreFocus();
+  useFocusOnChange(bodyRef, `${step}:${phase}:${failures}`);
+  const followPhase = useCallback((next: string, failed: number) => {
+    setPhase(next);
+    setFailures(failed);
+  }, []);
 
   const goTo = (next: AddAccountStep, nextEmail?: string) => {
     if (nextEmail !== undefined) setEmail(nextEmail);
@@ -73,6 +79,8 @@ function AddAccountFlow() {
 
   const done = (account: Account, kind: "microsoft" | "imap") => {
     closeAddAccount();
+    // Done: the keyboard goes on to what's next, not back to the opener.
+    if (request.returnFocusTo) focusOnceEnabled(request.returnFocusTo);
     // After the first account: would they like it to start at login?
     const accounts = client.getQueryData<Account[]>(qk.accounts());
     if (!reauth && accounts?.length === 1 && accounts[0]?.id === account.id) {
@@ -132,7 +140,7 @@ function AddAccountFlow() {
             onClose={close}
             onDone={(account) => done(account, "microsoft")}
             onOpenSettings={openMicrosoftSettings}
-            onPhaseChange={setPhase}
+            onPhaseChange={followPhase}
           />
         )}
         {step === "imap" && (

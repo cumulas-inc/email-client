@@ -771,9 +771,15 @@ describe("the demo's Microsoft sign-in", () => {
   });
 
   it("updates an account signing in again in place, by its address", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => void vi.useRealTimers());
     const backend = new MockBackend({ missing: ["calendar", "tasks"], refused: ["contacts"] });
     const count = (await backend.listAccounts()).length;
     const seen = changes(backend);
+    const statuses = vi.fn();
+    backend.onSyncStatus(statuses);
+    /** The sync after each sign-in, which brings in what came back. */
+    const synced = () => vi.advanceTimersByTimeAsync(1000);
 
     // Mail only and current keep what's missing, but check refusals again.
     const current = await backend.addMicrosoftAccount("Alex.Morgan@acme.example", CURRENT);
@@ -782,23 +788,41 @@ describe("the demo's Microsoft sign-in", () => {
       needsPermission: ["calendar", "tasks"],
       refusedFeatures: [],
     });
+    expect(statuses).toHaveBeenLastCalledWith(
+      expect.objectContaining({ accountId: "acct-work", state: "syncing" }),
+    );
+    expect(await backend.getSyncStatuses()).toContainEqual(
+      expect.objectContaining({ accountId: "acct-work", state: "syncing" }),
+    );
+    expect(await seen()).toEqual([{ kinds: ["accounts"], accountId: "acct-work" }]);
+    await synced();
     expect(await seen()).toContainEqual({
       kinds: ["accounts", "contacts"],
       accountId: "acct-work",
     });
+    expect(await backend.getSyncStatuses()).toContainEqual(
+      expect.objectContaining({ accountId: "acct-work", state: "idle" }),
+    );
     expect(
       (await backend.addMicrosoftAccount("alex.morgan@acme.example", MAIL_ONLY)).needsPermission,
     ).toEqual(["calendar", "tasks"]);
+    await synced();
 
-    // A feature comes back with its default calendar.
+    // A feature comes back with its default calendar, once synced.
     const turnedOn = await backend.addMicrosoftAccount("alex.morgan@acme.example", calendar);
     expect(turnedOn.needsPermission).toEqual(["tasks"]);
-    const calendars = (await backend.listCalendars()).filter((c) => c.accountId === "acct-work");
-    expect(calendars).toMatchObject([{ name: "Calendar", isDefault: true, canEdit: true }]);
+    const workCalendars = async () =>
+      (await backend.listCalendars()).filter((c) => c.accountId === "acct-work");
+    expect(await workCalendars()).toEqual([]);
+    await synced();
+    expect(await workCalendars()).toMatchObject([
+      { name: "Calendar", isDefault: true, canEdit: true },
+    ]);
 
     // Everything: the rest, with a task list.
     const all = await backend.addMicrosoftAccount("alex.morgan@acme.example", ALL);
     expect([all.needsPermission, all.refusedFeatures]).toEqual([[], []]);
+    await synced();
     expect(
       (await backend.listTaskLists()).filter((l) => l.accountId === "acct-work"),
     ).toMatchObject([{ name: "Tasks", isDefault: true }]);

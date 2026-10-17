@@ -437,6 +437,34 @@ describe("Microsoft sign-in with or without admin approval", () => {
     expect(signIn).toHaveBeenCalledWith("admin@contoso.example", { kind: "all" });
   });
 
+  it("asks for everything again when Microsoft's page said mail needs approval too", async () => {
+    const user = userEvent.setup();
+    const { backend } = openFlow({ step: "microsoft" });
+    const original = backend.addMicrosoftAccount.bind(backend);
+    // Microsoft shows its own approval page for mail only, and never comes back.
+    const signIn = vi
+      .spyOn(backend, "addMicrosoftAccount")
+      .mockImplementation((hint, permissions) =>
+        permissions?.kind === "mailOnly"
+          ? new Promise(() => undefined)
+          : original(hint, permissions),
+      );
+
+    await signInAs(user, "admin@contoso.example");
+    await user.click(await screen.findByRole("button", { name: "Try with mail only" }));
+    await screen.findByRole("heading", { name: "Continue in your browser" });
+    await user.click(screen.getByRole("button", { name: "Microsoft said I need admin approval" }));
+    expect(
+      await screen.findByText(
+        "In your organization, mail needs an administrator's approval too, so mail only didn't help.",
+      ),
+    ).toBeInTheDocument();
+
+    signIn.mockClear();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(signIn).toHaveBeenCalledWith("admin@contoso.example", { kind: "all" });
+  });
+
   it("keeps a declined mail-only sign-in to mail", async () => {
     const user = userEvent.setup();
     const { backend } = openFlow({ step: "microsoft" });
@@ -523,8 +551,8 @@ describe("Microsoft sign-in with or without admin approval", () => {
     await screen.findByRole("heading", { name: "Continue in your browser" });
     await user.click(screen.getByRole("button", { name: "Microsoft said I need admin approval" }));
 
-    expect(cancel).toHaveBeenCalledTimes(1);
     await screen.findByRole("heading", { name: "Your organization needs to approve Cumulas Mail" });
+    expect(cancel).toHaveBeenCalledTimes(1);
     expect(approvalLink()).toHaveValue(mockAdminConsentUrl("fabrikam.example"));
     await expect(signIn.mock.results[0]!.value).rejects.toMatchObject({
       code: "signInCancelled",
@@ -533,6 +561,77 @@ describe("Microsoft sign-in with or without admin approval", () => {
     expect(
       screen.getByRole("heading", { name: "Your organization needs to approve Cumulas Mail" }),
     ).toBeInTheDocument();
+  });
+
+  it("gives the keyboard to each panel that replaces another", async () => {
+    const user = userEvent.setup();
+    openFlow({ step: "microsoft" });
+    const focused = async (name: string) => {
+      const heading = await screen.findByRole("heading", { name });
+      await waitFor(() => expect(heading).toHaveFocus());
+    };
+
+    await signInAs(user, "timeout@fabrikam.example");
+    await focused("Sign-in timed out");
+    await user.click(screen.getByRole("button", { name: "Microsoft said I need admin approval" }));
+    await focused("Your organization needs to approve Cumulas Mail");
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await focused("Sign-in timed out");
+    await user.click(screen.getByRole("button", { name: "Microsoft showed an error code" }));
+    await user.type(screen.getByLabelText("Error code"), "50105");
+    await user.click(screen.getByRole("button", { name: "Show what to do" }));
+    await focused("You haven't been given access to Cumulas Mail");
+  });
+
+  it("keeps waiting for the browser when the approval link can't be had", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const cancel = vi.spyOn(backend, "cancelMicrosoftSignIn");
+    openFlow({ step: "microsoft" }, backend);
+
+    await signInAs(user, "slow@outlook.com");
+    await screen.findByRole("heading", { name: "Continue in your browser" });
+    await user.click(screen.getByRole("button", { name: "Microsoft showed an error code" }));
+    await user.type(screen.getByLabelText("Error code"), "65001");
+    await user.click(screen.getByRole("button", { name: "Show what to do" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Personal Microsoft accounts don't need an administrator's approval.",
+    );
+    expect(cancel).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Continue in your browser" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps what the browser answered while the approval link was looked up", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const original = backend.microsoftAdminConsent.bind(backend);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const ask = vi.spyOn(backend, "microsoftAdminConsent").mockImplementation(async (...args) => {
+      await gate;
+      return original(...args);
+    });
+    openFlow({ step: "microsoft" }, backend);
+
+    await signInAs(user, "slow@fabrikam.example");
+    await screen.findByRole("heading", { name: "Continue in your browser" });
+    await user.click(screen.getByRole("button", { name: "Microsoft said I need admin approval" }));
+    // Microsoft's page answers first.
+    await act(() => backend.cancelMicrosoftSignIn());
+    await screen.findByRole("heading", { name: "Sign-in was canceled" });
+
+    release();
+    await act(async () => {
+      await ask.mock.results[0]!.value;
+    });
+    expect(screen.getByRole("heading", { name: "Sign-in was canceled" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Your organization needs to approve Cumulas Mail" }),
+    ).toBeNull();
   });
 
   it("offers the approval link after a cancel, but not for a personal address", async () => {
@@ -694,7 +793,10 @@ describe("Microsoft sign-in with or without admin approval", () => {
     expect(toastMessages()).toEqual(["Turned on calendar for alex.morgan@acme.example."]);
     const [work] = await backend.listAccounts();
     expect(work!.needsPermission).toEqual([]);
-    expect((await backend.listCalendars()).map((c) => c.accountId)).toContain("acct-work");
+    // The sync after the sign-in brings the calendar in.
+    await waitFor(async () =>
+      expect((await backend.listCalendars()).map((c) => c.accountId)).toContain("acct-work"),
+    );
   });
 
   it("explains approving a feature, with Turn on to try again", async () => {

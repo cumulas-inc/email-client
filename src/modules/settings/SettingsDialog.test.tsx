@@ -7,6 +7,7 @@ import { qk } from "../../api/queries";
 import { SANS_STACK, SERIF_STACK } from "../../lib/fonts";
 import type { Account, ImapAccountUpdate, Settings } from "../../api/types";
 import { type SettingsSection, useAppStore } from "../../app/store";
+import { useBackendEvents } from "../../app/useBackendEvents";
 import { useToasts } from "../../components/toast";
 import { renderWithBackend } from "../../test/render";
 import { editFrame, loadFrame } from "../mail/testUtils";
@@ -17,12 +18,19 @@ import { SettingsDialog } from "./SettingsDialog";
 
 const GUID = "1b2c3d4e-0000-4a5b-8c9d-0123456789ab";
 
-function openAt(section: SettingsSection, backend = new MockBackend()) {
+/** Follows the backend's events (sync statuses, changed data), as the app does. */
+function Events() {
+  useBackendEvents();
+  return null;
+}
+
+function openAt(section: SettingsSection, backend = new MockBackend(), { events = false } = {}) {
   const updateSettings = vi.spyOn(backend, "updateSettings");
   const utils = renderWithBackend(
     <>
       <SettingsDialog />
       <AddAccountDialog />
+      {events && <Events />}
     </>,
     { backend },
   );
@@ -823,7 +831,7 @@ describe("Microsoft permissions", () => {
         await gate;
         return original(hint, permissions);
       });
-    openAt("accounts", backend);
+    openAt("accounts", backend, { events: true });
 
     await manageWork(user);
     await user.click(screen.getByRole("button", { name: `Turn on calendar for ${EMAIL}` }));
@@ -832,7 +840,11 @@ describe("Microsoft permissions", () => {
 
     release();
     await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Sync now" })).toHaveFocus());
+    // The sync after the sign-in runs: the account holds the keyboard until it ends.
+    const syncNow = screen.getByRole("button", { name: "Sync now" });
+    await waitFor(() => expect(syncNow.closest("li")).toHaveFocus());
+    expect(syncNow).toBeDisabled();
+    await waitFor(() => expect(syncNow).toHaveFocus(), { timeout: 3000 });
     expect(screen.queryByText("Permissions")).not.toBeInTheDocument();
     expect(useToasts.getState().toasts.map((t) => t.message)).toContain(
       `Turned on calendar for ${EMAIL}.`,

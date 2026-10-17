@@ -16,7 +16,10 @@ export interface AddAccountRequest {
    * account, and what the account has for "Sign in again".
    */
   permissions?: PermissionRequest;
-  /** The id of an element to focus once the dialog closes, if it's still there. */
+  /**
+   * The id of an element to focus once the sign-in succeeds, if it's there;
+   * otherwise the keyboard goes back to what opened the dialog.
+   */
   returnFocusTo?: string;
 }
 
@@ -38,8 +41,8 @@ export function openAddAccount(request: AddAccountRequest = DEFAULT_REQUEST): vo
 
 /**
  * "Turn on": signs in again, asking for what the account has plus the
- * feature. `returnFocusTo` gets the keyboard afterwards (the notice with
- * the button goes once the feature is on).
+ * feature. `returnFocusTo` gets the keyboard once it's on (the notice with
+ * the button goes then), or the region around it until it's enabled.
  */
 export function openTurnOn(email: string, feature: AccountFeature, returnFocusTo?: string): void {
   openAddAccount({

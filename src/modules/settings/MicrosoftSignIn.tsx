@@ -151,8 +151,11 @@ interface MicrosoftSignInProps {
   onClose: () => void;
   onDone: (account: Account) => void;
   onOpenSettings: () => void;
-  /** Lets the dialog follow the current phase (for its title and focus). */
-  onPhaseChange?: (phase: Phase["kind"]) => void;
+  /**
+   * Lets the dialog follow the current phase (for its title and focus).
+   * `failures` counts the failed panels shown: one can replace another.
+   */
+  onPhaseChange?: (phase: Phase["kind"], failures: number) => void;
 }
 
 export function MicrosoftSignIn({
@@ -170,6 +173,7 @@ export function MicrosoftSignIn({
   const [email, setEmail] = useState(initialEmail);
   const [emailError, setEmailError] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>(autoStart ? { kind: "waiting" } : { kind: "form" });
+  const [failures, setFailures] = useState(0);
   /** What the next sign-in asks for: "Try with mail only" changes it. */
   const [request, setRequest] = useState<PermissionRequest>(permissions);
   /** The organization's Microsoft page offered Request approval. */
@@ -194,19 +198,28 @@ export function MicrosoftSignIn({
     };
   }, []);
 
-  useEffect(() => onPhaseChange?.(phase.kind), [phase.kind, onPhaseChange]);
+  useEffect(() => onPhaseChange?.(phase.kind, failures), [phase.kind, failures, onPhaseChange]);
 
   /** Shows the panel for a failed sign-in (or for what Microsoft's page said). */
-  const showFailure = useCallback((error: unknown, req: PermissionRequest) => {
-    if (isBackendError(error)) {
-      const can = error.details?.canRequestApproval;
-      // A link asked for by hand can't tell whether the workflow is on.
-      if (can === true || (can === false && error.details?.manual !== true)) {
-        setPrevCanRequestApproval(can);
+  const showFailure = useCallback(
+    (error: unknown, req: PermissionRequest) => {
+      if (isBackendError(error)) {
+        const can = error.details?.canRequestApproval;
+        // A link asked for by hand can't tell whether the workflow is on.
+        if (can === true || (can === false && error.details?.manual !== true)) {
+          setPrevCanRequestApproval(can);
+        }
       }
-    }
-    setPhase({ kind: "failed", error, request: req });
-  }, []);
+      // Mail needs approval too: what was asked for at first is what to
+      // try again.
+      if (req.kind === "mailOnly" && hasErrorCode(error, "adminConsentRequired")) {
+        setRequest(permissions);
+      }
+      setPhase({ kind: "failed", error, request: req });
+      setFailures((n) => n + 1);
+    },
+    [permissions],
+  );
 
   /** Runs the browser sign-in; the caller has already shown the waiting state. */
   const signIn = useCallback(
@@ -219,15 +232,10 @@ export function MicrosoftSignIn({
         else toast.success(`Signed in as ${account.email}.`);
       } catch (error) {
         if (!mounted.current || id !== attempt.current) return;
-        // Mail needs approval too: what was asked for at first is what to
-        // try again.
-        if (req.kind === "mailOnly" && hasErrorCode(error, "adminConsentRequired")) {
-          setRequest(permissions);
-        }
         showFailure(error, req);
       }
     },
-    [mutateAsync, onDone, permissions, showFailure],
+    [mutateAsync, onDone, showFailure],
   );
 
   /** Stops waiting for the browser; the sign-in rejects, unseen. */
@@ -306,7 +314,8 @@ export function MicrosoftSignIn({
             </p>
           </ResultPanel>
         </div>
-        <SignInHelp email={email} onCancelFirst={stopWaiting} onResult={showResult} />
+        {/* Not the failed panel's: what it looks up after the browser answered is dropped. */}
+        <SignInHelp key="waiting" email={email} onCancelFirst={stopWaiting} onResult={showResult} />
       </StepLayout>
     );
   }

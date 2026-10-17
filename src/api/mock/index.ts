@@ -481,6 +481,8 @@ export class MockBackend implements Backend {
   private customClient: boolean;
   /** "workflow@…" asked for approval once: Microsoft's page now offers no request. */
   private approvalRequested = false;
+  /** Accounts a simulated sync runs for: their statuses say so, as the core's do. */
+  private syncing = new Set<string>();
   /** Messages sent through the mock, for tests. */
   readonly sent: Parameters<Backend["sendMessage"]>[0][] = [];
   /** Each account's signatures, once asked for. */
@@ -719,13 +721,13 @@ export class MockBackend implements Backend {
           (f) => f !== permissions.feature,
         );
       }
-      const kinds: DataKind[] = ["accounts"];
-      for (const feature of before) {
-        if (existing.needsPermission.includes(feature)) continue;
-        const kind = this.addDefaultContainer(existing, feature);
-        if (kind) kinds.push(kind);
-      }
-      this.emit(kinds, existing.id);
+      this.emit(["accounts"], existing.id);
+      // Like the core, which syncs the account after a sign-in: what came
+      // back arrives with that sync, after the sign-in returns.
+      const back = before.filter((f) => !existing.needsPermission.includes(f));
+      this.simulateSync(existing.id, () =>
+        back.flatMap((feature) => this.addDefaultContainer(existing, feature) ?? []),
+      );
       return clone(existing);
     }
     const account: Account = {
@@ -1053,6 +1055,11 @@ export class MockBackend implements Backend {
   }
 
   async syncAccount(accountId: string) {
+    this.simulateSync(accountId);
+  }
+
+  /** Reports a sync, which ends a moment later with what `synced` brings in. */
+  private simulateSync(accountId: string, synced: () => DataKind[] = () => []): void {
     const account = this.account(accountId);
     const status = (state: SyncStatus["state"], message: string | null): SyncStatus => ({
       accountId,
@@ -1060,11 +1067,15 @@ export class MockBackend implements Backend {
       message,
       lastSyncedAt: account.lastSyncedAt,
     });
+    this.syncing.add(accountId);
     this.syncHandlers.forEach((h) => h(status("syncing", "Syncing Inbox…")));
     setTimeout(() => {
+      this.syncing.delete(accountId);
+      if (!this.state.accounts.includes(account)) return;
       account.lastSyncedAt = new Date().toISOString();
+      const kinds = synced();
       this.syncHandlers.forEach((h) => h(status("idle", null)));
-      this.emit(["accounts"], accountId);
+      this.emit(["accounts", ...kinds], accountId);
     }, 600);
   }
 
@@ -1310,11 +1321,12 @@ export class MockBackend implements Backend {
     return clone(this.checkReminders());
   }
 
-  async getSyncStatuses() {
+  async getSyncStatuses(): Promise<SyncStatus[]> {
     return this.state.accounts.map((a) => ({
       accountId: a.id,
-      state: a.syncError ? ("error" as const) : ("idle" as const),
-      message: a.syncError,
+      ...(this.syncing.has(a.id)
+        ? { state: "syncing", message: "Syncing Inbox…" }
+        : { state: a.syncError ? "error" : "idle", message: a.syncError }),
       lastSyncedAt: a.lastSyncedAt,
     }));
   }

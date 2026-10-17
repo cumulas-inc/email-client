@@ -17,9 +17,8 @@ export function useFocusOnChange(ref: RefObject<HTMLElement | null>, key: unknow
 /**
  * Returns focus to whatever had it when the component mounted (e.g. the
  * button that opened a dialog) once it unmounts, if that is still on screen.
- * With `preferId`, the element with that id gets it instead, when there is one.
  */
-export function useRestoreFocus(preferId?: string): void {
+export function useRestoreFocus(): void {
   const previous = useRef<Element | null>(null);
   // Read in a layout effect, before <dialog>.showModal() moves focus…
   useLayoutEffect(() => {
@@ -31,16 +30,54 @@ export function useRestoreFocus(preferId?: string): void {
   useEffect(() => {
     const element = previous.current;
     return () => {
-      const restore = () => {
-        const preferred = preferId ? document.getElementById(preferId) : null;
-        if (preferred && !preferred.matches(":disabled")) preferred.focus();
-        else if (element instanceof HTMLElement && element.isConnected) element.focus();
-      };
-      // The preferred element may only be enabled by what the dialog changed.
-      if (preferId) window.setTimeout(restore, 0);
-      else restore();
+      if (element instanceof HTMLElement && element.isConnected) element.focus();
     };
-  }, [preferId]);
+  }, []);
+}
+
+/** Holds the keyboard while what it's for is disabled. */
+const WAITING_REGION = "aside, section, li, dialog, main, [role='region'], [role='tabpanel']";
+/** How long a disabled element is waited for. */
+const ENABLED_WITHIN_MS = 30_000;
+
+/**
+ * Focuses an element by id on the next tick, once a dialog that did what it
+ * was for has closed (after useRestoreFocus). While the element is disabled
+ * (it waits for what the dialog changed, such as the calendars the sync
+ * after a sign-in brings in), the region around it holds the keyboard and
+ * hands it on once it's enabled, unless the keyboard moved meanwhile.
+ */
+export function focusOnceEnabled(id: string): void {
+  window.setTimeout(() => {
+    const target = document.getElementById(id);
+    if (target) focusOrWait(target);
+  }, 0);
+}
+
+function focusOrWait(target: HTMLElement): void {
+  if (!target.matches(":disabled")) {
+    target.focus();
+    return;
+  }
+  const region = target.parentElement?.closest<HTMLElement>(WAITING_REGION);
+  if (!region) return;
+  if (!region.hasAttribute("tabindex")) {
+    region.tabIndex = -1;
+    region.addEventListener("blur", () => region.removeAttribute("tabindex"), { once: true });
+  }
+  region.focus();
+  let timer = 0;
+  const observer = new MutationObserver(() => {
+    if (target.matches(":disabled")) return;
+    stop();
+    if (document.activeElement === region) target.focus();
+  });
+  const stop = () => {
+    observer.disconnect();
+    window.clearTimeout(timer);
+  };
+  observer.observe(target, { attributes: true, attributeFilter: ["disabled"] });
+  timer = window.setTimeout(stop, ENABLED_WITHIN_MS);
 }
 
 /** Focuses an element by id on the next tick (after a re-render). */

@@ -90,6 +90,24 @@ describe("FeaturePermissionNotice", () => {
     expect(screen.queryByRole("region", { name: "Calendar needs permission" })).toBeNull();
   });
 
+  it("gives the keyboard back to Turn on when the feature wasn't turned on", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ missing: ["calendar"] });
+    vi.spyOn(backend, "addMicrosoftAccount").mockRejectedValue({
+      code: "signInCancelled",
+      message: "Sign-in was canceled.",
+    });
+    renderNotice(backend);
+
+    const turnOn = await screen.findByRole("button", { name: `Turn on calendar for ${EMAIL}` });
+    await user.click(turnOn);
+    await screen.findByRole("heading", { name: "Sign-in was canceled" });
+    const dialog = screen.getByRole("dialog", { name: "Turn on calendar" });
+    await user.click(within(dialog).getAllByRole("button", { name: "Close" }).at(-1)!);
+    await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
+    await waitFor(() => expect(turnOn).toHaveFocus());
+  });
+
   it("only offers Turn on to a personal account", async () => {
     const backend = new MockBackend({ missing: ["calendar"] });
     makePersonal(backend);
