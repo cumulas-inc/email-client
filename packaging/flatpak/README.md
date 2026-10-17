@@ -52,6 +52,18 @@ allows without a permission. Update notices and restarting into a new version
 use the Flatpak portal, which every Flatpak app can reach, and that
 single-instance name: no permission either.
 
+### For the Flathub review
+
+- **Push service.** Microsoft accounts hear about changes to the Inbox and the
+  calendar through the Cumulas push service at `sync.cumulas.co` (on by
+  default; Settings → General → Sync turns it off). The metainfo description
+  and [PRIVACY.md](../../PRIVACY.md) disclose it.
+- **Background.** Closing the window keeps the app running (on by default,
+  through the Background portal); start at login is off until the user turns
+  it on.
+- **AI disclosure.** Flathub's Generative AI policy requires one; see
+  [Submitting to Flathub](#submitting-to-flathub).
+
 ## Updates
 
 People get updates from their software center, which installs Flatpak updates
@@ -125,26 +137,37 @@ This needs a desktop session with the portal (or `dbus-run-session` and Xvfb).
    `busctl --user status co.cumulas.Mail.SingleInstance` one owner. Try it from
    the tray and from the notification's button too, with the app started with
    `--background`, and with an unsent message (it asks first).
-5. Build with another `runtime-version` (another installed GNOME branch),
+5. On Wayland, with the window closed, the notification's Restart gives the
+   new window the focus; with an unsent message, the window comes up with the
+   focus to ask first.
+6. Build with another `runtime-version` (another installed GNOME branch),
    update, and Restart: "Couldn't restart…" within a second or two, and the app
    keeps running; quit and open it, and `flatpak ps` shows it on its runtime.
-6. Build with `command:` set to a missing binary: Restart fails at once (the
-   new version exited), not after 30 seconds.
-7. Click the launcher several times during a restart: one instance remains.
-8. Run `flatpak-portal --replace` while the app runs: its log says it watches
-   for updates again, and step 3 still works.
-
-### For the Flathub review
-
-- **Push service.** Microsoft accounts hear about changes to the Inbox and the
-  calendar through the Cumulas push service at `sync.cumulas.co` (on by
-  default; Settings → General → Sync turns it off). The metainfo description
-  and [PRIVACY.md](../../PRIVACY.md) disclose it.
-- **Background.** Closing the window keeps the app running (on by default,
-  through the Background portal); start at login is off until the user turns
-  it on.
-- **AI disclosure.** Flathub's Generative AI policy requires one; see
-  [Submitting to Flathub](#submitting-to-flathub).
+7. Build a version that can't start: in the `cumulas-mail` module's
+   `build-commands`, after the `install` of `target/release/cumulas-mail`, add
+   `- printf '#!/bin/sh\nexit 1\n' > /app/bin/cumulas-mail` (leave `command:`
+   alone: the portal starts `cumulas-mail` by name). Update, and Restart: it
+   fails at once (the new version exited), not after 30 seconds, and the app
+   keeps running.
+8. With flatpak before 1.15.6, in an X11 session (on Wayland, `flatpak run`
+   falls back to `wayland-0`), start the portal without the display:
+   `env -u DISPLAY -u WAYLAND_DISPLAY /usr/libexec/flatpak-portal --replace --verbose --poll-timeout=15 --poll-when-metered &`.
+   Build any change, update, and Restart: "Couldn't restart…", the app keeps
+   running, and the new instance's log (in the portal's terminal) says it
+   can't open the display.
+9. Click the launcher several times during a restart: one instance remains.
+10. Run `flatpak-portal --replace` while the app runs: its log says it watches
+    for updates again, and step 3 still works.
+11. Keep the portal from starting with the app:
+    `systemctl --user mask --runtime flatpak-portal.service`, and stop the
+    portal (the one from step 2, or `systemctl --user stop flatpak-portal.service`).
+    Start the app: its log says it could not watch for updates yet. Two
+    minutes later (after its first retry), start the portal as in step 2:
+    the log says "watching for updates" at once, not at the next retry,
+    five minutes after the first. Then
+    `systemctl --user unmask --runtime flatpak-portal.service`.
+12. Outside a Flatpak (`npm run tauri dev`, or a deb or AppImage), nothing
+    about updates shows.
 
 ## Submitting to Flathub
 
