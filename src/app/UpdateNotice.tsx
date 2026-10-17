@@ -5,7 +5,7 @@ import { useId } from "react";
 import { useUpdateState } from "../api/queries";
 import { useCornerCard } from "./cornerCard";
 import { useAppStore } from "./store";
-import { installedText } from "./update";
+import { installedText, restartLabel } from "./update";
 import { useRestart } from "./useQuit";
 
 /**
@@ -50,7 +50,7 @@ export function UpdateNotice() {
           {installedText(installed.restart)}
         </p>
         <div className="offer__actions">
-          {/* One button from Restart to Restarting… and back, so it keeps the focus. */}
+          {/* One button through Restart, Restarting… and Try again, so it keeps the focus. */}
           <button
             type="button"
             className={clsx("btn btn--primary btn--sm", restarting && "btn--busy")}
@@ -59,7 +59,7 @@ export function UpdateNotice() {
               if (!restarting) restart();
             }}
           >
-            {restarting ? "Restarting…" : "Restart"}
+            {restartLabel(installed.restart)}
           </button>
           {!restarting && (
             <button type="button" className="btn btn--sm" onClick={later}>

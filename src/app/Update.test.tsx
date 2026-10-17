@@ -331,8 +331,8 @@ describe("an installed update", () => {
     await waitFor(() =>
       expect(useToasts.getState().toasts.map((t) => t.message)).toContain(failed),
     );
-    // The same button, focused, offers Restart again; the card says what happened.
-    await waitFor(() => expect(restart).toHaveTextContent(/^Restart$/));
+    // The same button, focused, offers to try again, as the card says.
+    await waitFor(() => expect(restart).toHaveTextContent(/^Try again$/));
     expect(restart).not.toHaveAttribute("aria-disabled");
     expect(restart).toHaveFocus();
     expect(notice).toHaveAccessibleDescription(failed);
@@ -344,7 +344,9 @@ describe("an installed update", () => {
     await user.click(restart);
     await waitFor(() => expect(backend.calls.restart).toBe(2));
     act(() => useAppStore.getState().openSettings("about"));
-    expect(await screen.findByRole("region", { name: "Updates" })).toHaveTextContent(failed);
+    const updates = await screen.findByRole("region", { name: "Updates" });
+    expect(await within(updates).findByRole("button", { name: "Try again" })).toBeEnabled();
+    expect(updates).toHaveTextContent(failed);
   });
 
   it("shares the corner with the start at login offer", async () => {

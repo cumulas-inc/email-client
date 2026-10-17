@@ -4,7 +4,7 @@ import { useEffect, useId } from "react";
 
 import { useUpdateState } from "../../../api/queries";
 import { useAppStore } from "../../../app/store";
-import { installedText } from "../../../app/update";
+import { installedText, restartLabel } from "../../../app/update";
 import { useRestart } from "../../../app/useQuit";
 
 /** An installed update, in About, for as long as it isn't running: Restart starts it. */
@@ -33,7 +33,7 @@ export function UpdateGroup() {
             <p className="about-row__title">Update installed</p>
             <p>{installedText(update.restart)}</p>
           </div>
-          {/* One button from Restart to Restarting… and back, so it keeps the focus. */}
+          {/* One button through Restart, Restarting… and Try again, so it keeps the focus. */}
           <button
             type="button"
             className={clsx(
@@ -45,7 +45,7 @@ export function UpdateGroup() {
               if (!restarting) restart();
             }}
           >
-            {restarting ? "Restarting…" : "Restart"}
+            {restartLabel(update.restart)}
           </button>
         </div>
       </div>

@@ -64,12 +64,13 @@ and restarts into it (`src-tauri/src/desktop/update.rs`).
   minutes after the app starts, and not at all on a metered connection (unless
   the portal runs with `--poll-when-metered`). When the installed version
   isn't the running one, a card in the window's corner says so, once per
-  version (Restart, or Later); the main menu (with a dot on its button), the
-  tray menu (above Quit) and Settings → About keep offering **Restart to
-  update**; and while the window isn't open, one desktop notification per
-  version says so, with a Restart button. Outside a Flatpak, or with a portal
-  without the monitor, nothing shows; a portal that can't be reached is tried
-  again after 1, 5 and then every 30 minutes, and at once when it starts.
+  version (Restart, or Later); the main menu (with a dot on its button) and
+  the tray menu (above Quit) keep offering **Restart to update**, and
+  Settings → About a **Restart** button; and while the window isn't open, one
+  desktop notification per version says so, with a Restart button. Outside a
+  Flatpak, or with a portal without the monitor, nothing shows; a portal that
+  can't be reached is tried again after 1, 5 and then every 30 minutes, and at
+  once when it starts.
 - **Restarting.** It asks first about an unsent message, as Quit does. Then
   the app asks the portal to start the installed version (`Spawn` with
   `LatestVersion`, `--restarted-from=<its bus name>`) and hands over to it
@@ -79,7 +80,7 @@ and restarts into it (`src-tauri/src/desktop/update.rs`).
   opens its window and says "Updated to version …". If the new instance
   refuses (`--restart-refused`), exits early (`SpawnExited`) or doesn't answer
   within 30 seconds, the old one keeps running and says it couldn't restart
-  (with a notification when its window isn't open). Restart can be tried
+  (with a notification when its window isn't open). **Try again** restarts
   again, and quitting and opening the app always works.
 - **The runtime.** `Spawn` starts the new version on the running one's
   runtime, whatever it was built for. So the new instance compares the runtime

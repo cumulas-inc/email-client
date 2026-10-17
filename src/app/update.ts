@@ -13,6 +13,12 @@ export function installedText(restart: RestartPhase): string {
     : "Restart Cumulas Mail to use the new version.";
 }
 
+/** The card's and Settings → About's button, which restarts (one element in every phase). */
+export function restartLabel(restart: RestartPhase): string {
+  if (restart === "restarting") return "Restarting…";
+  return restart === "failed" ? "Try again" : "Restart";
+}
+
 /** Pages (one per backend) that said they were updated. */
 const announced = new WeakSet<Backend>();
 
