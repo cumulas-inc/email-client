@@ -39,7 +39,7 @@ beforeEach(() => {
     settingsOpen: null,
     addAccountOpen: false,
     composeRequest: null,
-    quitConfirmOpen: false,
+    leaveConfirm: null,
     startAtLoginOffer: false,
     remindersOpen: false,
     calendarRequest: null,

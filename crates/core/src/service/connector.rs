@@ -6,12 +6,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use super::permissions::NeedsPermission;
+use crate::auth::GrantRecord;
 use crate::auth::microsoft::{
     self, ApiTokenSource, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult, SyncTokenSource,
-    sync_scope,
+    admin_consent_link, is_personal_tenant, sync_scope,
 };
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{Account, AccountKind, AccountSettings, ImapSettings};
+use crate::model::{
+    Account, AccountFeature, AccountKind, AccountSettings, AdminConsentLink, ImapSettings,
+};
 use crate::providers::graph::GraphProvider;
 use crate::providers::imap::{self, IdleConfig, ImapCredentials, ImapIdleWatcher, ImapProvider};
 use crate::providers::{
@@ -91,6 +95,43 @@ pub struct ProviderSet {
     pub subscriptions: Option<Arc<dyn ChangeSubscriptions>>,
 }
 
+impl ProviderSet {
+    /// The providers `account` may use now. A Microsoft account's calendar,
+    /// contacts or tasks it lacks the permission for, or that Microsoft 365
+    /// refused, answer every call with `PermissionRequired`: never `None`,
+    /// which would keep them in the local store as for IMAP accounts. The
+    /// refused features in `retrying` are let through, to try them again.
+    pub(crate) fn gated(&self, account: &Account, retrying: &[AccountFeature]) -> ProviderSet {
+        let mut set = self.clone();
+        if account.kind != AccountKind::Microsoft {
+            return set;
+        }
+        let refused = account
+            .refused_features
+            .iter()
+            .filter(|f| !retrying.contains(f));
+        for &feature in account.needs_permission.iter().chain(refused) {
+            let stub = || {
+                Arc::new(NeedsPermission {
+                    feature,
+                    account_id: account.id.clone(),
+                    email: account.email.clone(),
+                    refused: account.refused_features.contains(&feature),
+                })
+            };
+            match feature {
+                AccountFeature::Calendar => set.calendar = Some(stub()),
+                AccountFeature::Contacts => set.contacts = Some(stub()),
+                AccountFeature::Tasks => set.tasks = Some(stub()),
+                // Only the time zone of all-day events and due dates
+                // depends on it, and Graph falls back to the computer's.
+                AccountFeature::MailboxSettings => {}
+            }
+        }
+        set
+    }
+}
+
 pub type BrowserOpener = dyn Fn(&str) -> Result<()> + Send + Sync;
 
 /// How an account hears about changes between full syncs.
@@ -120,14 +161,25 @@ pub trait Connector: Send + Sync {
     /// Checks IMAP and SMTP settings and credentials.
     async fn verify_imap(&self, credentials: &ImapCredentials) -> Result<()>;
 
-    /// Interactive Microsoft sign-in in the user's browser.
-    /// `push_consent` also asks consent for the push service's scope.
+    /// Interactive Microsoft sign-in in the user's browser, asking for
+    /// `graph_scopes` (see [`microsoft::sign_in_scopes`]). `push_consent`
+    /// also asks consent for the push service's scope.
     async fn microsoft_sign_in(
         &self,
         open_browser: &BrowserOpener,
         login_hint: Option<&str>,
+        graph_scopes: &[String],
         push_consent: bool,
     ) -> Result<SignInResult>;
+
+    /// Where an administrator of `tenant_hint`'s organization (a tenant id
+    /// or domain; `organizations` without one) approves the app.
+    fn microsoft_admin_consent(&self, _tenant_hint: Option<&str>) -> Result<AdminConsentLink> {
+        Err(Error::new(
+            ErrorCode::NotConfigured,
+            "Microsoft sign-in isn't available.",
+        ))
+    }
 
     /// Asks a Microsoft 365 work account's organization for its signature
     /// (Cumulas Signatures); `None` when the app can't (company signatures
@@ -206,10 +258,38 @@ impl LiveConnector {
                  Settings → Accounts → Microsoft app registration.",
             )
         })?;
-        Ok(MicrosoftAuthConfig::new(
-            client_id,
-            settings.microsoft_tenant.filter(|t| !t.trim().is_empty()),
-        ))
+        let published = client_id.eq_ignore_ascii_case(PUBLISHED_MICROSOFT_CLIENT_ID);
+        Ok(MicrosoftAuthConfig {
+            published,
+            ..MicrosoftAuthConfig::new(
+                client_id,
+                settings.microsoft_tenant.filter(|t| !t.trim().is_empty()),
+            )
+        })
+    }
+}
+
+/// Records a Microsoft account's grant in the store.
+pub(crate) struct StoreGrant {
+    store: Arc<Store>,
+    account_id: String,
+}
+
+impl GrantRecord for StoreGrant {
+    fn granted(&self) -> Result<Option<Vec<String>>> {
+        Ok(self
+            .store
+            .microsoft_grant(&self.account_id)?
+            .map(|grant| grant.scopes))
+    }
+
+    fn record(&self, granted: &[String]) {
+        if let Err(e) = self.store.record_granted_scopes(&self.account_id, granted) {
+            tracing::warn!(
+                "could not record what account {} was granted: {e}",
+                self.account_id
+            );
+        }
     }
 }
 
@@ -217,11 +297,16 @@ impl LiveConnector {
 impl Connector for LiveConnector {
     async fn providers(&self, account: &Account) -> Result<ProviderSet> {
         match &account.settings {
-            AccountSettings::Microsoft(_) => {
+            AccountSettings::Microsoft(settings) => {
                 let tokens = Arc::new(MicrosoftTokenSource::new(
                     self.microsoft_config()?,
                     account.id.clone(),
                     Arc::clone(&self.secrets),
+                    is_personal_tenant(&settings.tenant_id),
+                    Arc::new(StoreGrant {
+                        store: Arc::clone(&self.store),
+                        account_id: account.id.clone(),
+                    }),
                 ));
                 let graph = Arc::new(GraphProvider::new(account.id.clone(), tokens));
                 Ok(ProviderSet {
@@ -273,13 +358,19 @@ impl Connector for LiveConnector {
         &self,
         open_browser: &BrowserOpener,
         login_hint: Option<&str>,
+        graph_scopes: &[String],
         push_consent: bool,
     ) -> Result<SignInResult> {
         let mut config = self.microsoft_config()?;
+        config.graph_scopes = graph_scopes.to_vec();
         if push_consent {
             config.consent_scopes.push(sync_scope(&config.client_id));
         }
         microsoft::sign_in(&config, open_browser, login_hint, Duration::from_secs(300)).await
+    }
+
+    fn microsoft_admin_consent(&self, tenant_hint: Option<&str>) -> Result<AdminConsentLink> {
+        Ok(admin_consent_link(&self.microsoft_config()?, tenant_hint))
     }
 
     fn organization_signatures(

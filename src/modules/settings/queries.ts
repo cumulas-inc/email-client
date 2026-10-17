@@ -1,7 +1,7 @@
 // Account mutations for the settings and add-account flows. Keys come from
 // the shared `qk` so backend "data-changed" events keep them fresh.
 
-import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 
 import { useBackend } from "../../api/context";
 import { qk } from "../../api/queries";
@@ -10,8 +10,10 @@ import type {
   DataKind,
   ImapAccountUpdate,
   NewImapAccount,
+  PermissionRequest,
   SyncStatus,
 } from "../../api/types";
+import { noteFeatureTurnedOn } from "./featureToasts";
 
 const ALL_KINDS: DataKind[] = ["accounts", "mail", "calendar", "contacts", "tasks", "signatures"];
 
@@ -45,11 +47,44 @@ export function useAddMicrosoftAccount() {
   const backend = useBackend();
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (loginHint?: string) => backend.addMicrosoftAccount(loginHint),
-    onSuccess: (account) => {
+    mutationFn: ({
+      loginHint,
+      permissions,
+    }: {
+      loginHint?: string;
+      permissions?: PermissionRequest;
+    }) => backend.addMicrosoftAccount(loginHint, permissions),
+    onSuccess: (account, { permissions }) => {
+      // Before the account changes anywhere, so its own toast is the only one.
+      if (permissions?.kind === "feature") noteFeatureTurnedOn(account.id, permissions.feature);
+      // A sign-in checks refused features again, as Check again does: the
+      // notice going away says one is back, a sync that's refused again says so.
+      const before = client
+        .getQueryData<Account[]>(qk.accounts())
+        ?.find((a) => a.id === account.id);
+      for (const f of before?.refusedFeatures ?? []) noteFeatureTurnedOn(account.id, f);
       upsertAccount(client, account);
       refreshEverything(client);
     },
+  });
+}
+
+/** Where an administrator approves the account's organization (Ask IT). */
+export function useAdminConsentLink(accountId: string, enabled = true) {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: qk.adminConsent(accountId),
+    queryFn: () => backend.microsoftAdminConsent(accountId),
+    enabled,
+    retry: false,
+  });
+}
+
+/** "Check again": asks Microsoft 365 again for the features it refused. */
+export function useRetryMicrosoftFeatures() {
+  const backend = useBackend();
+  return useMutation({
+    mutationFn: (accountId: string) => backend.retryMicrosoftFeatures(accountId),
   });
 }
 

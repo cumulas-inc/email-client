@@ -14,6 +14,7 @@ mod mail;
 mod subscriptions;
 mod tasks;
 mod types;
+mod windows_zones;
 
 #[cfg(test)]
 mod tests;
@@ -25,13 +26,36 @@ use serde::Deserialize;
 use tokio::sync::OnceCell;
 
 use crate::auth::TokenSource;
+use crate::error::Error;
 use client::GraphClient;
 
 /// Microsoft Graph v1.0 endpoint of the public cloud.
 pub const GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
 
-/// Time zone used when the mailbox's own cannot be read.
-const FALLBACK_TIME_ZONE: &str = "UTC";
+/// The computer's time zone as a Windows name (`W. Europe Standard Time`),
+/// for when the mailbox's can't be read; `UTC` when it isn't known. `TZ`
+/// wins when it names a zone (`Europe/Berlin`, `:Europe/Berlin`).
+fn computer_time_zone() -> String {
+    match tz_zone(std::env::var("TZ").ok().as_deref()) {
+        Some(zone) => zone.to_owned(),
+        None => windows_time_zone(iana_time_zone::get_timezone().ok().as_deref()),
+    }
+}
+
+/// The Windows time zone `TZ` names, if it names one (rather than a POSIX
+/// rule such as `CET-1CEST`).
+fn tz_zone(tz: Option<&str>) -> Option<&'static str> {
+    let tz = tz?;
+    windows_zones::windows_zone(tz.strip_prefix(':').unwrap_or(tz).trim())
+}
+
+/// The Windows name of an IANA time zone, which Graph accepts everywhere;
+/// `UTC` when it isn't known.
+fn windows_time_zone(iana: Option<&str>) -> String {
+    iana.and_then(windows_zones::windows_zone)
+        .unwrap_or("UTC")
+        .to_owned()
+}
 
 /// One Microsoft account on Microsoft Graph; implements all four provider
 /// traits.
@@ -46,6 +70,8 @@ pub struct GraphProvider {
     /// moved message's `parentFolderId` that isn't one of them is looked up
     /// in case it names one of them another way.
     folder_ids: Mutex<HashSet<String>>,
+    /// The computer's time zone (tests set another).
+    computer_time_zone: fn() -> String,
 }
 
 impl GraphProvider {
@@ -65,11 +91,14 @@ impl GraphProvider {
             client: GraphClient::new(base_url.into(), tokens),
             time_zone: OnceCell::new(),
             folder_ids: Mutex::default(),
+            computer_time_zone,
         }
     }
 
-    /// The mailbox time zone, or UTC when it cannot be read (the failure is
-    /// not cached, so the next call tries again).
+    /// The mailbox time zone, or the computer's when it cannot be read.
+    /// Without the permission to read it (HTTP 403) that holds for the
+    /// provider's life, which ends once the permission is granted; other
+    /// failures are not cached, so the next call tries again.
     async fn mailbox_time_zone(&self) -> String {
         #[derive(Deserialize)]
         struct Value {
@@ -79,19 +108,31 @@ impl GraphProvider {
             .time_zone
             .get_or_try_init(|| async {
                 let url = self.client.url("/me/mailboxSettings/timeZone");
-                let tz: Value = self.client.get_json(&url, &[]).await?;
-                Ok::<_, crate::error::Error>(
-                    tz.value
+                match self
+                    .client
+                    .get_json::<Value>(&url, &[])
+                    .await
+                    .map_err(Error::from)
+                {
+                    Ok(tz) => Ok(tz
+                        .value
                         .filter(|tz| !tz.trim().is_empty())
-                        .unwrap_or_else(|| FALLBACK_TIME_ZONE.into()),
-                )
+                        .unwrap_or_else(self.computer_time_zone)),
+                    Err(e) if e.http_status() == Some(403) => {
+                        tracing::info!(
+                            "no permission to read the mailbox time zone; using the computer's"
+                        );
+                        Ok((self.computer_time_zone)())
+                    }
+                    Err(e) => Err(e),
+                }
             })
             .await;
         match read {
             Ok(tz) => tz.clone(),
             Err(e) => {
-                tracing::warn!("could not read the mailbox time zone, using UTC: {e}");
-                FALLBACK_TIME_ZONE.into()
+                tracing::warn!("could not read the mailbox time zone, using the computer's: {e}");
+                (self.computer_time_zone)()
             }
         }
     }

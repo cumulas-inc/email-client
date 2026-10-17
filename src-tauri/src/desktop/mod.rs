@@ -1,6 +1,7 @@
 //! The desktop around the core: notifications and where clicking them
 //! leads, the main window's lifecycle, the tray icon, running in the
-//! background and starting at login, and the network monitor.
+//! background and starting at login, the network monitor, and updates of
+//! the Flatpak.
 
 pub mod background;
 #[cfg(target_os = "linux")]
@@ -8,6 +9,7 @@ mod network;
 pub mod notify;
 pub mod router;
 pub mod tray;
+pub mod update;
 pub mod window;
 
 use std::future::Future;
@@ -29,6 +31,7 @@ use self::notify::{
 };
 use self::router::Router;
 use self::tray::Tray;
+use self::update::Updates;
 use self::window::WindowState;
 use crate::AppState;
 
@@ -47,6 +50,7 @@ pub struct Desktop {
     pub window: WindowState,
     pub tray: Tray,
     pub background: Background,
+    pub update: Updates,
     /// Reminder changes, carried out one after another by [`start`] (see
     /// [`serve_reminders`]).
     reminders: mpsc::UnboundedSender<ReminderChange>,
@@ -80,6 +84,7 @@ impl Desktop {
             window: WindowState::default(),
             tray: Tray::default(),
             background: Background::new(app),
+            update: Updates::default(),
             reminders,
         };
         let inbound = Inbound {
@@ -140,7 +145,8 @@ impl Desktop {
 }
 
 /// Starts the desktop side once the core runs: notification clicks,
-/// reminders, the tray, the network monitor and the background status.
+/// reminders, the tray, the network monitor, the background status and
+/// the update monitor.
 pub fn start(app: &AppHandle, inbound: Inbound) {
     let handle = app.clone();
     let show = move |due: Vec<ActiveReminder>, cleared: Vec<String>, now: DateTime<Utc>| {
@@ -165,6 +171,7 @@ pub fn start(app: &AppHandle, inbound: Inbound) {
     tray::mail_changed(app);
     tray::sync(app);
     tauri::async_runtime::spawn(tray::watch(app.clone()));
+    tauri::async_runtime::spawn(update::watch(app.clone()));
     #[cfg(target_os = "linux")]
     {
         let service = Arc::clone(&app.state::<AppState>().service);

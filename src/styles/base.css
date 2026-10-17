@@ -253,6 +253,12 @@ a {
   cursor: progress;
 }
 
+/* The same, where the button keeps the focus (aria-disabled rather than
+   disabled): it ignores clicks. */
+.btn.btn--busy[aria-disabled="true"] {
+  cursor: progress;
+}
+
 /* A spinner in a button turns with the label's color, not teal on teal. */
 .btn .spinner {
   color: inherit;

@@ -12,6 +12,8 @@ import { type CalendarRequest, useAppStore } from "../../app/store";
 import { EmptyState } from "../../components/EmptyState";
 import { Spinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
+import { FeaturePermissionNotice, REFUSED_HINT } from "../settings/FeaturePermission";
+import { FEATURE_COPY, accountsWithout, isPersonalAccount } from "../settings/microsoft";
 import { Agenda } from "./Agenda";
 import { CalendarList } from "./CalendarList";
 import { defaultNewEventTimes, eventRange, timesFromRange } from "./dates";
@@ -30,6 +32,8 @@ import { Toolbar } from "./Toolbar";
 const NO_ACCOUNTS: Account[] = [];
 const NO_CALENDARS: Calendar[] = [];
 const NO_EVENTS: CalendarEvent[] = [];
+/** The New event button, which gets the keyboard after the calendar is turned on. */
+const NEW_EVENT_BUTTON_ID = "calendar-new-event";
 /** Range titles longer than this (in characters) get a short form for narrow windows. */
 const SHORT_TITLE_AFTER = 24;
 
@@ -244,6 +248,17 @@ export function CalendarModule() {
   const selectedCalendar = selectedEvent ? calendarsById.get(selectedEvent.calendarId) : undefined;
   const allHidden = calendars.length > 0 && calendars.every((c) => hidden.has(c.id));
   const noCalendars = calendarsQuery.isSuccess && calendars.length === 0;
+  // Microsoft accounts whose calendar can't be used: the empty state says
+  // so when there's no other calendar, the sidebar otherwise.
+  const withoutCalendar = accountsWithout(accounts, "calendar");
+  const calendarGated = withoutCalendar.needing.length + withoutCalendar.refused.length > 0;
+  const permissionNotice = (
+    <FeaturePermissionNotice
+      feature="calendar"
+      accounts={accounts}
+      returnFocusId={NEW_EVENT_BUTTON_ID}
+    />
+  );
   const nothingScheduled = eventsSettled && !allHidden && events.length === 0;
   const title = rangeTitle(view, anchor);
   // Narrow windows shorten titles that wouldn't fit ("Wed, Oct 14, 2026");
@@ -263,6 +278,7 @@ export function CalendarModule() {
         className="cal-sidebar"
         action={
           <button
+            id={NEW_EVENT_BUTTON_ID}
             type="button"
             className="btn btn--primary cal-sidebar__new"
             onClick={newEvent}
@@ -299,6 +315,7 @@ export function CalendarModule() {
             onToggle={toggleCalendar}
           />
         )}
+        {!(noCalendars && calendarGated) && permissionNotice}
         {calendars.length > 0 && (
           <Agenda
             today={today}
@@ -346,7 +363,24 @@ export function CalendarModule() {
           </div>
         )}
         <div className="cal-view">
-          {noCalendars ? (
+          {noCalendars && calendarGated ? (
+            <EmptyState
+              icon={<CalendarDays size={40} />}
+              title={
+                withoutCalendar.needing.length > 0
+                  ? "Your calendar needs permission"
+                  : FEATURE_COPY.calendar.refusedTitle
+              }
+              description={
+                withoutCalendar.needing.length === 0
+                  ? REFUSED_HINT
+                  : withoutCalendar.needing.every(isPersonalAccount)
+                    ? "Turn it on to see your calendar here."
+                    : "Turn it on, or ask your IT team to approve it."
+              }
+              action={permissionNotice}
+            />
+          ) : noCalendars ? (
             <EmptyState
               icon={<CalendarDays size={40} />}
               title="No calendars yet"

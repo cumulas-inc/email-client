@@ -3,17 +3,20 @@ import { lazy, Suspense, useEffect, useState } from "react";
 
 import type { Backend } from "../api/backend";
 import { BackendProvider } from "../api/BackendProvider";
-import { useAccounts } from "../api/queries";
+import { useAccounts, useUpdateState } from "../api/queries";
 import { PaneSpinner } from "../components/Spinner";
 import { Toaster } from "../components/Toaster";
 import { MailModule } from "../modules/mail/MailModule";
 import { Welcome } from "../modules/onboarding/Welcome";
 import { AddAccountDialog } from "../modules/settings/AddAccountDialog";
+import { useFeatureChangeToasts } from "../modules/settings/featureToasts";
 import { SettingsDialog } from "../modules/settings/SettingsDialog";
 import { AppHeader } from "./AppHeader";
 import { QuitConfirmDialog } from "./QuitConfirmDialog";
 import { StartAtLoginOffer } from "./StartAtLoginOffer";
 import { type Module, useAppStore } from "./store";
+import { UpdateNotice } from "./UpdateNotice";
+import { useUpdatedToast } from "./update";
 import { useAppearance } from "./useAppearance";
 import { useBackendEvents } from "./useBackendEvents";
 import { useQuitRequests } from "./useQuit";
@@ -74,8 +77,13 @@ function Shell() {
   useAppearance();
   useGlobalShortcuts();
   useQuitRequests();
+  useFeatureChangeToasts();
+  useUpdatedToast();
   const module = useAppStore((s) => s.module);
   const { data: accounts, isLoading } = useAccounts();
+  const { data: update } = useUpdateState();
+  // The new version is taking over: nothing typed now would be kept.
+  const restarting = update?.kind === "installed" && update.restart === "restarting";
 
   let content;
   if (isLoading) content = <PaneSpinner />;
@@ -93,11 +101,17 @@ function Shell() {
   return (
     <div className="app">
       <AppHeader />
-      <main className="app__main">{content}</main>
+      <main className="app__main" inert={restarting || undefined}>
+        {content}
+      </main>
       <SettingsDialog />
       <AddAccountDialog />
       <QuitConfirmDialog />
-      <StartAtLoginOffer />
+      {/* Present before a card arrives, so that screen readers announce it. */}
+      <div className="offer-anchor" aria-live="polite">
+        <StartAtLoginOffer />
+        <UpdateNotice />
+      </div>
       <Toaster />
     </div>
   );

@@ -7,6 +7,7 @@ import { LogoMark } from "../../../app/LogoMark";
 import { PaneSpinner } from "../../../components/Spinner";
 import { PRIVACY_URL } from "../constants";
 import { Callout } from "../Fields";
+import { UpdateGroup } from "./UpdateGroup";
 
 const LICENSE_URL = "https://www.gnu.org/licenses/gpl-3.0.html";
 
@@ -25,6 +26,8 @@ export function AboutSection() {
         <p className="about-hero__version selectable">Version {info.version}</p>
         <p className="about-hero__tagline">Mail, calendar, contacts and tasks for Linux.</p>
       </div>
+
+      <UpdateGroup />
 
       {!info.persistentSecrets && (
         <Callout tone="warning" role="status" title="Your sign-ins can't be saved">

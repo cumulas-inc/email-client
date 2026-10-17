@@ -31,6 +31,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls", "http2", "charset", "gzip"] }
 sha2 = "0.10"
 rand = "0.9"
+# The computer's time zone, when the mailbox's can't be read
+iana-time-zone = "0.1"
 
 # Push: cancellation for the per-account watchers, TCP keepalive on IMAP sockets
 tokio-util = "0.7"

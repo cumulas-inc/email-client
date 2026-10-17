@@ -95,6 +95,24 @@
   color: var(--fg-primary);
 }
 
+.app-header__menu {
+  position: relative;
+}
+
+/* An update is installed: a dot on the main menu's shoulder, like the
+   reminders' count on the bell's. */
+.app-header__menu-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-round);
+  background: var(--brand);
+  box-shadow: 0 0 0 2px var(--bg-app);
+  pointer-events: none;
+}
+
 /* --- Sidebar card ---------------------------------------------------------- */
 
 .module-sidebar {
@@ -268,13 +286,16 @@
 
 /* --- Offers ------------------------------------------------------------------ */
 
-/* A one-time question in the corner (start at login): out of the way of the
-   list and the toasts, and gone at a click. */
+/* One-time news in the corner (start at login, an installed update): out of
+   the way of the list and the toasts, and gone at a click. Two stack. */
 .offer-anchor {
   position: fixed;
   right: var(--space-4);
   bottom: var(--space-4);
   z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   width: min(360px, calc(100vw - 2 * var(--space-4)));
   pointer-events: none;
 }

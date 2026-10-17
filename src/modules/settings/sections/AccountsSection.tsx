@@ -5,6 +5,7 @@ import {
   KeyRound,
   LoaderCircle,
   LogIn,
+  Mail,
   Plus,
   RefreshCw,
   Trash,
@@ -13,24 +14,34 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
+import { useBackend } from "../../../api/context";
+import { errorMessage } from "../../../api/errors";
 import { useAccounts, usePushStatuses, useSettings, useSyncStatuses } from "../../../api/queries";
 import type { Account, PushStatus, SyncStatus } from "../../../api/types";
 import { ColorPicker } from "../../../components/ColorPicker";
 import { EmptyState } from "../../../components/EmptyState";
-import { PaneSpinner } from "../../../components/Spinner";
+import { PaneSpinner, Spinner } from "../../../components/Spinner";
 import { Switch } from "../../../components/Switch";
 import { toast } from "../../../components/toast";
-import { openAddAccount } from "../addAccountStore";
+import { openAddAccount, openTurnOn } from "../addAccountStore";
 import { AccountBadge } from "../../../components/AccountBadge";
 import { ACCOUNT_COLORS, ADD_ACCOUNT_BUTTON_ID } from "../constants";
 import { Callout, TextField } from "../Fields";
 import { focusLater } from "../focus";
 import { ImapAccountEditor } from "../ImapAccountEditor";
 import { ApprovalLink } from "../AdminConsent";
+import { REFUSED_HINT } from "../FeaturePermission";
+import { noteFeatureTurnedOn } from "../featureToasts";
+import { FEATURE_COPY, featureList, isPersonalAccount, refusedFeatureMailto } from "../microsoft";
 import { notifyWhere } from "../notifyScope";
 import { describePush } from "../pushStatus";
 import { TLS_LABELS } from "../presets";
-import { useSyncAccount, useUpdateAccount } from "../queries";
+import {
+  useAdminConsentLink,
+  useRetryMicrosoftFeatures,
+  useSyncAccount,
+  useUpdateAccount,
+} from "../queries";
 import { trackSave, useSaveSettings } from "../saveStatus";
 
 /** Re-renders every half minute so "Synced 2 minutes ago" stays true. */
@@ -135,6 +146,7 @@ function AccountItem({
   const id = useId();
   const bodyId = `${id}-body`;
   const editButtonId = `${id}-edit-servers`;
+  const syncButtonId = `${id}-sync-now`;
   const sync = useSyncAccount();
   const update = useUpdateAccount();
   const [editing, setEditing] = useState(false);
@@ -266,6 +278,22 @@ function AccountItem({
             {account.email}
           </div>
           <div className="account-item__status">{statusNode}</div>
+          {microsoft && account.needsPermission.length > 0 && (
+            <div className="account-item__status">
+              <span className="account-status account-status--warning">
+                <span className="account-status__dot" aria-hidden="true" />
+                Needs permission: {featureList(account.needsPermission)}
+              </span>
+            </div>
+          )}
+          {microsoft && account.refusedFeatures.length > 0 && (
+            <div className="account-item__status">
+              <span className="account-status account-status--warning">
+                <span className="account-status__dot" aria-hidden="true" />
+                Refused by Microsoft 365: {featureList(account.refusedFeatures)}
+              </span>
+            </div>
+          )}
         </div>
         <div className="account-item__actions">
           {/* Hidden while its editor is open: it would do nothing. */}
@@ -361,13 +389,27 @@ function AccountItem({
                   ` · checks every ${intervalMinutes === 1 ? "minute" : `${intervalMinutes} minutes`}`}
               </p>
             </div>
-            <button type="button" className="btn btn--sm" onClick={syncNow} disabled={syncing}>
+            <button
+              id={syncButtonId}
+              type="button"
+              className="btn btn--sm"
+              onClick={syncNow}
+              disabled={syncing}
+            >
               <RefreshCw size={14} aria-hidden="true" className={syncing ? "spin" : undefined} />
               Sync now
             </button>
           </div>
 
           {push && <PushField account={account} push={push} onSignIn={signInAgain} />}
+          {microsoft &&
+            (account.needsPermission.length > 0 || account.refusedFeatures.length > 0) && (
+              <PermissionsField
+                account={account}
+                syncError={syncError !== null}
+                returnFocusId={syncButtonId}
+              />
+            )}
           <NotifyField account={account} />
 
           {!syncError && servers}
@@ -421,9 +463,157 @@ function PushField({ account, push, onSignIn }: PushFieldProps) {
         <ApprovalLink
           adminConsentUrl={push.adminConsent.url}
           tenant={push.adminConsent.tenant}
+          adminPageUrl={push.adminConsent.adminPageUrl}
           email={account.email}
           purpose="push"
+          emphasis="compact"
         />
+      )}
+    </div>
+  );
+}
+
+interface PermissionsFieldProps {
+  account: Account;
+  /** The account can't sync, so its mail isn't said to work. */
+  syncError: boolean;
+  /** Where the keyboard goes once a Turn on succeeds (the Sync now button). */
+  returnFocusId: string;
+}
+
+/** A Microsoft account's features it can't use: what's missing, what was refused. */
+function PermissionsField({ account, syncError, returnFocusId }: PermissionsFieldProps) {
+  const id = useId();
+  const askId = `${id}-ask`;
+  const backend = useBackend();
+  const retry = useRetryMicrosoftFeatures();
+  const [asking, setAsking] = useState(false);
+  const link = useAdminConsentLink(account.id, asking);
+  const { needsPermission: needing, refusedFeatures: refused } = account;
+
+  const checkAgain = () => {
+    // The row going away says it's back; a sync that's refused again says so.
+    for (const f of refused) noteFeatureTurnedOn(account.id, f);
+    retry.mutate(account.id, { onError: (e) => toast.error(e) });
+  };
+
+  const emailIt = () => {
+    backend
+      .openLink(refusedFeatureMailto({ email: account.email, features: refused }))
+      .catch((e: unknown) => toast.error(e));
+  };
+
+  return (
+    <div className="account-field">
+      <span className="account-field__label">Permissions</span>
+      {needing.length > 0 && (
+        <>
+          <p className="account-field__hint">
+            {syncError ? "" : "Your mail works. "}These need permission before Cumulas Mail can use
+            them:
+          </p>
+          <ul className="permission-rows">
+            {needing.map((feature) => (
+              <li key={feature} className="permission-row">
+                <span className="permission-row__text">
+                  <span className="permission-row__name">{FEATURE_COPY[feature].name}</span>
+                  {feature === "mailboxSettings" && (
+                    <span className="permission-row__note">
+                      Until then, all-day events and due dates use this computer&apos;s time zone.
+                    </span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn--sm"
+                  aria-label={`Turn on ${FEATURE_COPY[feature].noun} for ${account.email}`}
+                  onClick={() => openTurnOn(account.email, feature, returnFocusId)}
+                >
+                  Turn on
+                </button>
+              </li>
+            ))}
+          </ul>
+          {!isPersonalAccount(account) && (
+            <div className="permission-ask">
+              <div>
+                <button
+                  type="button"
+                  className="btn btn--sm"
+                  aria-expanded={asking}
+                  aria-controls={askId}
+                  onClick={() => setAsking((open) => !open)}
+                >
+                  Ask IT
+                </button>
+              </div>
+              <div id={askId} className="permission-ask__body" hidden={!asking}>
+                {asking && link.isPending && <Spinner label="Loading the approval link" />}
+                {asking && link.isError && (
+                  <p className="field__error" role="alert">
+                    {errorMessage(link.error)}
+                  </p>
+                )}
+                {asking && link.data && (
+                  <ApprovalLink
+                    adminConsentUrl={link.data.adminConsentUrl}
+                    tenant={link.data.tenant}
+                    adminPageUrl={link.data.adminPageUrl}
+                    email={account.email}
+                    purpose="features"
+                    features={needing}
+                    emphasis="compact"
+                  />
+                )}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+      {refused.length > 0 && (
+        <>
+          <ul className="permission-rows">
+            {refused.map((feature) => {
+              const checking = retry.isPending;
+              return (
+                <li key={feature} className="permission-row">
+                  <span className="permission-row__text">
+                    <span className="permission-row__name">
+                      {FEATURE_COPY[feature].name}: Microsoft 365 refused access
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn--sm"
+                    aria-label={`Check ${FEATURE_COPY[feature].noun} again for ${account.email}`}
+                    aria-busy={checking || undefined}
+                    disabled={checking}
+                    onClick={checkAgain}
+                  >
+                    {checking ? (
+                      <LoaderCircle size={14} className="spin" aria-hidden="true" />
+                    ) : (
+                      <RefreshCw size={14} aria-hidden="true" />
+                    )}
+                    Check again
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="account-field__hint">{REFUSED_HINT}</p>
+          <div>
+            <button
+              type="button"
+              className="btn btn--sm"
+              aria-label={`Email IT about ${featureList(refused)} for ${account.email}`}
+              onClick={emailIt}
+            >
+              <Mail size={14} aria-hidden="true" />
+              Email IT
+            </button>
+          </div>
+        </>
       )}
     </div>
   );

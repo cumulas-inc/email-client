@@ -6,6 +6,9 @@
 //! without. So the library is looked for first, and the host followed on
 //! the session bus: the icon is added once there is one.
 //!
+//! While an update is installed, the menu offers to restart into it, above
+//! Quit.
+//!
 //! Once added, the icon is hidden and shown, never removed: the library
 //! can't really remove it (it stays on the bus, and a new icon then can't
 //! take its place), and it registers it again with a host that restarts.
@@ -26,6 +29,8 @@ use super::{Desktop, window};
 use crate::AppState;
 
 const TRAY_ID: &str = "main";
+/// "Restart to update"'s id.
+const RESTART: &str = "restart-update";
 /// The StatusNotifier host's bus name.
 #[cfg(target_os = "linux")]
 const WATCHER: &str = "org.kde.StatusNotifierWatcher";
@@ -38,12 +43,17 @@ pub struct Tray {
     host: AtomicBool,
     unread: AtomicU32,
     items: Mutex<Option<TrayItems>>,
+    /// "Restart to update" is in the menu.
+    restart_shown: AtomicBool,
 }
 
-/// The menu items that change.
+/// The menu, and its items that change.
 struct TrayItems {
+    menu: Menu<tauri::Wry>,
     unread: MenuItem<tauri::Wry>,
     resume: MenuItem<tauri::Wry>,
+    /// In the menu, above Quit, while an update is installed.
+    restart: MenuItem<tauri::Wry>,
 }
 
 /// Whether to show the icon: the setting is on, there's a host, and the
@@ -187,6 +197,8 @@ fn build(app: &AppHandle) -> tauri::Result<()> {
 
     let unread_item = MenuItem::with_id(app, "unread", unread_label(unread), false, None::<&str>)?;
     let resume = MenuItem::with_id(app, "pause-resume", "Resume", paused, None::<&str>)?;
+    let restart = MenuItem::with_id(app, RESTART, "Restart to update", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Cumulas Mail", true, None::<&str>)?;
     let pause = Submenu::with_items(
         app,
         "Pause mail notifications",
@@ -209,9 +221,13 @@ fn build(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &pause,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "quit", "Quit Cumulas Mail", true, None::<&str>)?,
+            &quit,
         ],
     )?;
+    let installed = desktop.update.installed();
+    if installed {
+        menu.insert(&restart, menu.items()?.len() - 1)?;
+    }
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(unread))
         .tooltip(tooltip(unread))
@@ -232,9 +248,13 @@ fn build(app: &AppHandle) -> tauri::Result<()> {
         );
     }
     builder.build(app)?;
-    *desktop.tray.items.lock().unwrap() = Some(TrayItems {
+    let tray = &desktop.tray;
+    tray.restart_shown.store(installed, Ordering::Relaxed);
+    *tray.items.lock().unwrap() = Some(TrayItems {
+        menu,
         unread: unread_item,
         resume,
+        restart,
     });
     Ok(())
 }
@@ -289,6 +309,39 @@ pub fn pause_changed(app: &AppHandle) {
     });
 }
 
+/// An update was installed, or isn't anymore: "Restart to update" comes
+/// or goes, right above Quit.
+pub fn update_changed(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let desktop = handle.state::<Desktop>();
+        let installed = desktop.update.installed();
+        let items = desktop.tray.items.lock().unwrap();
+        // No icon yet: it's built with the item when there's one to show.
+        let Some(items) = &*items else {
+            return;
+        };
+        let shown = desktop
+            .tray
+            .restart_shown
+            .swap(installed, Ordering::Relaxed);
+        if shown == installed {
+            return;
+        }
+        let changed = if installed {
+            items
+                .menu
+                .items()
+                .and_then(|all| items.menu.insert(&items.restart, all.len() - 1))
+        } else {
+            items.menu.remove(&items.restart)
+        };
+        if let Err(e) = changed {
+            tracing::warn!("could not update the tray menu: {e}");
+        }
+    });
+}
+
 fn paused_until(app: &AppHandle) -> Option<chrono::DateTime<Utc>> {
     app.state::<AppState>()
         .service
@@ -327,6 +380,7 @@ fn on_menu(app: &AppHandle, id: &str) {
         "pause-hour" => pause(app, Some(Utc::now() + Duration::hours(1))),
         "pause-tomorrow" => pause(app, Some(tomorrow_morning(Local::now()))),
         "pause-resume" => pause(app, None),
+        RESTART => window::restart(app, None),
         "quit" => window::quit(app),
         _ => {}
     }

@@ -25,6 +25,7 @@ export const qk = {
   syncStatuses: () => ["accounts", "sync-statuses"] as const,
   pushStatuses: () => ["accounts", "push-statuses"] as const,
   backgroundState: () => ["accounts", "background"] as const,
+  adminConsent: (accountId: string) => ["accounts", "admin-consent", accountId] as const,
 
   folders: (accountId?: string) => ["mail", "folders", accountId ?? "all"] as const,
   messages: (folderId: string, filter: string) => ["mail", "messages", folderId, filter] as const,
@@ -42,6 +43,8 @@ export const qk = {
 
   /** Not under a DataKind: the reminders-changed event keeps it up to date. */
   reminders: () => ["reminders", "active"] as const,
+  /** Not under a DataKind: the update-state event keeps it up to date. */
+  updateState: () => ["update", "state"] as const,
 
   accountSignature: (accountId: string) => ["signatures", "account", accountId] as const,
   composeSignature: (accountId: string, replyKind: ReplyKind | null) =>
@@ -139,6 +142,16 @@ export function useSetStartAtLogin() {
       backend.setStartAtLogin(enabled, hidden),
     onSuccess: (state) => applyBackgroundState(client, state),
     onError: () => void client.invalidateQueries({ queryKey: qk.backgroundState() }),
+  });
+}
+
+/** What the Flatpak portal says about updates; kept current by the update-state event. */
+export function useUpdateState() {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: qk.updateState(),
+    queryFn: () => backend.getUpdateState(),
+    staleTime: Infinity,
   });
 }
 

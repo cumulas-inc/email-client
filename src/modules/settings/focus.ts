@@ -35,6 +35,51 @@ export function useRestoreFocus(): void {
   }, []);
 }
 
+/** Holds the keyboard while what it's for is disabled. */
+const WAITING_REGION = "aside, section, li, dialog, main, [role='region'], [role='tabpanel']";
+/** How long a disabled element is waited for. */
+const ENABLED_WITHIN_MS = 30_000;
+
+/**
+ * Focuses an element by id on the next tick, once a dialog that did what it
+ * was for has closed (after useRestoreFocus). While the element is disabled
+ * (it waits for what the dialog changed, such as the calendars the sync
+ * after a sign-in brings in), the region around it holds the keyboard and
+ * hands it on once it's enabled, unless the keyboard moved meanwhile.
+ */
+export function focusOnceEnabled(id: string): void {
+  window.setTimeout(() => {
+    const target = document.getElementById(id);
+    if (target) focusOrWait(target);
+  }, 0);
+}
+
+function focusOrWait(target: HTMLElement): void {
+  if (!target.matches(":disabled")) {
+    target.focus();
+    return;
+  }
+  const region = target.parentElement?.closest<HTMLElement>(WAITING_REGION);
+  if (!region) return;
+  if (!region.hasAttribute("tabindex")) {
+    region.tabIndex = -1;
+    region.addEventListener("blur", () => region.removeAttribute("tabindex"), { once: true });
+  }
+  region.focus();
+  let timer = 0;
+  const observer = new MutationObserver(() => {
+    if (target.matches(":disabled")) return;
+    stop();
+    if (document.activeElement === region) target.focus();
+  });
+  const stop = () => {
+    observer.disconnect();
+    window.clearTimeout(timer);
+  };
+  observer.observe(target, { attributes: true, attributeFilter: ["disabled"] });
+  timer = window.setTimeout(stop, ENABLED_WITHIN_MS);
+}
+
 /** Focuses an element by id on the next tick (after a re-render). */
 export function focusLater(id: string): void {
   window.setTimeout(() => document.getElementById(id)?.focus(), 0);

@@ -9,6 +9,7 @@ mod mail;
 mod search;
 mod subscriptions;
 mod tasks;
+mod time_zones;
 
 use std::sync::Arc;
 

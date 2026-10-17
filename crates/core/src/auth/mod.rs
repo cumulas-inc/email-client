@@ -30,6 +30,27 @@ pub trait TokenSource: Send + Sync {
 /// A fixed token, for tests.
 pub struct StaticToken(pub String);
 
+/// Keeps what a Microsoft account was granted: the Graph permissions
+/// Microsoft last said it has.
+pub trait GrantRecord: Send + Sync {
+    /// The recorded Graph permissions; `None` when nothing was recorded yet.
+    fn granted(&self) -> Result<Option<Vec<String>>>;
+    /// Records the Graph permissions a token refresh says the account has.
+    /// Called with the account's lock held; never fails the refresh.
+    fn record(&self, granted: &[String]);
+}
+
+/// Records nothing (tests).
+pub struct NoGrantRecord;
+
+impl GrantRecord for NoGrantRecord {
+    fn granted(&self) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
+
+    fn record(&self, _: &[String]) {}
+}
+
 #[async_trait]
 impl TokenSource for StaticToken {
     async fn access_token(&self) -> Result<String> {

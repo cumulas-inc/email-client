@@ -5,10 +5,11 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use cumulas_core::model::{
-    Account, AccountSignature, ActiveReminder, Calendar, ComposeSignature, Contact, ContactDraft,
-    EmailAddress, Event, EventDraft, EventResponse, Folder, ImapAccountUpdate, Message,
-    MessagePage, MessageQuery, MessageSummary, NewImapAccount, OutgoingMessage, ReplyKind,
-    ServerSearchResult, Settings, Snooze, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
+    Account, AccountSignature, ActiveReminder, AdminConsentLink, Calendar, ComposeSignature,
+    Contact, ContactDraft, EmailAddress, Event, EventDraft, EventResponse, Folder,
+    ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount,
+    OutgoingMessage, PermissionRequest, ReplyKind, ServerSearchResult, Settings, Snooze,
+    SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::push::PushStatus;
 use cumulas_core::service::builtin_microsoft_client_id;
@@ -21,6 +22,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::AppState;
 use crate::desktop::background::{self, BackgroundState};
 use crate::desktop::router::Navigate;
+use crate::desktop::update::{self, UpdateState};
 use crate::desktop::{self as desktop_shell, Desktop, notify, tray};
 
 /// Runs store work off the main thread and off the async workers: a sync
@@ -49,6 +51,8 @@ pub struct AppInfo {
     /// (`CUMULAS_SIGNATURE_CLIENT_ID` is `none`, or another service has no
     /// client ID).
     signature_server: Option<String>,
+    /// Started by a restart into an update: the page says it's updated.
+    restarted_to_update: bool,
 }
 
 #[tauri::command]
@@ -59,6 +63,7 @@ pub fn get_app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
         microsoft_client_id_built_in: builtin_microsoft_client_id().is_some(),
         sync_server: cumulas_core::push::relay::sync_host(),
         signature_server: cumulas_core::signatures::config::signature_host(),
+        restarted_to_update: state.restarted_to_update,
     }
 }
 
@@ -84,11 +89,12 @@ pub fn quit_app(app: AppHandle, desktop: State<'_, Desktop>) {
     app.exit(0);
 }
 
-/// The user kept the unsent message when asked whether to quit: the tray's
-/// next Quit asks again, rather than quitting at once.
+/// The user kept the unsent message when asked whether to quit (or
+/// restart): the tray's next Quit asks again, rather than quitting at once.
 #[tauri::command]
 pub fn quit_canceled(desktop: State<'_, Desktop>) {
     desktop.window.forget_quit();
+    desktop.update.take_activation_token();
 }
 
 // --- accounts & settings ------------------------------------------------------
@@ -109,11 +115,14 @@ pub async fn add_imap_account(
     Ok(account)
 }
 
+/// Signs in to a Microsoft account in the browser, asking for `permissions`
+/// (everything when `null`), then syncs it.
 #[tauri::command]
 pub async fn add_microsoft_account(
     app: AppHandle,
     state: State<'_, AppState>,
     login_hint: Option<String>,
+    permissions: Option<PermissionRequest>,
 ) -> Result<Account> {
     let opener = app.clone();
     let open_browser = move |url: &str| {
@@ -124,7 +133,11 @@ pub async fn add_microsoft_account(
     };
     let account = state
         .service
-        .add_microsoft_account(&open_browser, login_hint.as_deref())
+        .add_microsoft_account(
+            &open_browser,
+            login_hint.as_deref(),
+            permissions.unwrap_or_default(),
+        )
         .await?;
     spawn_sync(&state, &account.id);
     Ok(account)
@@ -134,6 +147,33 @@ pub async fn add_microsoft_account(
 #[tauri::command]
 pub fn cancel_microsoft_sign_in(state: State<'_, AppState>) {
     state.service.cancel_microsoft_sign_in();
+}
+
+/// The link an administrator approves Cumulas Mail with, for an account's
+/// organization or the one of the address being signed in with.
+#[tauri::command]
+pub async fn microsoft_admin_consent(
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+    login_hint: Option<String>,
+) -> Result<AdminConsentLink> {
+    let service = state.service.clone();
+    blocking(move || service.microsoft_admin_consent(account_id.as_deref(), login_hint.as_deref()))
+        .await
+}
+
+/// Checks a Microsoft account's refused features again ("Check again"),
+/// then syncs it.
+#[tauri::command]
+pub async fn retry_microsoft_features(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<()> {
+    let service = state.service.clone();
+    let id = account_id.clone();
+    blocking(move || service.retry_microsoft_features(&id)).await?;
+    spawn_sync(&state, &account_id);
+    Ok(())
 }
 
 /// Updates an IMAP account's password and/or servers, then syncs it.
@@ -274,6 +314,24 @@ pub async fn send_test_notification(app: AppHandle) -> Result<()> {
     desktop_shell::test_notification(&app)
         .await
         .map_err(|e| Error::unsupported(format!("Couldn't show a notification. {e}")))
+}
+
+/// What the Flatpak portal said about updates; changes arrive as
+/// `update-state` events.
+#[tauri::command]
+pub fn get_update_state(desktop: State<'_, Desktop>) -> UpdateState {
+    desktop.update.state()
+}
+
+/// Restarts into the installed update: the page's Restart, and its answer
+/// to the tray's or a notification's (`restart-requested`). The app exits
+/// once the new version has taken over; when it couldn't, it keeps running.
+#[tauri::command]
+pub async fn restart_app(app: AppHandle) -> Result<()> {
+    let desktop = app.state::<Desktop>();
+    desktop.window.forget_quit();
+    let activation_token = desktop.update.take_activation_token();
+    update::restart(&app, activation_token).await
 }
 
 /// Navigation that waited for the page (a notification was clicked while
@@ -755,6 +813,7 @@ mod tests {
                 microsoft_client_id_built_in: false,
                 sync_server: "sync.cumulas.co".into(),
                 signature_server: signature_server.map(str::to_owned),
+                restarted_to_update: true,
             })
             .unwrap()
         };
@@ -763,5 +822,6 @@ mod tests {
             "signature.cumulas.co"
         );
         assert_eq!(info(None)["signatureServer"], serde_json::Value::Null);
+        assert_eq!(info(None)["restartedToUpdate"], true);
     }
 }

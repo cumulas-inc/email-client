@@ -108,7 +108,9 @@ this sends where.
   closing the window hides it while running in the background is on and
   allowed (the first time, a notification says so); Quit in the main menu
   (`quit_app`) or the tray's menu exits, shutting push down. Ctrl+Q is Mail's
-  Mark as read, as in Outlook.
+  Mark as read, as in Outlook. The tray's Quit asks the page
+  (`quit-requested`), which asks first about an unsent message; its Restart
+  to update asks the page the same way (`restart-requested`).
 - `tray.rs`: a tray icon only where the libayatana-appindicator library loads
   and a StatusNotifier host owns `org.kde.StatusNotifierWatcher` (followed as
   it comes and goes). Its menu opens the app, starts a message, checks mail,
@@ -121,6 +123,19 @@ this sends where.
   the `background-state` event tell Settings.
 - `network.rs`: the NetworkMonitor portal tells the core when the network
   comes and goes (push pauses while offline).
+- `update.rs`: in a Flatpak, the Flatpak portal's update monitor says when a
+  version other than the running one is installed; `get_update_state` and the
+  `update-state` event tell the page, which shows a card once per version, a
+  main menu item and a row in About, and the tray adds Restart to update. A
+  desktop notification says it once per version while the window isn't open.
+  `restart_app` starts the installed version through the portal (`Spawn` with
+  `LatestVersion`, `--restarted-from=<bus name>`) and hands over through the
+  single-instance name: the new instance checks its runtime against
+  `/app/manifest.json` and opens the display, answers `--restart-ready` (or
+  `--restart-refused`) through the single-instance callback, and waits for
+  the old one to shut push down, release the name and exit. An early exit
+  (`SpawnExited`), a refusal or 30 seconds without an answer leave the old one
+  running, and Restart can be tried again.
 
 ## Reminders
 
@@ -357,11 +372,17 @@ and Flagged filters apply to results too, and say so when they hide some.
 
 ## Microsoft 365 permissions
 
-The app requests only delegated permissions that users can grant themselves:
-`User.Read`, `offline_access`, `Mail.ReadWrite`, `Mail.Send`,
-`MailboxSettings.Read`, `Calendars.ReadWrite`, `Contacts.ReadWrite`,
-`Tasks.ReadWrite`. Whether a user may consent is the organization's policy;
-when it is blocked the app shows an admin-consent link to forward to IT. See
+The app requests only delegated permissions: `User.Read`, `offline_access`,
+`Mail.ReadWrite` and `Mail.Send` for mail (`CORE_SCOPES` in
+`auth/microsoft.rs`), and one optional permission per feature
+(`OPTIONAL_SCOPES`): `MailboxSettings.Read`, `Calendars.ReadWrite`,
+`Contacts.ReadWrite`, `Tasks.ReadWrite`. Whether people may grant them is the
+organization's policy, and under Microsoft's default since late 2025 an
+administrator usually has to approve the app first; the app then shows an
+approval link to forward to IT, and can sign in with mail only. What each
+account was granted is recorded (`accounts.microsoft_grant`). A feature
+without its permission, or one Microsoft 365 refuses, gets a provider that
+fails with `permissionRequired`, and its cached data is dropped. See
 [microsoft-365.md](microsoft-365.md).
 
 ## Data on disk

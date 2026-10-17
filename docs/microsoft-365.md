@@ -12,9 +12,11 @@ retiring EWS in Exchange Online.
 
 ## Permissions
 
-All permissions are **delegated** (the app acts as the signed-in user, never
-on behalf of the whole organization) and are ones Microsoft lets users grant
-themselves by default:
+All permissions are **delegated**: the app acts as the signed-in user, never
+on behalf of the whole organization, and reaches only that user's own data.
+
+**Needed for mail.** An account can't be added without these
+(`CORE_SCOPES` in `crates/core/src/auth/microsoft.rs`):
 
 | Permission                                | Used for                                               |
 | ----------------------------------------- | ------------------------------------------------------ |
@@ -22,10 +24,23 @@ themselves by default:
 | `offline_access`                          | Staying signed in (refresh token)                      |
 | `Mail.ReadWrite`                          | Reading, searching, flagging, moving and deleting mail |
 | `Mail.Send`                               | Sending mail                                           |
-| `MailboxSettings.Read`                    | Time zone and mailbox preferences                      |
-| `Calendars.ReadWrite`                     | Calendar views, creating events, meeting responses     |
-| `Contacts.ReadWrite`                      | Contacts and address autocomplete                      |
-| `Tasks.ReadWrite`                         | Microsoft To Do lists and tasks                        |
+
+**Optional, one per feature** (`OPTIONAL_SCOPES`). The account works without
+them. A feature whose permission is missing "needs permission": Settings →
+Accounts and the Calendar, People and Tasks modules say so, with **Turn on**
+(asks Microsoft for that permission) and **Ask IT** (the approval link and an
+email for IT).
+
+| Permission             | Used for                                           | Without it                                                          |
+| ---------------------- | -------------------------------------------------- | ------------------------------------------------------------------- |
+| `MailboxSettings.Read` | Time zone and mailbox preferences                  | All-day events and due dates use the computer's time zone           |
+| `Calendars.ReadWrite`  | Calendar views, creating events, meeting responses | The account has no calendars, events or reminders in the app        |
+| `Contacts.ReadWrite`   | Contacts and address autocomplete                  | The account's contacts aren't in the app or in address autocomplete |
+| `Tasks.ReadWrite`      | Microsoft To Do lists and tasks                    | The account has no task lists                                       |
+
+Adding an account asks for both groups at once, so one approval covers
+everything; **Try with mail only** asks for the first group alone (see
+["Need admin approval"](#need-admin-approval)).
 
 One more scope is not a Graph permission but the app's own:
 `api://<client ID>/Sync.Receive` lets the app open a stream to the Cumulas push
@@ -35,30 +50,131 @@ app, `api://<service host>/<its client ID>/access_as_user`, which the
 service's operator pre-authorizes for Cumulas Mail (see
 [Company signatures](#company-signatures-cumulas-signatures)).
 
+### How permissions are kept
+
+The app records which Graph permissions Microsoft says each account has: at
+each sign-in, and at each token refresh (when the access token expires, about
+every 60 to 90 minutes while the app runs). It turns on the features whose
+permission is there.
+
+- **Work and school accounts** refresh with
+  `https://graph.microsoft.com/.default offline_access`, which returns every
+  permission the account was granted, without a prompt. So when an
+  administrator approves a permission later, its feature turns on by itself
+  within a couple of hours. If Microsoft refuses `.default`, the app asks once
+  more with the explicit list.
+- **Personal accounts** refresh with an explicit list: the permissions needed
+  for mail, plus the optional ones the account was granted.
+- **New permissions in future versions are always optional**, so updating
+  never signs anyone out: an account gets a new feature when someone selects
+  **Turn on** (or, for work and school accounts, once an administrator has
+  approved it).
+- **Features Microsoft 365 refuses** (see "Refused" below) are checked again
+  at the account's first sync a day later, or at once with **Check again**.
+
+Accounts added before the app recorded permissions count as having all of them
+until their first refresh records what Microsoft says.
+
 ## "Need admin approval"
 
-Whether a user may grant these permissions is decided by **their
-organization's consent settings**, not by the app. Organizations commonly:
+Whether people may grant these permissions themselves is decided by **their
+organization's consent settings**, not by the app. Since late 2025, in steps
+until mid-2026, Microsoft's default setting ("Let Microsoft manage your
+consent settings") blocks user consent to `Mail.*`, `Calendars.*`,
+`MailboxSettings.*`, `Contacts.ReadWrite` and `Tasks.*` for apps that aren't
+on Microsoft's own list of mail clients (Cumulas Mail isn't). `Mail.Send`,
+`User.Read`, the OpenID Connect scopes and `Contacts.Read` remain ones people
+can approve themselves, and approvals given before the change remain. So in
+most organizations an administrator must approve Cumulas Mail once before
+anyone can add a work or school account. Other organizations:
 
-- allow users to consent to any app;
+- let people approve any app (the old default);
 - allow consent only for apps from **verified publishers**, and only for
   permissions the admins classified as low impact; or
 - require an administrator to approve every app.
 
-In the last two cases the user sees "Need admin approval" in the browser. The
-app detects this and shows a screen with an **admin consent link** and a
-ready-to-send email to IT. An administrator opening the link can approve the
-app once for the whole organization; when the sign-in also asked consent for
-the push service's scope, the link covers that too. If the organization has
-the admin consent workflow enabled, users can also request approval directly
-from Microsoft's page.
+Personal Microsoft accounts (Outlook.com, Hotmail, Live) aren't affected and
+never need an administrator.
+
+When Microsoft says an administrator must approve, people see "Need admin
+approval" (or "Approval required") in the browser, and the app helps:
+
+- **The approval panel** shows the admin consent link, with **Email IT** (a
+  ready-to-send request for IT that says what the app is and what it asks
+  for) and **Open approval page** (for people who are administrators
+  themselves). With the published registration, the link brings the
+  administrator back to
+  [the page for IT administrators](#approving-cumulas-mail-it-admins).
+- **Request approval.** When the organization has the admin consent workflow
+  on (AADSTS90095), **Request approval** is the main button: it opens
+  Microsoft's page again, where people send the request with a reason.
+  Microsoft usually emails them when their IT team responds; they then select
+  **Try again**.
+- **Try with mail only** signs in with the permissions needed for mail alone,
+  for organizations that approved mail but not the rest, or let people
+  approve only some permissions. The other features then need permission.
+- **"Needs permission".** A feature whose permission wasn't granted offers
+  **Turn on**, which asks Microsoft for that one permission on top of what the
+  account has (incremental consent), and **Ask IT**, which shows the approval
+  link for the account's organization. Approvals given later are picked up by
+  themselves within a couple of hours (see
+  [How permissions are kept](#how-permissions-are-kept)).
+- **"Refused".** When the permission is granted but Microsoft 365 refuses the
+  feature (Graph answers 403 for the account's calendars, contacts or task
+  lists, for example because the mailbox's license doesn't include it), the
+  feature shows as refused, with **Check again** and **Email IT**, not Turn
+  on, which can't fix it.
+- **When Microsoft's page doesn't send people back.** Microsoft shows some
+  errors on its own page and never returns to the app. The waiting, timeout
+  and cancel screens offer **Microsoft said I need admin approval**, which
+  shows the approval panel for the address being signed in, and **Microsoft
+  showed an error code**, which turns the AADSTS number into the matching
+  screen (or opens Microsoft's explanation of codes the app doesn't know).
 
 When only the push service's scope needs approval, the sign-in goes ahead
 without it and the app shows no link yet (see
 [What users see before it is set up](#what-users-see-before-it-is-set-up)).
 
-Personal Microsoft accounts (Outlook.com, Hotmail, Live) never need admin
-approval.
+## Approving Cumulas Mail (IT admins)
+
+The page for administrators is <https://flatpak.cumulas.co/admin-consent/>.
+It says what Cumulas Mail is and what it asks for, and how to:
+
+- approve it for everyone, with the link below;
+- approve it in the Microsoft Entra admin center (Enterprise apps → Cumulas
+  Mail → Security → Permissions → Grant admin consent), once Cumulas Mail is
+  listed there, which it is after someone in the organization approved it;
+- approve the requests people send with the admin consent workflow
+  (Enterprise apps → Activity → Admin consent requests);
+- let people approve Cumulas Mail for themselves, with a custom app consent
+  policy for its client ID (or Cumulas Inc's publisher ID, `7118869`), or by
+  classifying its permissions as low impact;
+- fix sign-ins that approving doesn't fix (the AADSTS codes in
+  [Troubleshooting](#troubleshooting)).
+
+The approval link is the one the app builds for the published registration,
+for the tenant `organizations` (a Rust unit test and
+`packaging/flatpak/repo/check-admin-consent.sh` keep the app, the page and
+this link the same):
+
+```text
+https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F
+```
+
+A Global Administrator, Privileged Role Administrator, Cloud Application
+Administrator or Application Administrator opens it and signs in. Microsoft
+then brings them back to the page, which shows whether the approval went
+through. The link names exactly the permissions in the tables above plus
+`Sync.Receive`, unlike the plain `/adminconsent?client_id=…` link, which
+grants whatever is listed on the registration.
+
+The link asks for `Sync.Receive` while `ADMIN_LINK_INCLUDES_PUSH` in
+`crates/core/src/auth/microsoft.rs` is `true`. If Microsoft ever refuses the
+scope in the link, turn it off, drop the scope from the page's link and this
+one, remove the page's "For instant updates" rows from its table, and drop
+"plus `Sync.Receive`" above (`check-admin-consent.sh` fails until they all
+match); people then approve instant updates through the app's own two-step
+sign-in.
 
 ## Registering the app (publisher)
 
@@ -90,14 +206,30 @@ work accounts show company signatures as not allowed. Build it with
 2. Name: `Cumulas Mail`. Supported account types: **Accounts in any
    organizational directory and personal Microsoft accounts**.
 3. Redirect URI: platform **Public client/native (mobile & desktop)**, value
-   `http://localhost` (any port is accepted for localhost).
-4. **API permissions → Add a permission → Microsoft Graph → Delegated**: add
-   the permissions in the table above. Do not grant admin consent for other
-   organizations; each organization decides for itself.
+   `http://localhost` (any port is accepted for localhost). Then
+   **Authentication → Add a platform → Web**, redirect URI
+   `https://flatpak.cumulas.co/admin-consent/`, exactly, with the trailing
+   slash. The app uses it only as the approval link's `redirect_uri`
+   (`ADMIN_CONSENT_LANDING_URI`): sign-in keeps `http://localhost`, and no
+   client secret is involved. Without it, every approval link from the app
+   fails with AADSTS50011.
+4. **API permissions**: exactly the permissions in the tables above and
+   `Sync.Receive`, nothing else. Add the Graph ones with **Add a permission →
+   Microsoft Graph → Delegated**, and `Sync.Receive` with **Add a permission →
+   My APIs → Cumulas Mail → Sync.Receive** once the registration exposes it
+   (see
+   [Setting up the app registration for it](#setting-up-the-app-registration-for-it-publisher)).
+   No `.Shared` permissions and no `User-Mail.ReadWrite.All`. The list
+   matters: the admin center's **Grant admin consent** button and `.default`
+   requests use it, and Microsoft may refuse an approval link that names a
+   scope of an API that isn't on it (AADSTS650057). Do not grant admin consent
+   for other organizations; each organization decides for itself.
 5. **Branding & properties**: set the publisher domain to `cumulas.co`, then
    complete **publisher verification** with a Microsoft AI Cloud Partner
-   Program ID. Verification is what lets users in organizations that only
-   allow verified publishers sign in without an administrator.
+   Program ID (Cumulas Inc's is `7118869`). Verification lets the app pass
+   risk-based step-up consent and the "verified publishers, selected
+   permissions" setting, but doesn't exempt it from Microsoft's managed default
+   (see ["Need admin approval"](#need-admin-approval)).
 
 ## Instant updates (the Cumulas push service)
 
@@ -190,13 +322,16 @@ browser page says "Signing in without instant updates" and the sign-in opens
 again in a new tab, for the Graph permissions alone. The Inbox is still checked
 every 30 seconds. Settings then says why instead of offering **Sign in again**,
 and when an administrator must approve, it shows the approval link (covering
-the Graph permissions and `Sync.Receive`) with **Copy** and **Email IT**
-buttons. Later sign-ins don't ask for the scope again while the app runs.
+the Graph permissions and `Sync.Receive`) with **Copy**, **Email IT** and
+**Open approval page** buttons. Later sign-ins don't ask for the scope again
+while the app runs.
 
 Pre-authorizing the app for its own scope
 ([step 3](#setting-up-the-app-registration-for-it-publisher)) fixes it for
 everyone. Until then, an administrator can approve the scope for their
-organization by opening
+organization with the published registration's approval link (see
+[Approving Cumulas Mail](#approving-cumulas-mail-it-admins)), or, for any
+registration, by opening
 `https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=<client ID>&scope=api://<client ID>/Sync.Receive&redirect_uri=http://localhost`
 and signing in to their own tenant. The app turns instant updates on within 6
 hours, or when it next starts.
@@ -360,25 +495,40 @@ turn company signatures off for that run.
 ## Using your organization's own registration (IT admins)
 
 Organizations that prefer to control the app themselves can register it in
-their own tenant (single-tenant, same redirect URI and permissions as above),
-grant admin consent once, and have users enter the client ID and tenant ID
-under **Settings → Microsoft app registration**.
+their own tenant (single-tenant, the same `http://localhost` redirect URI and
+permissions as above; no Web redirect URI), grant admin consent once, and have
+users enter the client ID and tenant ID under **Settings → Microsoft app
+registration**.
+
+With such a registration, the approval link the app shows still returns to
+`http://localhost`, so after approving, the administrator's browser shows a
+"can't connect" page. The approval is recorded by then: close it, and select
+**Try again** in Cumulas Mail. The page for IT administrators at
+flatpak.cumulas.co is for the published registration only and doesn't apply.
 
 ## Troubleshooting
 
-| What the user sees                                                                            | Meaning                                                                                                                                                                                |
-| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "Your organization needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981) | The organization requires an administrator to approve the app. The app shows the admin consent link and an email to send to IT.                                                        |
-| Same screen, with "Request approval" mentioned (AADSTS90095)                                  | The organization has the admin consent workflow enabled: the user can also request approval on Microsoft's page.                                                                       |
-| "Cumulas Mail needs your permission" (AADSTS65004)                                            | The permission prompt was declined. Microsoft also sends this when the user clicks "Back to app" after requesting approval, so retry once IT has approved.                             |
-| "Signing in without instant updates" (in the browser)                                         | The push service's scope needs an administrator's approval or was declined. The sign-in continues in a new tab without it; see [Instant updates](#what-users-see-before-it-is-set-up). |
-| "Sign in again to keep … up to date"                                                          | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction).                                                        |
-| Sign-in never returns to the app                                                              | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again.                                                           |
+| What the user sees                                                                                                                      | Meaning                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Your organization needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981)                                           | The organization requires an administrator to approve the app. The app shows the approval link with **Email IT** and **Open approval page**, and offers **Try with mail only**.                                                                |
+| Same screen, with **Request approval** as the main button (AADSTS90095)                                                                 | The organization has the admin consent workflow on: the user can request approval on Microsoft's page, then select **Try again** once IT has approved.                                                                                         |
+| "Cumulas Mail doesn't have permission yet" (AADSTS65004)                                                                                | The permission prompt was declined. Microsoft also sends this when the user selects "Back to app" after requesting approval, so try again once IT has approved.                                                                                |
+| "You haven't been given access to Cumulas Mail" (AADSTS50105)                                                                           | The organization requires assignment to the app: an administrator assigns the user under Enterprise apps → Cumulas Mail → Users and groups.                                                                                                    |
+| "Your organization has blocked Cumulas Mail" (AADSTS7000112)                                                                            | The app is disabled in the organization, for example after a consent request was blocked: Enterprise apps → Cumulas Mail → Properties → Enabled for users to sign in.                                                                          |
+| "Your organization isn't set up for Cumulas Mail yet" (AADSTS65005)                                                                     | The organization is missing something the app needs; approving the app usually fixes it. If it doesn't, [let Cumulas know](https://github.com/cumulas-inc/email-client/issues).                                                                |
+| "Your organization's Microsoft 365 is missing a service" (AADSTS650052)                                                                 | The organization hasn't subscribed to or enabled a service the app needs, usually Exchange Online. Approving the app doesn't help.                                                                                                             |
+| "Set up your sign-in security info first" (AADSTS53004, 53010)                                                                          | The user must finish setting up multifactor authentication or other security info, which Microsoft couldn't do during this sign-in.                                                                                                            |
+| "Your organization's sign-in rules …" or "Your organization only allows apps it has approved" (AADSTS53000–53003, 53011, 530000–530999) | A Conditional Access policy blocked the sign-in; the Entra sign-in logs show which. A sign-in through the browser on Linux may not meet policies that require a compliant or managed device or an approved client app.                         |
+| "Calendar needs permission", or "Needs permission: …" in Settings → Accounts                                                            | The feature's optional permission wasn't granted. **Turn on** asks for it; **Ask IT** shows the approval link. An approval given later is picked up within a couple of hours.                                                                  |
+| "Microsoft 365 refused access to your calendar" (or contacts, tasks)                                                                    | The permission is granted, but Graph refused the feature (403), often because the mailbox's license doesn't include it. The app checks again daily, or at once with **Check again**; **Email IT** asks IT to look.                             |
+| "Sign-in timed out"                                                                                                                     | Microsoft's page didn't send the browser back within 5 minutes, often because it showed an error of its own. **Microsoft said I need admin approval** and **Microsoft showed an error code** lead to the matching screen.                      |
+| "Signing in without instant updates" (in the browser)                                                                                   | The push service's scope needs an administrator's approval or was declined. The sign-in continues in a new tab without it; see [Instant updates](#what-users-see-before-it-is-set-up).                                                         |
+| "Sign in again to keep … up to date"                                                                                                    | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction). When Microsoft says it's one of the blocks above, the account shows that reason instead, with its AADSTS code. |
+| Sign-in never returns to the app                                                                                                        | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again. If Microsoft's page shows an error, use **Microsoft showed an error code**.                                       |
 
-After an administrator grants consent through the link, Microsoft redirects
-their browser to `http://localhost`, which shows a "can't connect" page. The
-consent is recorded at that point; the user can select **Try again**. A
-friendlier landing page needs an extra redirect URI on the app registration
-(for example `https://cumulas.co/mail/consent-granted`) and the
-`ADMIN_CONSENT_REDIRECT_URI` constant in `crates/core/src/auth/microsoft.rs`
-changed to match.
+After an administrator approves Cumulas Mail with the published registration's
+link, Microsoft brings their browser back to
+<https://flatpak.cumulas.co/admin-consent/>, which says whether it worked and
+what to tell people. With an organization's own registration the link returns
+to `http://localhost` instead, which shows a "can't connect" page; the approval
+is recorded at that point, and the user can select **Try again**.

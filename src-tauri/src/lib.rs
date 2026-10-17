@@ -1,7 +1,8 @@
 //! Tauri shell: wires [`CoreService`] to the webview through commands and
 //! events, starts and stops the core's background work (sync and push), and
 //! fits the app into the desktop (`desktop`): notifications, the tray,
-//! running in the background, one instance per user.
+//! running in the background, one instance per user, restarting into an
+//! update.
 
 mod commands;
 mod desktop;
@@ -23,13 +24,15 @@ use crate::desktop::Desktop;
 use crate::desktop::background::BACKGROUND_ARG;
 
 /// The most the app waits on exit for push connections to close.
-const SHUTDOWN_LIMIT: Duration = Duration::from_secs(2);
+pub(crate) const SHUTDOWN_LIMIT: Duration = Duration::from_secs(2);
 
 pub(crate) struct AppState {
     pub service: Arc<CoreService>,
     /// False when no Secret Service was reachable and secrets only live in
     /// memory for this session.
     pub persistent_secrets: bool,
+    /// Started by a restart into an update (`desktop::update`).
+    pub restarted_to_update: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -143,6 +146,12 @@ fn single_instance(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri:
         return builder;
     }
     builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        // The new version, started by a restart, saying how it went (see
+        // desktop::update): not a launch.
+        if let Some(handover) = desktop::update::handover(&argv) {
+            desktop::update::answered(app, handover);
+            return;
+        }
         if argv.iter().any(|a| a == BACKGROUND_ARG) {
             return;
         }
@@ -158,6 +167,18 @@ pub fn run() {
                 .unwrap_or_else(|_| "info,cumulas_core=debug".into()),
         )
         .init();
+    // Started by a restart into an update: the previous instance hears from
+    // this one, and is gone, before the single-instance check.
+    let restarted = desktop::update::restarted_from(std::env::args());
+    if let Some(previous) = &restarted {
+        // On the main thread, before anything else: GTK starts here.
+        let answer = desktop::update::startable();
+        let next = tauri::async_runtime::block_on(desktop::update::take_over(previous, answer));
+        if next == desktop::update::TakeOver::Exit {
+            return;
+        }
+    }
+    let restarted_to_update = restarted.is_some();
     // Started at login without a window: none is created until asked for.
     let in_background = std::env::args().any(|a| a == BACKGROUND_ARG);
 
@@ -176,6 +197,7 @@ pub fn run() {
             app.manage(AppState {
                 service: Arc::clone(&service),
                 persistent_secrets,
+                restarted_to_update,
             });
             let (desktop, inbound) = Desktop::new(app.handle());
             app.manage(desktop);
@@ -201,6 +223,8 @@ pub fn run() {
             commands::add_imap_account,
             commands::add_microsoft_account,
             commands::cancel_microsoft_sign_in,
+            commands::microsoft_admin_consent,
+            commands::retry_microsoft_features,
             commands::update_imap_account,
             commands::update_account,
             commands::remove_account,
@@ -217,6 +241,8 @@ pub fn run() {
             commands::set_start_at_login,
             commands::send_test_notification,
             commands::take_pending_navigation,
+            commands::get_update_state,
+            commands::restart_app,
             // reminders
             commands::list_active_reminders,
             commands::snooze_reminder,

@@ -8,8 +8,8 @@ use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{authorized, batch_responder, batched_requests, graph_error, ok_json, setup};
-use crate::auth::StaticToken;
 use crate::auth::microsoft::{MicrosoftAuthConfig, MicrosoftTokenSource};
+use crate::auth::{NoGrantRecord, StaticToken};
 use crate::error::ErrorCode;
 use crate::providers::graph::GraphProvider;
 use crate::providers::{MailProvider, MessageLocator, TasksProvider};
@@ -58,8 +58,16 @@ async fn provider_with_revoked_token(server: &MockServer) -> GraphProvider {
         tenant: "common".into(),
         authority_host: server.uri(),
         consent_scopes: Vec::new(),
+        graph_scopes: Vec::new(),
+        published: false,
     };
-    let tokens = Arc::new(MicrosoftTokenSource::new(config, "acct", secrets));
+    let tokens = Arc::new(MicrosoftTokenSource::new(
+        config,
+        "acct",
+        secrets,
+        false,
+        Arc::new(NoGrantRecord),
+    ));
     tokens
         .prime("revoked-token", Duration::from_secs(3600))
         .await;
