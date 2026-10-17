@@ -170,9 +170,11 @@ grants whatever is listed on the registration.
 
 The link asks for `Sync.Receive` while `ADMIN_LINK_INCLUDES_PUSH` in
 `crates/core/src/auth/microsoft.rs` is `true`. If Microsoft ever refuses the
-scope in the link, turn it off and drop the scope from the page's link
-(`check-admin-consent.sh` fails until both match); people then approve
-instant updates through the app's own two-step sign-in.
+scope in the link, turn it off, drop the scope from the page's link and this
+one, remove the page's "For instant updates" rows from its table, and drop
+"plus `Sync.Receive`" above (`check-admin-consent.sh` fails until they all
+match); people then approve instant updates through the app's own two-step
+sign-in.
 
 ## Registering the app (publisher)
 

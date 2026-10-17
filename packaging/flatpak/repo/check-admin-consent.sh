@@ -7,13 +7,15 @@
 #    service/connector.rs): the client ID, every permission, Sync.Receive
 #    when ADMIN_LINK_INCLUDES_PUSH says so, and this page as the redirect
 #    URI, which must be ADMIN_CONSENT_LANDING_URI on this site; and
-#    docs/microsoft-365.md shows the same link;
+#    docs/microsoft-365.md shows the same link; the page's table and the docs
+#    name Sync.Receive as approved by it only when it asks for it;
 #  - it names every permission the app asks for, the roles that can
 #    approve, the admin consent workflow, the app and publisher IDs, and has
 #    a <noscript> note;
 #  - it loads nothing from elsewhere, its one script is inline and never
 #    writes HTML, and the script shows each answer Microsoft can bring an
-#    administrator back with (check-admin-consent.mjs);
+#    administrator back with, and nothing else of the address
+#    (check-admin-consent.mjs);
 #  - the install page links to it.
 #
 # CI runs it on every pull request (ci.yml) and test.sh on the assembled
@@ -144,6 +146,16 @@ if [ "$includes_push" = false ]; then
   check "no approval link asks for Sync.Receive" test -z "$(grep Sync.Receive <<<"$links" || true)"
 fi
 check "docs/microsoft-365.md shows the same link" grep -qxF -- "$plain_link" "$docs"
+# Whether the page's table and the docs say the link approves Sync.Receive,
+# with line breaks as single spaces, since Prettier may wrap a phrase
+# anywhere.
+names_push() {
+  if tr -s '[:space:]' ' ' <"$1" | grep -qF -- "$2"; then echo true; else echo false; fi
+}
+check "the page's table lists Sync.Receive only when the link asks for it" \
+  test "$(names_push "$page" "<code>Sync.Receive</code>")" = "$includes_push"
+check "docs/microsoft-365.md says the link asks for Sync.Receive only when it does" \
+  test "$(names_push "$docs" "above plus \`Sync.Receive\`")" = "$includes_push"
 check "every client ID in the page is the published one, $client_id" \
   test "$(grep -oiE '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' "$page" | tr 'A-F' 'a-f' | sort -u)" \
   = "$(tr 'A-F' 'a-f' <<<"$client_id")"

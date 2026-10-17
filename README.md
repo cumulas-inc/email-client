@@ -142,8 +142,9 @@ CI runs all of these, plus a Flatpak build.
   approved Cumulas Mail, open the
   [approval link](docs/microsoft-365.md#approving-cumulas-mail-it-admins):
   Microsoft must bring the browser back to that page without an error. If it
-  refuses `Sync.Receive` there, set `ADMIN_LINK_INCLUDES_PUSH` to `false` and
-  drop the scope from the page's and the docs' link.
+  refuses `Sync.Receive` there, set `ADMIN_LINK_INCLUDES_PUSH` to `false`,
+  drop the scope from the page's and the docs' link, remove the page's "For
+  instant updates" rows and drop "plus `Sync.Receive`" from the docs.
 - Finish [setting up the self-hosted Flatpak repository](packaging/flatpak/README.md#setting-it-up)
   before the first release tag: the signing key, DNS and GitHub Pages are
   done; the `flatpak-signing` environment (with the secret moved into it), the
