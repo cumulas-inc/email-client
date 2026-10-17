@@ -2,6 +2,7 @@ import type {
   Account,
   AccountSignature,
   ActiveReminder,
+  AdminConsentLink,
   AppInfo,
   BackgroundState,
   Calendar,
@@ -22,6 +23,7 @@ import type {
   Navigate,
   NewImapAccount,
   OutgoingMessage,
+  PermissionRequest,
   PushStatus,
   RemindersChangedEvent,
   ReplyKind,
@@ -58,10 +60,18 @@ export interface Backend {
   // Accounts & settings
   listAccounts(): Promise<Account[]>;
   addImapAccount(input: NewImapAccount): Promise<Account>;
-  /** Opens the system browser for Microsoft sign-in and resolves once done. */
-  addMicrosoftAccount(loginHint?: string): Promise<Account>;
+  /** Opens the system browser for Microsoft sign-in and resolves once done. `permissions` defaults to { kind: "all" }. */
+  addMicrosoftAccount(loginHint?: string, permissions?: PermissionRequest): Promise<Account>;
   /** Abandons a pending addMicrosoftAccount, which rejects with signInCancelled. */
   cancelMicrosoftSignIn(): Promise<void>;
+  /**
+   * The admin consent link for an account's organization (`accountId`), or for the address being
+   * signed in with (`loginHint`); `organizations` without either. Rejects with invalidInput for IMAP
+   * and personal accounts and consumer addresses, notConfigured without a client ID.
+   */
+  microsoftAdminConsent(accountId?: string, loginHint?: string): Promise<AdminConsentLink>;
+  /** Checks the account's refused features again ("Check again"): clears them and syncs. */
+  retryMicrosoftFeatures(accountId: string): Promise<void>;
   /** Checks new credentials/servers against the servers, then saves them. */
   updateImapAccount(accountId: string, update: ImapAccountUpdate): Promise<Account>;
   updateAccount(accountId: string, displayName?: string, color?: string): Promise<Account>;

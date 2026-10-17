@@ -2,10 +2,10 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
-import { MockBackend } from "../../api/mock";
+import { MockBackend, mockAdminConsentUrl } from "../../api/mock";
 import { qk } from "../../api/queries";
 import { SANS_STACK, SERIF_STACK } from "../../lib/fonts";
-import type { ImapAccountUpdate, Settings } from "../../api/types";
+import type { Account, ImapAccountUpdate, Settings } from "../../api/types";
 import { type SettingsSection, useAppStore } from "../../app/store";
 import { useToasts } from "../../components/toast";
 import { renderWithBackend } from "../../test/render";
@@ -602,7 +602,7 @@ describe("Accounts", () => {
     expect(screen.getByText("Couldn't sync")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Sign in again" }));
 
-    expect(signIn).toHaveBeenCalledWith("alex.morgan@acme.example");
+    expect(signIn).toHaveBeenCalledWith("alex.morgan@acme.example", { kind: "current" });
     await waitFor(() =>
       expect(useToasts.getState().toasts.map((t) => t.message)).toContain(
         "You're signed in again as alex.morgan@acme.example.",
@@ -762,6 +762,137 @@ describe("Accounts", () => {
     await user.click(screen.getByRole("button", { name: "Add account" }));
     expect(useAppStore.getState().addAccountOpen).toBe(true);
     expect(screen.getByRole("dialog", { name: "Add an account" })).toBeInTheDocument();
+  });
+});
+
+describe("Microsoft permissions", () => {
+  const EMAIL = "alex.morgan@acme.example";
+
+  async function manageWork(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole("button", { name: "Manage Alex Morgan" }));
+  }
+
+  it("shows what a Microsoft account can't use, and what to do", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({
+      missing: ["calendar", "mailboxSettings"],
+      refused: ["tasks"],
+    });
+    const retry = vi.spyOn(backend, "retryMicrosoftFeatures");
+    const openLink = vi.spyOn(backend, "openLink").mockResolvedValue(undefined);
+    openAt("accounts", backend);
+
+    expect(
+      await screen.findByText("Needs permission: calendar and mailbox time zone"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Refused by Microsoft 365: tasks")).toBeInTheDocument();
+
+    await manageWork(user);
+    expect(screen.getByText("Permissions")).toBeInTheDocument();
+    expect(screen.getByText(/These need permission/)).toHaveTextContent(
+      "Your mail works. These need permission before Cumulas Mail can use them:",
+    );
+    expect(screen.getByText("Calendar")).toBeInTheDocument();
+    expect(
+      screen.getByText("Until then, all-day events and due dates use this computer's time zone."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: `Turn on mailbox time zone for ${EMAIL}` }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Tasks: Microsoft 365 refused access")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Turn on tasks for ${EMAIL}` })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: `Check tasks again for ${EMAIL}` }));
+    expect(retry).toHaveBeenCalledWith("acct-work");
+
+    await user.click(screen.getByRole("button", { name: `Email IT about tasks for ${EMAIL}` }));
+    expect(decodeURIComponent(String(openLink.mock.lastCall?.[0]))).toMatch(
+      /^mailto:\?subject=Cumulas Mail can't open my tasks&body=/,
+    );
+  });
+
+  it("turns a feature on, then gives the keyboard to Sync now", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ missing: ["calendar"] });
+    const original = backend.addMicrosoftAccount.bind(backend);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const signIn = vi
+      .spyOn(backend, "addMicrosoftAccount")
+      .mockImplementation(async (hint, permissions) => {
+        await gate;
+        return original(hint, permissions);
+      });
+    openAt("accounts", backend);
+
+    await manageWork(user);
+    await user.click(screen.getByRole("button", { name: `Turn on calendar for ${EMAIL}` }));
+    expect(screen.getByRole("dialog", { name: "Turn on calendar" })).toBeInTheDocument();
+    expect(signIn).toHaveBeenCalledWith(EMAIL, { kind: "feature", feature: "calendar" });
+
+    release();
+    await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sync now" })).toHaveFocus());
+    expect(screen.queryByText("Permissions")).not.toBeInTheDocument();
+    expect(useToasts.getState().toasts.map((t) => t.message)).toContain(
+      `Turned on calendar for ${EMAIL}.`,
+    );
+  });
+
+  it("asks IT for the features an account lacks", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ missing: ["contacts", "tasks"] });
+    const ask = vi.spyOn(backend, "microsoftAdminConsent");
+    const openLink = vi.spyOn(backend, "openLink").mockResolvedValue(undefined);
+    openAt("accounts", backend);
+
+    await manageWork(user);
+    const askIt = screen.getByRole("button", { name: "Ask IT" });
+    expect(askIt).toHaveAttribute("aria-expanded", "false");
+    expect(ask).not.toHaveBeenCalled();
+    await user.click(askIt);
+    expect(askIt).toHaveAttribute("aria-expanded", "true");
+    expect(ask).toHaveBeenCalledWith("acct-work");
+    expect(await screen.findByLabelText("Approval link for your IT administrator")).toHaveValue(
+      mockAdminConsentUrl("demo-tenant"),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Email IT" }));
+    expect(decodeURIComponent(String(openLink.mock.lastCall?.[0]))).toContain(
+      "My mail works, but Cumulas Mail needs an administrator's approval to use my contacts and tasks.",
+    );
+  });
+
+  it("doesn't offer IT to a personal account", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ missing: ["calendar"] });
+    const state = (backend as unknown as { state: { accounts: Account[] } }).state;
+    state.accounts[0]!.settings = {
+      kind: "microsoft",
+      tenantId: "9188040d-6c67-4c5b-b112-36a304b66dad",
+      userId: "u",
+    };
+    openAt("accounts", backend);
+
+    await manageWork(user);
+    expect(
+      screen.getByRole("button", { name: `Turn on calendar for ${EMAIL}` }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Ask IT" })).not.toBeInTheDocument();
+  });
+
+  it("doesn't say mail works when the account can't sync", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ missing: ["calendar"] });
+    vi.spyOn(backend, "getSyncStatuses").mockResolvedValue([
+      { accountId: "acct-work", state: "error", message: "Sign in again.", lastSyncedAt: null },
+    ]);
+    openAt("accounts", backend);
+
+    await manageWork(user);
+    expect(screen.getByText(/These need permission/)).toHaveTextContent(
+      /^These need permission before Cumulas Mail can use them:$/,
+    );
   });
 });
 

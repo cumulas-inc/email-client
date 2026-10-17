@@ -122,6 +122,8 @@ function accounts(): Account[] {
       createdAt: iso(at(-2400, 9)),
       lastSyncedAt: iso(new Date()),
       syncError: null,
+      needsPermission: [],
+      refusedFeatures: [],
     },
     {
       id: J,
@@ -142,6 +144,8 @@ function accounts(): Account[] {
       createdAt: iso(at(-400, 9)),
       lastSyncedAt: iso(at(-14, 23, 59)),
       syncError: SYNC_ERROR,
+      needsPermission: [],
+      refusedFeatures: [],
     },
     {
       id: JP,
@@ -153,6 +157,8 @@ function accounts(): Account[] {
       createdAt: iso(at(-30, 9)),
       lastSyncedAt: iso(new Date()),
       syncError: null,
+      needsPermission: [],
+      refusedFeatures: [],
     },
   ];
 }

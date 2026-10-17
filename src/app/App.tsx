@@ -9,6 +9,7 @@ import { Toaster } from "../components/Toaster";
 import { MailModule } from "../modules/mail/MailModule";
 import { Welcome } from "../modules/onboarding/Welcome";
 import { AddAccountDialog } from "../modules/settings/AddAccountDialog";
+import { useFeatureChangeToasts } from "../modules/settings/featureToasts";
 import { SettingsDialog } from "../modules/settings/SettingsDialog";
 import { AppHeader } from "./AppHeader";
 import { QuitConfirmDialog } from "./QuitConfirmDialog";
@@ -74,6 +75,7 @@ function Shell() {
   useAppearance();
   useGlobalShortcuts();
   useQuitRequests();
+  useFeatureChangeToasts();
   const module = useAppStore((s) => s.module);
   const { data: accounts, isLoading } = useAccounts();
 

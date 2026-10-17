@@ -25,6 +25,7 @@ export const qk = {
   syncStatuses: () => ["accounts", "sync-statuses"] as const,
   pushStatuses: () => ["accounts", "push-statuses"] as const,
   backgroundState: () => ["accounts", "background"] as const,
+  adminConsent: (accountId: string) => ["accounts", "admin-consent", accountId] as const,
 
   folders: (accountId?: string) => ["mail", "folders", accountId ?? "all"] as const,
   messages: (folderId: string, filter: string) => ["mail", "messages", folderId, filter] as const,

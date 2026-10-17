@@ -6,6 +6,7 @@ import { MockBackend } from "../../api/mock";
 import type { Backend } from "../../api/backend";
 import type { Task } from "../../api/types";
 import { useAppStore } from "../../app/store";
+import { useBackendEvents } from "../../app/useBackendEvents";
 import { Toaster } from "../../components/Toaster";
 import { useToasts } from "../../components/toast";
 import { renderWithBackend } from "../../test/render";
@@ -766,5 +767,37 @@ describe("Task reminders", () => {
         reminderAt: new Date(2026, 9, 16, 9, 0).toISOString(),
       }),
     );
+  });
+});
+
+describe("tasks permission", () => {
+  /** Applies the backend's data changes, as the app does. */
+  function Events() {
+    useBackendEvents();
+    return null;
+  }
+
+  it("says which account's tasks need permission, until it's granted", async () => {
+    const backend = new MockBackend({ missing: ["tasks"] });
+    renderWithBackend(
+      <>
+        <TasksModule />
+        <Events />
+      </>,
+      { backend },
+    );
+
+    const notice = await screen.findByRole("region", { name: "Tasks need permission" });
+    expect(
+      within(notice).getByRole("button", { name: "Turn on tasks for alex.morgan@acme.example" }),
+    ).toBeInTheDocument();
+    expect(within(sidebar()).queryByRole("group", { name: /Alex Morgan/ })).toBeNull();
+    expect(within(sidebar()).getByRole("group", { name: /Alex \(Personal\)/ })).toBeInTheDocument();
+
+    act(() => backend.grantFeature("acct-work", "tasks"));
+    expect(
+      await within(sidebar()).findByRole("group", { name: /Alex Morgan/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Tasks need permission" })).toBeNull();
   });
 });

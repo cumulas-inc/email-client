@@ -45,16 +45,25 @@ interface ResultPanelProps {
   children?: ReactNode;
   /** Center short messages; align longer explanations to the start. */
   align?: "center" | "start";
+  /** The heading's id, for callers that move focus to it. */
+  titleId?: string;
 }
 
 /** Icon, heading and text for the waiting and sign-in problem screens. */
-export function ResultPanel({ icon, tone, title, children, align = "center" }: ResultPanelProps) {
+export function ResultPanel({
+  icon,
+  tone,
+  title,
+  children,
+  align = "center",
+  titleId,
+}: ResultPanelProps) {
   return (
     <div className={clsx("result-panel", `result-panel--${align}`)}>
       <div className={clsx("result-panel__icon", `result-panel__icon--${tone}`)} aria-hidden="true">
         {icon}
       </div>
-      <h3 className="result-panel__title" tabIndex={-1} data-autofocus>
+      <h3 id={titleId} className="result-panel__title" tabIndex={-1} data-autofocus>
         {title}
       </h3>
       {children && <div className="result-panel__body">{children}</div>}

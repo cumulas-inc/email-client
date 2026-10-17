@@ -551,7 +551,12 @@ describe("describePush", () => {
     ).toBeNull();
     expect(
       describePush(
-        { ...base, ...consent, consentRefused: true, adminConsent: { url: "u", tenant: "t" } },
+        {
+          ...base,
+          ...consent,
+          consentRefused: true,
+          adminConsent: { url: "u", tenant: "t", adminPageUrl: null },
+        },
         "microsoft",
       ).action,
     ).toBe("approve");

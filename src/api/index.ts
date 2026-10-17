@@ -3,6 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import type { Backend } from "./backend";
 import { type DemoPush, type DemoSignature, MockBackend } from "./mock";
 import { tauriBackend } from "./tauri";
+import type { AccountFeature } from "./types";
 
 export type { Backend } from "./backend";
 export * from "./types";
@@ -17,6 +18,19 @@ const DEMO_SIGNATURE: readonly DemoSignature[] = [
   "unreachable",
 ];
 
+const DEMO_FEATURES: readonly AccountFeature[] = [
+  "calendar",
+  "contacts",
+  "tasks",
+  "mailboxSettings",
+];
+
+/** The features a `?missing=` or `?refused=` parameter names, comma-separated. */
+function demoFeatures(value: string | null): AccountFeature[] {
+  const names = value?.split(",").map((name) => name.trim()) ?? [];
+  return DEMO_FEATURES.filter((f) => names.includes(f));
+}
+
 /**
  * The Rust backend inside the desktop app; the in-memory demo backend in a
  * plain browser (`pnpm dev`). Add `?empty` to the URL to start the demo with
@@ -27,6 +41,12 @@ const DEMO_SIGNATURE: readonly DemoSignature[] = [
  * `?signature=addedOnSend|notAllowed|stale|notUsed|unreachable` shows its
  * company signature in that state. `?searchfail` makes searches of the IMAP
  * account's server fail, as when it can't be reached.
+ * `?missing=calendar,contacts,tasks,mailboxSettings` starts the Microsoft
+ * account without those features' permissions, `?refused=calendar,contacts,tasks`
+ * with Microsoft 365 refusing them, and `?customclient` signs in with an
+ * organization's own app registration (approval links return to localhost).
+ * Login hints such as admin@, partial@ or unassigned@ show how organizations
+ * answer a sign-in (see the mock's addMicrosoftAccount).
  */
 export function createBackend(): Backend {
   if (isTauri()) return tauriBackend;
@@ -44,5 +64,8 @@ export function createBackend(): Backend {
     overdueReminder: params.has("reminders"),
     searchFail: params.has("searchfail"),
     background: params.has("notray") ? { trayAvailable: false } : undefined,
+    missing: demoFeatures(params.get("missing")),
+    refused: demoFeatures(params.get("refused")),
+    customClient: params.has("customclient"),
   });
 }

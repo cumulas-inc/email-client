@@ -34,9 +34,18 @@ export const tauriBackend: Backend = {
 
   listAccounts: () => invoke("list_accounts"),
   addImapAccount: (input) => invoke("add_imap_account", { input }),
-  addMicrosoftAccount: (loginHint) =>
-    invoke("add_microsoft_account", { loginHint: loginHint ?? null }),
+  addMicrosoftAccount: (loginHint, permissions) =>
+    invoke("add_microsoft_account", {
+      loginHint: loginHint ?? null,
+      permissions: permissions ?? null,
+    }),
   cancelMicrosoftSignIn: () => invoke("cancel_microsoft_sign_in"),
+  microsoftAdminConsent: (accountId, loginHint) =>
+    invoke("microsoft_admin_consent", {
+      accountId: accountId ?? null,
+      loginHint: loginHint ?? null,
+    }),
+  retryMicrosoftFeatures: (accountId) => invoke("retry_microsoft_features", { accountId }),
   updateImapAccount: (accountId, update) => invoke("update_imap_account", { accountId, update }),
   updateAccount: (accountId, displayName, color) =>
     invoke("update_account", {

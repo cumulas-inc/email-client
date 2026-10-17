@@ -28,6 +28,28 @@ export interface Account {
   createdAt: string;
   lastSyncedAt: string | null;
   syncError: string | null;
+  /** Microsoft accounts: optional features whose permission Microsoft hasn't granted. Empty for IMAP. */
+  needsPermission: AccountFeature[];
+  /** Microsoft accounts: features that have permission but that Microsoft 365 refused. Empty for IMAP. */
+  refusedFeatures: AccountFeature[];
+}
+
+/** An optional part of a Microsoft account that needs a permission of its own (in display order). */
+export type AccountFeature = "calendar" | "contacts" | "tasks" | "mailboxSettings";
+
+/** What a Microsoft sign-in asks permission for. */
+export type PermissionRequest =
+  | { kind: "all" }
+  | { kind: "mailOnly" }
+  | { kind: "current" }
+  | { kind: "feature"; feature: AccountFeature };
+
+/** Where an administrator approves Cumulas Mail for an organization. */
+export interface AdminConsentLink {
+  adminConsentUrl: string;
+  tenant: string;
+  /** The page for IT administrators; null unless the sign-in uses Cumulas Mail's published app registration. */
+  adminPageUrl: string | null;
 }
 
 export interface NewImapAccount {
@@ -526,6 +548,8 @@ export interface AdminConsent {
   url: string;
   /** The organization: a tenant id or domain. */
   tenant: string;
+  /** The page for IT administrators; null unless the sign-in uses Cumulas Mail's published app registration. */
+  adminPageUrl: string | null;
 }
 
 /** How starting at login works: the Background portal (Flatpak) or an autostart file. */
@@ -591,7 +615,21 @@ export type ErrorCode =
   | "invalidInput"
   | "unsupported"
   | "storage"
-  | "internal";
+  | "internal"
+  | "signInBlocked"
+  | "permissionRequired";
+
+/** Why the organization's settings block a Microsoft sign-in. */
+export type SignInBlockedReason =
+  | "notAssigned"
+  | "appDisabled"
+  | "appNotSetUp"
+  | "serviceNotEnabled"
+  | "securityInfo"
+  | "conditionalAccess";
+
+/** permissionRequired: the permission isn't granted, or Microsoft 365 refused the feature. */
+export type PermissionRequiredReason = "notGranted" | "refused";
 
 /** Shape of errors rejected by backend calls. */
 export interface BackendError {
@@ -602,6 +640,14 @@ export interface BackendError {
     tenant?: string;
     /** The tenant has Microsoft's admin consent workflow ("Request approval") enabled. */
     canRequestApproval?: boolean;
+    adminPageUrl?: string | null;
+    /** signInBlocked and authRequired-after-refresh: why. signInCancelled: "timeout". permissionRequired: which state. */
+    reason?: SignInBlockedReason | "timeout" | PermissionRequiredReason;
+    /** signInBlocked (and authRequired after a blocked refresh): Microsoft's AADSTS code. */
+    aadsts?: number;
+    /** permissionRequired */
+    feature?: AccountFeature;
+    accountId?: string;
     [key: string]: unknown;
   };
 }
