@@ -257,8 +257,9 @@ impl Store {
         if !grant.refused.contains(&feature) {
             grant.refused.push(feature);
             grant.refused.sort();
-            grant.refused_at = Some(Utc::now());
         }
+        // Refused again when tried again: not tried for another while.
+        grant.refused_at = Some(Utc::now());
         write_grant(&conn, id, &grant)?;
         Ok(shown(old.as_ref()) != shown(Some(&grant)))
     }
@@ -266,29 +267,56 @@ impl Store {
     /// Checks every refused feature again. Returns whether what the UI
     /// shows changed.
     pub fn clear_refused(&self, id: &str) -> Result<bool> {
-        self.clear_refused_if(id, |_| true)
-    }
-
-    /// Checks the refused features again once they were refused more than
-    /// `max_age` ago. Returns whether what the UI shows changed.
-    pub fn expire_refused(&self, id: &str, max_age: chrono::Duration) -> Result<bool> {
-        let now = Utc::now();
-        self.clear_refused_if(id, |grant| {
-            grant.refused_at.is_none_or(|at| now - at > max_age)
-        })
-    }
-
-    fn clear_refused_if(&self, id: &str, due: impl Fn(&MicrosoftGrant) -> bool) -> Result<bool> {
         let conn = self.conn();
         let Some(old) = read_grant(&conn, id)?.1 else {
             return Ok(false);
         };
-        if old.refused.is_empty() || !due(&old) {
+        if old.refused.is_empty() {
             return Ok(false);
         }
         let grant = MicrosoftGrant {
             refused: Vec::new(),
             refused_at: None,
+            ..old.clone()
+        };
+        write_grant(&conn, id, &grant)?;
+        Ok(shown(Some(&old)) != shown(Some(&grant)))
+    }
+
+    /// The refused features due to be tried again: refused more than
+    /// `max_age` ago. They stay refused until [`Self::lift_refusal`].
+    pub fn due_refused(&self, id: &str, max_age: chrono::Duration) -> Result<Vec<AccountFeature>> {
+        let Some(grant) = self.microsoft_grant(id)? else {
+            return Ok(Vec::new());
+        };
+        if grant
+            .refused_at
+            .is_some_and(|at| Utc::now() - at <= max_age)
+        {
+            return Ok(Vec::new());
+        }
+        Ok(microsoft::refused_features(Some(&grant)))
+    }
+
+    /// A refused feature tried again answered: it is refused no more.
+    /// Returns whether what the UI shows changed.
+    pub fn lift_refusal(&self, id: &str, feature: AccountFeature) -> Result<bool> {
+        let conn = self.conn();
+        let Some(old) = read_grant(&conn, id)?.1 else {
+            return Ok(false);
+        };
+        if !old.refused.contains(&feature) {
+            return Ok(false);
+        }
+        let refused: Vec<AccountFeature> = old
+            .refused
+            .iter()
+            .copied()
+            .filter(|f| *f != feature)
+            .collect();
+        let grant = MicrosoftGrant {
+            refused_at: old.refused_at.filter(|_| !refused.is_empty()),
+            refused,
             ..old.clone()
         };
         write_grant(&conn, id, &grant)?;
@@ -444,32 +472,57 @@ mod tests {
     }
 
     #[test]
-    fn refused_features_clear_on_request_or_once_old() {
+    fn refused_features_clear_on_request_or_come_due_once_old() {
+        use AccountFeature::*;
         let store = Store::open_in_memory().unwrap();
         store.insert_account(&microsoft_account("m")).unwrap();
         let day = chrono::Duration::hours(24);
         assert!(!store.clear_refused("m").unwrap());
-        assert!(!store.expire_refused("m", day).unwrap());
+        assert!(store.due_refused("m", day).unwrap().is_empty());
 
-        store.refuse_feature("m", AccountFeature::Calendar).unwrap();
-        // Refused just now: kept.
-        assert!(!store.expire_refused("m", day).unwrap());
-        assert_eq!(shown_of(&store, "m").1, [AccountFeature::Calendar]);
+        store.refuse_feature("m", Calendar).unwrap();
+        // Refused just now: not due.
+        assert!(store.due_refused("m", day).unwrap().is_empty());
+        assert_eq!(shown_of(&store, "m").1, [Calendar]);
         assert!(store.clear_refused("m").unwrap());
         assert_eq!(shown_of(&store, "m"), (vec![], vec![]));
         assert!(!store.clear_refused("m").unwrap());
 
-        // Refused more than a day ago: expired.
-        store.refuse_feature("m", AccountFeature::Calendar).unwrap();
-        let old = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
-        store.execute_for_tests(&format!(
-            "UPDATE accounts SET microsoft_grant = json_set(microsoft_grant, '$.refusedAt', '{old}')"
-        ));
-        assert!(store.expire_refused("m", day).unwrap());
+        // Refused more than a day ago: due, and still refused.
+        store.refuse_feature("m", Calendar).unwrap();
+        store.refuse_feature("m", Tasks).unwrap();
+        let refused_a_day_ago = || {
+            let old = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+            store.execute_for_tests(&format!(
+                "UPDATE accounts SET microsoft_grant = \
+                 json_set(microsoft_grant, '$.refusedAt', '{old}')"
+            ));
+        };
+        refused_a_day_ago();
+        assert_eq!(store.due_refused("m", day).unwrap(), [Calendar, Tasks]);
+        assert_eq!(shown_of(&store, "m").1, [Calendar, Tasks]);
+        // Refused again: as of now, so not due for another day.
+        let before = Utc::now();
+        assert!(!store.refuse_feature("m", Calendar).unwrap());
+        let grant = store.microsoft_grant("m").unwrap().unwrap();
+        assert!(grant.refused_at.unwrap() >= before - chrono::Duration::seconds(1));
+        assert!(store.due_refused("m", day).unwrap().is_empty());
+
+        // One answers: only it is lifted, and when stays.
+        refused_a_day_ago();
+        let refused_at = store.microsoft_grant("m").unwrap().unwrap().refused_at;
+        assert!(store.lift_refusal("m", Tasks).unwrap());
+        assert!(!store.lift_refusal("m", Tasks).unwrap());
+        let grant = store.microsoft_grant("m").unwrap().unwrap();
+        assert_eq!(grant.refused, [Calendar]);
+        assert_eq!(grant.refused_at, refused_at);
+        // The last one: when clears.
+        assert!(store.lift_refusal("m", Calendar).unwrap());
         let grant = store.microsoft_grant("m").unwrap().unwrap();
         assert!(grant.refused.is_empty());
         assert_eq!(grant.refused_at, None);
         assert_eq!(grant.scopes, legacy_graph_scopes());
+        assert!(!store.lift_refusal("gone", Calendar).unwrap());
     }
 
     #[test]

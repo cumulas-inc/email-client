@@ -99,17 +99,18 @@ impl ProviderSet {
     /// The providers `account` may use now. A Microsoft account's calendar,
     /// contacts or tasks it lacks the permission for, or that Microsoft 365
     /// refused, answer every call with `PermissionRequired`: never `None`,
-    /// which would keep them in the local store as for IMAP accounts.
-    pub(crate) fn gated(&self, account: &Account) -> ProviderSet {
+    /// which would keep them in the local store as for IMAP accounts. The
+    /// refused features in `retrying` are let through, to try them again.
+    pub(crate) fn gated(&self, account: &Account, retrying: &[AccountFeature]) -> ProviderSet {
         let mut set = self.clone();
         if account.kind != AccountKind::Microsoft {
             return set;
         }
-        for &feature in account
-            .needs_permission
+        let refused = account
+            .refused_features
             .iter()
-            .chain(&account.refused_features)
-        {
+            .filter(|f| !retrying.contains(f));
+        for &feature in account.needs_permission.iter().chain(refused) {
             let stub = || {
                 Arc::new(NeedsPermission {
                     feature,

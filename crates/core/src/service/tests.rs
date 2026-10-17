@@ -539,10 +539,14 @@ struct RemindersChanged {
     cleared: Vec<String>,
 }
 
+/// Hears every `data_changed` as it happens, as the UI would.
+type ChangeWatcher = Box<dyn Fn(&[DataKind], Option<&str>) + Send>;
+
 #[derive(Default)]
 struct RecordingSink {
     /// Every `data_changed`: the kinds and the account.
     changes: Mutex<Vec<(Vec<DataKind>, Option<String>)>>,
+    watcher: Mutex<Option<ChangeWatcher>>,
     reminders: Mutex<Vec<RemindersChanged>>,
     new_mail: Mutex<Vec<String>>,
     alerts: Mutex<Vec<MailAlert>>,
@@ -557,6 +561,9 @@ impl EventSink for RecordingSink {
             .lock()
             .unwrap()
             .push((kinds.to_vec(), account_id.map(str::to_owned)));
+        if let Some(watcher) = &*self.watcher.lock().unwrap() {
+            watcher(kinds, account_id);
+        }
     }
     fn sync_status(&self, status: &SyncStatus) {
         if status.state == SyncState::Idle {
@@ -4182,6 +4189,8 @@ struct FakePim {
     account_id: String,
     /// Features whose listing Graph refuses.
     refused: Mutex<Vec<AccountFeature>>,
+    /// Features whose listing gets no answer (the network is down).
+    offline: Mutex<Vec<AccountFeature>>,
     /// Calendars and task lists (remote ids) whose items Graph refuses.
     unreadable: Mutex<Vec<String>>,
     /// How often anything was listed.
@@ -4193,6 +4202,9 @@ impl FakePim {
         self.listings.fetch_add(1, Ordering::SeqCst);
         if self.refused.lock().unwrap().contains(&feature) {
             return Err(forbidden());
+        }
+        if self.offline.lock().unwrap().contains(&feature) {
+            return Err(Error::network("The connection dropped."));
         }
         Ok(())
     }
@@ -4410,6 +4422,7 @@ fn pim_account(
     let pim = Arc::new(FakePim {
         account_id: account.id.clone(),
         refused: Mutex::default(),
+        offline: Mutex::default(),
         unreadable: Mutex::default(),
         listings: AtomicUsize::new(0),
     });
@@ -4968,9 +4981,8 @@ async fn a_refused_feature_returns_after_sign_in_retry_new_grant_or_a_day() {
             a_day_ago.to_rfc3339()
         ))
     };
-    // Still refused: checked again, and refused as of now. Only the
-    // refusal and the sync's end are told, so nobody sees the calendar
-    // look back on in between.
+    // Still refused: checked again, and refused as of now. Nothing the UI
+    // shows changed; only the sync's end is told.
     refused_a_day_ago();
     pim.refused.lock().unwrap().push(AccountFeature::Calendar);
     let notified = accounts_notified(&h, &account);
@@ -4980,7 +4992,7 @@ async fn a_refused_feature_returns_after_sign_in_retry_new_grant_or_a_day() {
     assert_eq!(grant.refused, [AccountFeature::Calendar]);
     assert!(grant.refused_at.unwrap() > a_day_ago);
     assert_eq!(cached(&h, &account).0, 0);
-    assert_eq!(accounts_notified(&h, &account), notified + 2);
+    assert_eq!(accounts_notified(&h, &account), notified + 1);
     // Back: told at the sync's end.
     refused_a_day_ago();
     pim.refused.lock().unwrap().clear();
@@ -5004,6 +5016,65 @@ async fn a_refused_feature_returns_after_sign_in_retry_new_grant_or_a_day() {
         account_of(&h, &account).refused_features,
         [AccountFeature::Calendar]
     );
+}
+
+#[tokio::test]
+async fn a_refused_feature_tried_again_looks_back_on_only_once_it_answers() {
+    use AccountFeature::{Calendar, Tasks};
+    let h = harness();
+    let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    pim.refused.lock().unwrap().extend([Calendar, Tasks]);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(account_of(&h, &account).refused_features, [Calendar, Tasks]);
+    let a_day_ago = Utc::now() - Duration::hours(25);
+    let refused_a_day_ago = || {
+        h.service.store().execute_for_tests(&format!(
+            "UPDATE accounts SET microsoft_grant =
+               json_set(microsoft_grant, '$.refusedAt', '{}')",
+            a_day_ago.to_rfc3339()
+        ))
+    };
+    // What the UI reads of the account each time it hears it changed.
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    {
+        let (store, id, shown) = (
+            Arc::clone(h.service.store()),
+            account.id.clone(),
+            Arc::clone(&shown),
+        );
+        *h.sink.watcher.lock().unwrap() = Some(Box::new(move |kinds, account_id| {
+            if kinds.contains(&DataKind::Accounts) && account_id == Some(id.as_str()) {
+                let account = store.get_account(&id).unwrap();
+                shown.lock().unwrap().push(account.refused_features);
+            }
+        }));
+    }
+
+    // Both still refused: neither looks back on while the other is tried.
+    refused_a_day_ago();
+    h.service.sync_account(&account.id).await.unwrap();
+    let seen = std::mem::take(&mut *shown.lock().unwrap());
+    assert!(!seen.is_empty());
+    assert!(seen.iter().all(|f| f == &[Calendar, Tasks]), "{seen:?}");
+    assert!(grant_of(&h, &account).unwrap().refused_at.unwrap() > a_day_ago);
+
+    // The calendar answers, and the tasks' listing gets no answer, as on
+    // waking up before the network is: only the calendar is back, and the
+    // tasks are tried again at the next sync.
+    refused_a_day_ago();
+    pim.refused.lock().unwrap().clear();
+    pim.offline.lock().unwrap().push(Tasks);
+    let error = h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Network);
+    let seen = std::mem::take(&mut *shown.lock().unwrap());
+    assert!(!seen.is_empty());
+    assert!(seen.iter().all(|f| f.contains(&Tasks)), "{seen:?}");
+    assert_eq!(account_of(&h, &account).refused_features, [Tasks]);
+    assert_eq!(cached(&h, &account), (2, 1, 0));
+    pim.offline.lock().unwrap().clear();
+    h.service.sync_account(&account.id).await.unwrap();
+    assert!(account_of(&h, &account).refused_features.is_empty());
+    assert_eq!(cached(&h, &account), (2, 1, 2));
 }
 
 #[tokio::test]

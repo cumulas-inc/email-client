@@ -143,14 +143,17 @@ impl CoreService {
             tracing::warn!("mail sync for account {} failed: {e}", account.id);
         }
         // Features Microsoft 365 refused a day ago or more are tried again
-        // below. Nobody hears of it until the sync's end, or until a feature
-        // is refused again: in between, the feature would look back on.
-        if account.kind == AccountKind::Microsoft {
-            self.store.expire_refused(&account.id, REFUSED_RETRY)?;
-        }
+        // below. They stay refused until their listing answers, so that
+        // nothing shows them back on before: not what tells the UI in
+        // between (another feature refused again, another account's sync),
+        // nor a listing that fails for another reason, such as the network.
+        let retrying = match account.kind {
+            AccountKind::Microsoft => self.store.due_refused(&account.id, REFUSED_RETRY)?,
+            AccountKind::Imap => Vec::new(),
+        };
         // The token refresh during the mail sync may have recorded a new grant.
         let account = &self.store.get_account(&account.id)?;
-        let providers = self.providers_for(&account.id).await?;
+        let providers = self.providers_retrying(&account.id, &retrying).await?;
         // Calendar, contacts and tasks failures should not hide mail errors and
         // vice versa, but one failing module must not stop the others.
         let mut first_error: Option<Error> = None;
@@ -377,7 +380,8 @@ impl CoreService {
     /// A feature's top-level listing, or `None` when the account can't use
     /// the feature: without its permission its cache goes, and when
     /// Microsoft 365 refuses the listing (HTTP 403) the feature is marked
-    /// refused. Neither is a sync error.
+    /// refused. Neither is a sync error. A refused feature tried again is
+    /// refused no more once its listing answers; the sync's end tells.
     fn listed<T>(
         &self,
         account: &Account,
@@ -385,7 +389,12 @@ impl CoreService {
         listed: Result<Vec<T>>,
     ) -> Result<Option<Vec<T>>> {
         match listed {
-            Ok(items) => Ok(Some(items)),
+            Ok(items) => {
+                if account.refused_features.contains(&feature) {
+                    self.store.lift_refusal(&account.id, feature)?;
+                }
+                Ok(Some(items))
+            }
             Err(e) if e.code == ErrorCode::PermissionRequired => {
                 self.drop_feature_data(account, feature)?;
                 Ok(None)

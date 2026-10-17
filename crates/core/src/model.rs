@@ -186,7 +186,8 @@ pub struct MicrosoftGrant {
     /// Features Microsoft Graph refused (403 on the listing) although their
     /// permission was granted.
     pub refused: Vec<AccountFeature>,
-    /// When `refused` last gained a feature.
+    /// When Microsoft 365 last refused a feature, the first time or when
+    /// it was tried again.
     pub refused_at: Option<DateTime<Utc>>,
 }
 

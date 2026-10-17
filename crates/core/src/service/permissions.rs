@@ -201,16 +201,19 @@ impl CoreService {
     /// Microsoft 365 refused to list a feature's items although its
     /// permission is granted: it is marked refused until checked again (a
     /// sign-in, Check again, its permission granted anew, or a day later),
-    /// and its cache goes.
+    /// and its cache goes. Refused again when tried again, nothing the UI
+    /// shows changes.
     pub(super) fn refuse_feature(&self, account: &Account, feature: AccountFeature) -> Result<()> {
-        self.store.refuse_feature(&account.id, feature)?;
+        let changed = self.store.refuse_feature(&account.id, feature)?;
         self.drop_feature_data(account, feature)?;
         tracing::info!(
             "Microsoft 365 refused the {} of account {}",
             feature.noun(),
             account.id
         );
-        self.notify(&[DataKind::Accounts], Some(&account.id));
+        if changed {
+            self.notify(&[DataKind::Accounts], Some(&account.id));
+        }
         Ok(())
     }
 

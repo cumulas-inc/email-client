@@ -160,15 +160,26 @@ impl CoreService {
     /// permission for change: a provider keeps what it fell back on
     /// without a permission (the computer's time zone).
     async fn providers_for(&self, account_id: &str) -> Result<ProviderSet> {
+        self.providers_retrying(account_id, &[]).await
+    }
+
+    /// The providers for an account, with the refused features in
+    /// `retrying` not gated, so that a sync tries them again while they
+    /// still show as refused.
+    async fn providers_retrying(
+        &self,
+        account_id: &str,
+        retrying: &[AccountFeature],
+    ) -> Result<ProviderSet> {
         let account = self.store.get_account(account_id)?;
         let mut cache = self.providers.lock().await;
         if let Some(entry) = cache.get(account_id)
             && entry.needs_permission == account.needs_permission
         {
-            return Ok(entry.raw.gated(&account));
+            return Ok(entry.raw.gated(&account, retrying));
         }
         let raw = self.connector.providers(&account).await?;
-        let set = raw.gated(&account);
+        let set = raw.gated(&account, retrying);
         cache.insert(
             account_id.to_owned(),
             CachedProviders {
