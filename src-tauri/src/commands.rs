@@ -22,6 +22,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::AppState;
 use crate::desktop::background::{self, BackgroundState};
 use crate::desktop::router::Navigate;
+use crate::desktop::update::{self, UpdateState};
 use crate::desktop::{self as desktop_shell, Desktop, notify, tray};
 
 /// Runs store work off the main thread and off the async workers: a sync
@@ -50,6 +51,8 @@ pub struct AppInfo {
     /// (`CUMULAS_SIGNATURE_CLIENT_ID` is `none`, or another service has no
     /// client ID).
     signature_server: Option<String>,
+    /// Started by a restart into an update: the page says it's updated.
+    restarted_to_update: bool,
 }
 
 #[tauri::command]
@@ -60,6 +63,7 @@ pub fn get_app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
         microsoft_client_id_built_in: builtin_microsoft_client_id().is_some(),
         sync_server: cumulas_core::push::relay::sync_host(),
         signature_server: cumulas_core::signatures::config::signature_host(),
+        restarted_to_update: state.restarted_to_update,
     }
 }
 
@@ -85,11 +89,12 @@ pub fn quit_app(app: AppHandle, desktop: State<'_, Desktop>) {
     app.exit(0);
 }
 
-/// The user kept the unsent message when asked whether to quit: the tray's
-/// next Quit asks again, rather than quitting at once.
+/// The user kept the unsent message when asked whether to quit (or
+/// restart): the tray's next Quit asks again, rather than quitting at once.
 #[tauri::command]
 pub fn quit_canceled(desktop: State<'_, Desktop>) {
     desktop.window.forget_quit();
+    desktop.update.take_activation_token();
 }
 
 // --- accounts & settings ------------------------------------------------------
@@ -309,6 +314,24 @@ pub async fn send_test_notification(app: AppHandle) -> Result<()> {
     desktop_shell::test_notification(&app)
         .await
         .map_err(|e| Error::unsupported(format!("Couldn't show a notification. {e}")))
+}
+
+/// What the Flatpak portal said about updates; changes arrive as
+/// `update-state` events.
+#[tauri::command]
+pub fn get_update_state(desktop: State<'_, Desktop>) -> UpdateState {
+    desktop.update.state()
+}
+
+/// Restarts into the installed update: the page's Restart, and its answer
+/// to the tray's or a notification's (`restart-requested`). The app exits
+/// once the new version has taken over; when it couldn't, it keeps running.
+#[tauri::command]
+pub async fn restart_app(app: AppHandle) -> Result<()> {
+    let desktop = app.state::<Desktop>();
+    desktop.window.forget_quit();
+    let activation_token = desktop.update.take_activation_token();
+    update::restart(&app, activation_token).await
 }
 
 /// Navigation that waited for the page (a notification was clicked while
@@ -790,6 +813,7 @@ mod tests {
                 microsoft_client_id_built_in: false,
                 sync_server: "sync.cumulas.co".into(),
                 signature_server: signature_server.map(str::to_owned),
+                restarted_to_update: true,
             })
             .unwrap()
         };
@@ -798,5 +822,6 @@ mod tests {
             "signature.cumulas.co"
         );
         assert_eq!(info(None)["signatureServer"], serde_json::Value::Null);
+        assert_eq!(info(None)["restartedToUpdate"], true);
     }
 }

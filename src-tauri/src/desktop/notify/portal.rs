@@ -137,6 +137,7 @@ fn button_action(action: &Action) -> &'static str {
         Action::Dismiss(_) => "dismiss",
         Action::Join(_) => "join",
         Action::CompleteTask(_) => "complete",
+        Action::RestartToUpdate => "restart-update",
         _ => "open",
     }
 }

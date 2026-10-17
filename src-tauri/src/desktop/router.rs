@@ -2,7 +2,8 @@
 //! an event or a task shows the window and tells the page to go there (the
 //! `navigate` event); marking read, archiving, snoozing, dismissing and
 //! completing a task happen without the window (and a new notification
-//! says when they failed); Join opens the meeting in the browser.
+//! says when they failed); Join opens the meeting in the browser; Restart
+//! restarts into the installed update, as the tray's item does.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -193,6 +194,14 @@ pub async fn handle(app: &AppHandle, click: Invoked) {
         }
         action @ Action::CompleteTask(_) => {
             reminder_action(&desktop.notifications, service, action).await;
+        }
+        Action::RestartToUpdate if desktop.update.installed() => {
+            window::restart(app, click.activation_token);
+        }
+        // A notification from before the last restart: its update is the
+        // running version now.
+        Action::RestartToUpdate => {
+            window::show_main(app, click.activation_token);
         }
     }
 }
