@@ -356,16 +356,17 @@ pub(crate) fn running_runtime(flatpak_info: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// The runtime the build is for, as its id (when named) and branch, from
-/// the manifest flatpak-builder keeps in `/app/manifest.json`.
-pub(crate) fn built_for(manifest: &str) -> Option<(Option<String>, String)> {
+/// The runtime the build is for, from the manifest flatpak-builder keeps in
+/// `/app/manifest.json`: the ids it runs on, as named (the runtime's, and
+/// the SDK's, which `flatpak run --devel` uses), and the branch.
+pub(crate) fn built_for(manifest: &str) -> Option<(Vec<String>, String)> {
     let manifest: serde_json::Value = serde_json::from_str(manifest).ok()?;
     let branch = manifest.get("runtime-version")?.as_str()?.to_owned();
-    let id = manifest
-        .get("runtime")
-        .and_then(|r| r.as_str())
-        .map(str::to_owned);
-    Some((id, branch))
+    let ids = ["runtime", "sdk"]
+        .into_iter()
+        .filter_map(|key| Some(manifest.get(key)?.as_str()?.to_owned()))
+        .collect();
+    Some((ids, branch))
 }
 
 /// Whether this build runs on the runtime it was built for: true unless
@@ -373,13 +374,13 @@ pub(crate) fn built_for(manifest: &str) -> Option<(Option<String>, String)> {
 /// the previous one's runtime, so a version built for another would run on
 /// the old one; a normal launch uses the right one.
 pub(crate) fn runtime_matches(manifest: Option<&str>, flatpak_info: Option<&str>) -> bool {
-    let (Some((wanted_id, wanted_branch)), Some((id, branch))) = (
+    let (Some((wanted_ids, wanted_branch)), Some((id, branch))) = (
         manifest.and_then(built_for),
         flatpak_info.and_then(running_runtime),
     ) else {
         return true;
     };
-    wanted_branch == branch && wanted_id.is_none_or(|wanted| wanted == id)
+    wanted_branch == branch && (wanted_ids.is_empty() || wanted_ids.iter().any(|w| w == id))
 }
 
 /// What a new instance that can't take over does: it runs anyway only when
@@ -1261,13 +1262,20 @@ mod tests {
         };
         assert_eq!(
             built_for(manifest),
-            Some((Some("org.gnome.Platform".into()), "50".into()))
+            Some((
+                vec!["org.gnome.Platform".into(), "org.gnome.Sdk".into()],
+                "50".into()
+            ))
         );
         assert!(runtime_matches(Some(manifest), Some(&info("50"))));
         // Started on the previous version's runtime.
         assert!(!runtime_matches(Some(manifest), Some(&info("49"))));
         let other = info("50").replace("org.gnome.Platform", "org.kde.Platform");
         assert!(!runtime_matches(Some(manifest), Some(&other)));
+        // `flatpak run --devel` runs it on the SDK, and the portal keeps that.
+        let sdk = |branch: &str| info(branch).replace("org.gnome.Platform", "org.gnome.Sdk");
+        assert!(runtime_matches(Some(manifest), Some(&sdk("50"))));
+        assert!(!runtime_matches(Some(manifest), Some(&sdk("49"))));
         // Without a runtime id, the branch decides.
         let branch_only = r#"{"runtime-version": "50"}"#;
         assert!(runtime_matches(Some(branch_only), Some(&other)));

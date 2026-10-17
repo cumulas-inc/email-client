@@ -84,11 +84,11 @@ and restarts into it (`src-tauri/src/desktop/update.rs`).
 - **The runtime.** `Spawn` starts the new version on the running one's
   runtime, whatever it was built for. So the new instance compares the runtime
   its manifest names (`runtime` and `runtime-version` in `/app/manifest.json`,
-  which flatpak-builder writes into every build, Flathub's included) with the
-  one it was started on (`[Application] runtime` in `/.flatpak-info`), and
-  refuses when they differ: after a release that moves to another runtime
-  branch, the app asks for a quit and reopen instead. A build without
-  `/app/manifest.json` isn't checked.
+  which flatpak-builder writes into every build, Flathub's included; or `sdk`,
+  which `flatpak run --devel` runs it on) with the one it was started on
+  (`[Application] runtime` in `/.flatpak-info`), and refuses when they differ:
+  after a release that moves to another runtime branch, the app asks for a
+  quit and reopen instead. A build without `/app/manifest.json` isn't checked.
 - **flatpak before 1.15.6** (Ubuntu 24.04, Debian 12) starts the new version
   with the portal's environment rather than the app's. The app passes its
   locale and input method on (`LANG`, `LANGUAGE`, `LC_*`, `GTK_IM_MODULE`,
