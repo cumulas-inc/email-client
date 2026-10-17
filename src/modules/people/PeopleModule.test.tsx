@@ -505,6 +505,43 @@ describe("contacts permission", () => {
     expect(radios[0]).toBeChecked();
   });
 
+  it("explains an address book it can't read, and offers no new contact for it", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ missing: ["contacts"] });
+    renderWithEvents(backend);
+
+    await screen.findByRole("region", { name: "Contacts need permission" });
+    await user.click(screen.getByRole("button", { name: /^Alex Morgan \(/ }));
+    const listPane = screen.getByRole("region", { name: "Contact list" });
+    expect(
+      await within(listPane).findByText("This account's contacts need permission"),
+    ).toBeInTheDocument();
+    expect(
+      within(listPane).getByText(
+        `Turn them on, or ask your IT team to approve them, under Address books to see the contacts of ${EMAIL} here.`,
+      ),
+    ).toBeInTheDocument();
+    expect(within(listPane).queryByText("No contacts in this account")).toBeNull();
+    // New contacts would go to another account.
+    expect(within(listPane).queryByRole("button", { name: "New contact" })).toBeNull();
+
+    await user.click(within(listPane).getByRole("button", { name: "Show all contacts" }));
+    expect(await within(listPane).findByRole("listbox", { name: "Contacts" })).toBeInTheDocument();
+  });
+
+  it("says when Microsoft 365 refused an address book", async () => {
+    const user = userEvent.setup();
+    renderWithEvents(new MockBackend({ refused: ["contacts"] }));
+
+    await screen.findByRole("region", { name: "Microsoft 365 refused access to your contacts" });
+    await user.click(screen.getByRole("button", { name: /^Alex Morgan \(/ }));
+    const listPane = screen.getByRole("region", { name: "Contact list" });
+    expect(
+      await within(listPane).findByText("Microsoft 365 refused access to your contacts"),
+    ).toBeInTheDocument();
+    expect(within(listPane).queryByRole("button", { name: "New contact" })).toBeNull();
+  });
+
   it("disables New contact while no account can take contacts, until one can", async () => {
     const backend = new MockBackend({ refused: ["contacts"] });
     await backend.removeAccount("acct-home");

@@ -12,8 +12,13 @@ import { SearchField } from "../../components/SearchField";
 import { PaneSpinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
 import { formatCount } from "../../lib/format";
-import { FeaturePermissionNotice } from "../settings/FeaturePermission";
-import { accountsWithout, noticeHeadingIds } from "../settings/microsoft";
+import { FeaturePermissionNotice, REFUSED_HINT } from "../settings/FeaturePermission";
+import {
+  FEATURE_COPY,
+  accountsWithout,
+  isPersonalAccount,
+  noticeHeadingIds,
+} from "../settings/microsoft";
 import { AddressText, ContactDetails } from "./ContactDetails";
 import { ContactEditor } from "./ContactEditor";
 import { ContactList } from "./ContactList";
@@ -152,6 +157,15 @@ export function PeopleModule() {
   const filterAccount = filterAccountId
     ? accounts.find((a) => a.id === filterAccountId)
     : undefined;
+  // The address book on show is one Cumulas Mail can't read: it isn't empty,
+  // and new contacts can't go in it.
+  const filterGated = filterAccount
+    ? withoutContacts.needing.some((a) => a.id === filterAccount.id)
+      ? "needing"
+      : withoutContacts.refused.some((a) => a.id === filterAccount.id)
+        ? "refused"
+        : null
+    : null;
 
   let list;
   if (query.isLoading) {
@@ -177,6 +191,27 @@ export function PeopleModule() {
         action={
           <button type="button" className="btn" onClick={() => setSearch("")}>
             Clear search
+          </button>
+        }
+      />
+    ) : filterAccount && filterGated ? (
+      <EmptyState
+        icon={<Users size={40} strokeWidth={1.5} />}
+        title={
+          filterGated === "needing"
+            ? "This account's contacts need permission"
+            : FEATURE_COPY.contacts.refusedTitle
+        }
+        description={
+          filterGated === "refused"
+            ? REFUSED_HINT
+            : isPersonalAccount(filterAccount)
+              ? `Turn them on under Address books to see the contacts of ${filterAccount.email} here.`
+              : `Turn them on, or ask your IT team to approve them, under Address books to see the contacts of ${filterAccount.email} here.`
+        }
+        action={
+          <button type="button" className="btn" onClick={() => setAccountId(null)}>
+            Show all contacts
           </button>
         }
       />
