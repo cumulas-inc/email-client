@@ -806,21 +806,34 @@ impl MicrosoftTokenSource {
         }
 
         let key = keys::refresh_token(&self.account_id);
-        let refresh_token = self
-            .secrets
-            .get(&key)
-            .await
-            .map_err(TokenFailure::Other)?
-            .ok_or_else(|| {
-                TokenFailure::Other(Error::auth_required(
-                    "The Microsoft sign-in for this account is missing. Sign in again.",
-                ))
-            })?;
+        // The refresh token and the grant are read together, under the
+        // account's lock, which a sign-in takes to save both: what a
+        // personal account's refresh names is what that token was granted.
+        let (refresh_token, recorded) = {
+            let _sign_in = secrets::lock_account(&self.account_id).await;
+            let refresh_token = self
+                .secrets
+                .get(&key)
+                .await
+                .map_err(TokenFailure::Other)?
+                .ok_or_else(|| {
+                    TokenFailure::Other(Error::auth_required(
+                        "The Microsoft sign-in for this account is missing. Sign in again.",
+                    ))
+                })?;
+            let recorded = match &self.scope {
+                RefreshScope::Fixed(_) => None,
+                RefreshScope::Graph { grant, .. } => {
+                    grant.granted().map_err(TokenFailure::Other)?
+                }
+            };
+            (refresh_token, recorded)
+        };
         let (tokens, granted) = match &self.scope {
             RefreshScope::Fixed(scope) => (self.redeem(&refresh_token, scope).await?, None),
             RefreshScope::Graph { personal, grant } => {
                 let (tokens, sent) = self
-                    .redeem_graph(&refresh_token, *personal, grant.as_ref())
+                    .redeem_graph(&refresh_token, *personal, recorded.as_deref())
                     .await?;
                 let granted = granted_by_refresh(tokens.scope.as_deref(), *personal, &sent);
                 (tokens, Some((grant, granted)))
@@ -836,7 +849,8 @@ impl MicrosoftTokenSource {
         // one stays. Under the account's lock, which removing it and signing
         // in also take, so neither comes between the comparison and the save.
         // What a Graph refresh says the account was granted is recorded
-        // likewise: a sign-in meanwhile recorded a newer grant, which stays.
+        // likewise, and only over the grant it read: a sign-in (or another
+        // refresh) meanwhile recorded a newer one, which stays.
         let rotated = tokens
             .refresh_token
             .as_deref()
@@ -851,7 +865,15 @@ impl MicrosoftTokenSource {
                         tracing::warn!("could not store the rotated refresh token: {e}");
                     }
                     if let Some((grant, Some(granted))) = &granted {
-                        grant.record(granted);
+                        match grant.granted() {
+                            Ok(current) if current == recorded => grant.record(granted),
+                            Ok(_) => tracing::info!(
+                                "not recording what a token refresh brought: account {} has a \
+                                 newer grant",
+                                self.account_id
+                            ),
+                            Err(e) => tracing::warn!("could not check the recorded grant: {e}"),
+                        }
                     }
                 }
                 Ok(Some(_)) => tracing::info!(
@@ -895,20 +917,18 @@ impl MicrosoftTokenSource {
     }
 
     /// Redeems the refresh token for Graph; returns the tokens and the
-    /// scope asked for. Should Microsoft refuse a work account's
-    /// `.default`, it asks once more naming the permissions instead.
+    /// scope asked for. A personal account's refresh names the permissions
+    /// `recorded` (the grant read with the token). Should Microsoft refuse
+    /// a work account's `.default`, it asks once more naming them too.
     async fn redeem_graph(
         &self,
         refresh_token: &str,
         personal: bool,
-        grant: &dyn GrantRecord,
+        recorded: Option<&[String]>,
     ) -> std::result::Result<(TokenResponse, String), TokenFailure> {
-        let explicit = || {
-            let recorded = grant.granted().map_err(TokenFailure::Other)?;
-            Ok::<_, TokenFailure>(graph_refresh_scope(true, recorded.as_deref()))
-        };
+        let explicit = || graph_refresh_scope(true, recorded);
         if personal {
-            let scope = explicit()?;
+            let scope = explicit();
             return Ok((self.redeem(refresh_token, &scope).await?, scope));
         }
         let scope = graph_refresh_scope(false, None);
@@ -918,7 +938,7 @@ impl MicrosoftTokenSource {
                     "Microsoft refused `.default` for account {}; naming the permissions instead",
                     self.account_id
                 );
-                let scope = explicit()?;
+                let scope = explicit();
                 Ok((self.redeem(refresh_token, &scope).await?, scope))
             }
             result => Ok((result?, scope)),
@@ -3087,6 +3107,79 @@ mod tests {
             source.secrets.get(&key).await.unwrap().as_deref(),
             Some("refresh-new")
         );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_reads_its_token_and_grant_after_a_sign_in_saving_both() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(token_with_scope(Some(
+                "User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite",
+            )))
+            .mount(&server)
+            .await;
+        let mail_only: &[&str] = &["User.Read", "Mail.ReadWrite", "Mail.Send"];
+        let with_calendar = strings(&[mail_only, &["Calendars.ReadWrite"]].concat());
+        let grant = FakeGrant::with(Some(mail_only));
+        let secrets = Arc::new(MemorySecretStore::default());
+        let (id, key) = ("acct-turning-on", keys::refresh_token("acct-turning-on"));
+        secrets.set(&key, "refresh-0").await.unwrap();
+        let source = Arc::new(MicrosoftTokenSource::new(
+            config(&server),
+            id,
+            secrets,
+            true,
+            grant.clone(),
+        ));
+        // A personal account's sign-in turning the calendar on saves its
+        // refresh token, then its grant, as a refresh starts.
+        let signing_in = secrets::lock_account(id).await;
+        let refreshing = tokio::spawn({
+            let source = Arc::clone(&source);
+            async move { source.access_token().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        source.secrets.set(&key, "refresh-new").await.unwrap();
+        *grant.granted.lock().unwrap() = Some(with_calendar.clone());
+        drop(signing_in);
+        assert_eq!(refreshing.await.unwrap().unwrap(), "access-1");
+        // The refresh asked with the new token for what it was granted.
+        let requests = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert!(body.contains("refresh_token=refresh-new"), "{body}");
+        assert_eq!(
+            asked_scopes(&server).await,
+            [format!("{} Calendars.ReadWrite", CORE_SCOPES.join(" "))]
+        );
+        assert_eq!(grant.recorded(), [with_calendar]);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_keeps_a_grant_recorded_meanwhile() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                token_with_scope(Some("User.Read Mail.ReadWrite Mail.Send"))
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+        let grant = FakeGrant::with(Some(&["User.Read", "Mail.ReadWrite", "Mail.Send"]));
+        let source = Arc::new(graph_tokens(&server, true, &grant).await);
+        let refreshing = tokio::spawn({
+            let source = Arc::clone(&source);
+            async move { source.access_token().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Another refresh of the same token records a newer grant.
+        *grant.granted.lock().unwrap() = Some(strings(&[
+            "User.Read",
+            "Mail.ReadWrite",
+            "Mail.Send",
+            "Calendars.ReadWrite",
+        ]));
+        assert_eq!(refreshing.await.unwrap().unwrap(), "access-1");
+        assert!(grant.recorded().is_empty());
     }
 
     #[tokio::test]

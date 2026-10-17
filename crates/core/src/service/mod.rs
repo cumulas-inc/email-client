@@ -441,9 +441,11 @@ impl CoreService {
         {
             // Under the account's lock, which removing it also takes: the
             // removal deletes what's saved here, or this finds the account
-            // gone and saves nothing. A token refresh records a grant under
-            // it too, and only while its refresh token is still stored, so
-            // one under way can't overwrite this newer grant.
+            // gone and saves nothing. A token refresh reads the refresh token
+            // and the grant under it too, so it never asks with this token
+            // for the grant before, and records a grant only while the token
+            // and grant it read are still stored, so one under way can't
+            // overwrite this newer grant.
             let _sign_in = secrets::lock_account(&account.id).await;
             self.store.get_account(&account.id)?;
             self.secrets

@@ -42,9 +42,11 @@ static ACCOUNT_LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>
 /// the one redeemed and saved; a new sign-in's, saved; and the account's
 /// secrets, deleted when it's removed. Each reads what it needs and writes
 /// under the lock, so none undoes another: no refresh token is ever left
-/// for an account that was removed. Held only around those secret store
-/// calls, never across a request to Microsoft. One per account id in the
-/// process, as the keyring is.
+/// for an account that was removed. A refresh also reads the refresh token
+/// and the grant under it, so it never pairs a sign-in's token with the
+/// grant before. Held only around those secret store calls, never across a
+/// request to Microsoft. One per account id in the process, as the keyring
+/// is.
 pub(crate) async fn lock_account(account_id: &str) -> OwnedMutexGuard<()> {
     let lock = {
         let mut locks = ACCOUNT_LOCKS.lock().unwrap();
