@@ -540,4 +540,32 @@ mod tests {
             mail_only()
         );
     }
+
+    #[test]
+    fn a_grant_from_a_newer_version_keeps_its_scopes() {
+        use AccountFeature::*;
+        let store = Store::open_in_memory().unwrap();
+        store.insert_account(&microsoft_account("m")).unwrap();
+        let with_tasks = [mail_only(), scopes(&["Tasks.ReadWrite"])].concat();
+        // A newer version refused a feature this one doesn't know.
+        let json = serde_json::json!({
+            "scopes": with_tasks,
+            "refused": ["notes", "tasks"],
+            "refusedAt": "2026-10-01T08:00:00Z",
+        });
+        store.execute_for_tests(&format!(
+            "UPDATE accounts SET microsoft_grant = '{json}' WHERE id = 'm'"
+        ));
+
+        // Recorded, so a personal account's refresh names what it was given,
+        // not every permission.
+        let grant = store.microsoft_grant("m").unwrap().unwrap();
+        assert_eq!(grant.scopes, with_tasks);
+        assert_eq!(grant.refused, vec![Tasks]);
+        assert!(grant.refused_at.is_some());
+        assert_eq!(
+            shown_of(&store, "m"),
+            (vec![Calendar, Contacts, MailboxSettings], vec![Tasks])
+        );
+    }
 }

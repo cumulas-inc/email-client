@@ -184,11 +184,24 @@ pub struct MicrosoftGrant {
     /// (`Mail.ReadWrite`), never the OpenID Connect scopes.
     pub scopes: Vec<String>,
     /// Features Microsoft Graph refused (403 on the listing) although their
-    /// permission was granted.
+    /// permission was granted. Ones a newer version wrote that this one
+    /// doesn't know are dropped: they never cost the grant its `scopes`.
+    #[serde(deserialize_with = "known_features")]
     pub refused: Vec<AccountFeature>,
     /// When Microsoft 365 last refused a feature, the first time or when
     /// it was tried again.
     pub refused_at: Option<DateTime<Utc>>,
+}
+
+/// Reads a list of features, leaving out the names this version doesn't know.
+fn known_features<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<AccountFeature>, D::Error> {
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|feature| serde_json::from_value(feature).ok())
+        .collect())
 }
 
 /// Where an administrator approves Cumulas Mail for an organization.
