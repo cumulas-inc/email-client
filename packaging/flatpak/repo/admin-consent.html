@@ -433,17 +433,20 @@
           <strong>Approve for your organization</strong> below, then <strong>Accept</strong>.
         </p>
         <p id="failed-other" hidden>
-          Sign in with an account that has one of the roles listed under
-          <strong>Approve it for everyone</strong>, then select
-          <strong>Approve for your organization</strong> again.
+          Check that you signed in with an account that has one of the roles listed under
+          <strong>Approve it for everyone</strong>. If you did, Microsoft's code says what it needs,
+          and the codes under <strong>If people still can't sign in</strong> (such as AADSTS65005
+          and AADSTS650052) apply here too.
         </p>
       </div>
 
       <div id="admin">
         <noscript>
           <p class="result">
-            Did Microsoft just bring you back here after you selected Accept? If Microsoft showed no
-            error, Cumulas Mail is approved, and people can select Try again in Cumulas Mail.
+            Did Microsoft just bring you back here after you selected Accept? If this page's address
+            contains <code>error=</code>, Cumulas Mail wasn't approved, and the AADSTS code after
+            <code>error_description=</code> says why. Otherwise it's approved, and people can select
+            Try again in Cumulas Mail.
           </p>
         </noscript>
 

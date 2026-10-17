@@ -6,7 +6,9 @@
 #    registration (crates/core/src/auth/microsoft.rs and
 #    service/connector.rs): the client ID, every permission, Sync.Receive
 #    when ADMIN_LINK_INCLUDES_PUSH says so, and this page as the redirect
-#    URI, which must be ADMIN_CONSENT_LANDING_URI on this site; and
+#    URI, which must be ADMIN_CONSENT_LANDING_URI on this site; rebuilt
+#    here from those, and the same as PUBLISHED_LINK_WITH_PUSH (or
+#    _WITHOUT_PUSH), which the app's tests hold its builder to; and
 #    docs/microsoft-365.md shows the same link; the page's table and the docs
 #    name Sync.Receive as approved by it only when it asks for it;
 #  - it names every permission the app asks for, the roles that can
@@ -138,6 +140,17 @@ redirect_param="redirect_uri=$(form_encode "$landing_uri")"
 plain_link="$endpoint?$client_param&$scope_param&$redirect_param"
 link="$endpoint?$client_param&amp;$scope_param&amp;$redirect_param"
 
+# The link the app's test holds admin_consent_url to, so that the page and
+# the docs (checked against $plain_link below) follow the real builder, not
+# only this rebuild of it.
+published=PUBLISHED_LINK_WITHOUT_PUSH
+if [ "$includes_push" = true ]; then
+  published=PUBLISHED_LINK_WITH_PUSH
+fi
+app_link=$(sed -n "s/^[[:space:]]*const $published: &str = \"\([^\"]*\)\";.*/\1/p" "$microsoft")
+[ -n "$app_link" ] || die "No $published in $microsoft."
+check "the link is $published, which the app's tests build" test "$plain_link" = "$app_link"
+
 links=$(grep -o 'https://login\.microsoftonline\.com/[^"<[:space:]]*adminconsent[^"<[:space:]]*' "$page" | sort -u || true)
 check "the page has the approval link (ADMIN_LINK_INCLUDES_PUSH = $includes_push)" \
   grep -qF -- "href=\"$link\"" "$page"
@@ -180,6 +193,9 @@ check "the page says where Admin consent requests are" says "Admin consent reque
 check "the page shows the app ID" says "<code>$client_id</code>"
 check "the page shows the publisher ID" says "<code>$publisher_id</code>"
 check "the page has a <noscript> note" says "<noscript>"
+# Without the script, a failure is only in the address: Microsoft shows none.
+check "the <noscript> note says an error in the address means it wasn't approved" \
+  says "contains <code>error=</code>, Cumulas Mail wasn't approved"
 
 # --- Nothing from elsewhere, no HTML from the address ---------------------------------
 
