@@ -43,6 +43,8 @@ export const qk = {
 
   /** Not under a DataKind: the reminders-changed event keeps it up to date. */
   reminders: () => ["reminders", "active"] as const,
+  /** Not under a DataKind: the update-state event keeps it up to date. */
+  updateState: () => ["update", "state"] as const,
 
   accountSignature: (accountId: string) => ["signatures", "account", accountId] as const,
   composeSignature: (accountId: string, replyKind: ReplyKind | null) =>
@@ -140,6 +142,16 @@ export function useSetStartAtLogin() {
       backend.setStartAtLogin(enabled, hidden),
     onSuccess: (state) => applyBackgroundState(client, state),
     onError: () => void client.invalidateQueries({ queryKey: qk.backgroundState() }),
+  });
+}
+
+/** What the Flatpak portal says about updates; kept current by the update-state event. */
+export function useUpdateState() {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: qk.updateState(),
+    queryFn: () => backend.getUpdateState(),
+    staleTime: Infinity,
   });
 }
 

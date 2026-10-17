@@ -10,6 +10,7 @@ import type {
   PushStatus,
   RemindersChangedEvent,
   SyncStatus,
+  UpdateState,
 } from "./types";
 
 function subscribe<T>(event: string, handler: (payload: T) => void): Unsubscribe {
@@ -68,6 +69,8 @@ export const tauriBackend: Backend = {
   setStartAtLogin: (enabled, hidden) => invoke("set_start_at_login", { enabled, hidden }),
   sendTestNotification: () => invoke("send_test_notification"),
   takePendingNavigation: () => invoke("take_pending_navigation"),
+  getUpdateState: () => invoke("get_update_state"),
+  restartApp: () => invoke("restart_app"),
 
   listActiveReminders: () => invoke("list_active_reminders"),
   snoozeReminder: (reminderKey, snooze) =>
@@ -139,4 +142,6 @@ export const tauriBackend: Backend = {
   onBackgroundState: (handler) => subscribe<BackgroundState>("background-state", handler),
   onRemindersChanged: (handler) => subscribe<RemindersChangedEvent>("reminders-changed", handler),
   onQuitRequested: (handler) => subscribe<null>("quit-requested", () => handler()),
+  onUpdateState: (handler) => subscribe<UpdateState>("update-state", handler),
+  onRestartRequested: (handler) => subscribe<null>("restart-requested", () => handler()),
 };

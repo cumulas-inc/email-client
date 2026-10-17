@@ -484,6 +484,7 @@ describe("Microsoft app registration", () => {
       microsoftClientIdBuiltIn: false,
       syncServer: "sync.cumulas.co",
       signatureServer: "signature.cumulas.co",
+      restartedToUpdate: false,
     });
     openAt("microsoft", backend);
     expect(
@@ -938,6 +939,7 @@ describe("About", () => {
       microsoftClientIdBuiltIn: true,
       syncServer: "sync.cumulas.co",
       signatureServer: null,
+      restartedToUpdate: false,
     });
     openAt("about", backend);
     expect(await screen.findByText(/No keyring service was found/)).toHaveTextContent(

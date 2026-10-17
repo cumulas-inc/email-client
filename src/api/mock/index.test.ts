@@ -8,7 +8,7 @@ import type {
   PermissionRequest,
   RemindersChangedEvent,
 } from "../types";
-import { MockBackend, mockAdminConsentUrl } from ".";
+import { DEMO_UPDATE_COMMIT, MockBackend, mockAdminConsentUrl } from ".";
 
 function addStyle(css: string): CSSRule[] {
   const style = document.createElement("style");
@@ -106,6 +106,86 @@ describe("push and background settings", () => {
     ).rejects.toMatchObject({
       code: "invalidInput",
     });
+  });
+});
+
+describe("the demo's updates", () => {
+  it("start with none, or one installed", async () => {
+    expect(await new MockBackend().getUpdateState()).toEqual({ kind: "none" });
+    for (const update of ["installed", "restartfails"] as const) {
+      expect(await new MockBackend({ update }).getUpdateState()).toEqual({
+        kind: "installed",
+        commit: DEMO_UPDATE_COMMIT,
+        restart: "idle",
+      });
+    }
+    expect((await new MockBackend().getAppInfo()).restartedToUpdate).toBe(false);
+    const updated = new MockBackend({ restartedToUpdate: true });
+    expect((await updated.getAppInfo()).restartedToUpdate).toBe(true);
+  });
+
+  it("restart once at a time, into an installed update only", async () => {
+    const onRestart = vi.fn();
+    const backend = new MockBackend({ onRestart });
+    const states: unknown[] = [];
+    backend.onUpdateState((state) => states.push(state));
+    await expect(backend.restartApp()).rejects.toEqual({
+      code: "unsupported",
+      message: "There's no new version to restart into.",
+    });
+    expect(backend.calls.restart).toBe(0);
+
+    backend.setUpdateState({ kind: "installed", commit: "c", restart: "idle" });
+    await backend.restartApp();
+    expect(backend.calls.restart).toBe(1);
+    expect(onRestart).toHaveBeenCalledTimes(1);
+    expect(await backend.getUpdateState()).toEqual({
+      kind: "installed",
+      commit: "c",
+      restart: "restarting",
+    });
+    // Asked again while it restarts: nothing more.
+    await backend.restartApp();
+    expect(backend.calls.restart).toBe(1);
+    expect(onRestart).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    expect(states).toEqual([
+      { kind: "installed", commit: "c", restart: "idle" },
+      { kind: "installed", commit: "c", restart: "restarting" },
+    ]);
+  });
+
+  it("fail a restart the demo is asked to, which can be tried again", async () => {
+    const onRestart = vi.fn();
+    const backend = new MockBackend({ update: "restartfails", onRestart });
+    const states: unknown[] = [];
+    backend.onUpdateState((state) => states.push(state));
+    const failed = {
+      code: "unsupported",
+      message: "Couldn't restart. Try again, or quit Cumulas Mail and open it again.",
+    };
+    await expect(backend.restartApp()).rejects.toEqual(failed);
+    await expect(backend.restartApp()).rejects.toEqual(failed);
+    expect(backend.calls.restart).toBe(2);
+    expect(onRestart).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(states.map((s) => (s as { restart: string }).restart)).toEqual([
+      "restarting",
+      "failed",
+      "restarting",
+      "failed",
+    ]);
+  });
+
+  it("ask the page to restart, as the tray does", () => {
+    const backend = new MockBackend({ update: "installed" });
+    const asked = vi.fn();
+    const off = backend.onRestartRequested(asked);
+    backend.requestRestart();
+    expect(asked).toHaveBeenCalledTimes(1);
+    off();
+    backend.requestRestart();
+    expect(asked).toHaveBeenCalledTimes(1);
   });
 });
 

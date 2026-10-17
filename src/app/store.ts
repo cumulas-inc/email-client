@@ -7,6 +7,20 @@ export type Module = "mail" | "calendar" | "people" | "tasks";
 export type SettingsSection =
   "accounts" | "general" | "mail" | "signatures" | "microsoft" | "about";
 
+/** The ways of leaving the app: both lose an unsent message. */
+export type Leave = "quit" | "restart";
+
+/** Where the update whose card was put off is kept, per device. */
+export const DISMISSED_UPDATE_KEY = "cumulas.update.dismissed";
+
+function storedDismissedUpdate(): string | null {
+  try {
+    return window.localStorage.getItem(DISMISSED_UPDATE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 /** A request to show an event in Calendar (a reminder was clicked). */
 export interface CalendarRequest {
   eventId: string;
@@ -45,9 +59,16 @@ interface AppState {
   requestCompose: (request: ComposeRequest) => void;
   clearComposeRequest: () => void;
 
-  /** Asking whether to quit and lose an unsent message. */
-  quitConfirmOpen: boolean;
-  setQuitConfirmOpen: (open: boolean) => void;
+  /** Asking whether to quit (or restart into an update) and lose an unsent message. */
+  leaveConfirm: Leave | null;
+  setLeaveConfirm: (leave: Leave | null) => void;
+
+  /**
+   * The installed update whose card was put off (Later), by its commit: the
+   * card comes back only for another one. Remembered per device.
+   */
+  dismissedUpdate: string | null;
+  dismissUpdate: (commit: string) => void;
 
   /** The one-time offer to start at login, after the first account was added. */
   startAtLoginOffer: boolean;
@@ -81,8 +102,18 @@ export const useAppStore = create<AppState>((set) => ({
   requestCompose: (composeRequest) => set({ composeRequest, module: "mail" }),
   clearComposeRequest: () => set({ composeRequest: null }),
 
-  quitConfirmOpen: false,
-  setQuitConfirmOpen: (quitConfirmOpen) => set({ quitConfirmOpen }),
+  leaveConfirm: null,
+  setLeaveConfirm: (leaveConfirm) => set({ leaveConfirm }),
+
+  dismissedUpdate: storedDismissedUpdate(),
+  dismissUpdate: (commit) => {
+    try {
+      window.localStorage.setItem(DISMISSED_UPDATE_KEY, commit);
+    } catch {
+      // Without storage, it's put off for this run.
+    }
+    set({ dismissedUpdate: commit });
+  },
 
   startAtLoginOffer: false,
   setStartAtLoginOffer: (startAtLoginOffer) => set({ startAtLoginOffer }),

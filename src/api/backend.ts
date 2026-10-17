@@ -35,6 +35,7 @@ import type {
   TaskDraft,
   TaskList,
   TaskPatch,
+  UpdateState,
 } from "./types";
 
 export type Unsubscribe = () => void;
@@ -110,6 +111,15 @@ export interface Backend {
    * once the page listens for onNavigate.
    */
   takePendingNavigation(): Promise<Navigate | null>;
+  /** What the Flatpak portal says about updates; changes arrive with onUpdateState. */
+  getUpdateState(): Promise<UpdateState>;
+  /**
+   * Starts the installed update, which takes over, and quits: an unsent
+   * message is lost, so ask first. Asked again while it restarts, does nothing.
+   * Rejects with unsupported when it couldn't restart; the app keeps running
+   * then, and can try again.
+   */
+  restartApp(): Promise<void>;
 
   // Reminders
   /** The reminders due now, or snoozed. */
@@ -223,4 +233,10 @@ export interface Backend {
    * Quit, asking first when an unsent message would be lost.
    */
   onQuitRequested(handler: () => void): Unsubscribe;
+  onUpdateState(handler: (state: UpdateState) => void): Unsubscribe;
+  /**
+   * Restart to update from outside the page (the tray, a notification): the
+   * page restarts as for its own Restart, asking first the way Quit does.
+   */
+  onRestartRequested(handler: () => void): Unsubscribe;
 }

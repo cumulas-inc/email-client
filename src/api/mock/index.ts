@@ -33,6 +33,7 @@ import type {
   SnoozeFor,
   SyncStatus,
   Task,
+  UpdateState,
 } from "../types";
 import { cleanFamily } from "../../lib/fonts";
 import {
@@ -292,6 +293,18 @@ export type DemoSignature = "addedOnSend" | "notAllowed" | "stale" | "notUsed" |
 /** Push states the demo can show for its Microsoft account (`?push=` in the URL). */
 export type DemoPush = "consent" | "refused" | "unreachable";
 
+/**
+ * An update of the Flatpak the demo has installed (`?update=` in the URL):
+ * restarting into it works ("installed"), or fails and can be tried again
+ * ("restartfails").
+ */
+export type DemoUpdate = "installed" | "restartfails";
+
+/** The installed update's commit in the demo. */
+export const DEMO_UPDATE_COMMIT = "demo-commit-2";
+
+const RESTART_FAILED = "Couldn't restart. Try again, or quit Cumulas Mail and open it again.";
+
 /** The optional features of a Microsoft account, in the order the core lists them. */
 const FEATURES: readonly AccountFeature[] = ["calendar", "contacts", "tasks", "mailboxSettings"];
 
@@ -405,6 +418,12 @@ export interface MockOptions {
   refused?: AccountFeature[];
   /** Microsoft sign-in uses an organization's own app registration: approval links return to localhost and there's no page for administrators (`?customclient`). */
   customClient?: boolean;
+  /** An update of the Flatpak is installed (`?update=installed|restartfails`). */
+  update?: DemoUpdate;
+  /** Started by a restart into an update (`?updated`). */
+  restartedToUpdate?: boolean;
+  /** What a restart that works does; the browser demo reloads as restarted. */
+  onRestart?: () => void;
 }
 
 /** The demo's Microsoft account's push status for `?push=`. */
@@ -457,6 +476,13 @@ export class MockBackend implements Backend {
   private navigateHandlers = new Set<(to: Navigate) => void>();
   private backgroundHandlers = new Set<(state: BackgroundState) => void>();
   private quitHandlers = new Set<() => void>();
+  private updateHandlers = new Set<(state: UpdateState) => void>();
+  private restartHandlers = new Set<() => void>();
+  private update: UpdateState;
+  /** Restarting fails (`?update=restartfails`). */
+  private failRestart: boolean;
+  private restartedToUpdate: boolean;
+  private onRestart: (() => void) | undefined;
   private reminderHandlers = new Set<(event: RemindersChangedEvent) => void>();
   /** What became of reminders: snoozed until, or dismissed. */
   private reminderStates = new Map<string, { snoozedUntil?: number; dismissed?: boolean }>();
@@ -473,7 +499,7 @@ export class MockBackend implements Backend {
   >;
   private pendingNavigation: Navigate | null = null;
   /** Calls the desktop app would have acted on, for tests. */
-  readonly calls = { quit: 0, quitCanceled: 0, testNotifications: 0 };
+  readonly calls = { quit: 0, quitCanceled: 0, restart: 0, testNotifications: 0 };
   private seq = 1000;
   private latency: number;
   private pendingSignIn: (() => void) | null = null;
@@ -529,6 +555,12 @@ export class MockBackend implements Backend {
       ...options.background,
     };
     this.customClient = options.customClient ?? false;
+    this.update = options.update
+      ? { kind: "installed", commit: DEMO_UPDATE_COMMIT, restart: "idle" }
+      : { kind: "none" };
+    this.failRestart = options.update === "restartfails";
+    this.restartedToUpdate = options.restartedToUpdate ?? false;
+    this.onRestart = options.onRestart;
     const microsoft = this.state.accounts.find((a) => a.kind === "microsoft");
     if (options.push && microsoft) {
       this.pushOverrides.set(microsoft.id, demoPush(options.push, this.customClient));
@@ -609,6 +641,7 @@ export class MockBackend implements Backend {
       microsoftClientIdBuiltIn: true,
       syncServer: "sync.cumulas.co",
       signatureServer: "signature.cumulas.co",
+      restartedToUpdate: this.restartedToUpdate,
     };
   }
 
@@ -1189,6 +1222,42 @@ export class MockBackend implements Backend {
   /** What the tray's Quit does while the page is there: asks the page. */
   requestQuit() {
     this.quitHandlers.forEach((h) => h());
+  }
+
+  async getUpdateState() {
+    await this.delay();
+    return clone(this.update);
+  }
+
+  async restartApp() {
+    await this.delay();
+    const update = this.update;
+    if (update.kind !== "installed") fail("unsupported", "There's no new version to restart into.");
+    // Like the desktop app: one restart at a time.
+    if (update.restart === "restarting") return;
+    this.calls.restart += 1;
+    this.setUpdateState({ ...update, restart: "restarting" });
+    await this.delay();
+    if (this.failRestart) {
+      this.setUpdateState({ ...update, restart: "failed" });
+      fail("unsupported", RESTART_FAILED);
+    }
+    // The desktop app exits here, once the new version has taken over.
+    this.onRestart?.();
+  }
+
+  /** Sets the update state, as the Flatpak portal would report it (tests, demos). */
+  setUpdateState(state: UpdateState) {
+    this.update = clone(state);
+    queueMicrotask(() => this.updateHandlers.forEach((h) => h(clone(state))));
+  }
+
+  /**
+   * What the tray's Restart to update, or a notification's Restart, does while
+   * the page is there: asks the page.
+   */
+  requestRestart() {
+    this.restartHandlers.forEach((h) => h());
   }
 
   // --- reminders ----------------------------------------------------------------
@@ -2178,6 +2247,16 @@ export class MockBackend implements Backend {
   onQuitRequested(handler: () => void): Unsubscribe {
     this.quitHandlers.add(handler);
     return () => this.quitHandlers.delete(handler);
+  }
+
+  onUpdateState(handler: (state: UpdateState) => void): Unsubscribe {
+    this.updateHandlers.add(handler);
+    return () => this.updateHandlers.delete(handler);
+  }
+
+  onRestartRequested(handler: () => void): Unsubscribe {
+    this.restartHandlers.add(handler);
+    return () => this.restartHandlers.delete(handler);
   }
 
   onRemindersChanged(handler: (event: RemindersChangedEvent) => void): Unsubscribe {

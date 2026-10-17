@@ -1,11 +1,11 @@
-import { Info, Menu as MenuIcon, Power, Settings } from "lucide-react";
+import { CircleArrowUp, Info, Menu as MenuIcon, Power, Settings } from "lucide-react";
 
-import { useAccounts } from "../api/queries";
+import { useAccounts, useUpdateState } from "../api/queries";
 import { Avatar } from "../components/Avatar";
-import { Menu } from "../components/Menu";
+import { Menu, type MenuItem } from "../components/Menu";
 import { LogoMark } from "./LogoMark";
 import { RemindersButton } from "./Reminders";
-import { useQuit } from "./useQuit";
+import { useQuit, useRestart } from "./useQuit";
 import { useAppStore } from "./store";
 
 /** The quiet strip above the cards: the name on the left; the reminders, the
@@ -13,8 +13,25 @@ import { useAppStore } from "./store";
 export function AppHeader() {
   const openSettings = useAppStore((s) => s.openSettings);
   const quit = useQuit();
+  const restart = useRestart();
   const { data: accounts = [] } = useAccounts();
+  const { data: update } = useUpdateState();
   const me = accounts[0];
+  const installed = update?.kind === "installed" ? update : null;
+  const restarting = installed?.restart === "restarting";
+  // Right above Quit, the other way of leaving: Settings stays first, where
+  // the menu puts the focus.
+  const restartItem: MenuItem[] = installed
+    ? [
+        {
+          label: restarting ? "Restarting…" : "Restart to update",
+          icon: <CircleArrowUp size={16} />,
+          separator: true,
+          disabled: restarting,
+          onSelect: restart,
+        },
+      ]
+    : [];
 
   return (
     <header className="app-header">
@@ -33,11 +50,12 @@ export function AppHeader() {
           <button
             {...props}
             type="button"
-            className="icon-btn"
+            className="icon-btn app-header__menu"
             title="Main menu"
-            aria-label="Main menu"
+            aria-label={installed ? "Main menu, update installed" : "Main menu"}
           >
             <MenuIcon size={18} />
+            {installed && <span className="app-header__menu-dot" aria-hidden="true" />}
           </button>
         )}
         items={[
@@ -52,10 +70,11 @@ export function AppHeader() {
             icon: <Info size={16} />,
             onSelect: () => openSettings("about"),
           },
+          ...restartItem,
           {
             label: "Quit",
             icon: <Power size={16} />,
-            separator: true,
+            separator: !installed,
             onSelect: quit,
           },
         ]}

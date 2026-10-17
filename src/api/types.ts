@@ -575,6 +575,24 @@ export interface BackgroundState {
   notifications: NotifierKind | null;
 }
 
+/**
+ * Restarting into an installed update: not asked for yet, under way (the new
+ * version is starting, to take over), or the last try failed (it can be tried
+ * again).
+ */
+export type RestartPhase = "idle" | "restarting" | "failed";
+
+/**
+ * An update of the Flatpak, as the Flatpak portal reports it (it checks every
+ * 30 minutes). Software centers and `flatpak update` install updates; the app
+ * says when one is installed and restarts into it. Always { kind: "none" }
+ * outside a Flatpak.
+ */
+export type UpdateState =
+  | { kind: "none" }
+  /** A version other than the running one is installed. */
+  | { kind: "installed"; commit: string; restart: RestartPhase };
+
 /** Where the desktop asks the page to go (a notification or the tray was clicked). */
 export type Navigate =
   | { kind: "message"; messageId: string; folderId: string; accountId: string }
@@ -599,6 +617,8 @@ export interface AppInfo {
    * build or run.
    */
   signatureServer: string | null;
+  /** Started by a restart into an update. */
+  restartedToUpdate: boolean;
 }
 
 // --- Errors -----------------------------------------------------------------
