@@ -3,11 +3,13 @@ import {
   useCallback,
   useEffect,
   useId,
+  useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
   type ReactNode,
+  type Ref,
   type RefObject,
 } from "react";
 
@@ -31,7 +33,13 @@ interface TriggerProps {
   ref: RefObject<HTMLButtonElement | null>;
 }
 
+/** Opens the menu from elsewhere: a choice that has to be made now. */
+export interface MenuHandle {
+  open: () => void;
+}
+
 interface MenuProps {
+  ref?: Ref<MenuHandle>;
   trigger: (props: TriggerProps) => ReactNode;
   items: MenuItem[];
   align?: "start" | "end";
@@ -55,11 +63,13 @@ function cssZoom(el: Element): number {
 }
 
 /** Dropdown menu with keyboard navigation (arrows, Home/End, Escape). */
-export function Menu({ trigger, items, align = "start", label, fixed = false }: MenuProps) {
+export function Menu({ ref, trigger, items, align = "start", label, fixed = false }: MenuProps) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  useImperativeHandle(ref, () => ({ open: () => setOpen(true) }), []);
 
   const close = useCallback((focusTrigger: boolean) => {
     setOpen(false);

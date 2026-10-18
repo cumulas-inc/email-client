@@ -35,7 +35,8 @@ export interface Account {
 }
 
 /** An optional part of a Microsoft account that needs a permission of its own (in display order). */
-export type AccountFeature = "calendar" | "contacts" | "tasks" | "mailboxSettings";
+export type AccountFeature =
+  "calendar" | "contacts" | "tasks" | "mailboxSettings" | "sensitivityLabels";
 
 /** What a Microsoft sign-in asks permission for. */
 export type PermissionRequest =
@@ -127,6 +128,44 @@ export interface Message extends MessageSummary {
   internetMessageId: string | null;
   inReplyTo: string | null;
   references: string[];
+  /** How the message is protected; null for ordinary mail. */
+  protection: Protection | null;
+  /** Its sensitivity label from the account's own organization (Microsoft work and school accounts). */
+  label: MessageLabel | null;
+  /** A copy in a Sent folder of mail Cumulas Mail sent: what it asked for. */
+  requested: RequestedProtection | null;
+}
+
+/** How a message is protected, as far as the app can tell. */
+export type ProtectionKind = "rightsManaged" | "smimeEncrypted" | "smimeSigned" | "portalLink";
+
+export interface Protection {
+  kind: ProtectionKind;
+  /** Attachments that only hold the protected content or the signature: hidden, explained. */
+  containerIds: string[];
+  /** The verified link to Microsoft's encrypted message portal, as written; null without one. */
+  portalUrl: string | null;
+  /** Signed: some content is inside a container Cumulas Mail couldn't unpack. */
+  contentHidden: boolean;
+}
+
+export interface MessageLabel {
+  id: string;
+  /** "Parent › Child", the message's own (cleaned) name, or null. */
+  name: string | null;
+  /** "#rrggbb" or null. */
+  color: string | null;
+  /** Name and color come from the account's labels, not from the message. */
+  fromCatalog: boolean;
+}
+
+/** Encryption the organization's mail server can be asked for. */
+export type ProtectAction = "encrypt" | "doNotForward";
+
+/** A Sent copy of mail Cumulas Mail sent: what it asked the organization's mail server for. */
+export interface RequestedProtection {
+  action: ProtectAction | null;
+  label: MessageLabel | null;
 }
 
 export interface MessageQuery {
@@ -180,6 +219,80 @@ export interface OutgoingMessage {
   importance?: Importance | null;
   replyToMessageId?: string | null;
   replyKind?: ReplyKind | null;
+  /** Encryption to ask the organization's mail server for; refused unless its check passed. */
+  protect?: ProtectAction | null;
+  /** The sensitivity label to ask for (a GUID); refused unless its check passed. */
+  labelId?: string | null;
+}
+
+// --- Protection setup ---------------------------------------------------------
+
+/** One thing a check sends a test message for. */
+export type CheckItem =
+  { kind: "action"; action: ProtectAction } | { kind: "label"; labelId: string };
+
+/**
+ * A check's outcome: never checked, waiting for its test message, arrived
+ * protected (offered), applied but too long ago (not offered until checked
+ * again), arrived without it, or the app can't tell (see the note).
+ */
+export type CheckState =
+  "notChecked" | "waiting" | "applied" | "expired" | "notApplied" | "unknown";
+
+/** Why a check ended as it did, when the state alone doesn't say. */
+export type CheckNote = "otherRule" | "headerKept" | "notArrived" | "headerNotKept";
+
+export interface CheckResult {
+  state: CheckState;
+  /** When it was decided (or sent, while waiting); null if never checked. */
+  at: string | null;
+  note: CheckNote | null;
+  /** The test message arrived and can be opened in Outlook on the web. */
+  testMessage: boolean;
+}
+
+/** A sensitivity label Microsoft 365 lists for the person, with its check. */
+export interface LabelOption {
+  /** GUID, lowercase. */
+  id: string;
+  name: string;
+  parentName: string | null;
+  tooltip: string | null;
+  /** "#rrggbb" or null. */
+  color: string | null;
+  /** It encrypts. */
+  hasProtection: boolean;
+  /** Higher is more sensitive; null when Microsoft 365 doesn't say. */
+  sensitivity: number | null;
+  check: CheckResult;
+}
+
+export interface LabelPolicy {
+  /** A label is required. */
+  required: boolean;
+  defaultLabelId: string | null;
+  /** Lowering a label needs a reason, which Cumulas Mail can't give. */
+  justifyDowngrade: boolean;
+  /** https only. */
+  moreInfoUrl: string | null;
+}
+
+/** What an account can send protected, and how its checks went. */
+export interface ProtectionSetup {
+  accountId: string;
+  /** A Microsoft 365 work or school account: the only kind that can. */
+  supported: boolean;
+  encrypt: CheckResult;
+  doNotForward: CheckResult;
+  /** Empty without the permission, or until first listed. */
+  labels: LabelOption[];
+  policy: LabelPolicy;
+  /** When Microsoft 365 last listed the labels; null until then. */
+  labelsListedAt: string | null;
+  /** Why the last listing failed; null after a success. `labels` are the ones listed before. */
+  labelsError: string | null;
+  /** A check is waiting for its messages. */
+  checking: boolean;
 }
 
 // --- Calendar ---------------------------------------------------------------
@@ -442,7 +555,8 @@ export interface SyncStatus {
   lastSyncedAt: string | null;
 }
 
-export type DataKind = "accounts" | "mail" | "calendar" | "contacts" | "tasks" | "signatures";
+export type DataKind =
+  "accounts" | "mail" | "calendar" | "contacts" | "tasks" | "signatures" | "protection";
 
 export interface DataChangedEvent {
   kinds: DataKind[];
@@ -651,6 +765,14 @@ export type SignInBlockedReason =
 /** permissionRequired: the permission isn't granted, or Microsoft 365 refused the feature. */
 export type PermissionRequiredReason = "notGranted" | "refused";
 
+/**
+ * Why sending refused a message: it replies to or forwards an encrypted one
+ * (`messageId`), a label is required, Microsoft 365 didn't keep the request
+ * on its draft, or the reply already carries another label (`labelId`).
+ */
+export type SendRefusedReason =
+  "protectedOriginal" | "labelRequired" | "headersNotKept" | "labelCopied";
+
 /** Shape of errors rejected by backend calls. */
 export interface BackendError {
   code: ErrorCode;
@@ -661,13 +783,17 @@ export interface BackendError {
     /** The tenant has Microsoft's admin consent workflow ("Request approval") enabled. */
     canRequestApproval?: boolean;
     adminPageUrl?: string | null;
-    /** signInBlocked and authRequired-after-refresh: why. signInCancelled: "timeout". permissionRequired: which state. */
-    reason?: SignInBlockedReason | "timeout" | PermissionRequiredReason;
+    /** signInBlocked and authRequired-after-refresh: why. signInCancelled: "timeout". permissionRequired: which state. sendMessage: why it refused. */
+    reason?: SignInBlockedReason | "timeout" | PermissionRequiredReason | SendRefusedReason;
     /** signInBlocked (and authRequired after a blocked refresh): Microsoft's AADSTS code. */
     aadsts?: number;
     /** permissionRequired */
     feature?: AccountFeature;
     accountId?: string;
+    /** protectedOriginal: the message replied to or forwarded. */
+    messageId?: string;
+    /** labelCopied: the label already on the reply or forward. */
+    labelId?: string;
     [key: string]: unknown;
   };
 }

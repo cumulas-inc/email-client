@@ -1319,6 +1319,18 @@
   border-radius: 2.5px;
 }
 
+/* A sensitivity label: its name can be long; the tooltip has it in full. */
+.mail-tag--label {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mail-tag__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Who it's from, to whom, when; and the ways to answer, right beside it. */
 .mail-reader__sender {
   display: flex;
@@ -1513,6 +1525,90 @@
 
 .mail-banner__text {
   flex: 1;
+}
+
+/* What the app can't open of a protected or signed message, and where to
+   open it. A note, not an alarm: quiet unless it asks for care (a link to
+   Microsoft's portal, which a phishing message could imitate). */
+.mail-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding: 14px var(--space-4) 14px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-primary);
+}
+
+.mail-notice--caution {
+  background: var(--warning-subtle);
+  box-shadow: none;
+}
+
+.mail-notice__icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--fg-secondary);
+}
+
+.mail-notice--caution .mail-notice__icon {
+  color: var(--warning);
+}
+
+.mail-notice__content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mail-notice__title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.mail-notice__text {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+.mail-notice__address,
+.mail-notice__file {
+  overflow-wrap: anywhere;
+}
+
+.mail-notice__file {
+  font-weight: var(--weight-medium);
+}
+
+.mail-notice__files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
+.mail-notice__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: 4px;
+}
+
+/* A sent message's request: what the organization's mail server was asked for. */
+.mail-reader__caveat {
+  margin: 8px 0 0;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  text-wrap: pretty;
 }
 
 /* Attachments: small cards, a page tinted by file type on each. */
@@ -2336,6 +2432,83 @@
   color: var(--fg-tertiary);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+}
+
+/* Encrypt and Sensitivity: on when they ask for something. */
+.mail-compose__protect.is-on,
+.mail-compose__sensitivity.is-on {
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+}
+
+.mail-compose__protect.is-on:hover:not(:disabled),
+.mail-compose__sensitivity.is-on:hover:not(:disabled) {
+  background: var(--brand-subtle-hover);
+  color: var(--brand-text);
+}
+
+/* The label's color, beside its name (never its text color). */
+.mail-label-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 3px;
+}
+
+.mail-compose__sensitivity .mail-tool__label {
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Their names go first when the toolbar gets crowded: the subject row's
+   tags say what they ask for. */
+@container compose (max-width: 860px) {
+  .mail-compose__protect .mail-tool__label,
+  .mail-compose__sensitivity .mail-tool__label {
+    display: none;
+  }
+
+  .mail-compose__protect,
+  .mail-compose__sensitivity {
+    padding: 0 6px 0 8px;
+  }
+}
+
+/* What the composer asks the organization's mail server for, and why Send
+   stopped over it. */
+.mail-compose__protection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: var(--space-2);
+  padding: 0 var(--space-1);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
+.mail-compose__hint {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+.mail-compose__hint + .mail-compose__hint {
+  margin-top: 4px;
+}
+
+.mail-compose__protection-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--danger);
+  font-weight: var(--weight-medium);
+}
+
+.mail-compose__protection-error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
 .mail-compose__warning {

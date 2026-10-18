@@ -5,6 +5,7 @@ import type {
   ActiveReminder,
   BackendError,
   DataChangedEvent,
+  OutgoingMessage,
   PermissionRequest,
   RemindersChangedEvent,
 } from "../types";
@@ -671,13 +672,13 @@ describe("the demo's search", () => {
 
 describe("the demo's Microsoft sign-in", () => {
   const PUBLISHED_LINK =
-    "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F";
+    "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FInformationProtectionPolicy.Read+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F";
   const ADMIN_PAGE = "https://flatpak.cumulas.co/admin-consent/";
   const ALL: PermissionRequest = { kind: "all" };
   const MAIL_ONLY: PermissionRequest = { kind: "mailOnly" };
   const CURRENT: PermissionRequest = { kind: "current" };
   const calendar: PermissionRequest = { kind: "feature", feature: "calendar" };
-  const EVERY_FEATURE = ["calendar", "contacts", "tasks", "mailboxSettings"];
+  const EVERY_FEATURE = ["calendar", "contacts", "tasks", "mailboxSettings", "sensitivityLabels"];
 
   /** Every data-changed event, once the microtasks that carry them ran. */
   function changes(backend: MockBackend) {
@@ -838,16 +839,73 @@ describe("the demo's Microsoft sign-in", () => {
 
   it("adds a new account with what was asked for", async () => {
     const backend = new MockBackend();
-    expect((await backend.addMicrosoftAccount("a@contoso.example")).needsPermission).toEqual([]);
+    // Sensitivity labels are asked for only when turned on by themselves.
+    expect((await backend.addMicrosoftAccount("a@contoso.example")).needsPermission).toEqual([
+      "sensitivityLabels",
+    ]);
     expect(
       (await backend.addMicrosoftAccount("b@contoso.example", MAIL_ONLY)).needsPermission,
     ).toEqual(EVERY_FEATURE);
     expect(
       (await backend.addMicrosoftAccount("c@contoso.example", calendar)).needsPermission,
-    ).toEqual(["contacts", "tasks", "mailboxSettings"]);
+    ).toEqual(["contacts", "tasks", "mailboxSettings", "sensitivityLabels"]);
     expect(
       (await backend.addMicrosoftAccount("d@contoso.example", CURRENT)).needsPermission,
-    ).toEqual([]);
+    ).toEqual(["sensitivityLabels"]);
+  });
+
+  it("never lists sensitivity labels for personal accounts", async () => {
+    const backend = new MockBackend();
+    const personal = await backend.addMicrosoftAccount("sam@outlook.com");
+    expect(personal.needsPermission).toEqual([]);
+    expect(
+      (await backend.addMicrosoftAccount("kim@hotmail.com", MAIL_ONLY)).needsPermission,
+    ).toEqual(["calendar", "contacts", "tasks", "mailboxSettings"]);
+    await expect(
+      backend.addMicrosoftAccount("sam@outlook.com", {
+        kind: "feature",
+        feature: "sensitivityLabels",
+      }),
+    ).rejects.toEqual({
+      code: "invalidInput",
+      message: "Sensitivity labels are only for work and school accounts.",
+    });
+    expect(await backend.getProtectionSetup(personal.id)).toMatchObject({
+      supported: false,
+      labels: [],
+    });
+  });
+
+  it("keeps sensitivity labels off when an account signs in again for everything", async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => void vi.useRealTimers());
+    const backend = new MockBackend({ missing: ["calendar", "sensitivityLabels"] });
+    const again = await backend.addMicrosoftAccount("alex.morgan@acme.example", ALL);
+    expect(again.needsPermission).toEqual(["sensitivityLabels"]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect((await backend.getProtectionSetup("acct-work")).labels).toEqual([]);
+
+    // Turning them on lists them with the sync that follows.
+    const seen = changes(backend);
+    const on = await backend.addMicrosoftAccount("alex.morgan@acme.example", {
+      kind: "feature",
+      feature: "sensitivityLabels",
+    });
+    expect(on.needsPermission).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1000);
+    const setup = await backend.getProtectionSetup("acct-work");
+    expect(setup.labels.map((l) => l.name)).toEqual([
+      "Public",
+      "General",
+      "Confidential",
+      "All Employees",
+      "Project Atlas",
+    ]);
+    expect(setup.labelsListedAt).not.toBeNull();
+    expect(await seen()).toContainEqual({
+      kinds: ["accounts", "protection"],
+      accountId: "acct-work",
+    });
   });
 
   it("updates an account signing in again in place, by its address", async () => {
@@ -1037,5 +1095,351 @@ describe("the demo's Microsoft sign-in", () => {
     await expect(
       backend.createContact({ accountId: "acct-home", displayName: "Kim", emails: [], phones: [] }),
     ).resolves.toMatchObject({ accountId: "acct-home" });
+  });
+});
+
+describe("the demo's protected mail", () => {
+  const EMAIL = "alex.morgan@acme.example";
+  const GENERAL = "2a7f3c10-8b4e-4f6a-a1d2-3b4c5d6e7f80";
+  const PUBLIC = "0f6c58a2-4a6b-4d3e-9b1a-1c2d3e4f5a60";
+  const ALL_EMPLOYEES = "7b2d4e61-9c3a-4e5f-8a7b-6c5d4e3f2a10";
+  const ATLAS = "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c60";
+  const encrypt = { kind: "action", action: "encrypt" } as const;
+  const general = { kind: "label", labelId: GENERAL } as const;
+
+  const message = (fields: Partial<OutgoingMessage> = {}): OutgoingMessage => ({
+    accountId: "acct-work",
+    to: [{ name: null, address: "priya.raman@acme.example" }],
+    cc: [],
+    bcc: [],
+    subject: "Pricing",
+    bodyHtml: "<p>Hi</p>",
+    attachments: [],
+    ...fields,
+  });
+
+  it("lists the work account's labels, with nothing checked", async () => {
+    const backend = new MockBackend();
+    const setup = await backend.getProtectionSetup("acct-work");
+    expect(setup).toMatchObject({
+      accountId: "acct-work",
+      supported: true,
+      encrypt: { state: "notChecked", at: null, note: null, testMessage: false },
+      doNotForward: { state: "notChecked" },
+      policy: {
+        required: true,
+        defaultLabelId: GENERAL,
+        justifyDowngrade: true,
+        moreInfoUrl: "https://acme.example/labels",
+      },
+      labelsError: null,
+      checking: false,
+    });
+    expect(setup.labels.map((l) => [l.parentName, l.name, l.hasProtection])).toEqual([
+      [null, "Public", false],
+      [null, "General", false],
+      [null, "Confidential", false],
+      ["Confidential", "All Employees", true],
+      ["Highly Confidential", "Project Atlas", true],
+    ]);
+    expect(setup.labels.every((l) => l.check.state === "notChecked")).toBe(true);
+    // IMAP accounts can't send protected mail.
+    expect(await backend.getProtectionSetup("acct-home")).toEqual({
+      accountId: "acct-home",
+      supported: false,
+      encrypt: { state: "notChecked", at: null, note: null, testMessage: false },
+      doNotForward: { state: "notChecked", at: null, note: null, testMessage: false },
+      labels: [],
+      policy: { required: false, defaultLabelId: null, justifyDowngrade: false, moreInfoUrl: null },
+      labelsListedAt: null,
+      labelsError: null,
+      checking: false,
+    });
+    await expect(backend.checkProtection("acct-home", [encrypt])).rejects.toEqual({
+      code: "unsupported",
+      message: "Only Microsoft 365 work and school accounts can send protected mail.",
+    });
+  });
+
+  it.each(["missing", "refused"] as const)(
+    "has no labels when the permission is %s, and keeps the encryption checks",
+    async (how) => {
+      const backend = new MockBackend({ [how]: ["sensitivityLabels"] });
+      const setup = await backend.getProtectionSetup("acct-work");
+      expect(setup).toMatchObject({ supported: true, labels: [], labelsListedAt: null });
+      expect(setup.encrypt.state).toBe("notChecked");
+      await expect(backend.refreshSensitivityLabels("acct-work")).rejects.toMatchObject({
+        code: "permissionRequired",
+        details: { feature: "sensitivityLabels", accountId: "acct-work" },
+      });
+    },
+  );
+
+  it("starts in the states ?protection names", async () => {
+    const setup = await new MockBackend({ protection: "setup" }).getProtectionSetup("acct-work");
+    expect(setup.encrypt).toMatchObject({ state: "applied", testMessage: true });
+    expect(setup.doNotForward.state).toBe("applied");
+    expect(
+      Object.fromEntries(setup.labels.map((l) => [l.name, [l.check.state, l.check.note]])),
+    ).toEqual({
+      Public: ["unknown", "otherRule"],
+      General: ["applied", null],
+      Confidential: ["applied", null],
+      "All Employees": ["applied", null],
+      "Project Atlas": ["notApplied", null],
+    });
+
+    const expired = await new MockBackend({ protection: "expired" }).getProtectionSetup(
+      "acct-work",
+    );
+    expect(expired.encrypt.state).toBe("expired");
+    expect(Date.now() - Date.parse(expired.encrypt.at!)).toBeGreaterThan(90 * 86_400_000);
+    expect(expired.doNotForward.state).toBe("applied");
+
+    const checking = await new MockBackend({ protection: "checking" }).getProtectionSetup(
+      "acct-work",
+    );
+    expect(checking).toMatchObject({ checking: true, encrypt: { state: "waiting" } });
+  });
+
+  it("checks: waiting, then what arrived by the second look, moved to Deleted Items", async () => {
+    const backend = new MockBackend();
+    const deleted = async () =>
+      (await backend.listMessages("w-trash", { offset: 0, limit: 50 })).items.map((m) => m.subject);
+    expect(await deleted()).toEqual([]);
+
+    const waiting = await backend.checkProtection("acct-work", [encrypt, general]);
+    expect(waiting.checking).toBe(true);
+    expect(waiting.encrypt.state).toBe("waiting");
+    expect(waiting.labels.find((l) => l.id === GENERAL)!.check.state).toBe("waiting");
+    await expect(backend.checkProtection("acct-work", [encrypt])).rejects.toEqual({
+      code: "invalidInput",
+      message: "Wait for the check that's running to finish.",
+    });
+    await expect(backend.openProtectionCheckMessage("acct-work", encrypt)).rejects.toEqual({
+      code: "notFound",
+      message: "There's no test message to open. Check again.",
+    });
+
+    expect((await backend.refreshProtectionCheck("acct-work")).checking).toBe(true);
+    const done = await backend.refreshProtectionCheck("acct-work");
+    expect(done.checking).toBe(false);
+    expect(done.encrypt).toMatchObject({ state: "applied", testMessage: true });
+    expect(done.labels.find((l) => l.id === GENERAL)!.check.state).toBe("applied");
+    // The control and the two test messages, with the same neutral subject.
+    const subjects = await deleted();
+    expect(subjects).toHaveLength(3);
+    expect(new Set(subjects).size).toBe(1);
+    expect(subjects[0]).toMatch(/^Cumulas Mail setup check \[[a-z0-9]{8}\]$/);
+
+    await backend.openProtectionCheckMessage("acct-work", encrypt);
+    expect(backend.calls.openedInOutlook).toEqual(["check:acct-work:encrypt"]);
+  });
+
+  it("refuses checks it can't send", async () => {
+    const backend = new MockBackend();
+    const invalid = (message: string) => ({ code: "invalidInput", message });
+    await expect(backend.checkProtection("acct-work", [])).rejects.toEqual(
+      invalid("Choose what to check."),
+    );
+    const many = Array.from({ length: 20 }, () => general);
+    await expect(backend.checkProtection("acct-work", many)).rejects.toEqual(
+      invalid("Cumulas Mail checks at most 19 at a time."),
+    );
+    await expect(
+      backend.checkProtection("acct-work", [
+        { kind: "label", labelId: "00000000-0000-0000-0000-000000000000" },
+      ]),
+    ).rejects.toEqual(invalid(`That sensitivity label isn't available for ${EMAIL}.`));
+    expect((await backend.getProtectionSetup("acct-work")).checking).toBe(false);
+    // Only work and school accounts have checks, as in the core.
+    const unsupported = {
+      code: "unsupported",
+      message: "Only Microsoft 365 work and school accounts can send protected mail.",
+    };
+    await expect(backend.checkProtection("acct-home", [encrypt])).rejects.toEqual(unsupported);
+    await expect(backend.openProtectionCheckMessage("acct-home", encrypt)).rejects.toEqual(
+      unsupported,
+    );
+  });
+
+  it("refuses to send what isn't set up, as the core does", async () => {
+    const backend = new MockBackend({ protectedMail: true });
+    const invalid = (text: string, details?: object) => ({
+      code: "invalidInput",
+      message: text,
+      ...(details ? { details } : {}),
+    });
+    // Nothing checked: the label isn't required yet, and nothing can be asked for.
+    await expect(backend.sendMessage(message())).resolves.toBeUndefined();
+    await expect(backend.sendMessage(message({ protect: "encrypt" }))).rejects.toEqual(
+      invalid(`Encrypt isn't set up for ${EMAIL}. Check it in Settings → Accounts.`),
+    );
+    await expect(backend.sendMessage(message({ labelId: GENERAL }))).rejects.toEqual(
+      invalid(`The label General isn't set up for ${EMAIL}. Check it in Settings → Accounts.`),
+    );
+    await expect(backend.sendMessage(message({ labelId: "not-a-guid" }))).rejects.toEqual(
+      invalid(`That sensitivity label isn't available for ${EMAIL}.`),
+    );
+    await expect(
+      backend.sendMessage(
+        message({
+          accountId: "acct-home",
+          to: [{ name: null, address: "b@x.example" }],
+          protect: "encrypt",
+        }),
+      ),
+    ).rejects.toEqual({
+      code: "unsupported",
+      message: "Only Microsoft 365 work and school accounts can send protected mail.",
+    });
+  });
+
+  it("sends what passed its check, and the Sent copy says what was asked for", async () => {
+    const backend = new MockBackend({ protection: "expired", protectedMail: true });
+    const invalid = (text: string, details?: object) => ({
+      code: "invalidInput",
+      message: text,
+      ...(details ? { details } : {}),
+    });
+    await expect(backend.sendMessage(message())).rejects.toEqual(
+      invalid("Choose a sensitivity label. Your organization requires one.", {
+        reason: "labelRequired",
+      }),
+    );
+    await expect(
+      backend.sendMessage(message({ labelId: GENERAL, protect: "encrypt" })),
+    ).rejects.toEqual(
+      invalid(
+        "Encrypt was last checked more than 90 days ago. Check it again in Settings → Accounts.",
+      ),
+    );
+    await expect(
+      backend.sendMessage(message({ labelId: ALL_EMPLOYEES, protect: "doNotForward" })),
+    ).rejects.toEqual(
+      invalid(
+        "The label Confidential › All Employees already encrypts this message. Choose either the label or Do Not Forward.",
+      ),
+    );
+    // In the core's order: the label is judged before Encrypt's own (too old) check.
+    await expect(
+      backend.sendMessage(message({ labelId: ALL_EMPLOYEES, protect: "encrypt" })),
+    ).rejects.toEqual(
+      invalid(
+        "The label Confidential › All Employees already encrypts this message. Choose either the label or Encrypt.",
+      ),
+    );
+    await expect(backend.sendMessage(message({ labelId: ATLAS }))).rejects.toEqual(
+      invalid(
+        `The label Highly Confidential › Project Atlas isn't set up for ${EMAIL}. Check it in Settings → Accounts.`,
+      ),
+    );
+    await expect(backend.sendMessage(message({ labelId: PUBLIC }))).rejects.toMatchObject({
+      code: "invalidInput",
+    });
+
+    await backend.sendMessage(
+      message({
+        subject: "Atlas numbers",
+        labelId: GENERAL.toUpperCase(),
+        protect: "doNotForward",
+      }),
+    );
+    expect(backend.sent.at(-1)).toMatchObject({ protect: "doNotForward" });
+    const sent = (await backend.listMessages("w-sent", { offset: 0, limit: 50 })).items.find(
+      (m) => m.subject === "Atlas numbers",
+    )!;
+    expect((await backend.getMessage(sent.id)).requested).toEqual({
+      action: "doNotForward",
+      label: { id: GENERAL, name: "General", color: "#2b7aa8", fromCatalog: true },
+    });
+  });
+
+  it("hands replies to encrypted mail to Outlook on the web", async () => {
+    const backend = new MockBackend({ protectedMail: true });
+    await expect(
+      backend.sendMessage(
+        message({ replyToMessageId: "msg-protected-1", replyKind: "reply", subject: "Re: Q4" }),
+      ),
+    ).rejects.toEqual({
+      code: "unsupported",
+      message: "This message is protected. Reply to it or forward it in Outlook on the web.",
+      details: { reason: "protectedOriginal", messageId: "msg-protected-1" },
+    });
+    await expect(
+      backend.sendMessage(
+        message({
+          accountId: "acct-home",
+          replyToMessageId: "msg-protected-5",
+          replyKind: "forward",
+        }),
+      ),
+    ).rejects.toEqual({
+      code: "unsupported",
+      message:
+        "This message is encrypted. Cumulas Mail can't reply to it or forward it without removing the encryption.",
+      details: { reason: "protectedOriginal", messageId: "msg-protected-5" },
+    });
+    // Signed mail can be answered.
+    await expect(
+      backend.sendMessage(message({ replyToMessageId: "msg-protected-4", replyKind: "reply" })),
+    ).resolves.toBeUndefined();
+  });
+
+  it("opens messages in Outlook on the web, never a protection's own files", async () => {
+    const backend = new MockBackend({ protectedMail: true });
+    const forecast = await backend.getMessage("msg-protected-1");
+    expect(forecast.protection).toEqual({
+      kind: "rightsManaged",
+      containerIds: ["msg-protected-1-att-0"],
+      portalUrl: null,
+      contentHidden: false,
+    });
+    expect(forecast.label).toEqual({
+      id: ALL_EMPLOYEES,
+      name: "Confidential › All Employees",
+      color: "#b35f26",
+      fromCatalog: true,
+    });
+    await expect(
+      backend.openAttachment("msg-protected-1", "msg-protected-1-att-0"),
+    ).rejects.toEqual({
+      code: "unsupported",
+      message:
+        "This file holds a protected message's content, which Cumulas Mail can't open. Open the message in Outlook on the web.",
+    });
+    // Other files open as before.
+    await expect(backend.openAttachment("msg-1", "msg-1-att-0")).resolves.toBeUndefined();
+
+    await backend.openInOutlook("msg-protected-1");
+    expect(backend.calls.openedInOutlook).toEqual(["msg-protected-1"]);
+    await expect(backend.openInOutlook("msg-protected-5")).rejects.toEqual({
+      code: "unsupported",
+      message: "Only Microsoft 365 messages open in Outlook on the web.",
+    });
+  });
+
+  it("describes a message's protection without its content", async () => {
+    const backend = new MockBackend({ protectedMail: true });
+    const text = await backend.getMessageDiagnostics("msg-protected-1");
+    expect(text.split("\n").slice(0, 6)).toEqual([
+      "Cumulas Mail 0.1.0-demo: protection details of one message",
+      "These details don't include the message's subject, addresses, text, links, or the names of its files other than the protection's own.",
+      "",
+      "Account: Microsoft 365 (work or school)",
+      "Folder: inbox",
+      "Detected: Microsoft Purview encryption",
+    ]);
+    expect(text).toContain(
+      "  - message.rpmsg · application/x-microsoft-rpmsg-message · 47 KB · protection file",
+    );
+    expect(text).toContain(`  - ${ALL_EMPLOYEES} · this organization: yes`);
+    expect(text).not.toMatch(/Q4 forecast|Dana|dana\.whitfield/);
+
+    const portal = await backend.getMessageDiagnostics("msg-protected-3");
+    expect(portal).toContain("Portal link: yes (outlook.office365.com)");
+    expect(portal).not.toContain("recipientemailaddress");
+    // Every message has them, protected or not.
+    expect(await backend.getMessageDiagnostics("msg-1")).toContain("Detected: nothing");
   });
 });

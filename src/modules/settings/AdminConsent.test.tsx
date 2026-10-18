@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MockBackend, mockAdminConsentUrl } from "../../api/mock";
 import { renderWithBackend } from "../../test/render";
 import { AdminConsent, ApprovalLink } from "./AdminConsent";
+import { PermissionList } from "./PermissionList";
 
 const URL = mockAdminConsentUrl("contoso.example");
 const ADMIN_PAGE = "https://flatpak.cumulas.co/admin-consent/";
@@ -96,6 +97,27 @@ describe("AdminConsent", () => {
     expect(
       screen.getByRole("list", { name: "For calendar, contacts, tasks and time zone (optional)" }),
     ).toBeInTheDocument();
+  });
+
+  it("lists sensitivity labels apart: the link covers them, though nobody's asked yet", () => {
+    renderWithBackend(<AdminConsent adminConsentUrl={URL} />);
+    const labels = screen.getByRole("list", {
+      name: "For sensitivity labels (optional, work and school accounts)",
+    });
+    expect(labels).toHaveTextContent(
+      "Read the sensitivity labels you can use (work and school accounts) InformationProtectionPolicy.Read",
+    );
+    expect(
+      screen.getByRole("list", { name: "For calendar, contacts, tasks and time zone (optional)" }),
+    ).not.toHaveTextContent("sensitivity labels");
+  });
+});
+
+describe("PermissionList", () => {
+  it("leaves sensitivity labels out of what a sign-in asks for", () => {
+    renderWithBackend(<PermissionList />);
+    expect(screen.queryByText(/sensitivity labels/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("list")).toHaveLength(2);
   });
 });
 

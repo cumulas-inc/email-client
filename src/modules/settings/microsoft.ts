@@ -56,6 +56,12 @@ export const MICROSOFT_PERMISSIONS: Permission[] = [
     request: "Read and write my tasks",
     feature: "tasks",
   },
+  {
+    scopes: ["InformationProtectionPolicy.Read"],
+    label: "Read the sensitivity labels you can use (work and school accounts)",
+    request: "Read the sensitivity labels I can use",
+    feature: "sensitivityLabels",
+  },
 ];
 
 /** The optional features, in display order (as the backend lists them). */
@@ -64,7 +70,24 @@ export const ACCOUNT_FEATURES: readonly AccountFeature[] = [
   "contacts",
   "tasks",
   "mailboxSettings",
+  "sensitivityLabels",
 ];
+
+/**
+ * Features asked for only when turned on by themselves, never with the others
+ * at sign-in: generic permission messages leave them out, and they have their
+ * own place in Settings → Accounts.
+ */
+export const ON_REQUEST_FEATURES: readonly AccountFeature[] = ["sensitivityLabels"];
+
+/** The features in `list` that generic permission messages are about. */
+export function moduleFeatures(list: readonly AccountFeature[]): AccountFeature[] {
+  return list.filter((f) => !ON_REQUEST_FEATURES.includes(f));
+}
+
+/** The admin guide's section on encrypting and labeling mail sent from Cumulas Mail. */
+export const PROTECTION_GUIDE_URL =
+  "https://github.com/cumulas-inc/email-client/blob/main/docs/microsoft-365.md#sensitivity-labels-and-encryption-it-admins";
 
 /** Microsoft's tenant for personal accounts (Outlook.com, Hotmail…). */
 export const PERSONAL_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad";
@@ -211,10 +234,19 @@ export const FEATURE_COPY: Record<AccountFeature, FeatureCopy> = {
     isOn: "Mailbox time zone is on",
     refusedTitle: "Microsoft 365 refused access to your mailbox time zone",
   },
+  sensitivityLabels: {
+    name: "Sensitivity labels",
+    noun: "sensitivity labels",
+    object: "your sensitivity labels",
+    title: "Sensitivity labels need permission",
+    notOn: "Sensitivity labels weren't turned on",
+    isOn: "Sensitivity labels are on",
+    refusedTitle: "Microsoft 365 refused access to your sensitivity labels",
+  },
 };
 
 /** The features a module of its own shows: calendar, contacts and tasks. */
-export type ModuleFeature = Exclude<AccountFeature, "mailboxSettings">;
+export type ModuleFeature = Exclude<AccountFeature, "mailboxSettings" | "sensitivityLabels">;
 
 /** The Microsoft accounts that can't use the feature: its permission missing, or refused. */
 export function accountsWithout(accounts: Account[], feature: AccountFeature) {

@@ -188,7 +188,7 @@ export function AdminConsent({
           Only permissions that act as you. Your data stays on this computer and goes only to
           Microsoft.
         </p>
-        <PermissionList showScopes push={linkIncludesPush(adminConsentUrl)} />
+        <PermissionList showScopes push={linkIncludesPush(adminConsentUrl)} onRequest />
       </details>
     </ResultPanel>
   );

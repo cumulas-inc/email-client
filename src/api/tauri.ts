@@ -106,6 +106,15 @@ export const tauriBackend: Backend = {
   openAttachment: (messageId, attachmentId) =>
     invoke("open_attachment", { messageId, attachmentId }),
 
+  getProtectionSetup: (accountId) => invoke("get_protection_setup", { accountId }),
+  refreshSensitivityLabels: (accountId) => invoke("refresh_sensitivity_labels", { accountId }),
+  checkProtection: (accountId, items) => invoke("check_protection", { accountId, items }),
+  refreshProtectionCheck: (accountId) => invoke("refresh_protection_check", { accountId }),
+  openProtectionCheckMessage: (accountId, item) =>
+    invoke("open_protection_check_message", { accountId, item }),
+  openInOutlook: (messageId) => invoke("open_in_outlook", { messageId }),
+  getMessageDiagnostics: (messageId) => invoke("get_message_diagnostics", { messageId }),
+
   getAccountSignature: (accountId) => invoke("get_account_signature", { accountId }),
   updateOwnSignature: (accountId, html, onReplies) =>
     invoke("update_own_signature", { accountId, html, onReplies }),

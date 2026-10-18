@@ -894,6 +894,21 @@ describe("Microsoft permissions", () => {
     expect(screen.queryByRole("button", { name: "Ask IT" })).not.toBeInTheDocument();
   });
 
+  it("leaves sensitivity labels to their own field", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ missing: ["sensitivityLabels"] });
+    openAt("accounts", backend);
+
+    await screen.findByText("alex.morgan@acme.example");
+    expect(screen.queryByText(/Needs permission/)).not.toBeInTheDocument();
+    await manageWork(user);
+    expect(screen.queryByText("Permissions")).not.toBeInTheDocument();
+    expect(await screen.findByText("Sensitivity labels and encryption")).toBeInTheDocument();
+    expect(
+      screen.getByText("Cumulas Mail needs permission to read the sensitivity labels you can use."),
+    ).toBeInTheDocument();
+  });
+
   it("doesn't say mail works when the account can't sync", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend({ missing: ["calendar"] });

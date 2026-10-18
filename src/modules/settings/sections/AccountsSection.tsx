@@ -17,7 +17,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useBackend } from "../../../api/context";
 import { errorMessage } from "../../../api/errors";
 import { useAccounts, usePushStatuses, useSettings, useSyncStatuses } from "../../../api/queries";
-import type { Account, PushStatus, SyncStatus } from "../../../api/types";
+import type { Account, AccountFeature, PushStatus, SyncStatus } from "../../../api/types";
 import { ColorPicker } from "../../../components/ColorPicker";
 import { EmptyState } from "../../../components/EmptyState";
 import { PaneSpinner, Spinner } from "../../../components/Spinner";
@@ -32,8 +32,15 @@ import { ImapAccountEditor } from "../ImapAccountEditor";
 import { ApprovalLink } from "../AdminConsent";
 import { REFUSED_HINT } from "../FeaturePermission";
 import { noteFeatureTurnedOn } from "../featureToasts";
-import { FEATURE_COPY, featureList, isPersonalAccount, refusedFeatureMailto } from "../microsoft";
+import {
+  FEATURE_COPY,
+  featureList,
+  isPersonalAccount,
+  moduleFeatures,
+  refusedFeatureMailto,
+} from "../microsoft";
 import { notifyWhere } from "../notifyScope";
+import { ProtectionField } from "../ProtectionField";
 import { describePush } from "../pushStatus";
 import { TLS_LABELS } from "../presets";
 import {
@@ -169,6 +176,9 @@ function AccountItem({
     state === "error" ? (status?.message ?? account.syncError ?? "Sync failed.") : null;
   const syncing = state === "syncing";
   const microsoft = account.kind === "microsoft";
+  // Sensitivity labels have a field of their own (ProtectionField).
+  const needing = moduleFeatures(account.needsPermission);
+  const refused = moduleFeatures(account.refusedFeatures);
 
   const syncNow = () => {
     sync.mutate(account.id, { onError: (e) => toast.error(e) });
@@ -278,19 +288,19 @@ function AccountItem({
             {account.email}
           </div>
           <div className="account-item__status">{statusNode}</div>
-          {microsoft && account.needsPermission.length > 0 && (
+          {microsoft && needing.length > 0 && (
             <div className="account-item__status">
               <span className="account-status account-status--warning">
                 <span className="account-status__dot" aria-hidden="true" />
-                Needs permission: {featureList(account.needsPermission)}
+                Needs permission: {featureList(needing)}
               </span>
             </div>
           )}
-          {microsoft && account.refusedFeatures.length > 0 && (
+          {microsoft && refused.length > 0 && (
             <div className="account-item__status">
               <span className="account-status account-status--warning">
                 <span className="account-status__dot" aria-hidden="true" />
-                Refused by Microsoft 365: {featureList(account.refusedFeatures)}
+                Refused by Microsoft 365: {featureList(refused)}
               </span>
             </div>
           )}
@@ -402,14 +412,18 @@ function AccountItem({
           </div>
 
           {push && <PushField account={account} push={push} onSignIn={signInAgain} />}
-          {microsoft &&
-            (account.needsPermission.length > 0 || account.refusedFeatures.length > 0) && (
-              <PermissionsField
-                account={account}
-                syncError={syncError !== null}
-                returnFocusId={syncButtonId}
-              />
-            )}
+          {microsoft && (needing.length > 0 || refused.length > 0) && (
+            <PermissionsField
+              account={account}
+              needing={needing}
+              refused={refused}
+              syncError={syncError !== null}
+              returnFocusId={syncButtonId}
+            />
+          )}
+          {microsoft && !isPersonalAccount(account) && (
+            <ProtectionField account={account} returnFocusId={syncButtonId} />
+          )}
           <NotifyField account={account} />
 
           {!syncError && servers}
@@ -475,6 +489,9 @@ function PushField({ account, push, onSignIn }: PushFieldProps) {
 
 interface PermissionsFieldProps {
   account: Account;
+  /** The features it lacks permission for, and those Microsoft 365 refused (sensitivity labels left out). */
+  needing: AccountFeature[];
+  refused: AccountFeature[];
   /** The account can't sync, so its mail isn't said to work. */
   syncError: boolean;
   /** Where the keyboard goes once a Turn on succeeds (the Sync now button). */
@@ -482,18 +499,23 @@ interface PermissionsFieldProps {
 }
 
 /** A Microsoft account's features it can't use: what's missing, what was refused. */
-function PermissionsField({ account, syncError, returnFocusId }: PermissionsFieldProps) {
+function PermissionsField({
+  account,
+  needing,
+  refused,
+  syncError,
+  returnFocusId,
+}: PermissionsFieldProps) {
   const id = useId();
   const askId = `${id}-ask`;
   const backend = useBackend();
   const retry = useRetryMicrosoftFeatures();
   const [asking, setAsking] = useState(false);
   const link = useAdminConsentLink(account.id, asking);
-  const { needsPermission: needing, refusedFeatures: refused } = account;
 
   const checkAgain = () => {
     // The row going away says it's back; a sync that's refused again says so.
-    for (const f of refused) noteFeatureTurnedOn(account.id, f);
+    for (const f of account.refusedFeatures) noteFeatureTurnedOn(account.id, f);
     retry.mutate(account.id, { onError: (e) => toast.error(e) });
   };
 

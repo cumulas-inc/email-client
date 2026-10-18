@@ -17,7 +17,7 @@ import {
 } from "./addAccountStore";
 import { focusOnceEnabled, useFocusOnChange, useRestoreFocus } from "./focus";
 import { ImapForm } from "./ImapForm";
-import { FEATURE_COPY, featureList } from "./microsoft";
+import { FEATURE_COPY, featureList, moduleFeatures } from "./microsoft";
 import { MicrosoftSignIn } from "./MicrosoftSignIn";
 import { StepLayout } from "./StepLayout";
 
@@ -86,8 +86,10 @@ function AddAccountFlow() {
     if (!reauth && accounts?.length === 1 && accounts[0]?.id === account.id) {
       offerStartAtLoginOnce();
     }
-    const missing = account.needsPermission.length
-      ? ` Cumulas Mail needs permission for your ${featureList(account.needsPermission)} (Settings → Accounts).`
+    // Sensitivity labels are turned on by themselves, in their own field.
+    const needing = moduleFeatures(account.needsPermission);
+    const missing = needing.length
+      ? ` Cumulas Mail needs permission for your ${featureList(needing)} (Settings → Accounts).`
       : "";
     toast.success(
       feature

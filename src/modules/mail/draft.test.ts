@@ -49,6 +49,9 @@ function message(patch: Partial<Message> = {}): Message {
     internetMessageId: null,
     inReplyTo: null,
     references: [],
+    protection: null,
+    label: null,
+    requested: null,
     ...patch,
   };
 }
@@ -338,5 +341,25 @@ describe("reply helpers", () => {
     expect(replyDraft(message(), "reply", accounts).signature).toBe("auto");
     expect(newDraft("a1").signature).toBe("auto");
     expect(newDraft("a1", { signature: "off" }).signature).toBe("off");
+  });
+
+  it("carries the original's label into a reply or forward, and starts without a request", () => {
+    const accounts = [{ displayName: me.name, email: me.address }] as Account[];
+    const label = { id: "l1", name: "Confidential", color: "#b35f26", fromCatalog: true };
+    for (const kind of ["reply", "replyAll", "forward"] as const) {
+      expect(replyDraft(message({ label }), kind, accounts)).toMatchObject({
+        originalLabel: label,
+        labelId: null,
+        labelChosen: false,
+        protect: null,
+      });
+    }
+    expect(replyDraft(message(), "reply", accounts).originalLabel).toBeNull();
+    expect(newDraft("a1")).toMatchObject({
+      protect: null,
+      labelId: null,
+      labelChosen: false,
+      originalLabel: null,
+    });
   });
 });

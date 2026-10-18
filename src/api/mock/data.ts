@@ -11,7 +11,11 @@ import type {
   EmailAddress,
   Folder,
   FolderRole,
+  LabelOption,
+  LabelPolicy,
   Message,
+  MessageLabel,
+  Protection,
   Task,
   TaskList,
 } from "../types";
@@ -117,6 +121,8 @@ function signature(name: string, title?: string): string {
 let messageSeq = 0;
 
 interface MessageSeed {
+  /** A fixed id instead of the next msg-N. */
+  id?: string;
   folderId: string;
   from: EmailAddress;
   to?: EmailAddress[];
@@ -135,7 +141,7 @@ interface MessageSeed {
 
 function message(accountId: string, me: EmailAddress, seed: MessageSeed): Message {
   messageSeq += 1;
-  const id = `msg-${messageSeq}`;
+  const id = seed.id ?? `msg-${messageSeq}`;
   const text = (seed.plainText ?? seed.html ?? "")
     .replace(/<style[\s\S]*?<\/style>/g, "")
     .replace(/<[^>]+>/g, " ")
@@ -176,6 +182,9 @@ function message(accountId: string, me: EmailAddress, seed: MessageSeed): Messag
     internetMessageId: `<${id}@demo.example>`,
     inReplyTo: null,
     references: [],
+    protection: null,
+    label: null,
+    requested: null,
   };
 }
 
@@ -630,6 +639,239 @@ function serverOnlyMessages(): Message[] {
       attachments: [{ name: "waterhole.jpg", contentType: "image/jpeg", size: 3_104_220 }],
     }),
   ];
+}
+
+// --- Protected mail ---------------------------------------------------------------
+
+/** A sensitivity label as Microsoft 365 lists it, before its check. */
+export type CatalogLabel = Omit<LabelOption, "check">;
+
+/** The demo organization's sensitivity labels' ids (lowercase GUIDs). */
+export const DEMO_LABEL_IDS = {
+  public: "0f6c58a2-4a6b-4d3e-9b1a-1c2d3e4f5a60",
+  general: "2a7f3c10-8b4e-4f6a-a1d2-3b4c5d6e7f80",
+  confidential: "5c1e9d72-3f4a-4b8c-9d0e-1f2a3b4c5d60",
+  allEmployees: "7b2d4e61-9c3a-4e5f-8a7b-6c5d4e3f2a10",
+  atlas: "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c60",
+} as const;
+
+/** What Microsoft 365 lists for the demo's work account: its labels in order, and the policy. */
+export function demoLabelCatalog(): { labels: CatalogLabel[]; policy: LabelPolicy } {
+  const label = (
+    id: string,
+    name: string,
+    color: string,
+    sensitivity: number,
+    extra: Partial<CatalogLabel> = {},
+  ): CatalogLabel => ({
+    id,
+    name,
+    parentName: null,
+    tooltip: null,
+    color,
+    hasProtection: false,
+    sensitivity,
+    ...extra,
+  });
+  return {
+    labels: [
+      label(DEMO_LABEL_IDS.public, "Public", "#3a7d44", 0, {
+        tooltip: "Information anyone may see.",
+      }),
+      label(DEMO_LABEL_IDS.general, "General", "#2b7aa8", 1, {
+        tooltip: "Business information for Acme staff and partners.",
+      }),
+      label(DEMO_LABEL_IDS.confidential, "Confidential", "#b35f26", 2, {
+        tooltip: "Sensitive business information. Share only with those who need it.",
+      }),
+      label(DEMO_LABEL_IDS.allEmployees, "All Employees", "#b35f26", 3, {
+        parentName: "Confidential",
+        hasProtection: true,
+        tooltip: "Encrypted. Only Acme employees can open it.",
+      }),
+      label(DEMO_LABEL_IDS.atlas, "Project Atlas", "#a4262c", 4, {
+        parentName: "Highly Confidential",
+        hasProtection: true,
+        tooltip: "Encrypted. Only the Atlas team can open it.",
+      }),
+    ],
+    policy: {
+      required: true,
+      defaultLabelId: DEMO_LABEL_IDS.general,
+      justifyDowngrade: true,
+      moreInfoUrl: "https://acme.example/labels",
+    },
+  };
+}
+
+/** A label of the demo catalog as a message carries it. */
+function demoLabel(id: string): MessageLabel {
+  const label = demoLabelCatalog().labels.find((l) => l.id === id)!;
+  return {
+    id,
+    name: label.parentName ? `${label.parentName} › ${label.name}` : label.name,
+    color: label.color,
+    fromCatalog: true,
+  };
+}
+
+/** Protection with the message's attachments at `containers` as its containers. */
+function protect(
+  m: Message,
+  protection: Omit<Protection, "containerIds">,
+  containers: number[] = [],
+): Message {
+  m.protection = { ...protection, containerIds: containers.map((i) => m.attachments[i]!.id) };
+  return m;
+}
+
+/** Microsoft's portal, as Purview Message Encryption links to it. */
+export const DEMO_PORTAL_URL =
+  "https://outlook.office365.com/Encryption/retrieve.ashx?recipientemailaddress=alex.morgan%40acme.example";
+/** The same for the home address (the rpmsg-plus-link form a spoofed sender copied). */
+const HOME_PORTAL_URL =
+  "https://outlook.office365.com/Encryption/retrieve.ashx?recipientemailaddress=alex%40morgan-family.example";
+
+/**
+ * Protected and labeled mail (`?protected`): encrypted with Purview, a link
+ * to Microsoft's portal with a look-alike button above it, S/MIME signed and
+ * encrypted, a Sent copy that asked for encryption and a label, and a
+ * spoofed sender. Ids are fixed: msg-protected-1 to 8.
+ */
+export function protectedMessages(): Message[] {
+  const work = (n: number, seed: Omit<MessageSeed, "id">) =>
+    message(WORK, ME_WORK, { ...seed, id: `msg-protected-${n}` });
+  const home = (n: number, seed: Omit<MessageSeed, "id">) =>
+    message(HOME, ME_HOME, { ...seed, id: `msg-protected-${n}` });
+  const rpmsg = {
+    name: "message.rpmsg",
+    contentType: "application/x-microsoft-rpmsg-message",
+    size: 48_213,
+  };
+
+  const forecast = protect(
+    work(1, {
+      folderId: "w-inbox",
+      from: people.dana,
+      subject: "Q4 forecast",
+      html: para(
+        "Dana Whitfield (dana.whitfield@acme.example) has sent you a protected message.",
+        "Open it in Outlook to read it.",
+      ),
+      received: at(0, 6, 40),
+      read: false,
+      attachments: [rpmsg],
+    }),
+    { kind: "rightsManaged", portalUrl: null, contentHidden: false },
+    [0],
+  );
+  forecast.label = demoLabel(DEMO_LABEL_IDS.allEmployees);
+
+  const orgChart = work(2, {
+    folderId: "w-inbox",
+    from: people.hr,
+    subject: "Updated org chart",
+    html:
+      para(
+        "Hi all,",
+        "The org chart is updated with this month's changes. You'll find it on the intranet under People.",
+      ) + signature("People Team"),
+    received: at(0, 6, 20),
+  });
+  orgChart.label = demoLabel(DEMO_LABEL_IDS.general);
+
+  const contract = protect(
+    work(3, {
+      folderId: "w-inbox",
+      from: people.lucia,
+      subject: "Contract draft",
+      html:
+        '<p><a href="https://evil.example/login" style="display:inline-block;padding:12px 28px;border-radius:4px;background:#0078d4;color:#ffffff;font-weight:bold;text-decoration:none">Read the message</a></p>' +
+        para(
+          "Lucía Fernández (lucia@northwind-design.example) has sent you a protected message.",
+          `<a href="${DEMO_PORTAL_URL}">Read the message</a>`,
+          "Learn about messages protected by Microsoft Purview Message Encryption.",
+        ),
+      received: at(0, 5, 55),
+      read: false,
+    }),
+    { kind: "portalLink", portalUrl: DEMO_PORTAL_URL, contentHidden: false },
+  );
+
+  const vpn = protect(
+    work(4, {
+      folderId: "w-inbox",
+      from: people.it,
+      subject: "VPN certificate renewal",
+      html:
+        para(
+          "Hello,",
+          "Your VPN certificate expires at the end of the month. The renewal instructions are in the attached PDF.",
+        ) + signature("Acme IT Service Desk"),
+      received: at(-1, 9, 10),
+      attachments: [{ name: "smime.p7m", contentType: "multipart/signed", size: 214_771 }],
+    }),
+    { kind: "smimeSigned", portalUrl: null, contentHidden: true },
+    [0],
+  );
+
+  const tax = protect(
+    home(5, {
+      folderId: "h-inbox",
+      from: people.ben,
+      subject: "Tax documents",
+      html: "",
+      received: at(0, 6, 5),
+      read: false,
+      attachments: [{ name: "smime.p7m", contentType: "application/pkcs7-mime", size: 389_120 }],
+    }),
+    { kind: "smimeEncrypted", portalUrl: null, contentHidden: false },
+    [0],
+  );
+
+  const pricing = work(6, {
+    folderId: "w-sent",
+    from: ME_WORK,
+    to: [people.priya],
+    subject: "Re: Atlas pricing",
+    html:
+      para(
+        "Priya, here are the price points we agreed on for the launch, before Finance's review.",
+      ) + signature("Alex"),
+    received: at(-1, 16, 25),
+  });
+  pricing.requested = { action: "encrypt", label: demoLabel(DEMO_LABEL_IDS.confidential) };
+
+  const spoofed = protect(
+    home(7, {
+      folderId: "h-inbox",
+      from: { name: "IT Service Desk <it@acme.example>\u202e", address: "alerts@notacme.example" },
+      subject: "Your protected message",
+      html: para(
+        "You have received a protected message.",
+        `<a href="${HOME_PORTAL_URL}">Read the message</a>`,
+      ),
+      received: at(0, 4, 30),
+      read: false,
+      attachments: [rpmsg],
+    }),
+    { kind: "rightsManaged", portalUrl: HOME_PORTAL_URL, contentHidden: false },
+    [0],
+  );
+
+  const releaseNotes = work(8, {
+    folderId: "w-inbox",
+    from: people.jonas,
+    subject: "Atlas public release notes",
+    html:
+      para(
+        "Here's the first draft of the public release notes for Atlas. Comments welcome before Friday.",
+      ) + signature("Jonas"),
+    received: at(-1, 14, 50),
+  });
+  releaseNotes.label = demoLabel(DEMO_LABEL_IDS.public);
+
+  return [forecast, orgChart, contract, vpn, tax, pricing, spoofed, releaseNotes];
 }
 
 function contact(

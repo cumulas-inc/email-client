@@ -11,6 +11,7 @@ import type { Account, Folder, ReplyKind } from "../../api/types";
 import { toast, useToasts } from "../../components/toast";
 import { type DraftInput, newDraft, parseMailto, replyDraft, textToHtml } from "./draft";
 import { ALL_INBOXES, useMailStore } from "./mailStore";
+import { isEncrypted } from "./protection";
 import {
   fetchMessage,
   findSummaries,
@@ -181,6 +182,17 @@ export function useMailActions(): MailActions {
       reply: async (messageId, kind) => {
         try {
           const original = await fetchMessage(client, backend, messageId);
+          // Encrypted: only Outlook on the web can answer it and keep it so.
+          if (isEncrypted(original.protection)) {
+            const account = accounts().find((a) => a.id === original.accountId);
+            useMailStore.getState().askProtectedReply({
+              messageId,
+              kind,
+              accountKind: account?.kind ?? "microsoft",
+              protection: original.protection?.kind ?? null,
+            });
+            return;
+          }
           useMailStore.getState().startCompose(replyDraft(original, kind, accounts()));
         } catch (e) {
           toast.error(e);

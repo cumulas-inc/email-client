@@ -246,6 +246,10 @@ export function replyDraft(original: Message, kind: ReplyKind, accounts: Account
     importance: "normal",
     replyToMessageId: original.id,
     replyKind: kind,
+    protect: null,
+    labelId: null,
+    labelChosen: false,
+    originalLabel: original.label,
     focus: kind === "forward" ? "to" : "body",
   };
 }
@@ -263,6 +267,10 @@ export function newDraft(accountId: string, init: Partial<DraftInput> = {}): Dra
     importance: "normal",
     replyToMessageId: null,
     replyKind: null,
+    protect: null,
+    labelId: null,
+    labelChosen: false,
+    originalLabel: null,
     focus: "to",
     ...init,
     accountId,

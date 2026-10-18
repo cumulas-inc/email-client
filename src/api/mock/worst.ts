@@ -298,6 +298,9 @@ function messageFactory(prefix = "wm") {
       internetMessageId: `<${id}@worst.example>`,
       inReplyTo: null,
       references: [],
+      protection: null,
+      label: null,
+      requested: null,
     };
   };
 }

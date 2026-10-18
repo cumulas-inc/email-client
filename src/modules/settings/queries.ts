@@ -2,11 +2,13 @@
 // the shared `qk` so backend "data-changed" events keep them fresh.
 
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
 
 import { useBackend } from "../../api/context";
-import { qk } from "../../api/queries";
+import { qk, storeProtectionSetup } from "../../api/queries";
 import type {
   Account,
+  CheckItem,
   DataKind,
   ImapAccountUpdate,
   NewImapAccount,
@@ -15,7 +17,15 @@ import type {
 } from "../../api/types";
 import { noteFeatureTurnedOn } from "./featureToasts";
 
-const ALL_KINDS: DataKind[] = ["accounts", "mail", "calendar", "contacts", "tasks", "signatures"];
+const ALL_KINDS: DataKind[] = [
+  "accounts",
+  "mail",
+  "calendar",
+  "contacts",
+  "tasks",
+  "signatures",
+  "protection",
+];
 
 /** Adding or removing an account changes every kind of data. */
 function refreshEverything(client: QueryClient) {
@@ -162,4 +172,59 @@ export function useRemoveAccount() {
 export function useSyncAccount() {
   const backend = useBackend();
   return useMutation({ mutationFn: (accountId: string) => backend.syncAccount(accountId) });
+}
+
+// --- Protection -------------------------------------------------------------------
+
+/** How often a waiting check looks for its test messages. */
+export const CHECK_POLL_MS = 10_000;
+
+/** "Refresh": lists the account's sensitivity labels from Microsoft 365 now. */
+export function useRefreshLabels() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (accountId: string) => backend.refreshSensitivityLabels(accountId),
+    onSuccess: (setup) => storeProtectionSetup(client, setup),
+  });
+}
+
+/** "Check": sends the account test messages for the items. */
+export function useCheckProtection() {
+  const backend = useBackend();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ accountId, items }: { accountId: string; items: CheckItem[] }) =>
+      backend.checkProtection(accountId, items),
+    onSuccess: (setup) => storeProtectionSetup(client, setup),
+    // A failed send can still leave earlier items waiting.
+    onError: (_error, { accountId }) =>
+      void client.invalidateQueries({ queryKey: qk.protectionSetup(accountId) }),
+  });
+}
+
+/**
+ * While the account's check waits for its test messages, looks for them
+ * every 10 seconds; stops when it's done or the caller goes.
+ */
+export function useProtectionCheckPolling(accountId: string, checking: boolean): void {
+  const backend = useBackend();
+  const client = useQueryClient();
+  useEffect(() => {
+    if (!checking) return;
+    let stopped = false;
+    const timer = window.setInterval(() => {
+      backend
+        .refreshProtectionCheck(accountId)
+        .then((setup) => {
+          if (!stopped) storeProtectionSetup(client, setup);
+        })
+        // The next look tries again; the check's own timeout ends it.
+        .catch(() => undefined);
+    }, CHECK_POLL_MS);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [backend, client, accountId, checking]);
 }

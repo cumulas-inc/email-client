@@ -91,6 +91,35 @@ describe("useFeatureChangeToasts", () => {
     expect(messages()).toEqual([`You're signed in again as ${EMAIL}.`]);
   });
 
+  it("says nothing when sensitivity labels lack permission, only when they're refused", async () => {
+    const backend = new MockBackend();
+    const { work } = await watch(backend);
+
+    // Turned on by themselves: lacking their permission isn't news.
+    act(() => backend.revokeFeature("acct-work", "sensitivityLabels"));
+    await waitFor(() => expect(work().needsPermission).toEqual(["sensitivityLabels"]));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(messages()).toEqual([]);
+
+    act(() => backend.revokeFeature("acct-work", "sensitivityLabels", "refused"));
+    await waitFor(() =>
+      expect(messages()).toEqual([
+        `Microsoft 365 refused access to the sensitivity labels of ${EMAIL}. See Settings → Accounts.`,
+      ]),
+    );
+
+    // Refused, then without permission: not back.
+    act(() => backend.revokeFeature("acct-work", "sensitivityLabels"));
+    await waitFor(() => expect(work().needsPermission).toEqual(["sensitivityLabels"]));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(messages()).toHaveLength(1);
+
+    act(() => backend.revokeFeature("acct-work", "sensitivityLabels", "refused"));
+    await waitFor(() => expect(messages()).toHaveLength(2));
+    act(() => backend.grantFeature("acct-work", "sensitivityLabels"));
+    await waitFor(() => expect(messages()).toContain(`Sensitivity labels are on for ${EMAIL}.`));
+  });
+
   it("says nothing about accounts added or removed", async () => {
     const backend = new MockBackend();
     const { accounts } = await watch(backend);

@@ -3,7 +3,15 @@
 
 import { create } from "zustand";
 
-import type { EmailAddress, Importance, ReplyKind } from "../../api/types";
+import type {
+  AccountKind,
+  EmailAddress,
+  Importance,
+  MessageLabel,
+  ProtectAction,
+  ProtectionKind,
+  ReplyKind,
+} from "../../api/types";
 
 export type MailFilter = "all" | "unread" | "flagged";
 
@@ -56,9 +64,28 @@ export interface ComposeDraft {
   importance: Importance;
   replyToMessageId: string | null;
   replyKind: ReplyKind | null;
+  /** Encryption the organization's mail server applies (only offered once checked), or null. */
+  protect: ProtectAction | null;
+  /** The sensitivity label to apply (an id from the account's labels), or null. */
+  labelId: string | null;
+  /** The person chose the label (or No label); until then the default or the original's is filled in. */
+  labelChosen: boolean;
+  /** The label of the message replied to or forwarded. */
+  originalLabel: MessageLabel | null;
   /** Where the cursor starts: "to" for new messages, "body" for replies. */
   focus: "to" | "body";
   dirty: boolean;
+}
+
+/**
+ * A reply or forward that Outlook on the web has to send: the original is
+ * encrypted. `protection` is null when only the backend's refusal said so.
+ */
+export interface ProtectedReply {
+  messageId: string;
+  kind: ReplyKind;
+  accountKind: AccountKind;
+  protection: ProtectionKind | null;
 }
 
 export type SelectMode = "single" | "toggle" | "range";
@@ -87,6 +114,8 @@ interface MailState {
   composeVisible: boolean;
   /** A new draft waiting for the user to confirm discarding the current one. */
   pendingCompose: ComposeDraft | null;
+  /** Reply, Reply all or Forward on an encrypted message: the hand-off to Outlook on the web. */
+  protectedReply: ProtectedReply | null;
 
   selectFolder: (folderId: string) => void;
   /**
@@ -115,6 +144,8 @@ interface MailState {
   closeCompose: () => void;
   confirmPendingCompose: () => void;
   cancelPendingCompose: () => void;
+  askProtectedReply: (reply: ProtectedReply) => void;
+  closeProtectedReply: () => void;
 }
 
 let draftSeq = 0;
@@ -133,6 +164,7 @@ const INITIAL = {
   compose: null,
   composeVisible: false,
   pendingCompose: null,
+  protectedReply: null,
 } satisfies Partial<MailState>;
 
 export const useMailStore = create<MailState>((set, get) => ({
@@ -262,6 +294,10 @@ export const useMailStore = create<MailState>((set, get) => ({
     ),
 
   cancelPendingCompose: () => set({ pendingCompose: null }),
+
+  askProtectedReply: (protectedReply) => set({ protectedReply }),
+
+  closeProtectedReply: () => set({ protectedReply: null }),
 }));
 
 /** Restores the initial state (tests). */
