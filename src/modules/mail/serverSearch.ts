@@ -9,9 +9,10 @@ import { useEffect, useMemo, useSyncExternalStore } from "react";
 import type { Backend } from "../../api/backend";
 import { useBackend } from "../../api/context";
 import { errorMessage, isBackendError } from "../../api/errors";
-import { isNarrowEnoughForServers, parseSearch } from "../../api/mock/searchQuery";
 import { useAccounts } from "../../api/queries";
-import type { BackendError, ServerSearchResult } from "../../api/types";
+import type { Account, BackendError, ServerSearchResult } from "../../api/types";
+import { weekStartsOn } from "../../lib/datetime";
+import { accountMatches, isNarrowEnoughForServers, parseSearch } from "../../lib/search/query";
 
 /**
  * Whether the servers are asked for `text`: not for single letters ("a b",
@@ -116,10 +117,20 @@ class ServerSearchStore {
     });
   }
 
-  /** Searches every account for `text`, canceling the search before. */
-  start(text: string, accountIds: string[]): void {
+  /**
+   * Searches every account for `text`, canceling the search before; not
+   * those outside the accounts `account:` names (the core would answer them
+   * with nothing).
+   */
+  start(text: string, accounts: Pick<Account, "id" | "email" | "displayName">[]): void {
     this.stop();
-    if (!wantsServerSearch(text) || accountIds.length === 0) {
+    const query = parseSearch(text);
+    const accountIds = accounts
+      .filter(
+        (a) => query.accounts.length === 0 || query.accounts.some((v) => accountMatches(v, a)),
+      )
+      .map((a) => a.id);
+    if (!isNarrowEnoughForServers(query) || accountIds.length === 0) {
       this.set({ text, searchId: null, accounts: [], ids: [] });
       return;
     }
@@ -170,7 +181,8 @@ class ServerSearchStore {
   private page(accountId: string, more: boolean): void {
     const { searchId, text } = this.state;
     if (!searchId) return;
-    this.backend.searchServer(searchId, text, accountId, more).then(
+    const options = { weekStartsOn: weekStartsOn() };
+    this.backend.searchServer(searchId, text, accountId, more, options).then(
       (result) => this.settle(searchId, result),
       // Only an account removed meanwhile, or a bad id, rejects.
       (error: unknown) =>
@@ -237,12 +249,14 @@ export function useServerSearch(text: string): ServerSearch {
   const backend = useBackend();
   const { data: accounts } = useAccounts();
   // A string, so a refetched but unchanged account list doesn't search again.
-  const accountKey = (accounts ?? []).map((a) => a.id).join("\n");
+  const accountKey = JSON.stringify(
+    (accounts ?? []).map(({ id, email, displayName }) => ({ id, email, displayName })),
+  );
   const store = useMemo(() => new ServerSearchStore(backend), [backend]);
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
 
   useEffect(() => {
-    store.start(text, accountKey ? accountKey.split("\n") : []);
+    store.start(text, JSON.parse(accountKey) as Pick<Account, "id" | "email" | "displayName">[]);
     return () => store.stop();
   }, [store, text, accountKey]);
 

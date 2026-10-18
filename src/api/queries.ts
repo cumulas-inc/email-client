@@ -12,6 +12,7 @@ import type {
   DataKind,
   ProtectionSetup,
   ReplyKind,
+  SearchSort,
   Settings,
   SnoozeFor,
 } from "./types";
@@ -33,7 +34,8 @@ export const qk = {
   message: (messageId: string, allowRemote: boolean) =>
     ["mail", "message", messageId, allowRemote] as const,
   /** `revision` names the server hits included (see useSearch). */
-  search: (text: string, revision: string) => ["mail", "search", text, revision] as const,
+  search: (text: string, revision: string, sort: SearchSort) =>
+    ["mail", "search", text, revision, sort] as const,
   suggestions: (text: string) => ["contacts", "suggest", text] as const,
 
   calendars: () => ["calendar", "calendars"] as const,

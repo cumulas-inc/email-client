@@ -25,7 +25,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { useBackend } from "../../api/context";
 import { errorMessage } from "../../api/errors";
@@ -50,9 +50,15 @@ import { MessageBody, PlainTextBody } from "./MessageBody";
 import { ACTION_NAMES, hasProtectionNotice } from "./protection";
 import { ProtectionNotice } from "./ProtectionNotice";
 import { useFolders, useMessage } from "./queries";
+import { FindBar } from "./search/FindBar";
+import { Highlighted } from "./search/Highlighted";
+import { useSearchHighlight } from "./search/useSearchHighlight";
 import { visualLength } from "./text";
 
 const ICON = { size: 17, strokeWidth: 1.75, "aria-hidden": true as const };
+
+/** How a dark theme shows an HTML letter: on paper, or dark itself. */
+const DARK_BODIES = ["paper", "dark"] as const;
 
 interface ToolButtonProps {
   icon: ReactNode;
@@ -248,8 +254,25 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
   const query = useMessage(messageId, remoteAllowed);
   const message = query.data;
   const isDark = useIsDark();
-  const [darkBody, setDarkBody] = usePersistentString<"paper" | "dark">("mail.darkBody", "paper");
+  const [darkBody, setDarkBody] = usePersistentString<(typeof DARK_BODIES)[number]>(
+    "mail.darkBody",
+    "paper",
+    DARK_BODIES,
+  );
   const [hoverUrl, setHoverUrl] = useState<string | null>(null);
+  // What the search box's words find in the message, and the match shown.
+  const highlight = useSearchHighlight();
+  // `step` counts the steps, so that stepping to the match shown (the only
+  // one) shows it again, wherever the reader has scrolled since.
+  const [found, setFound] = useState({ count: 0, current: null as number | null, step: 0 });
+  const onHits = useCallback(
+    (count: number) => setFound((f) => ({ count, current: null, step: f.step })),
+    [],
+  );
+  const showMatch = useCallback(
+    (current: number) => setFound((f) => ({ ...f, current, step: f.step + 1 })),
+    [],
+  );
 
   useAutoMarkRead(message, settings?.markReadAfterSeconds, actions.markRead);
 
@@ -522,7 +545,7 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 .join(" ")}
               dir={noSubject ? undefined : "auto"}
             >
-              {subject}
+              {noSubject ? subject : <Highlighted text={subject} patterns={highlight?.subject} />}
             </h1>
             {(message.importance !== "normal" ||
               message.isFlagged ||
@@ -680,6 +703,10 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
 
           <Attachments messageId={message.id} attachments={attachments} />
 
+          {highlight && found.count > 0 && (
+            <FindBar count={found.count} current={found.current} onShow={showMatch} />
+          )}
+
           <div className={`mail-reader__body mail-reader__body--${appearance}`}>
             {message.bodyHtml ? (
               <MessageBody
@@ -689,9 +716,20 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 title={`Message: ${subject}`}
                 onLink={onLink}
                 onHoverLink={setHoverUrl}
+                highlight={highlight?.body}
+                current={found.current}
+                revealStep={found.step}
+                onHits={onHits}
               />
             ) : (
-              <PlainTextBody text={message.bodyText ?? ""} onLink={onLink} />
+              <PlainTextBody
+                text={message.bodyText ?? ""}
+                onLink={onLink}
+                highlight={highlight?.body}
+                current={found.current}
+                revealStep={found.step}
+                onHits={onHits}
+              />
             )}
           </div>
         </div>

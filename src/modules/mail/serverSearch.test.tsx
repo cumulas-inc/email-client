@@ -7,10 +7,14 @@ import { BackendProvider } from "../../api/BackendProvider";
 import type { Backend } from "../../api/backend";
 import { MockBackend } from "../../api/mock";
 import type { ServerSearchResult } from "../../api/types";
+import { weekStartsOn } from "../../lib/datetime";
 import { MAX_SERVER_RESULTS, useServerSearch } from "./serverSearch";
 import { deferred } from "./testUtils";
 
 type Call = Parameters<Backend["searchServer"]>;
+
+/** Dates resolve with the week starting where the locale's does. */
+const OPTIONS = { weekStartsOn: weekStartsOn() };
 
 /** The hook over the demo's two accounts, with the server search answered by `answer`. */
 function setup(answer: (...call: Call) => Promise<ServerSearchResult>, text = "invoice") {
@@ -66,7 +70,9 @@ describe("useServerSearch", () => {
     expect(result.current.searching).toBe(true);
     await waitFor(() => expect(result.current.searching).toBe(false));
     // Only the account with more was asked, in the same search.
-    expect(searchServer.mock.calls.slice(2)).toEqual([[searchId, "invoice", "acct-work", true]]);
+    expect(searchServer.mock.calls.slice(2)).toEqual([
+      [searchId, "invoice", "acct-work", true, OPTIONS],
+    ]);
     expect(result.current.accounts[0]!.hasMore).toBe(false);
   });
 
@@ -130,6 +136,7 @@ describe("useServerSearch", () => {
       "invoice",
       "acct-home",
       false,
+      OPTIONS,
     ]);
     expect(result.current.ids).toEqual(["a", "h"]);
     expect(result.current.accounts[1]).toMatchObject({
@@ -177,6 +184,31 @@ describe("useServerSearch", () => {
     act(() => result.current.showMore());
     expect(result.current.searching).toBe(false);
     expect(searchServer).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks only the accounts account: names, with the week starting where the locale's does", async () => {
+    const { result, searchServer } = setup(
+      async (...call) => done(call, []),
+      "invoice account:alex@morgan-family.example",
+    );
+    await waitFor(() => expect(searchServer).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.searching).toBe(false));
+    expect(searchServer.mock.calls[0]!.slice(1)).toEqual([
+      "invoice account:alex@morgan-family.example",
+      "acct-home",
+      false,
+      OPTIONS,
+    ]);
+    expect(result.current.accounts.map((a) => a.accountId)).toEqual(["acct-home"]);
+  });
+
+  it("asks no account when account: names none of them", async () => {
+    const { result, searchServer } = setup(async (...call) => done(call, []), "invoice account:x");
+    // The accounts load meanwhile; still nothing is asked.
+    await act(async () => {});
+    await act(async () => {});
+    expect(searchServer).not.toHaveBeenCalled();
+    expect(result.current).toMatchObject({ searchId: null, accounts: [], searching: false });
   });
 
   it("leaves single letters to this device, and cancels when the text clears or it unmounts", async () => {

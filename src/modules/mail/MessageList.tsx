@@ -24,17 +24,28 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 
 import { useAppStore } from "../../app/store";
 import { useBackend } from "../../api/context";
 import { errorMessage } from "../../api/errors";
 import { qk, useAccounts } from "../../api/queries";
-import type { Account, Folder, Message, MessageSummary, ReadingPane } from "../../api/types";
+import type {
+  Account,
+  Folder,
+  Message,
+  MessageSummary,
+  ReadingPane,
+  SearchSort,
+} from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { Menu } from "../../components/Menu";
-import { SearchField } from "../../components/SearchField";
+import { SegmentedControl } from "../../components/SegmentedControl";
 import { PaneSpinner, Spinner } from "../../components/Spinner";
 import { formatCount } from "../../lib/format";
+import { clearFilters, hasFilters } from "../../lib/search/edit";
+import { hitPatterns } from "../../lib/search/highlight";
+import { isEmptySearch, isScopeOnly, parseSearch, ranks } from "../../lib/search/query";
 import { openAddAccount } from "../settings/addAccountStore";
 import type { MailActions } from "./actions";
 import { exactCount } from "./counts";
@@ -42,11 +53,16 @@ import { listGroup } from "./dates";
 import { endMailDrag, MAIL_DRAG_TYPE, startMailDrag } from "./dnd";
 import { FolderIcon } from "./FolderIcon";
 import { folderPath, moveTargets } from "./folders";
-import { useDebounced } from "./hooks";
+import { useDebounced, usePersistentString } from "./hooks";
 import { ALL_INBOXES, type MailFilter, useMailStore } from "./mailStore";
 import { optionId } from "./dom";
 import { MessageRow, type RowHandlers } from "./MessageRow";
 import { useFolders, useMessageList, useSearch } from "./queries";
+import { keepOrder } from "./search/keepOrder";
+import { MailSearchField } from "./search/MailSearchField";
+import { focusLost, focusSearch } from "./search/focus";
+import { addRecentSearch } from "./search/recentSearches";
+import { SearchFilters } from "./search/SearchFilters";
 import { useServerSearch, wantsServerSearch } from "./serverSearch";
 
 const FILTERS: { value: MailFilter; label: string }[] = [
@@ -55,11 +71,17 @@ const FILTERS: { value: MailFilter; label: string }[] = [
   { value: "flagged", label: "Flagged" },
 ];
 
-function matchesFilter(filter: MailFilter) {
-  return (m: MessageSummary) => filter === "all" || (filter === "unread" ? !m.isRead : m.isFlagged);
-}
+const SORTS: { value: SearchSort; label: string }[] = [
+  { value: "relevance", label: "Best match" },
+  { value: "newest", label: "Newest" },
+];
+const SORT_VALUES = SORTS.map((s) => s.value);
 
 const NO_IDS: string[] = [];
+
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, i) => id === b[i]);
+}
 
 function insertByDate(items: MessageSummary[], item: MessageSummary): MessageSummary[] {
   const index = items.findIndex((m) => m.receivedAt < item.receivedAt);
@@ -206,6 +228,7 @@ interface MessageListProps {
 
 export function MessageList({ actions, readingPane, onEditDraft }: MessageListProps) {
   const search = useAppStore((s) => s.search);
+  const setSearch = useAppStore((s) => s.setSearch);
   const query = search.trim();
   const searching = query.length > 0;
   // This device answers at once; the servers take seconds, so they are
@@ -223,6 +246,12 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   const backend = useBackend();
   const { data: folders = [] } = useFolders();
   const { data: accounts = [] } = useAccounts();
+  // Best match or newest first: a view of the results, kept per device.
+  const [sort, setSort] = usePersistentString<SearchSort>(
+    "cumulas.mail.searchSort",
+    "relevance",
+    SORT_VALUES,
+  );
   const list = useMessageList(searching ? null : folderId, filter);
   // A text still changing would cancel the server search it started.
   const server = useServerSearch(serverText === query ? query : "");
@@ -237,23 +266,51 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     searching ? localText : "",
     includeIds,
     includeIds.length > 0 ? `${server.searchId}:${includeIds.length}` : "local",
+    sort,
   );
   /** A server is still being asked for the first page for this text (or soon will be). */
   const serverBusy =
     serverWanted && (!serverCurrent || server.accounts.some((a) => a.status === "searching"));
-  // The text the listed results are for: the last one answered, while the
-  // next one loads. What the header and the empty states say is about it.
-  const [resultsFor, setResultsFor] = useState("");
+  // The text (and order) the listed results are for: the last one answered,
+  // while the next one loads. What the header and the empty states say is
+  // about it.
+  const [resultsFor, setResultsFor] = useState({ text: "", sort });
   const answered = !!results.data && !results.isPlaceholderData;
-  if (answered && resultsFor !== localText) setResultsFor(localText);
-  const shownFor = answered ? localText : resultsFor;
+  if (answered && (resultsFor.text !== localText || resultsFor.sort !== sort)) {
+    setResultsFor({ text: localText, sort });
+  }
+  const shown = answered ? { text: localText, sort } : resultsFor;
+  const shownFor = shown.text;
+  const shownQuery = useMemo(() => parseSearch(shownFor), [shownFor]);
+  // What the rows mark: the words of the text they were found by.
+  const highlight = useMemo(() => hitPatterns(shownQuery), [shownQuery]);
+  // Best first: the order the results came in, kept while servers add to them.
+  const ranked = searching && shown.sort === "relevance" && ranks(shownQuery);
   // A server has more pages than are shown: the count is so far.
   const serverHasMore = serverCurrent && server.accounts.some((a) => a.hasMore || a.loadingMore);
 
+  // Best matches don't move once listed: what comes later for the same text
+  // and order (the servers' hits, more pages, a flag changed) joins below.
+  // A new text or order ranks them all afresh, and so does a new search for
+  // the same text. The order is taken from answers for this text that have
+  // settled only: what shows while the next one loads (the last answer, or
+  // one cached from an earlier search) is ordered by it, never taken as it.
+  // Newest first is by date.
+  const orderKey = `${shown.sort}\n${shownFor}`;
+  const [order, setOrder] = useState<{ key: string; ids: string[] } | null>(null);
+  const ordered = useMemo(() => {
+    const data = results.data ?? [];
+    return ranked && order?.key === orderKey ? keepOrder(order.ids, data) : data;
+  }, [results.data, ranked, order, orderKey]);
+  if (searching && answered && !results.isFetching) {
+    const ids = ordered.map((m) => m.id);
+    if (order?.key !== orderKey || !sameIds(order.ids, ids)) setOrder({ key: orderKey, ids });
+  } else if (!searching && order) {
+    setOrder(null);
+  }
+
   const fetched = useMemo(() => {
-    // Unread and Flagged narrow search results too; the title says when
-    // they hide some, and the empty state when they hide them all.
-    if (searching) return (results.data ?? []).filter(matchesFilter(filter));
+    if (searching) return ordered;
     const seen = new Set<string>();
     const out: MessageSummary[] = [];
     for (const page of list.data?.pages ?? []) {
@@ -265,14 +322,20 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
       }
     }
     return out;
-  }, [searching, results.data, filter, list.data]);
+  }, [searching, ordered, list.data]);
 
-  // In the Unread/Flagged views the open message stays listed after it is
-  // read or unflagged, until another message is opened, so it doesn't vanish
-  // from under the reader.
+  // In the Unread/Flagged views, and searches for unread or flagged mail,
+  // the open message stays listed after it is read or unflagged, until
+  // another message is opened, so it doesn't vanish from under the reader:
+  // by its date, or among best matches where it was.
+  const narrowsByState = searching
+    ? shownQuery.read !== null || shownQuery.flagged
+    : filter !== "all";
   const activeFetched = activeId ? (fetched.find((m) => m.id === activeId) ?? null) : null;
-  const [sticky, setSticky] = useState<MessageSummary | null>(null);
-  if (activeFetched && activeFetched !== sticky) setSticky(activeFetched);
+  const [sticky, setSticky] = useState<{ message: MessageSummary; index: number } | null>(null);
+  if (activeFetched && activeFetched !== sticky?.message) {
+    setSticky({ message: activeFetched, index: fetched.indexOf(activeFetched) });
+  }
   // Subscribes to the open message's cache entry (filled by the reading pane).
   const { data: activeMessage } = useQuery<Message>({
     queryKey: qk.message(activeId ?? "none", false),
@@ -280,20 +343,41 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     enabled: false,
   });
   const items = useMemo(() => {
-    if (filter === "all" || !sticky || sticky.id !== activeId || activeFetched) return fetched;
+    if (!narrowsByState || !sticky || sticky.message.id !== activeId || activeFetched) {
+      return fetched;
+    }
     const current =
-      activeMessage?.id === sticky.id
+      activeMessage?.id === sticky.message.id
         ? {
-            ...sticky,
+            ...sticky.message,
             isRead: activeMessage.isRead,
             isFlagged: activeMessage.isFlagged,
             folderId: activeMessage.folderId,
           }
-        : sticky;
+        : sticky.message;
     // Moved elsewhere: let it go.
     if (!searching && folderId !== ALL_INBOXES && current.folderId !== folderId) return fetched;
-    return insertByDate(fetched, current);
-  }, [fetched, filter, sticky, activeId, activeFetched, activeMessage, searching, folderId]);
+    if (!ranked) return insertByDate(fetched, current);
+    const at = Math.min(Math.max(sticky.index, 0), fetched.length);
+    return [...fetched.slice(0, at), current, ...fetched.slice(at)];
+  }, [
+    fetched,
+    narrowsByState,
+    sticky,
+    activeId,
+    activeFetched,
+    activeMessage,
+    searching,
+    folderId,
+    ranked,
+  ]);
+
+  // A result opened is a search worth suggesting again.
+  useEffect(() => {
+    if (searching && activeId) addRecentSearch(query);
+    // Only when a result is opened, not as the text changes after.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
 
   // How many messages the list holds, for "3 of 76" in the reading pane: the
   // server's count while more pages wait to load, else what is listed.
@@ -322,8 +406,10 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   }, [folders]);
 
   const groups = useMemo(() => {
+    // Best matches aren't in date order: one list, without dates over it.
+    if (ranked) return [{ label: null, items }];
     const now = new Date();
-    const out: { label: string; items: MessageSummary[] }[] = [];
+    const out: { label: string | null; items: MessageSummary[] }[] = [];
     for (const m of items) {
       const label = listGroup(m.receivedAt, now);
       const last = out[out.length - 1];
@@ -331,7 +417,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
       else out.push({ label, items: [m] });
     }
     return out;
-  }, [items]);
+  }, [items, ranked]);
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const checkMode = selectedIds.length > 1;
@@ -491,27 +577,15 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     titleHint = folderPath(folders, folder);
     titleAccount = accounts.length > 1 ? (accountById.get(folder.accountId) ?? null) : null;
   }
-  // Every result, and how many of them the filter leaves listed.
   const resultCount = results.data?.length ?? 0;
-  const filtered = filter !== "all" && items.length < resultCount;
-  const filterWord = filter === "unread" ? "unread" : "flagged";
-  const resultsWord = resultCount === 1 ? "result" : "results";
   const soFar = serverHasMore ? " so far" : "";
+  const countText = (n: string) => `${n} ${items.length === 1 ? "result" : "results"}`;
   const subtitle =
     searching && results.data && items.length > 0 ? (
       <span className="mail-list__subtitle">
-        <span
-          className="mail-list__count"
-          title={
-            filtered
-              ? `${exactCount(items.length)} ${filterWord} of ${exactCount(resultCount)} ${resultsWord}`
-              : `${exactCount(items.length)} ${items.length === 1 ? "result" : "results"}`
-          }
-        >
-          {filtered
-            ? `${formatCount(items.length)} ${filterWord} of ${formatCount(resultCount)} ${resultsWord}${soFar}`
-            : `${formatCount(items.length)} ${items.length === 1 ? "result" : "results"}${soFar}`}{" "}
-          for “<bdi>{shownFor}</bdi>”
+        <span className="mail-list__count" title={countText(exactCount(items.length))}>
+          {countText(formatCount(items.length))}
+          {soFar} for “<bdi>{shownFor}</bdi>”
         </span>
         {/* Here rather than above the list, so the rows don't move when
             the servers answer. */}
@@ -576,15 +650,10 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     if (!where || document.activeElement !== document.body) return;
     focusWas.current = null;
     const next = where === "more" ? endRef.current : null;
-    (next ?? document.getElementById("global-search"))?.focus();
+    if (next) next.focus();
+    else focusSearch(undefined, { quiet: true });
   });
 
-  const searchStatus = serverBusy ? (
-    <div className="mail-search-status">
-      <LoaderCircle size={14} className="spin" aria-hidden="true" />
-      Searching your whole mailbox…
-    </div>
-  ) : null;
   // The button stays while the page loads, so keyboard focus stays on it.
   const showMore = moreToShow ? (
     <div
@@ -653,31 +722,27 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
       </div>
     ) : null;
 
-  // Said once things settle, and while the servers are being asked.
+  // Said once things settle, and while the servers are being asked; a
+  // search with nothing to look for says what the list shows.
+  const nothingToLookFor = searching && isEmptySearch(parseSearch(query));
   let announcement = "";
-  if (serverBusy) announcement = "Searching your whole mailbox…";
+  if (nothingToLookFor) announcement = "Add words or a filter.";
+  else if (serverBusy) announcement = "Searching your whole mailbox…";
   else if (settled) {
     const count =
       resultCount === 0
-        ? "No results"
-        : filtered
-          ? items.length === 0
-            ? `No ${filterWord} results`
-            : `${exactCount(items.length)} ${filterWord} of ${exactCount(resultCount)} ${resultsWord}${soFar}`
-          : `${exactCount(items.length)} ${items.length === 1 ? "result" : "results"}${soFar}`;
+        ? moreToShow
+          ? "No results so far"
+          : "No results"
+        : `${countText(exactCount(items.length))}${soFar}`;
     announcement = [
       `${count}.`,
       ...failedAccounts.map((a) => `Couldn't search ${accountName(a.accountId)} on the server.`),
     ].join(" ");
   }
 
-  /** An empty state of the search, under the server's progress. */
-  const searchEmpty = (state: ReactNode, status: ReactNode = null) => (
-    <div className="mail-search-empty">
-      {status}
-      {state}
-    </div>
-  );
+  /** An empty state of the search. */
+  const searchEmpty = (state: ReactNode) => <div className="mail-search-empty">{state}</div>;
 
   // --- body -------------------------------------------------------------------------
 
@@ -714,32 +779,33 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
       />
     );
   } else if (items.length === 0) {
+    const typed = parseSearch(query);
+    const clearFiltersButton = hasFilters(query) ? (
+      <button
+        type="button"
+        className="btn btn--subtle"
+        onClick={() => {
+          flushSync(() => setSearch(clearFilters(search)));
+          // The button went with the empty state: the keyboard goes to the box.
+          if (focusLost()) focusSearch(undefined, { quiet: true });
+        }}
+      >
+        Clear filters
+      </button>
+    ) : null;
     body = searching ? (
-      resultCount > 0 && filter !== "all" && shownFor !== query ? (
-        // What the filter hides is another text's results: no claim yet.
-        <PaneSpinner />
-      ) : resultCount > 0 && filter !== "all" ? (
-        // Results the filter hides: say so, rather than "No results".
+      isEmptySearch(typed) ? (
+        // Nothing to look for (yet): say what would be.
         searchEmpty(
           <EmptyState
             icon={<SearchX size={40} strokeWidth={1.5} />}
-            title={filter === "unread" ? "No unread results" : "No flagged results"}
+            title="Add words or a filter"
             description={
-              resultCount === 1
-                ? `The only result for “${shownFor}” isn't ${filterWord}.`
-                : `None of the ${formatCount(resultCount)} results for “${shownFor}” are ${filterWord}.`
-            }
-            action={
-              <>
-                <button type="button" className="btn btn--subtle" onClick={() => setFilter("all")}>
-                  Show all results
-                </button>
-                {showMore}
-                {failures}
-              </>
+              isScopeOnly(typed)
+                ? "Folder and account only narrow a search. Type what you're looking for, or choose a sender, a date, Unread or Flagged above."
+                : "Type what you're looking for, or choose a filter above."
             }
           />,
-          searchStatus,
         )
       ) : !settled ? (
         serverWanted ? (
@@ -757,6 +823,37 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
         ) : (
           <PaneSpinner />
         )
+      ) : moreToShow ? (
+        // The server has more to look through: what it sent so far didn't
+        // pass the filters, but what's next may.
+        searchEmpty(
+          <EmptyState
+            icon={<SearchX size={40} strokeWidth={1.5} />}
+            title="No results so far"
+            description={`Nothing matches “${query}” yet. Your mailbox on the server has more to look through.`}
+            action={
+              <>
+                {showMore}
+                {clearFiltersButton}
+                {failures}
+              </>
+            }
+          />,
+        )
+      ) : clearFiltersButton ? (
+        searchEmpty(
+          <EmptyState
+            icon={<SearchX size={40} strokeWidth={1.5} />}
+            title="No results"
+            description={`Nothing matches “${query}”. Try fewer filters or other words.`}
+            action={
+              <>
+                {clearFiltersButton}
+                {failures}
+              </>
+            }
+          />,
+        )
       ) : (
         searchEmpty(
           <EmptyState
@@ -765,7 +862,7 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
             description={
               failures
                 ? `We didn't find anything for “${query}” on this computer.`
-                : `We didn't find anything for “${query}”. Try other words, or from:, subject: or has:attachment.`
+                : `We didn't find anything for “${query}”. Try other words, or the filters above.`
             }
             action={failures}
           />,
@@ -818,38 +915,36 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
           }}
           tabIndex={activeId && items.some((m) => m.id === activeId) ? -1 : 0}
         >
-          {groups.map((group) => (
-            <div
-              key={group.label}
-              role="group"
-              aria-labelledby={`mail-group-${group.label.replace(/\W+/g, "-")}`}
-            >
-              <div
-                id={`mail-group-${group.label.replace(/\W+/g, "-")}`}
-                className="mail-group__header"
-                role="presentation"
-              >
-                {group.label}
+          {groups.map((group) => {
+            const rows = group.items.map((m) => (
+              <MessageRow
+                key={m.id}
+                message={m}
+                selected={selectedSet.has(m.id)}
+                active={m.id === activeId}
+                checkMode={checkMode}
+                showRecipients={showRecipients}
+                context={contextFor(m)}
+                contextColor={
+                  searching || folderId === ALL_INBOXES
+                    ? (accountById.get(m.accountId)?.color ?? null)
+                    : null
+                }
+                handlers={handlers}
+                highlight={searching ? highlight : null}
+              />
+            ));
+            if (group.label === null) return rows;
+            const id = `mail-group-${group.label.replace(/\W+/g, "-")}`;
+            return (
+              <div key={group.label} role="group" aria-labelledby={id}>
+                <div id={id} className="mail-group__header" role="presentation">
+                  {group.label}
+                </div>
+                {rows}
               </div>
-              {group.items.map((m) => (
-                <MessageRow
-                  key={m.id}
-                  message={m}
-                  selected={selectedSet.has(m.id)}
-                  active={m.id === activeId}
-                  checkMode={checkMode}
-                  showRecipients={showRecipients}
-                  context={contextFor(m)}
-                  contextColor={
-                    searching || folderId === ALL_INBOXES
-                      ? (accountById.get(m.accountId)?.color ?? null)
-                      : null
-                  }
-                  handlers={handlers}
-                />
-              ))}
-            </div>
-          ))}
+            );
+          })}
           {!searching && (hasNextPage || isFetchingNextPage) && (
             <div ref={sentinelRef} className="mail-list__more">
               {isFetchingNextPage ? (
@@ -874,7 +969,10 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   return (
     <section className="mail-list" aria-label="Message list">
       <header className="mail-list__header">
-        <SearchField placeholder="Search mail" />
+        <MailSearchField />
+        {/* Only while searching: with an empty box the suggestions offer the
+            same filters, so nothing appears under the pointer on focus. */}
+        {searching && <SearchFilters />}
         {/* The selection's actions take the title row's place, so the list
             doesn't jump under the pointer while messages are picked. */}
         <div className={`mail-list__bar${checkMode ? " is-selecting" : ""}`}>
@@ -899,21 +997,36 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
                 </span>
               </span>
             )}
-            <div className="segmented mail-filter" role="group" aria-label="Filter messages">
-              {FILTERS.map((f) => (
-                <button
-                  key={f.value}
-                  type="button"
-                  className={`segmented__option mail-filter__option${
-                    filter === f.value ? " segmented__option--selected" : ""
-                  }`}
-                  aria-pressed={filter === f.value}
-                  onClick={() => setFilter(f.value)}
-                >
-                  {f.label}
-                </button>
-              ))}
-            </div>
+            {searching ? (
+              // Results have their own filters (above): here, their order,
+              // for words to rank by.
+              ranks(shownQuery) && (
+                <div className="mail-sort">
+                  <SegmentedControl
+                    label="Sort results"
+                    value={sort}
+                    options={SORTS}
+                    onChange={setSort}
+                  />
+                </div>
+              )
+            ) : (
+              <div className="segmented mail-filter" role="group" aria-label="Filter messages">
+                {FILTERS.map((f) => (
+                  <button
+                    key={f.value}
+                    type="button"
+                    className={`segmented__option mail-filter__option${
+                      filter === f.value ? " segmented__option--selected" : ""
+                    }`}
+                    aria-pressed={filter === f.value}
+                    onClick={() => setFilter(f.value)}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            )}
             {subtitle}
           </div>
           {checkMode && (

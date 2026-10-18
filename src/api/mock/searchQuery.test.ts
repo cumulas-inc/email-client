@@ -1,120 +1,20 @@
 import { describe, expect, it } from "vitest";
 
+import { hitPatterns } from "../../lib/search/highlight";
+import { parseSearch, resolveDates } from "../../lib/search/query";
 import type { Message } from "../types";
 import { createDemoState } from "./data";
 import {
-  MAX_TERM_CHARS,
-  type SearchQuery,
-  isEmptySearch,
-  isNarrowEnoughForServers,
+  INFIX_RELEVANCE,
+  SERVER_RELEVANCE,
+  admits,
   matchesSearch,
-  parseSearch,
+  mockSnippet,
+  rankHits,
+  score,
 } from "./searchQuery";
 
-const FIELD_NAMES = {
-  any: "A",
-  from: "From",
-  to: "To",
-  cc: "Cc",
-  subject: "Subject",
-  body: "Body",
-} as const;
-
-/** "A:invoice", "Subject:q3 plan [p]": the notation of the shared test vectors. */
-function terms(query: SearchQuery): string[] {
-  return query.terms.map((t) => `${FIELD_NAMES[t.field]}:${t.text}${t.phrase ? " [p]" : ""}`);
-}
-
-// The core's parser tests (crates/core/src/search/mod.rs) share these cases.
-const VECTORS: [input: string, terms: string[], hasAttachment: boolean][] = [
-  ["invoice", ["A:invoice"], false],
-  ["Invoice March", ["A:invoice", "A:march"], false],
-  ['"quarterly report"', ["A:quarterly report [p]"], false],
-  ["from:megan", ["From:megan"], false],
-  ["From:Megan lunch", ["From:megan", "A:lunch"], false],
-  [
-    'subject:"Quarterly Report" from:megan@contoso.com',
-    ["Subject:quarterly report [p]", "From:megan@contoso.com"],
-    false,
-  ],
-  ["to:", [], false],
-  ["from: megan", ["A:megan"], false],
-  ["has:attachment budget", ["A:budget"], true],
-  ["HasAttachments:yes", [], true],
-  ["has:pdf", [], false],
-  ["re:hello", ["A:re", "A:hello"], false],
-  ['"unterminated phrase', ["A:unterminated phrase [p]"], false],
-  ["“curly quotes”", ["A:curly quotes [p]"], false],
-  ["*** ??", [], false],
-  ["-draft +final", ["A:draft", "A:final"], false],
-  ["o’brien.", ["A:o'brien"], false],
-  ["AND OR NOT", ["A:and", "A:or", "A:not"], false],
-  ['subject:"', [], false],
-  ["lucía", ["A:lucía"], false],
-  ['from:"Megan Bowen"', ["From:megan bowen [p]"], false],
-  ["cc:x@y.z", ["Cc:x@y.z"], false],
-  ["2023-118", ["A:2023-118"], false],
-  ["हिन्दी ಕನ್ನಡ", ["A:हिन्दी", "A:ಕನ್ನಡ"], false],
-  ["re\u0301sume\u0301", ["A:résumé"], false],
-  ["\u0301abc -\u0301x\u0301", ["A:abc", "A:x\u0301"], false],
-  ['"a\u0007b\tc\u0000"', ["A:ab c [p]"], false],
-  ["a b c d e f g h i j k l m n o p q r", "abcdefghijklmnop".split("").map((c) => `A:${c}`), false],
-];
-
-describe("isNarrowEnoughForServers", () => {
-  // As the core's single_letters_are_left_to_the_device.
-  it.each(["a", "a b c", "from:a", '"a"', "c++ x", "日"])("leaves %j to the device", (input) => {
-    expect(isNarrowEnoughForServers(parseSearch(input))).toBe(false);
-  });
-  it.each(["ab", "a ab", "from:al", '"a b"', "日本", "has:attachment"])(
-    "asks the servers for %j",
-    (input) => {
-      expect(isNarrowEnoughForServers(parseSearch(input))).toBe(true);
-    },
-  );
-});
-
-describe("parseSearch", () => {
-  it.each(VECTORS)("parses %j like the core", (input, expected, hasAttachment) => {
-    const query = parseSearch(input);
-    expect(terms(query)).toEqual(expected);
-    expect(query.hasAttachment).toBe(hasAttachment);
-    expect(isEmptySearch(query)).toBe(expected.length === 0 && !hasAttachment);
-  });
-
-  it("keeps to the limits, cutting at a character", () => {
-    const long = "é".repeat(200);
-    const [term] = parseSearch(long).terms;
-    expect(Array.from(term!.text)).toHaveLength(MAX_TERM_CHARS);
-    // 1,024 characters are read: the word after them isn't.
-    expect(terms(parseSearch(`${" ".repeat(1020)}abc def`))).toEqual(["A:abc"]);
-    expect(terms(parseSearch(`${"x ".repeat(511)}ab`))).toHaveLength(16);
-    // Emoji are two UTF-16 units but one character.
-    const emoji = parseSearch(`"${"😀".repeat(130)} a"`);
-    expect(emoji.terms).toEqual([]);
-  });
-
-  it("takes whitespace to be what Rust takes it to be", () => {
-    // U+3000 and U+2028 are whitespace to both; U+FEFF only to JavaScript's
-    // trim(), so a phrase keeps it, as the core's does.
-    expect(parseSearch('"\u3000a\u2028b "').terms).toEqual([
-      { field: "any", text: "a b", phrase: true },
-    ]);
-    expect(parseSearch('"\ufeffmegan"').terms).toEqual([
-      { field: "any", text: "\ufeffmegan", phrase: true },
-    ]);
-  });
-
-  it("never fails, whatever it is given", () => {
-    for (const input of ['"', "\\", '\\"', "\u0000\u0007", "😀", "מה שלום", ":", "from::", '""']) {
-      const query = parseSearch(input);
-      for (const t of query.terms) {
-        expect(t.text).not.toMatch(/["\\]/);
-        expect(t.text).toMatch(/[\p{L}\p{N}]/u);
-      }
-    }
-  });
-});
+// The parser and its shared test vectors are src/lib/search/query.ts's.
 
 describe("matchesSearch", () => {
   const messages = createDemoState().messages;
@@ -170,5 +70,105 @@ describe("matchesSearch", () => {
     expect(matches("from:priya.raman@acme", checklist)).toBe(true);
     expect(matches("from:priya.raman@acme.example", checklist)).toBe(true);
     expect(matches("from:priya.raman@example", checklist, false)).toBe(false);
+  });
+});
+
+describe("admits", () => {
+  const messages = createDemoState().messages;
+  const checklist = messages.find((m) => /Atlas launch checklist/.test(m.subject))!;
+  const open = { since: null, before: null };
+  const passes = (text: string, m: Message = checklist) =>
+    admits(parseSearch(text), m, resolveDates(parseSearch(text), new Date(), 0), null);
+
+  it("checks every filter but the words, as the core does", () => {
+    // Unread, flagged, with an attachment, today.
+    expect(passes("nothing like it")).toBe(true);
+    expect(passes("is:unread is:flagged has:attachment received:today")).toBe(true);
+    expect(passes("is:read")).toBe(false);
+    expect(passes("received:yesterday")).toBe(false);
+    const read = { ...checklist, isRead: true, isFlagged: false, hasAttachments: false };
+    expect(passes("is:read", read)).toBe(true);
+    expect(passes("is:flagged", read)).toBe(false);
+    expect(passes("has:attachment", read)).toBe(false);
+    // Folders by local id, when given.
+    const query = parseSearch("x");
+    expect(admits(query, checklist, open, new Set(["w-inbox"]))).toBe(true);
+    expect(admits(query, checklist, open, new Set(["w-archive"]))).toBe(false);
+    expect(admits(query, checklist, open, new Set())).toBe(false);
+  });
+});
+
+describe("rankHits", () => {
+  const now = new Date("2026-10-18T10:00:00Z");
+  const message = (id: string, subject: string, daysOld: number, preview = ""): Message => ({
+    ...createDemoState().messages[0]!,
+    id,
+    subject,
+    preview,
+    bodyText: null,
+    from: { name: "Sam", address: "sam@example.org" },
+    to: [],
+    cc: [],
+    receivedAt: new Date(now.getTime() - daysOld * 86_400_000).toISOString(),
+  });
+  const ids = (hits: { message: Message }[]) => hits.map((h) => h.message.id);
+
+  it("puts words in the subject or sender first, then recent mail", () => {
+    const query = parseSearch("porto");
+    const p1 = { message: message("p1", "Porto offsite: tickets", 2), fromServer: false };
+    const p2 = { message: message("p2", "Porto itinerary", 200), fromServer: false };
+    const p3 = {
+      message: message("p3", "Friday plans", 1, "we fly to porto on Friday"),
+      fromServer: false,
+    };
+    expect(ids(rankHits([p3, p2, p1], query, now))).toEqual(["p1", "p2", "p3"]);
+    expect(score(query, p1, now)).toBeCloseTo(0.973, 3);
+    expect(score(query, p2, now)).toBeCloseTo(0.406, 3);
+    expect(score(query, p3, now)).toBeCloseTo(0.296, 3);
+  });
+
+  it("scores matches inside words and server-only hits as the core does", () => {
+    const query = parseSearch("ortof");
+    const inside = { message: message("i", "Portoffice move", 0), fromServer: false };
+    const server = { message: message("s", "Nothing here", 0), fromServer: true };
+    expect(score(query, inside, now)).toBeCloseTo(INFIX_RELEVANCE, 6);
+    expect(score(query, server, now)).toBeCloseTo(SERVER_RELEVANCE, 6);
+    // Equal scores: newest first, then by id.
+    const a = { message: message("a", "x", 3), fromServer: true };
+    const b = { message: message("b", "x", 3), fromServer: true };
+    const c = { message: message("c", "x", 1), fromServer: true };
+    expect(ids(rankHits([b, a, c], parseSearch("zzz"), now))).toEqual(["c", "a", "b"]);
+  });
+
+  it("counts subject: terms as in the subject and body: terms as elsewhere", () => {
+    const m = { message: message("m", "Plans", 0, "porto"), fromServer: false };
+    expect(score(parseSearch("subject:plans"), m, now)).toBeCloseTo(1, 6);
+    expect(score(parseSearch("body:porto"), m, now)).toBeCloseTo(0.3, 6);
+    expect(score(parseSearch("subject:plans body:porto"), m, now)).toBeCloseTo(0.65, 6);
+  });
+});
+
+describe("mockSnippet", () => {
+  const body =
+    "Hi Alex, the plan for the week is set: we leave early on Monday, then we could get " +
+    "pineapple pizza on Friday at the harbor, and come back on the late train.";
+  const opened = { ...createDemoState().messages[0]!, bodyText: body };
+
+  it("shows the words around the first hit in the body", () => {
+    const snippet = mockSnippet(opened, hitPatterns(parseSearch("pineapple")))!;
+    expect(snippet.filter((r) => r.hit).map((r) => r.text)).toEqual(["pineapple"]);
+    const text = snippet.map((r) => r.text).join("");
+    expect(text.startsWith("…")).toBe(true);
+    expect(text).toContain("then we could get pineapple pizza");
+    expect(text.length).toBeLessThanOrEqual(162);
+  });
+
+  it("is null without a body or a hit in it", () => {
+    expect(
+      mockSnippet({ ...opened, bodyText: null }, hitPatterns(parseSearch("pizza"))),
+    ).toBeNull();
+    expect(mockSnippet(opened, hitPatterns(parseSearch("zebra")))).toBeNull();
+    expect(mockSnippet(opened, hitPatterns(parseSearch("subject:pizza")))).toBeNull();
+    expect(mockSnippet(opened, null)).toBeNull();
   });
 });

@@ -571,16 +571,17 @@ pub enum ServerSearchStatus {
     Failed,
 }
 
-/// One account's page of a search of the whole mailbox on its server.
-/// (No `PartialEq`: [`crate::error::Error`] has none.)
+/// What one call of a search of an account's whole mailbox on its server
+/// found (one or more pages). (No `PartialEq`: [`crate::error::Error`] has
+/// none.)
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerSearchResult {
     pub search_id: String,
     pub account_id: String,
     pub status: ServerSearchStatus,
-    /// Local ids of the messages found on this page, newest first; all
-    /// stored now.
+    /// Local ids of the messages found on the pages this call read that
+    /// pass the query's filters, newest first; all stored now.
     pub message_ids: Vec<String>,
     /// How many of them weren't stored on this device before.
     pub added: u32,
@@ -588,6 +589,47 @@ pub struct ServerSearchResult {
     pub has_more: bool,
     /// Why it failed (status `failed`), else null.
     pub error: Option<crate::error::Error>,
+}
+
+/// How search results are ordered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchSort {
+    /// Best matches first: words in the subject and sender count most, and recent mail leads.
+    #[default]
+    Relevance,
+    /// Newest first.
+    Newest,
+}
+
+/// How to search, besides what for. By default best matches first, and
+/// weeks from Sunday.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SearchOptions {
+    pub sort: SearchSort,
+    /// First day of the week, for `received:"this week"` and `"last week"`:
+    /// 0 is Sunday … 6 Saturday (as `Date.getDay`); others count modulo 7.
+    pub week_starts_on: u8,
+}
+
+/// A piece of text, and whether a search matched it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextRun {
+    pub text: String,
+    pub hit: bool,
+}
+
+/// A message a search found.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    #[serde(flatten)]
+    pub summary: MessageSummary,
+    /// The body's words around what matched there (`…` where cut), when
+    /// the body matched: shown in place of the preview. Otherwise null.
+    pub snippet: Option<Vec<TextRun>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1553,6 +1595,87 @@ mod tests {
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["kind"], "microsoft");
         assert_eq!(json["tenantId"], "t");
+    }
+
+    #[test]
+    fn search_options_default_when_missing() {
+        let options: SearchOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(options, SearchOptions::default());
+        assert_eq!(
+            (options.sort, options.week_starts_on),
+            (SearchSort::Relevance, 0)
+        );
+        let none: Option<SearchOptions> = serde_json::from_str("null").unwrap();
+        assert_eq!(none.unwrap_or_default(), SearchOptions::default());
+        let given: SearchOptions =
+            serde_json::from_str(r#"{"sort":"newest","weekStartsOn":1}"#).unwrap();
+        assert_eq!(
+            given,
+            SearchOptions {
+                sort: SearchSort::Newest,
+                week_starts_on: 1
+            }
+        );
+        let sort: SearchOptions = serde_json::from_str(r#"{"sort":"relevance"}"#).unwrap();
+        assert_eq!(sort.sort, SearchSort::Relevance);
+    }
+
+    #[test]
+    fn search_hits_are_flat_with_a_snippet() {
+        let summary = MessageSummary {
+            id: "m1".into(),
+            account_id: "a".into(),
+            folder_id: "f".into(),
+            remote_id: "r".into(),
+            conversation_id: None,
+            subject: "Lunch".into(),
+            from: Some(EmailAddress::new(Some("Ada"), "ada@x")),
+            to: vec![],
+            cc: vec![],
+            preview: "…".into(),
+            received_at: "2026-10-17T09:00:00Z".parse().unwrap(),
+            is_read: false,
+            is_flagged: false,
+            is_draft: false,
+            has_attachments: false,
+            importance: Importance::Normal,
+        };
+        let run = |text: &str, hit| TextRun {
+            text: text.into(),
+            hit,
+        };
+        let hit = SearchHit {
+            summary: summary.clone(),
+            snippet: Some(vec![
+                run("…we could get ", false),
+                run("pineapple", true),
+                run(" pizza on Friday…", false),
+            ]),
+        };
+        assert_eq!(
+            serde_json::to_value(&hit).unwrap(),
+            serde_json::json!({
+                "id": "m1", "accountId": "a", "folderId": "f", "remoteId": "r",
+                "conversationId": null, "subject": "Lunch",
+                "from": { "name": "Ada", "address": "ada@x" }, "to": [], "cc": [],
+                "preview": "…", "receivedAt": "2026-10-17T09:00:00Z", "isRead": false,
+                "isFlagged": false, "isDraft": false, "hasAttachments": false,
+                "importance": "normal",
+                "snippet": [
+                    { "text": "…we could get ", "hit": false },
+                    { "text": "pineapple", "hit": true },
+                    { "text": " pizza on Friday…", "hit": false },
+                ],
+            })
+        );
+        let plain = SearchHit {
+            summary,
+            snippet: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap()["snippet"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]

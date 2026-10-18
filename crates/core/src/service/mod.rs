@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use uuid::Uuid;
 
+pub use crate::search::rank::MAX_RANKED_CANDIDATES;
 pub use alerts::{MAX_AGE_HOURS, MailAlert, SUMMARY_THRESHOLD};
 pub use connector::{
     BrowserOpener, Connector, LiveConnector, PUBLISHED_MICROSOFT_CLIENT_ID, ProviderSet,
@@ -31,7 +32,8 @@ pub use connector::{
 pub use mail::Attachment;
 pub use search::{
     LOCAL_SEARCH_LIMIT, MAX_INCLUDED_IDS, MAX_SEARCH_ROWS_PER_ACCOUNT, SEARCH_RESULT_TTL_DAYS,
-    SERVER_SEARCH_PAGE, SERVER_SEARCH_TIMEOUT,
+    SERVER_SEARCH_MAX_PAGES, SERVER_SEARCH_MIN_HITS, SERVER_SEARCH_PAGE, SERVER_SEARCH_PAGE_TIME,
+    SERVER_SEARCH_TIMEOUT,
 };
 pub use targeted::SyncScope;
 

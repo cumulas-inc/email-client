@@ -35,6 +35,9 @@ _Last updated: October 18, 2026._
 - **Attachments you open**, in the app's cache folder,
   `~/.cache/co.cumulas.Mail/`, readable only by you. They're removed when the
   app next starts, and any older than a day when you open another.
+- **Your recent searches** (the last 8), so the search box can suggest them, in
+  the app's data folder. "Clear recent searches" in the search box's suggestions
+  deletes them.
 - **Passwords and sign-in tokens**, in your desktop's keyring (GNOME Keyring
   or KWallet), never in the app's database.
 - **An installation ID**: a random string made once, which the push service
@@ -107,9 +110,9 @@ which serves the page, may log the request, as its
 [privacy statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement)
 describes.
 
-When you search your mail, the words you type go to the mail servers of your
-accounts (Microsoft, or your IMAP server), so that each can search your whole
-mailbox, and never to Cumulas.
+When you search your mail, the words you type and the filters you choose (such
+as dates, or unread) go to the mail servers of your accounts (Microsoft, or your
+IMAP server), so that each can search your whole mailbox, and never to Cumulas.
 
 When you check encryption and sensitivity labels in Settings (Microsoft 365
 work and school accounts), the app sends a few test messages from your

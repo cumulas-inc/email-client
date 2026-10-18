@@ -874,6 +874,117 @@ export function protectedMessages(): Message[] {
   return [forecast, orgChart, contract, vpn, tax, pricing, spoofed, releaseNotes];
 }
 
+/**
+ * Mail that shows how search ranks and filters. "porto" is in three work
+ * messages and nowhere else: best match lists the subjects first (the
+ * recent one, then the old one) and the mention in a preview last; newest
+ * first, the mention leads. The server has an old flagged message and one
+ * with an attachment from last year, which only `is:flagged` and
+ * `has:attachment received:"last year"` on the server find; and Sent and
+ * Projects have an unread message each, for `in:`.
+ */
+function searchDemoMessages(): { local: Message[]; server: Message[] } {
+  const work = (seed: MessageSeed) => message(WORK, ME_WORK, seed);
+  const lastYear = new Date();
+  lastYear.setFullYear(lastYear.getFullYear() - 1, 6, 1);
+  lastYear.setHours(9, 40, 0, 0);
+  const itinerary = [
+    "Day one: arrive in the afternoon and check in at the riverside guesthouse.",
+    "Day two: the workshop runs from nine until four, with lunch in the old market hall.",
+    "Day three: a free morning, then the team dinner by the bridge.",
+    "Day four: the early train back; taxis are booked for six.",
+  ];
+  return {
+    local: [
+      work({
+        folderId: "w-archive",
+        from: people.travel,
+        subject: "Porto offsite: tickets and hotel",
+        html:
+          para(
+            "Your tickets for the team trip are attached, with the hotel booking for three nights.",
+            "Check-in opens at 14:00. Breakfast is included.",
+          ) + signature("Skyway Travel"),
+        received: at(-2, 9, 5),
+        flagged: true,
+        attachments: [
+          { name: "tickets-and-hotel.pdf", contentType: "application/pdf", size: 88_310 },
+        ],
+      }),
+      work({
+        folderId: "w-archive",
+        from: people.mei,
+        subject: "Porto itinerary",
+        html: para(
+          "Hi Alex,",
+          "Here is the plan for the four days, as we discussed:",
+          ...itinerary,
+        ),
+        received: at(-200, 11, 30),
+      }),
+      work({
+        folderId: "w-archive",
+        from: people.sam,
+        subject: "Friday plans",
+        html:
+          para(
+            "Quick one: we fly to porto on Friday, so the planning review moves to Thursday afternoon.",
+            "I'll send the updated invite.",
+          ) + signature("Sam"),
+        received: at(-1, 16, 20),
+      }),
+      work({
+        folderId: "w-sent",
+        from: ME_WORK,
+        to: [people.jonas],
+        subject: "Notes for the export endpoint fix",
+        html: para("Jonas, my notes from the call are below; the ticket has the details."),
+        received: at(-1, 10, 12),
+        read: false,
+      }),
+      work({
+        folderId: "w-projects",
+        from: people.priya,
+        subject: "Projects board: what moves next sprint",
+        html: para(
+          "Hi Alex,",
+          "I've sorted the projects board for next sprint. Could you check the order of the top five?",
+        ),
+        received: at(-1, 14, 45),
+        read: false,
+      }),
+    ],
+    server: [
+      work({
+        folderId: "w-archive",
+        from: people.dana,
+        subject: "Signed partnership agreement with Fabrikam",
+        html:
+          para(
+            "Alex,",
+            "Fabrikam signed the partnership agreement today. Keep this one handy for the renewal talks.",
+          ) + signature("Dana"),
+        received: at(-400, 15, 10),
+        flagged: true,
+      }),
+      work({
+        folderId: "w-archive",
+        from: people.lucia,
+        subject: "Brand guidelines, final edition",
+        html:
+          para(
+            "Hello Alex,",
+            "The final edition of the brand guidelines is attached, with the color and type sections updated.",
+          ) + signature("Lucía"),
+        received: lastYear,
+        attachments: [
+          { name: "brand-guidelines-final.pdf", contentType: "application/pdf", size: 2_481_118 },
+        ],
+      }),
+    ],
+  };
+}
+
 function contact(
   accountId: string,
   id: string,
@@ -1064,6 +1175,10 @@ export function createDemoState(): MockState {
   const messages = [...workMessages(), ...homeMessages(), ...olderWorkMessages()];
   // After the synced mail, so its ids stay as they were.
   const serverMessages = serverOnlyMessages();
+  // Last, so every id before stays as it was.
+  const searchDemo = searchDemoMessages();
+  messages.push(...searchDemo.local);
+  serverMessages.push(...searchDemo.server);
 
   const calendars: Calendar[] = [
     {

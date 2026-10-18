@@ -20,6 +20,8 @@ export interface MenuItem {
   disabled?: boolean;
   danger?: boolean;
   checked?: boolean;
+  /** One choice of several (with `checked`): a menuitemradio, not a menuitemcheckbox. */
+  radio?: boolean;
   /** Draw a separator above this item. */
   separator?: boolean;
   shortcut?: string;
@@ -172,8 +174,14 @@ export function Menu({ ref, trigger, items, align = "start", label, fixed = fals
               {item.separator && <div className="menu__separator" role="separator" />}
               <button
                 type="button"
-                role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"}
-                aria-checked={item.checked}
+                role={
+                  item.radio
+                    ? "menuitemradio"
+                    : item.checked === undefined
+                      ? "menuitem"
+                      : "menuitemcheckbox"
+                }
+                aria-checked={item.radio ? !!item.checked : item.checked}
                 className={`menu__item${item.danger ? " menu__item--danger" : ""}`}
                 disabled={item.disabled}
                 onClick={() => {

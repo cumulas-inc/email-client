@@ -20,8 +20,11 @@ import type {
   MessagePage,
   MessageSummary,
   OutgoingMessage,
+  SearchHit,
+  SearchSort,
 } from "../../api/types";
 import { toast } from "../../components/toast";
+import { weekStartsOn } from "../../lib/datetime";
 import { ALL_INBOXES, type MailFilter } from "./mailStore";
 
 export const PAGE_SIZE = 50;
@@ -135,27 +138,37 @@ export function fetchMessage(client: QueryClient, backend: Backend, messageId: s
 
 /**
  * The messages on this device matching `text`, with `includeIds` (what the
- * server searches found, stored on the device now) among them. `revision`
- * changes whenever `includeIds` does (the search they came from and how
- * many), so each list of hits is its own query; the last results stay on
- * screen while the next ones load.
+ * server searches found, stored on the device now) among them, in `sort`'s
+ * order. `revision` changes whenever `includeIds` does (the search they
+ * came from and how many), so each list of hits is its own query; the last
+ * results stay on screen while the next ones load.
  */
-export function useSearch(text: string, includeIds: string[], revision: string) {
+export function useSearch(
+  text: string,
+  includeIds: string[],
+  revision: string,
+  sort: SearchSort = "relevance",
+) {
   const backend = useBackend();
   return useQuery({
-    queryKey: qk.search(text, revision),
-    queryFn: () => backend.searchMessages(text, undefined, includeIds),
+    queryKey: qk.search(text, revision, sort),
+    queryFn: () =>
+      backend.searchMessages(text, undefined, includeIds, { sort, weekStartsOn: weekStartsOn() }),
     enabled: text.length > 0,
     placeholderData: (previous) => previous,
   });
 }
 
-export function useSuggestions(text: string) {
+/**
+ * Addresses to offer for `text`; with `allowEmpty`, an empty text asks too
+ * (the people who wrote most lately).
+ */
+export function useSuggestions(text: string, { allowEmpty = false } = {}) {
   const backend = useBackend();
   return useQuery({
     queryKey: qk.suggestions(text),
     queryFn: () => backend.suggestAddresses(text),
-    enabled: text.length > 0,
+    enabled: text.length > 0 || allowEmpty,
     staleTime: 60_000,
     placeholderData: (previous) => previous,
   });
@@ -223,9 +236,14 @@ function patchMessages(client: QueryClient, ids: Set<string>, patch: Patch): voi
       pages: pages.map((p) => (removed ? { ...p, total: Math.max(0, p.total - removed) } : p)),
     };
   });
-  client.setQueriesData<MessageSummary[]>({ queryKey: searchRoot }, (data) => {
+  client.setQueriesData<SearchHit[]>({ queryKey: searchRoot }, (data) => {
     if (!data?.some((m) => ids.has(m.id))) return data;
-    return data.flatMap((m) => (ids.has(m.id) ? (patch(m, "search") ?? []) : [m]));
+    // A hit keeps its snippet.
+    return data.flatMap((m) => {
+      if (!ids.has(m.id)) return [m];
+      const next = patch(m, "search");
+      return next ? [{ ...m, ...next }] : [];
+    });
   });
   client.setQueriesData<Message>({ queryKey: messageRoot }, (data) => {
     if (!data || !ids.has(data.id)) return data;

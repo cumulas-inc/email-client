@@ -203,6 +203,32 @@ export interface ServerSearchResult {
   error: BackendError | null;
 }
 
+/** How search results are ordered. */
+export type SearchSort = "relevance" | "newest";
+
+/** How to search, besides what for. */
+export interface SearchOptions {
+  /** Default "relevance": words in the subject and sender count most, and recent mail leads. */
+  sort?: SearchSort;
+  /**
+   * First day of the week, for received:"this week": 0 (Sunday) to 6
+   * (Saturday), as Date.getDay. Default 0; leave it out rather than null.
+   */
+  weekStartsOn?: number;
+}
+
+/** A piece of text, and whether a search matched it. */
+export interface TextRun {
+  text: string;
+  hit: boolean;
+}
+
+/** A message a search found. */
+export interface SearchHit extends MessageSummary {
+  /** The body's words around what matched there; null when the body didn't match. */
+  snippet: TextRun[] | null;
+}
+
 export interface OutgoingAttachment {
   name: string;
   contentType: string;

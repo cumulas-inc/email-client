@@ -21,6 +21,7 @@ mod windows_zones;
 mod tests;
 
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -83,6 +84,9 @@ pub struct GraphProvider {
     property_budget: Duration,
     /// The computer's time zone (tests set another).
     computer_time_zone: fn() -> String,
+    /// The mailbox refused KQL dates once: from then on they're left to the
+    /// device.
+    kql_dates_refused: AtomicBool,
 }
 
 impl GraphProvider {
@@ -105,6 +109,7 @@ impl GraphProvider {
             own_address: OnceCell::new(),
             property_budget: PROPERTY_BUDGET,
             computer_time_zone,
+            kql_dates_refused: AtomicBool::new(false),
         }
     }
 

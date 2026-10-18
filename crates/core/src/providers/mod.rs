@@ -14,10 +14,12 @@ pub mod graph;
 pub mod imap;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 
 use crate::error::{Error, Result};
 use crate::model::{
@@ -26,6 +28,7 @@ use crate::model::{
     Task, TaskDraft, TaskList, TaskPatch,
 };
 use crate::search::SearchQuery;
+use crate::search::dates::Received;
 
 /// Where a message lives on the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +128,37 @@ pub struct SearchPage {
     pub messages: Vec<MessageSummary>,
     /// Opaque cursor for the next page; `None` when there is none.
     pub next: Option<String>,
+}
+
+/// How long a page of a server search may take when nothing says
+/// otherwise ([`ServerQuery::whole_mailbox`]).
+const SEARCH_PAGE_TIME: Duration = Duration::from_secs(45);
+
+/// What a provider searches its server for: a query, its dates resolved, and where.
+#[derive(Debug, Clone, Copy)]
+pub struct ServerQuery<'a> {
+    pub query: &'a SearchQuery,
+    pub received: Received,
+    /// Every stored folder of the account, well-known ones first.
+    pub folders: &'a [Folder],
+    /// The folders `in:` names in this account (non-empty), or None: the whole mailbox.
+    pub scope: Option<&'a [Folder]>,
+    /// When the caller stops waiting for the page: a provider that takes
+    /// its time (IMAP looks through folder after folder) keeps within it.
+    pub deadline: Instant,
+}
+
+impl<'a> ServerQuery<'a> {
+    /// `query` anywhere in the mailbox, at any time, within 45 seconds.
+    pub fn whole_mailbox(query: &'a SearchQuery, folders: &'a [Folder]) -> Self {
+        Self {
+            query,
+            received: Received::default(),
+            folders,
+            scope: None,
+            deadline: Instant::now() + SEARCH_PAGE_TIME,
+        }
+    }
 }
 
 /// Body and full headers of a message, as fetched from the server.
@@ -250,13 +284,14 @@ pub trait MailProvider: Send + Sync {
     /// responsible for leaving a copy in the Sent folder.
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()>;
 
-    /// Searches the whole mailbox on the server, at most `limit` messages a
-    /// page. `folders` are the account's stored folders, well-known ones
-    /// first. `cursor` continues a previous page.
+    /// Searches the mailbox on the server (or the folders the search is
+    /// scoped to), at most `limit` messages a page. `cursor` continues a
+    /// previous page. What a server can't filter by exactly (read, flagged,
+    /// dates in its own zones) it may leave out: the caller checks every
+    /// message it returns against the query's filters.
     async fn search(
         &self,
-        _query: &SearchQuery,
-        _folders: &[Folder],
+        _search: &ServerQuery<'_>,
         _cursor: Option<&str>,
         _limit: u32,
     ) -> Result<SearchPage> {
