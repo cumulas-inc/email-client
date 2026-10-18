@@ -97,6 +97,20 @@
   </keywords>
 
   <releases>
+    <release version="0.3.0" date="2026-10-18">
+      <description>
+        <p>Microsoft 365 accounts work in more organizations, and Cumulas Mail tells you when an update is ready.</p>
+        <ul>
+          <li>When your organization requires an administrator's approval, Cumulas Mail explains why and makes asking easy: copy or email the approval link, open the approval page yourself, or request approval through Microsoft</li>
+          <li>Try with mail only: where your organization approves mail first, you can sign in now and turn on calendar, contacts and tasks later</li>
+          <li>Calendar, contacts or tasks that still need permission say so, with Turn on and Ask IT, instead of stopping the whole account</li>
+          <li>Clear explanations when your organization blocks a sign-in, for example when you aren't assigned to the app or a sign-in rule applies</li>
+          <li>Updating Cumulas Mail no longer risks signing you out, and permissions approved later are picked up by themselves</li>
+          <li>A page for IT administrators, flatpak.cumulas.co/admin-consent, explains what Cumulas Mail accesses and how to approve it</li>
+          <li>When a newer version has been installed, Cumulas Mail offers to restart into it</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-16">
       <description>
         <p>Search now covers your whole mailbox.</p>
