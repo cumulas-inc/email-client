@@ -23,12 +23,13 @@ system webview (WebKitGTK on Linux).
 │  store/     SQLite cache (+ FTS5 full-text indexes)                │
 │  search/    the search language, for FTS5, Graph KQL, IMAP SEARCH  │
 │  providers/ MailProvider · CalendarProvider · ContactsProvider ·   │
-│             TasksProvider                                          │
+│             TasksProvider · LabelsProvider                         │
 │     ├─ graph/  Microsoft 365 & Outlook.com (Microsoft Graph)       │
 │     └─ imap/   IMAP + SMTP                                         │
 │  auth/      Microsoft OAuth (PKCE, loopback redirect)              │
 │  secrets.rs Secret Service / Flatpak secret portal (oo7)           │
 │  html.rs    sanitizing email HTML and signatures                   │
+│  protection.rs protected mail: detection, labels, diagnostics      │
 └────────────────────────────────────────────────────────────────────┘
 ```
 

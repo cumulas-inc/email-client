@@ -58,6 +58,13 @@ and restarts into it when you choose Restart (see
   up and editable in each message (none is added when the organization's mail
   server signs mail on send). See [PRIVACY.md](PRIVACY.md) for what this sends
   where.
+- **Protected mail**: mail encrypted with Microsoft Purview or S/MIME says so
+  and opens in Outlook on the web, where replies and forwards to it go too, so
+  they stay protected; S/MIME signatures show, unchecked. Microsoft 365 work
+  and school accounts can ask their organization's mail server to encrypt a
+  message or apply a sensitivity label, once IT has set up the rules and a
+  check in Settings → Accounts shows they work (see
+  [the admin guide](docs/microsoft-365.md#sensitivity-labels-and-encryption-it-admins)).
 - **New mail within seconds**: IMAP accounts keep a connection open (IMAP
   IDLE, and NOTIFY where the server offers it); Microsoft accounts get
   Microsoft's change notifications through the Cumulas push service
@@ -150,6 +157,18 @@ CI runs all of these, plus a Flatpak build.
   refuses `Sync.Receive` there, set `ADMIN_LINK_INCLUDES_PUSH` to `false`,
   drop the scope from the page's and the docs' link, remove the page's "For
   instant updates" rows and drop "plus `Sync.Receive`" from the docs.
+- Add `InformationProtectionPolicy.Read` (Microsoft Graph, delegated) to the
+  published app registration's API permissions, and note any warning about
+  personal accounts. Then, in a test tenant, set up
+  [sensitivity labels and encryption](docs/microsoft-365.md#sensitivity-labels-and-encryption-it-admins)
+  as the guide says and check, with **Copy diagnostic details** on each: mail
+  protected by a label, Encrypt, Do Not Forward and S/MIME is recognized; the
+  checks in Settings pass only once the rules and policies are on, never
+  because of a rule that encrypts by subject; a reply and a forward of labeled
+  mail arrive with the label chosen, and a forward with its attachment once;
+  `x-cumulas-label` in mail from outside the organization labels nothing; and,
+  through the Cumulas Signatures relay, mail is signed before it's encrypted.
+  Confirm the licensing the guide states.
 - Finish [setting up the self-hosted Flatpak repository](packaging/flatpak/README.md#setting-it-up)
   before the first release tag: the signing key, DNS and GitHub Pages are
   done; the `flatpak-signing` environment (with the secret moved into it), the
