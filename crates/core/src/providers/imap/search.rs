@@ -24,8 +24,7 @@ use super::sync::{Target, fetch_summaries};
 use super::{ImapProvider, uid_set};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Folder, MessageSummary};
-use crate::providers::SearchPage;
-use crate::search::SearchQuery;
+use crate::providers::{SearchPage, ServerQuery};
 use crate::search::imap::{ImapCriteria, Literals};
 
 /// The newest matches taken from a folder at a time; older ones wait for a
@@ -236,20 +235,21 @@ async fn fetch_group(
 }
 
 impl ImapProvider {
-    /// See [`crate::providers::MailProvider::search`].
+    /// See [`crate::providers::MailProvider::search`]. A search scoped to
+    /// some folders looks in those only.
     pub(super) async fn search_mailbox(
         &self,
-        query: &SearchQuery,
-        folders: &[Folder],
+        search: &ServerQuery<'_>,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<SearchPage> {
-        let Some(criteria) = ImapCriteria::new(query) else {
+        let Some(criteria) = ImapCriteria::new(search.query, search.received) else {
             return Ok(SearchPage::default());
         };
+        let folders = search.folders;
         let mut cursor = match cursor {
             Some(text) => Cursor::parse(text)?,
-            None => Cursor::new(folders),
+            None => Cursor::new(search.scope.unwrap_or(folders)),
         };
         let limit = limit.max(1) as usize;
         self.look(&criteria, folders, &mut cursor, limit, SEARCH_TIME)
@@ -374,6 +374,8 @@ mod tests {
     use super::*;
     use crate::model::{ImapSettings, TlsMode};
     use crate::providers::imap::ImapCredentials;
+    use crate::search::SearchQuery;
+    use crate::search::dates::Received;
 
     /// A mailbox on a loopback server, with `LITERAL+`: folders (name,
     /// UIDVALIDITY, messages by UID with their arrival in Unix seconds),
@@ -398,6 +400,8 @@ mod tests {
         /// Times it answered what had come (the client's round trips).
         turns: usize,
         examines: usize,
+        /// The folders examined, in turn.
+        examined: Vec<String>,
         searches: Vec<String>,
     }
 
@@ -516,7 +520,8 @@ mod tests {
                             seen.turns += 1;
                             for line in &lines {
                                 let line = line.trim_end();
-                                if line.contains(" EXAMINE ") {
+                                if let Some((_, name)) = line.split_once(" EXAMINE ") {
+                                    seen.examined.push(name.trim_matches('"').to_owned());
                                     seen.examines += 1;
                                     if mailbox.cut_after.is_some_and(|n| seen.examines > n) {
                                         return;
@@ -584,7 +589,7 @@ mod tests {
     }
 
     fn criteria() -> ImapCriteria {
-        ImapCriteria::new(&SearchQuery::parse("zebracorn")).unwrap()
+        ImapCriteria::new(&SearchQuery::parse("zebracorn"), Received::default()).unwrap()
     }
 
     #[tokio::test]
@@ -724,6 +729,43 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Network);
     }
 
+    #[tokio::test]
+    async fn a_scoped_search_looks_in_its_folders_only() {
+        let mailbox = Mailbox {
+            folders: folders(4, 2),
+            ..Default::default()
+        };
+        let folders = stored(&mailbox);
+        let (provider, seen) = serve(mailbox).await;
+        let query = SearchQuery::parse("zebracorn is:unread is:flagged received:2026-10-01");
+        let received = Received {
+            since: Some(chrono::DateTime::from_timestamp(1_790_827_200, 0).unwrap()),
+            before: Some(chrono::DateTime::from_timestamp(1_790_913_600, 0).unwrap()),
+        };
+        let search = ServerQuery {
+            query: &query,
+            received,
+            folders: &folders,
+            scope: Some(&folders[1..3]),
+        };
+        let page = provider.search_mailbox(&search, None, 50).await.unwrap();
+        // This server tells nothing but UIDs and dates.
+        assert!(page.messages.is_empty());
+        let seen = seen.lock().unwrap();
+        let mut examined = seen.examined.clone();
+        examined.sort();
+        examined.dedup();
+        assert_eq!(examined, ["F1", "F2"]);
+        assert_eq!(seen.searches.len(), 2);
+        // Flags and dates (1 October 2026 in UTC−4, widened) on the wire.
+        for line in &seen.searches {
+            assert!(
+                line.ends_with(" FLAGGED UNSEEN SINCE 30-Sep-2026 BEFORE 3-Oct-2026 UNDELETED"),
+                "{line}"
+            );
+        }
+    }
+
     #[test]
     fn cursors_round_trip_and_reject_others() {
         let cursor = Cursor {
@@ -855,7 +897,8 @@ mod tests {
         let mut session = ImapSession::connect(&credentials).await.unwrap();
         assert!(!session.has_capability("LITERAL+"));
         session.select("INBOX", false).await.unwrap();
-        let criteria = ImapCriteria::new(&SearchQuery::parse("subject:café")).unwrap();
+        let criteria =
+            ImapCriteria::new(&SearchQuery::parse("subject:café"), Received::default()).unwrap();
         let uids = session
             .uid_search_segments(&criteria.render(Literals::Sync))
             .await
@@ -880,7 +923,7 @@ mod tests {
         let (credentials, _) = literal_server(true).await;
         let mut session = ImapSession::connect(&credentials).await.unwrap();
         session.select("INBOX", false).await.unwrap();
-        let criteria = ImapCriteria::new(&SearchQuery::parse("café")).unwrap();
+        let criteria = ImapCriteria::new(&SearchQuery::parse("café"), Received::default()).unwrap();
         let error = session
             .uid_search_segments(&criteria.render(Literals::Sync))
             .await

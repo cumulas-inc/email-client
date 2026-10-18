@@ -59,10 +59,9 @@ impl CoreService {
         self.store.list_messages(folder_id, query)
     }
 
+    /// People to suggest for `text`; without text, the people who wrote
+    /// most lately (for the search box's `from:`).
     pub fn suggest_addresses(&self, text: &str) -> Result<Vec<EmailAddress>> {
-        if text.trim().is_empty() {
-            return Ok(Vec::new());
-        }
         self.store.suggest_addresses(text.trim(), 8)
     }
 

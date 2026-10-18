@@ -1,7 +1,8 @@
 //! Compiles a query for the local full-text indexes (see migration 5 in
 //! `store/schema.rs`): `messages_fts` (words: subject, sender, To, Cc and
 //! body) and `messages_infix` (trigrams of subject and sender, for matches
-//! inside words, such as "voice" in "Invoice").
+//! inside words, such as "voice" in "Invoice"); and what ranking the matches
+//! needs of `messages_fts` (see `rank.rs` and `Store::search`).
 
 use super::{Field, SearchQuery, Term};
 
@@ -12,6 +13,24 @@ pub struct FtsPlan {
     pub conditions: Vec<String>,
     /// Parameters for `conditions`, in order (MATCH expressions only).
     pub params: Vec<String>,
+    /// Conditions on `m` for the filters (attachments, read, flagged), with
+    /// no parameters. They apply to server hits too.
+    pub filters: Vec<String>,
+}
+
+/// Column weights for bm25: subject, sender, To, Cc, body.
+pub const BM25_WEIGHTS: [f64; 5] = [10.0, 8.0, 3.0, 2.0, 1.0];
+
+/// How a ranked term counts toward a row's field share (see rank.rs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldShare {
+    /// `subject:`: in the subject by definition (1.0).
+    Subject,
+    /// `body:`: never in the subject or sender (OTHER_FIELD_SHARE).
+    Elsewhere,
+    /// A plain term: 1.0 for the rows this expression matches, else
+    /// OTHER_FIELD_SHARE. It is `{subject sender} : (<the term's expression>)`.
+    Probe(String),
 }
 
 /// One term matched by words, or inside words.
@@ -42,9 +61,57 @@ pub fn plan(query: &SearchQuery) -> FtsPlan {
         plan.params.push(words.join(" AND "));
     }
     if query.has_attachment {
-        plan.conditions.push("m.has_attachments = 1".to_owned());
+        plan.filters.push("m.has_attachments = 1".to_owned());
+    }
+    match query.read {
+        Some(true) => plan.filters.push("m.is_read = 1".to_owned()),
+        Some(false) => plan.filters.push("m.is_read = 0".to_owned()),
+        None => {}
+    }
+    if query.flagged {
+        plan.filters.push("m.is_flagged = 1".to_owned());
     }
     plan
+}
+
+/// Whether the query has words to rank by: a plain, `subject:` or `body:`
+/// term. `from:`, `to:` and `cc:` only pick messages by address.
+pub fn ranks(query: &SearchQuery) -> bool {
+    query
+        .terms
+        .iter()
+        .any(|t| matches!(t.field, Field::Any | Field::Subject | Field::Body))
+}
+
+/// Every term's word expression (`expression`), ANDed: what `WORDS` would
+/// match if no term went to the trigram index. For bm25() and snippet().
+/// None unless `ranks(query)`.
+pub fn rank_expression(query: &SearchQuery) -> Option<String> {
+    ranks(query).then(|| {
+        query
+            .terms
+            .iter()
+            .map(expression)
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    })
+}
+
+/// One per ranked term (plain, `subject:`, `body:`), in order; empty unless `ranks`.
+pub fn field_shares(query: &SearchQuery) -> Vec<FieldShare> {
+    query
+        .terms
+        .iter()
+        .filter_map(|term| match term.field {
+            Field::Any => Some(FieldShare::Probe(format!(
+                "{{subject sender}} : ({})",
+                expression(term)
+            ))),
+            Field::Subject => Some(FieldShare::Subject),
+            Field::Body => Some(FieldShare::Elsewhere),
+            Field::From | Field::To | Field::Cc => None,
+        })
+        .collect()
 }
 
 /// The term as an FTS5 expression on `messages_fts`: a quoted phrase, so
@@ -135,9 +202,93 @@ mod tests {
     #[test]
     fn attachments_and_empty_queries() {
         let attached = plan(&SearchQuery::parse("has:attachment budget"));
-        assert_eq!(attached.conditions, [EITHER, "m.has_attachments = 1"]);
+        assert_eq!(attached.conditions, [EITHER]);
+        assert_eq!(attached.filters, ["m.has_attachments = 1"]);
+        let alone = plan(&SearchQuery::parse("has:attachment"));
+        assert!(alone.conditions.is_empty() && alone.params.is_empty());
+        assert_eq!(alone.filters, ["m.has_attachments = 1"]);
         assert_eq!(plan(&SearchQuery::parse("has:pdf")), FtsPlan::default());
         assert_eq!(plan(&SearchQuery::default()), FtsPlan::default());
+        // Where to look and dates are for the store to say.
+        assert_eq!(
+            plan(&SearchQuery::parse("in:inbox account:x received:today")),
+            FtsPlan::default()
+        );
+    }
+
+    #[test]
+    fn read_and_flagged_filters() {
+        let filters = |text: &str| plan(&SearchQuery::parse(text)).filters;
+        assert_eq!(filters("is:unread"), ["m.is_read = 0"]);
+        assert_eq!(filters("is:read"), ["m.is_read = 1"]);
+        assert_eq!(filters("is:flagged"), ["m.is_flagged = 1"]);
+        assert_eq!(
+            filters("is:flagged is:unread has:attachment x"),
+            ["m.has_attachments = 1", "m.is_read = 0", "m.is_flagged = 1"]
+        );
+    }
+
+    /// The shared ranking vectors: words rank, addresses alone don't.
+    #[test]
+    fn which_queries_rank() {
+        for text in [
+            "invoice",
+            "subject:q3",
+            "body:pineapple",
+            "from:megan invoice",
+            "\"q3 plan\" is:unread",
+        ] {
+            assert!(ranks(&SearchQuery::parse(text)), "{text:?}");
+        }
+        for text in [
+            "from:megan",
+            "to:al cc:dana",
+            "from:megan@contoso.com is:unread",
+            "is:flagged",
+            "in:inbox",
+            "has:attachment received:today",
+        ] {
+            assert!(!ranks(&SearchQuery::parse(text)), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_rank_expression_joins_every_term() {
+        let expression = |text: &str| rank_expression(&SearchQuery::parse(text));
+        // Terms that went to the trigram index too.
+        assert_eq!(
+            expression("from:megan invoice vo").as_deref(),
+            Some("sender : \"megan\"* AND \"invoice\"* AND \"vo\"*")
+        );
+        assert_eq!(
+            expression("subject:\"q3 plan\" body:x").as_deref(),
+            Some("subject : \"q3 plan\" AND body : \"x\"*")
+        );
+        for text in [
+            "is:flagged has:attachment",
+            "from:megan",
+            "to:al cc:dana",
+            "",
+        ] {
+            assert_eq!(expression(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn field_shares_per_ranked_term() {
+        assert_eq!(
+            field_shares(&SearchQuery::parse("invoice subject:q3 body:x from:megan")),
+            [
+                FieldShare::Probe("{subject sender} : (\"invoice\"*)".into()),
+                FieldShare::Subject,
+                FieldShare::Elsewhere,
+            ]
+        );
+        assert_eq!(
+            field_shares(&SearchQuery::parse("\"q3 plan\"")),
+            [FieldShare::Probe("{subject sender} : (\"q3 plan\")".into())]
+        );
+        assert!(field_shares(&SearchQuery::parse("from:megan to:al")).is_empty());
     }
 
     #[test]
@@ -150,7 +301,7 @@ mod tests {
                 typed: "say \"hi\"".into(),
                 phrase: true,
             }],
-            has_attachment: false,
+            ..SearchQuery::default()
         };
         assert_eq!(
             plan(&query).params,

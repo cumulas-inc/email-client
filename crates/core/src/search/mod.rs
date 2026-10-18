@@ -1,21 +1,33 @@
 //! Mail search queries: what the user types in the search box, parsed once
 //! and compiled for each place that searches (the local full-text index,
-//! Microsoft Graph's `$search`, IMAP `SEARCH`).
+//! Microsoft Graph's `$search` or `$filter`, IMAP `SEARCH`).
 //!
-//! The syntax is a small, forgiving subset of Outlook's: plain words (all
-//! must match, as word prefixes), `"exact phrases"`, the operators `from:`
-//! `to:` `cc:` `subject:` `body:` and `has:attachment`. Anything else is
+//! The syntax is a small, forgiving subset of Outlook's and Gmail's: plain
+//! words (all must match, as word prefixes), `"exact phrases"`, the
+//! operators `from:` `to:` `cc:` `subject:` `body:` and `has:attachment`,
+//! and filters: `is:unread` `is:read` `is:flagged`, `in:<folder>`,
+//! `account:<account>`, and dates, `received:` (a day such as `2026-10-01`,
+//! a range such as `2026-10-01..2026-10-15`, or a word such as `today` or
+//! `"this week"`), `after:` and `before:` (see [`dates`]). Anything else is
 //! plain words, and nothing is ever an error: `-word`, `AND` or `re:` are
-//! just words. The demo backend in `src/api/mock/searchQuery.ts` ports this
-//! parser; both pass the same test vectors.
+//! just words, and a filter with a value it doesn't know (`is:starred`,
+//! `received:tomorrow`) is left out. The UI's port in
+//! `src/lib/search/query.ts` passes the same test vectors.
 
+pub mod dates;
 pub mod fts;
 pub mod imap;
 pub mod kql;
+pub mod rank;
+pub mod scope;
+
+use std::collections::HashSet;
 
 use icu_normalizer::ComposingNormalizerBorrowed;
 use icu_properties::CodePointMapData;
 use icu_properties::props::{GeneralCategory, GeneralCategoryGroup};
+
+use crate::model::MessageSummary;
 
 /// The part of a message a term must match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,10 +58,22 @@ pub struct SearchQuery {
     /// All must match.
     pub terms: Vec<Term>,
     pub has_attachment: bool,
+    /// `is:read` (Some(true)) or `is:unread` (Some(false)); the last typed wins.
+    pub read: Option<bool>,
+    /// `is:flagged`.
+    pub flagged: bool,
+    /// `received:`, `after:`, `before:`: all must hold.
+    pub dates: Vec<dates::DateClause>,
+    /// `in:` values as scope keys: a message in any of the folders they name matches.
+    pub folders: Vec<String>,
+    /// `account:` values as scope keys: any.
+    pub accounts: Vec<String>,
 }
 
 /// Terms kept; later ones are dropped.
 pub const MAX_TERMS: usize = 16;
+/// Dates, folders and accounts kept, each; later ones are dropped.
+pub const MAX_FILTER_VALUES: usize = 8;
 /// Characters kept of each term.
 pub const MAX_TERM_CHARS: usize = 128;
 /// Characters of the input read.
@@ -67,6 +91,12 @@ const OPERATORS: &[&str] = &[
     "has",
     "hasattachment",
     "hasattachments",
+    "is",
+    "in",
+    "account",
+    "after",
+    "before",
+    "received",
 ];
 
 /// Characters that may be part of a word besides letters and digits, as in
@@ -77,7 +107,7 @@ fn is_word_joiner(c: char) -> bool {
 
 /// A combining mark (`\p{M}`): a virama or vowel sign (as in "हिन्दी"), or
 /// an accent typed on its own. Part of the word it follows.
-fn is_mark(c: char) -> bool {
+pub(crate) fn is_mark(c: char) -> bool {
     GeneralCategoryGroup::Mark.contains(CodePointMapData::<GeneralCategory>::new().get(c))
 }
 
@@ -118,19 +148,49 @@ impl SearchQuery {
         query
     }
 
+    /// Nothing to look for. Where to look (`in:`, `account:`) alone only
+    /// narrows a search, so it counts as nothing.
     pub fn is_empty(&self) -> bool {
-        self.terms.is_empty() && !self.has_attachment
+        self.terms.is_empty()
+            && !self.has_attachment
+            && self.read.is_none()
+            && !self.flagged
+            && self.dates.is_empty()
+    }
+
+    pub fn has_terms(&self) -> bool {
+        !self.terms.is_empty()
     }
 
     /// Whether the servers are worth asking: some term has
     /// [`MIN_SERVER_TERM_CHARS`] letters or digits, or it asks for
-    /// attachments. Single letters (`a b`, `from:a`) match most of a
-    /// mailbox, and every server would look through every folder for them.
+    /// attachments, unread or flagged mail, or dates. Single letters (`a
+    /// b`, `from:a`) match most of a mailbox, and every server would look
+    /// through every folder for them; so does `is:read`, and `in:` or
+    /// `account:` alone.
     pub fn is_narrow_enough_for_servers(&self) -> bool {
         self.has_attachment
+            || self.read == Some(false)
+            || self.flagged
+            || !self.dates.is_empty()
             || self.terms.iter().any(|t| {
                 t.text.chars().filter(|c| c.is_alphanumeric()).count() >= MIN_SERVER_TERM_CHARS
             })
+    }
+
+    /// Whether `m` passes every filter but the words: attachments, read,
+    /// flagged, `received` and, when `Some`, the folders (local ids).
+    pub fn admits(
+        &self,
+        m: &MessageSummary,
+        received: &dates::Received,
+        folders: Option<&HashSet<String>>,
+    ) -> bool {
+        (!self.has_attachment || m.has_attachments)
+            && self.read.is_none_or(|read| m.is_read == read)
+            && (!self.flagged || m.is_flagged)
+            && received.contains(m.received_at)
+            && folders.is_none_or(|folders| folders.contains(&m.folder_id))
     }
 
     /// Reads the value of operator `name` starting at `at`; returns where
@@ -155,16 +215,7 @@ impl SearchQuery {
             "subject" => Field::Subject,
             "body" => Field::Body,
             _ => {
-                let value = if quoted {
-                    phrase_text(&value).to_lowercase()
-                } else {
-                    value.to_lowercase()
-                };
-                let yes: &[&str] = match name {
-                    "has" => &["attachment", "attachments"],
-                    _ => &["true", "yes"],
-                };
-                self.has_attachment |= yes.contains(&value.as_str());
+                self.add_filter(name, &value, quoted);
                 return next;
             }
         };
@@ -175,6 +226,51 @@ impl SearchQuery {
             self.add_words(field, &value);
         }
         next
+    }
+
+    /// A filter's value (`has:`, `is:`, `in:`, `account:` and dates); one
+    /// it doesn't know is left out.
+    fn add_filter(&mut self, name: &str, value: &str, quoted: bool) {
+        let text = if quoted {
+            phrase_text(value).to_lowercase()
+        } else {
+            value.to_lowercase()
+        };
+        match name {
+            "has" => self.has_attachment |= matches!(text.as_str(), "attachment" | "attachments"),
+            "hasattachment" | "hasattachments" => {
+                self.has_attachment |= matches!(text.as_str(), "true" | "yes");
+            }
+            "is" => match text.as_str() {
+                "unread" => self.read = Some(false),
+                "read" => self.read = Some(true),
+                "flagged" => self.flagged = true,
+                _ => {}
+            },
+            // Kept whole, as a name: `in:Q1\Q2`, `in:"Project X"`.
+            "in" | "account" => {
+                let key = scope::scope_key(value);
+                let values = match name {
+                    "in" => &mut self.folders,
+                    _ => &mut self.accounts,
+                };
+                if key.chars().any(char::is_alphanumeric) && values.len() < MAX_FILTER_VALUES {
+                    values.push(key);
+                }
+            }
+            _ => {
+                let op = match name {
+                    "after" => dates::DateOp::After,
+                    "before" => dates::DateOp::Before,
+                    _ => dates::DateOp::Received,
+                };
+                if let Some(clause) = dates::parse_clause(op, &text)
+                    && self.dates.len() < MAX_FILTER_VALUES
+                {
+                    self.dates.push(clause);
+                }
+            }
+        }
     }
 
     fn add_phrase(&mut self, field: Field, text: &str) {
@@ -267,11 +363,17 @@ fn operator(chars: &[char], at: usize) -> Option<(String, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
 
-    /// Terms as the shared test vectors write them: `A:invoice`,
-    /// `Subject:q3 plan [p]`.
-    fn terms(input: &str) -> (Vec<String>, bool) {
+    use super::dates::{DateKeyword, DateOp, DateSpec, Received};
+    use super::*;
+    use crate::model::{EmailAddress, Importance};
+
+    /// Terms and filters as the shared test vectors write them: terms
+    /// `A:invoice`, `Subject:q3 plan [p]`; filters in a fixed order
+    /// (attachments, read, flagged, dates as typed, folders, accounts), as
+    /// `is:unread` or `received:2026-10-01..`.
+    fn parsed(input: &str) -> (Vec<String>, Vec<String>) {
         let query = SearchQuery::parse(input);
         let terms = query
             .terms
@@ -289,73 +391,186 @@ mod tests {
                 format!("{field}:{}{phrase}", t.text)
             })
             .collect();
-        (terms, query.has_attachment)
+        let mut filters = Vec::new();
+        if query.has_attachment {
+            filters.push("has:attachment".to_owned());
+        }
+        match query.read {
+            Some(true) => filters.push("is:read".to_owned()),
+            Some(false) => filters.push("is:unread".to_owned()),
+            None => {}
+        }
+        if query.flagged {
+            filters.push("is:flagged".to_owned());
+        }
+        for clause in &query.dates {
+            let op = match clause.op {
+                DateOp::After => "after",
+                DateOp::Before => "before",
+                DateOp::Received => "received",
+            };
+            let day = |d: Option<chrono::NaiveDate>| {
+                d.map(|d| d.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default()
+            };
+            let spec = match clause.spec {
+                DateSpec::Day(d) => day(Some(d)),
+                DateSpec::Range(first, last) => format!("{}..{}", day(first), day(last)),
+                DateSpec::Keyword(keyword) => match keyword {
+                    DateKeyword::Today => "today",
+                    DateKeyword::Yesterday => "yesterday",
+                    DateKeyword::ThisWeek => "this week",
+                    DateKeyword::LastWeek => "last week",
+                    DateKeyword::ThisMonth => "this month",
+                    DateKeyword::LastMonth => "last month",
+                    DateKeyword::ThisYear => "this year",
+                    DateKeyword::LastYear => "last year",
+                }
+                .to_owned(),
+            };
+            filters.push(format!("{op}:{spec}"));
+        }
+        filters.extend(query.folders.iter().map(|f| format!("in:{f}")));
+        filters.extend(query.accounts.iter().map(|a| format!("account:{a}")));
+        (terms, filters)
     }
 
-    /// The vectors `src/api/mock/searchQuery.test.ts` checks as well.
+    /// Terms alone, and whether it asks for attachments.
+    fn terms(input: &str) -> (Vec<String>, bool) {
+        let query = SearchQuery::parse(input);
+        (parsed(input).0, query.has_attachment)
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    /// The vectors `src/lib/search/query.test.ts` checks as well.
     #[test]
     fn parses_the_shared_test_vectors() {
-        let vectors: &[(&str, &[&str], bool)] = &[
-            ("invoice", &["A:invoice"], false),
-            ("Invoice March", &["A:invoice", "A:march"], false),
-            ("\"quarterly report\"", &["A:quarterly report [p]"], false),
-            ("from:megan", &["From:megan"], false),
-            ("From:Megan lunch", &["From:megan", "A:lunch"], false),
+        let vectors: &[(&str, &[&str], &[&str])] = &[
+            ("invoice", &["A:invoice"], &[]),
+            ("Invoice March", &["A:invoice", "A:march"], &[]),
+            ("\"quarterly report\"", &["A:quarterly report [p]"], &[]),
+            ("from:megan", &["From:megan"], &[]),
+            ("From:Megan lunch", &["From:megan", "A:lunch"], &[]),
             (
                 "subject:\"Quarterly Report\" from:megan@contoso.com",
                 &["Subject:quarterly report [p]", "From:megan@contoso.com"],
-                false,
+                &[],
             ),
-            ("to:", &[], false),
-            ("from: megan", &["A:megan"], false),
-            ("has:attachment budget", &["A:budget"], true),
-            ("HasAttachments:yes", &[], true),
-            ("has:pdf", &[], false),
-            ("re:hello", &["A:re", "A:hello"], false),
-            (
-                "\"unterminated phrase",
-                &["A:unterminated phrase [p]"],
-                false,
-            ),
-            (
-                "\u{201c}curly quotes\u{201d}",
-                &["A:curly quotes [p]"],
-                false,
-            ),
-            ("*** ??", &[], false),
-            ("-draft +final", &["A:draft", "A:final"], false),
-            ("o\u{2019}brien.", &["A:o'brien"], false),
-            ("AND OR NOT", &["A:and", "A:or", "A:not"], false),
-            ("subject:\"", &[], false),
-            ("lucía", &["A:lucía"], false),
-            ("from:\"Megan Bowen\"", &["From:megan bowen [p]"], false),
-            ("cc:x@y.z", &["Cc:x@y.z"], false),
-            ("2023-118", &["A:2023-118"], false),
+            ("to:", &[], &[]),
+            ("from: megan", &["A:megan"], &[]),
+            ("has:attachment budget", &["A:budget"], &["has:attachment"]),
+            ("HasAttachments:yes", &[], &["has:attachment"]),
+            ("has:pdf", &[], &[]),
+            ("re:hello", &["A:re", "A:hello"], &[]),
+            ("\"unterminated phrase", &["A:unterminated phrase [p]"], &[]),
+            ("\u{201c}curly quotes\u{201d}", &["A:curly quotes [p]"], &[]),
+            ("*** ??", &[], &[]),
+            ("-draft +final", &["A:draft", "A:final"], &[]),
+            ("o\u{2019}brien.", &["A:o'brien"], &[]),
+            ("AND OR NOT", &["A:and", "A:or", "A:not"], &[]),
+            ("subject:\"", &[], &[]),
+            ("lucía", &["A:lucía"], &[]),
+            ("from:\"Megan Bowen\"", &["From:megan bowen [p]"], &[]),
+            ("cc:x@y.z", &["Cc:x@y.z"], &[]),
+            ("2023-118", &["A:2023-118"], &[]),
             // Combining marks stay in their word; typed accents compose.
-            ("हिन्दी ಕನ್ನಡ", &["A:हिन्दी", "A:ಕನ್ನಡ"], false),
-            ("re\u{301}sume\u{301}", &["A:résumé"], false),
-            (
-                "\u{301}abc -\u{301}x\u{301}",
-                &["A:abc", "A:x\u{301}"],
-                false,
-            ),
-            ("\"a\u{7}b\tc\u{0}\"", &["A:ab c [p]"], false),
+            ("हिन्दी ಕನ್ನಡ", &["A:हिन्दी", "A:ಕನ್ನಡ"], &[]),
+            ("re\u{301}sume\u{301}", &["A:résumé"], &[]),
+            ("\u{301}abc -\u{301}x\u{301}", &["A:abc", "A:x\u{301}"], &[]),
+            ("\"a\u{7}b\tc\u{0}\"", &["A:ab c [p]"], &[]),
             (
                 "a b c d e f g h i j k l m n o p q r",
                 &[
                     "A:a", "A:b", "A:c", "A:d", "A:e", "A:f", "A:g", "A:h", "A:i", "A:j", "A:k",
                     "A:l", "A:m", "A:n", "A:o", "A:p",
                 ],
-                false,
+                &[],
             ),
+            // Filters.
+            ("is:unread", &[], &["is:unread"]),
+            ("IS:Flagged invoice", &["A:invoice"], &["is:flagged"]),
+            ("is:read is:unread", &[], &["is:unread"]),
+            ("is:starred", &[], &[]),
+            ("is:\"unread\"", &[], &["is:unread"]),
+            ("in:inbox budget", &["A:budget"], &["in:inbox"]),
+            (
+                "in:\"Project  X\" in:Archive",
+                &[],
+                &["in:project x", "in:archive"],
+            ),
+            ("in:\" Clients\"", &[], &["in:clients"]),
+            ("in:Q1\\Q2", &[], &["in:q1q2"]),
+            ("in:\"Say Hi\"", &[], &["in:say hi"]),
+            ("in:*** x", &["A:x"], &[]),
+            (
+                "account:Megan@Contoso.com",
+                &[],
+                &["account:megan@contoso.com"],
+            ),
+            ("account:\"Work Mail\"", &[], &["account:work mail"]),
+            (
+                "after:2026-10-01 before:2026/10/16",
+                &[],
+                &["after:2026-10-01", "before:2026-10-16"],
+            ),
+            (
+                "received:2026-10-01..2026-10-15",
+                &[],
+                &["received:2026-10-01..2026-10-15"],
+            ),
+            ("received:2026-10-01..", &[], &["received:2026-10-01.."]),
+            ("received:..2026-1-5", &[], &["received:..2026-01-05"]),
+            (
+                "received:\"This  Week\" lunch",
+                &["A:lunch"],
+                &["received:this week"],
+            ),
+            ("received:\"last month\"", &[], &["received:last month"]),
+            (
+                "received:today received:yesterday",
+                &[],
+                &["received:today", "received:yesterday"],
+            ),
+            ("received:tomorrow", &[], &[]),
+            ("after:2026-02-30", &[], &[]),
+            ("after:2026-10-01..2026-10-02", &[], &[]),
+            ("received:2026-10-01..yesterday", &[], &[]),
+            (
+                "received:2026-10-15..2026-10-01",
+                &[],
+                &["received:2026-10-15..2026-10-01"],
+            ),
+            ("before:yesterday", &[], &["before:yesterday"]),
+            ("in:", &[], &[]),
+            ("in: inbox", &["A:inbox"], &[]),
+            ("received:", &[], &[]),
+            ("isunread is", &["A:isunread", "A:is"], &[]),
+            (
+                "has:attachment is:flagged in:sent received:yesterday account:work is:read",
+                &[],
+                &[
+                    "has:attachment",
+                    "is:read",
+                    "is:flagged",
+                    "received:yesterday",
+                    "in:sent",
+                    "account:work",
+                ],
+            ),
+            (
+                "from:megan is:unread \"q3 plan\"",
+                &["From:megan", "A:q3 plan [p]"],
+                &["is:unread"],
+            ),
+            ("ACCOUNT:x in:Inbox", &[], &["in:inbox", "account:x"]),
         ];
-        for (input, expected, has_attachment) in vectors {
+        for (input, terms, filters) in vectors {
             assert_eq!(
-                terms(input),
-                (
-                    expected.iter().map(|t| t.to_string()).collect(),
-                    *has_attachment
-                ),
+                parsed(input),
+                (strings(terms), strings(filters)),
                 "{input:?}"
             );
         }
@@ -399,12 +614,140 @@ mod tests {
         }
     }
 
+    /// The shared narrowness vectors: filters that leave few messages are
+    /// worth the servers' time; read mail and where to look aren't.
+    #[test]
+    fn filters_that_narrow_enough_for_the_servers() {
+        for input in [
+            "is:unread",
+            "is:flagged",
+            "received:today",
+            "after:2020-01-01",
+            "before:2010-01-01",
+            "has:attachment in:inbox",
+        ] {
+            assert!(
+                SearchQuery::parse(input).is_narrow_enough_for_servers(),
+                "{input:?}"
+            );
+        }
+        for input in [
+            "is:read",
+            "in:inbox",
+            "account:work",
+            "is:read in:inbox account:work",
+            "a is:read",
+        ] {
+            assert!(
+                !SearchQuery::parse(input).is_narrow_enough_for_servers(),
+                "{input:?}"
+            );
+        }
+    }
+
     #[test]
     fn empty_queries() {
         for input in ["", "   ", "to:", "has:pdf", "*** ??", "subject:\"", "\"\""] {
             assert!(SearchQuery::parse(input).is_empty(), "{input:?}");
         }
         assert!(!SearchQuery::parse("has:attachment").is_empty());
+        // The shared emptiness vectors: where to look alone, and filters
+        // left out, are nothing to look for.
+        for input in [
+            "in:inbox",
+            "account:x",
+            "in:inbox account:x",
+            "is:starred",
+            "received:tomorrow",
+        ] {
+            assert!(SearchQuery::parse(input).is_empty(), "{input:?}");
+        }
+        for input in ["is:read", "received:today", "is:flagged"] {
+            assert!(!SearchQuery::parse(input).is_empty(), "{input:?}");
+        }
+        assert!(SearchQuery::parse("x").has_terms());
+        assert!(!SearchQuery::parse("is:unread in:inbox").has_terms());
+    }
+
+    #[test]
+    fn filter_values_are_capped() {
+        let many = |op: &str, value: &dyn Fn(usize) -> String| {
+            (0..9)
+                .map(|i| format!("{op}:{}", value(i)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let query = SearchQuery::parse(&many("in", &|i| format!("f{i}")));
+        assert_eq!(query.folders.len(), MAX_FILTER_VALUES);
+        assert_eq!(query.folders[7], "f7");
+        let query = SearchQuery::parse(&many("account", &|i| format!("a{i}")));
+        assert_eq!(query.accounts.len(), MAX_FILTER_VALUES);
+        let query = SearchQuery::parse(&many("after", &|i| format!("2026-10-{:02}", i + 1)));
+        assert_eq!(query.dates.len(), MAX_FILTER_VALUES);
+        // Filters don't count as terms, nor terms as filters.
+        let words = (0..20).map(|i| format!("w{i}")).collect::<Vec<_>>();
+        let query = SearchQuery::parse(&format!("{} in:inbox", words.join(" ")));
+        assert_eq!(query.terms.len(), MAX_TERMS);
+        assert_eq!(query.folders, ["inbox"]);
+    }
+
+    fn summary() -> MessageSummary {
+        MessageSummary {
+            id: "m".into(),
+            account_id: "a".into(),
+            folder_id: "inbox".into(),
+            remote_id: "1".into(),
+            conversation_id: None,
+            subject: "Lunch".into(),
+            from: Some(EmailAddress::new(Some("Ada"), "ada@example.com")),
+            to: vec![],
+            cc: vec![],
+            preview: String::new(),
+            received_at: Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0).unwrap(),
+            is_read: false,
+            is_flagged: false,
+            is_draft: false,
+            has_attachments: false,
+            importance: Importance::Normal,
+        }
+    }
+
+    #[test]
+    fn admits_checks_every_filter_but_the_words() {
+        let m = summary();
+        let open = Received::default();
+        let admits =
+            |text: &str, m: &MessageSummary| SearchQuery::parse(text).admits(m, &open, None);
+        // Words are the index's business.
+        assert!(admits("nothing like it", &m));
+        assert!(admits("is:unread", &m));
+        assert!(!admits("is:read", &m));
+        assert!(!admits("is:flagged", &m));
+        assert!(!admits("has:attachment", &m));
+        let flagged = MessageSummary {
+            is_read: true,
+            is_flagged: true,
+            has_attachments: true,
+            ..summary()
+        };
+        assert!(admits("is:read is:flagged has:attachment", &flagged));
+        assert!(!admits("is:unread", &flagged));
+
+        // Received: since inclusive, before exclusive.
+        let query = SearchQuery::parse("x");
+        let at = m.received_at;
+        let hour = Duration::hours(1);
+        let span = |since, before| Received { since, before };
+        assert!(query.admits(&m, &span(Some(at), Some(at + hour)), None));
+        assert!(!query.admits(&m, &span(Some(at + hour), None), None));
+        assert!(!query.admits(&m, &span(None, Some(at)), None));
+
+        // Folders, by local id, when given.
+        let inbox: HashSet<String> = ["inbox".to_owned()].into();
+        let archive: HashSet<String> = ["archive".to_owned()].into();
+        assert!(query.admits(&m, &open, Some(&inbox)));
+        assert!(!query.admits(&m, &open, Some(&archive)));
+        assert!(!query.admits(&m, &open, Some(&HashSet::new())));
     }
 
     #[test]

@@ -20,6 +20,7 @@ mod windows_zones;
 mod tests;
 
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
@@ -72,6 +73,9 @@ pub struct GraphProvider {
     folder_ids: Mutex<HashSet<String>>,
     /// The computer's time zone (tests set another).
     computer_time_zone: fn() -> String,
+    /// The mailbox refused KQL dates once: from then on they're left to the
+    /// device.
+    kql_dates_refused: AtomicBool,
 }
 
 impl GraphProvider {
@@ -92,6 +96,7 @@ impl GraphProvider {
             time_zone: OnceCell::new(),
             folder_ids: Mutex::default(),
             computer_time_zone,
+            kql_dates_refused: AtomicBool::new(false),
         }
     }
 

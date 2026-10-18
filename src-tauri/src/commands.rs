@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use cumulas_core::model::{
     Account, AccountSignature, ActiveReminder, AdminConsentLink, Calendar, ComposeSignature,
     Contact, ContactDraft, EmailAddress, Event, EventDraft, EventResponse, Folder,
-    ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount,
-    OutgoingMessage, PermissionRequest, ReplyKind, ServerSearchResult, Settings, Snooze,
+    ImapAccountUpdate, Message, MessagePage, MessageQuery, NewImapAccount, OutgoingMessage,
+    PermissionRequest, ReplyKind, SearchHit, SearchOptions, ServerSearchResult, Settings, Snooze,
     SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::push::PushStatus;
@@ -474,29 +474,34 @@ pub async fn list_messages(
     blocking(move || service.list_messages(&folder_id, &query)).await
 }
 
-/// Messages on this device matching `text` (operators such as `from:`
-/// included), and the messages `includeIds` names: those server searches
-/// found. Newest first.
+/// Messages on this device matching `text` (operators and filters such as
+/// `from:` or `is:unread` included), and the messages `includeIds` names
+/// (those server searches found) that pass its filters. Best first, unless
+/// `options.sort` is newest or the query has no words to rank by; rows
+/// whose text matched carry a snippet of it.
 #[tauri::command]
 pub async fn search_messages(
     state: State<'_, AppState>,
     text: String,
     account_id: Option<String>,
     include_ids: Option<Vec<String>>,
-) -> Result<Vec<MessageSummary>> {
+    options: Option<SearchOptions>,
+) -> Result<Vec<SearchHit>> {
     let service = state.service.clone();
     blocking(move || {
         service.search_messages(
             &text,
             account_id.as_deref(),
             include_ids.as_deref().unwrap_or_default(),
+            options.unwrap_or_default(),
         )
     })
     .await
 }
 
-/// Searches one account's whole mailbox on its server (the first page, or
-/// the next with `more`) and stores what it finds. A new `searchId`
+/// Searches one account's whole mailbox on its server (the first pages, or
+/// the next with `more`) and stores what it finds that passes the query's
+/// filters; a call may read several pages to find enough. A new `searchId`
 /// cancels the previous search. The server's failures come back in the
 /// result; only an unknown account or a bad search id is an error.
 #[tauri::command]
@@ -506,10 +511,17 @@ pub async fn search_server(
     text: String,
     account_id: String,
     more: Option<bool>,
+    options: Option<SearchOptions>,
 ) -> Result<ServerSearchResult> {
     state
         .service
-        .search_server(&search_id, &text, &account_id, more.unwrap_or(false))
+        .search_server(
+            &search_id,
+            &text,
+            &account_id,
+            more.unwrap_or(false),
+            options.unwrap_or_default(),
+        )
         .await
 }
 
@@ -578,6 +590,8 @@ pub async fn send_message(state: State<'_, AppState>, message: OutgoingMessage) 
     Ok(())
 }
 
+/// People to suggest for `text`, contacts first; without text, the people
+/// who wrote most lately.
 #[tauri::command]
 pub async fn suggest_addresses(
     state: State<'_, AppState>,

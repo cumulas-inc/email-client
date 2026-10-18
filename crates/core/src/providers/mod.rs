@@ -22,6 +22,7 @@ use crate::model::{
     TaskPatch,
 };
 use crate::search::SearchQuery;
+use crate::search::dates::Received;
 
 /// Where a message lives on the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +124,29 @@ pub struct SearchPage {
     pub next: Option<String>,
 }
 
+/// What a provider searches its server for: a query, its dates resolved, and where.
+#[derive(Debug, Clone, Copy)]
+pub struct ServerQuery<'a> {
+    pub query: &'a SearchQuery,
+    pub received: Received,
+    /// Every stored folder of the account, well-known ones first.
+    pub folders: &'a [Folder],
+    /// The folders `in:` names in this account (non-empty), or None: the whole mailbox.
+    pub scope: Option<&'a [Folder]>,
+}
+
+impl<'a> ServerQuery<'a> {
+    /// `query` anywhere in the mailbox, at any time.
+    pub fn whole_mailbox(query: &'a SearchQuery, folders: &'a [Folder]) -> Self {
+        Self {
+            query,
+            received: Received::default(),
+            folders,
+            scope: None,
+        }
+    }
+}
+
 /// Body and full headers of a message, as fetched from the server.
 #[derive(Debug, Clone, Default)]
 pub struct MessageContent {
@@ -187,13 +211,14 @@ pub trait MailProvider: Send + Sync {
     /// responsible for leaving a copy in the Sent folder.
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()>;
 
-    /// Searches the whole mailbox on the server, at most `limit` messages a
-    /// page. `folders` are the account's stored folders, well-known ones
-    /// first. `cursor` continues a previous page.
+    /// Searches the mailbox on the server (or the folders the search is
+    /// scoped to), at most `limit` messages a page. `cursor` continues a
+    /// previous page. What a server can't filter by exactly (read, flagged,
+    /// dates in its own zones) it may leave out: the caller checks every
+    /// message it returns against the query's filters.
     async fn search(
         &self,
-        _query: &SearchQuery,
-        _folders: &[Folder],
+        _search: &ServerQuery<'_>,
         _cursor: Option<&str>,
         _limit: u32,
     ) -> Result<SearchPage> {

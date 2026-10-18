@@ -2,10 +2,16 @@
 //! them for the wire. Pure: the provider sends what this returns.
 //!
 //! IMAP matches substrings, so words and phrases alike are sent as they
-//! are; terms of every field must all match (criteria are ANDed).
+//! are; terms of every field must all match (criteria are ANDed). Read and
+//! flagged become `SEEN`, `UNSEEN` and `FLAGGED`, and dates `SINCE` and
+//! `BEFORE`, widened so the server's matches are never fewer than the
+//! device's (which checks every match exactly).
 
 use std::fmt::Write as _;
 
+use chrono::{Datelike, Days, Duration, NaiveDate};
+
+use super::dates::Received;
 use super::{Field, SearchQuery};
 
 /// Criteria for one `UID SEARCH`.
@@ -15,6 +21,12 @@ pub struct ImapCriteria {
     /// their string.
     keys: Vec<(&'static [&'static str], String)>,
     has_attachment: bool,
+    read: Option<bool>,
+    flagged: bool,
+    /// `SINCE`: the first day a match may have arrived on.
+    since: Option<NaiveDate>,
+    /// `BEFORE`: the day after the last a match may have arrived on.
+    before: Option<NaiveDate>,
 }
 
 /// Where a plain word is looked for: where the local index looks (sender,
@@ -37,9 +49,30 @@ pub enum Literals {
 /// checks each match's structure, which is exact.
 const ATTACHMENT_KEY: &str = "HEADER Content-Type \"multipart/mixed\"";
 
+/// Months as `SEARCH` dates name them (RFC 3501 `date-month`).
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// A `SEARCH` date: `1-Oct-2026`.
+fn search_date(date: NaiveDate) -> String {
+    format!(
+        "{}-{}-{}",
+        date.day(),
+        MONTHS[date.month0() as usize],
+        date.year()
+    )
+}
+
 impl ImapCriteria {
     /// `None` for an empty query.
-    pub fn new(query: &SearchQuery) -> Option<Self> {
+    ///
+    /// `SINCE` and `BEFORE` compare the day a message arrived on, in the
+    /// zone of its `INTERNALDATE` (RFC 3501 §6.4.4), which may be any from
+    /// UTC−12 to UTC+14: `since` is the day it is in UTC−12 then, and
+    /// `before` the day after the one it is in UTC+14, so the server's set
+    /// is always a superset of the device's.
+    pub fn new(query: &SearchQuery, received: Received) -> Option<Self> {
         if query.is_empty() {
             return None;
         }
@@ -64,6 +97,15 @@ impl ImapCriteria {
         Some(Self {
             keys,
             has_attachment: query.has_attachment,
+            read: query.read,
+            flagged: query.flagged,
+            since: received
+                .since
+                .map(|since| (since - Duration::hours(12)).date_naive()),
+            before: received.before.map(|before| {
+                let day = (before + Duration::hours(14)).date_naive();
+                day.checked_add_days(Days::new(1)).unwrap_or(day)
+            }),
         })
     }
 
@@ -127,6 +169,20 @@ impl ImapCriteria {
                 current.push(' ');
             }
         }
+        if self.flagged {
+            current.push_str("FLAGGED ");
+        }
+        match self.read {
+            Some(true) => current.push_str("SEEN "),
+            Some(false) => current.push_str("UNSEEN "),
+            None => {}
+        }
+        if let Some(since) = self.since {
+            let _ = write!(current, "SINCE {} ", search_date(since));
+        }
+        if let Some(before) = self.before {
+            let _ = write!(current, "BEFORE {} ", search_date(before));
+        }
         if self.has_attachment {
             current.push_str(ATTACHMENT_KEY);
             current.push(' ');
@@ -151,13 +207,32 @@ fn quoted(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{FixedOffset, TimeZone, Utc};
+
     use super::*;
-    use crate::search::Term;
+    use crate::search::{Term, dates};
+
+    fn criteria(input: &str) -> Option<ImapCriteria> {
+        ImapCriteria::new(&SearchQuery::parse(input), Received::default())
+    }
 
     fn rendered(input: &str, literals: Literals) -> Vec<String> {
-        ImapCriteria::new(&SearchQuery::parse(input))
+        criteria(input).unwrap().render(literals)
+    }
+
+    /// `input` with its dates resolved in a zone `east_hours` from UTC, on
+    /// Sunday 18 October 2026.
+    fn dated(input: &str, east_hours: i32) -> Vec<String> {
+        let query = SearchQuery::parse(input);
+        let tz = FixedOffset::east_opt(east_hours * 3600).unwrap();
+        let now = tz
+            .with_ymd_and_hms(2026, 10, 18, 10, 0, 0)
             .unwrap()
-            .render(literals)
+            .with_timezone(&Utc);
+        let received = dates::resolve(&query.dates, now, &tz, 0);
+        ImapCriteria::new(&query, received)
+            .unwrap()
+            .render(Literals::Sync)
     }
 
     /// A plain word's keys, each with `value` (already rendered).
@@ -193,10 +268,69 @@ mod tests {
                 anywhere("\"budget\"")
             )]
         );
-        assert!(
-            ImapCriteria::new(&SearchQuery::parse("budget has:attachment"))
+        assert!(criteria("budget has:attachment").unwrap().has_attachment());
+    }
+
+    #[test]
+    fn read_and_flagged_become_flags() {
+        assert_eq!(rendered("is:unread", Literals::Sync), ["UNSEEN UNDELETED"]);
+        assert_eq!(
+            rendered("is:read is:flagged invoice", Literals::Sync),
+            [format!(
+                "{} FLAGGED SEEN UNDELETED",
+                anywhere("\"invoice\"")
+            )]
+        );
+        assert_eq!(
+            rendered("has:attachment is:flagged", Literals::NonSync),
+            ["FLAGGED HEADER Content-Type \"multipart/mixed\" UNDELETED"]
+        );
+        // Where to look is the provider's business.
+        assert_eq!(
+            rendered("is:flagged in:inbox account:x", Literals::Sync),
+            ["FLAGGED UNDELETED"]
+        );
+        assert!(criteria("is:flagged").unwrap().is_quoted());
+    }
+
+    #[test]
+    fn dates_hold_for_every_zone_a_server_may_date_mail_in() {
+        // The same day, as the computer's zone has it: the server's days
+        // reach far enough either way.
+        for east in [-4, 1, 9] {
+            assert_eq!(
+                dated("received:2026-10-01", east),
+                ["SINCE 30-Sep-2026 BEFORE 3-Oct-2026 UNDELETED"],
+                "UTC{east:+}"
+            );
+        }
+        assert_eq!(
+            dated("received:2026-10-03", -4),
+            ["SINCE 2-Oct-2026 BEFORE 5-Oct-2026 UNDELETED"]
+        );
+        assert_eq!(
+            dated("after:2026-01-01", -4),
+            ["SINCE 31-Dec-2025 UNDELETED"]
+        );
+        assert_eq!(
+            dated("before:2026-10-01 is:unread", -4),
+            ["UNSEEN BEFORE 2-Oct-2026 UNDELETED"]
+        );
+        // In order, after the words and the flags, before the attachment
+        // key; the charset and older UIDs first.
+        let query = SearchQuery::parse("subject:é has:attachment is:flagged received:2026-10-01");
+        let tz = FixedOffset::east_opt(0).unwrap();
+        let now = tz.with_ymd_and_hms(2026, 10, 18, 10, 0, 0).unwrap();
+        let received = dates::resolve(&query.dates, now.with_timezone(&Utc), &tz, 0);
+        assert_eq!(
+            ImapCriteria::new(&query, received)
                 .unwrap()
-                .has_attachment()
+                .render_below(Literals::Sync, Some(301)),
+            [
+                "CHARSET UTF-8 UID 1:300 SUBJECT {2}",
+                "é FLAGGED SINCE 30-Sep-2026 BEFORE 3-Oct-2026 \
+                 HEADER Content-Type \"multipart/mixed\" UNDELETED"
+            ]
         );
     }
 
@@ -252,14 +386,17 @@ mod tests {
 
     #[test]
     fn only_quoted_criteria_go_whole() {
-        let criteria = |input: &str| ImapCriteria::new(&SearchQuery::parse(input)).unwrap();
-        assert!(criteria("from:megan \"q3 plan\" has:attachment").is_quoted());
-        assert!(!criteria("café").is_quoted());
+        assert!(
+            criteria("from:megan \"q3 plan\" has:attachment")
+                .unwrap()
+                .is_quoted()
+        );
+        assert!(!criteria("café").unwrap().is_quoted());
     }
 
     #[test]
     fn older_matches_are_asked_for_by_uid() {
-        let criteria = ImapCriteria::new(&SearchQuery::parse("subject:é")).unwrap();
+        let criteria = criteria("subject:é").unwrap();
         assert_eq!(
             criteria.render_below(Literals::Sync, Some(301)),
             ["CHARSET UTF-8 UID 1:300 SUBJECT {2}", "é UNDELETED"]
@@ -271,6 +408,10 @@ mod tests {
         let criteria = |text: &str| ImapCriteria {
             keys: vec![(&["SUBJECT"][..], text.to_owned())],
             has_attachment: false,
+            read: None,
+            flagged: false,
+            since: None,
+            before: None,
         };
         assert_eq!(
             criteria(r#"say "hi" \o/"#).render(Literals::Sync),
@@ -288,16 +429,20 @@ mod tests {
                 typed: "x\0y\r\nz".into(),
                 phrase: true,
             }],
-            has_attachment: false,
+            ..SearchQuery::default()
         };
         assert_eq!(
-            ImapCriteria::new(&query).unwrap().render(Literals::Sync),
+            ImapCriteria::new(&query, Received::default())
+                .unwrap()
+                .render(Literals::Sync),
             ["BODY \"x y  z\" UNDELETED"]
         );
     }
 
     #[test]
     fn empty_queries_have_none() {
-        assert_eq!(ImapCriteria::new(&SearchQuery::parse("to: has:pdf")), None);
+        assert_eq!(criteria("to: has:pdf"), None);
+        assert_eq!(criteria("in:inbox account:x is:starred"), None);
+        assert!(criteria("is:read").is_some());
     }
 }

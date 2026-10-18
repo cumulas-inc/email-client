@@ -2,6 +2,7 @@
 //! moves and sending.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -18,7 +19,7 @@ use super::client::{
     PREFER_IMMUTABLE_ID, PREFER_PAGE_SIZE, Page, segment, take_response,
 };
 use super::types::{ItemBody, Recipient, addresses, null_default, recipients_json};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::html::make_preview;
 use crate::model::{
     AttachmentMeta, EntityKind, Folder, FolderRole, Importance, Message, MessageSummary,
@@ -26,9 +27,10 @@ use crate::model::{
 };
 use crate::providers::{
     FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SearchPage,
-    SyncWindow,
+    ServerQuery, SyncWindow,
 };
-use crate::search::{SearchQuery, kql};
+use crate::search::dates::Received;
+use crate::search::kql;
 
 const FOLDER_FIELDS: &str =
     "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
@@ -555,35 +557,29 @@ impl GraphProvider {
         changes.removed = removed;
     }
 
-    /// One page of a search of the whole mailbox; see
-    /// [`MailProvider::search`]. `cursor` is Graph's `@odata.nextLink`.
+    /// One page of a search of the mailbox, or of the one folder it is
+    /// scoped to; see [`MailProvider::search`]. `cursor` is Graph's
+    /// `@odata.nextLink`.
+    ///
+    /// Words go to `$search` (KQL), which takes no `$filter` or `$orderby`
+    /// (Graph sorts its matches by date sent itself), with the dates when
+    /// the mailbox takes them. Filters alone go to `$filter`, newest first:
+    /// exact, and so it finds old unread or flagged mail `$search` can't
+    /// say. Graph can't say several folders: those, read and flagged with
+    /// words, and the exact dates are the caller's to check.
     async fn search_page(
         &self,
-        query: &SearchQuery,
-        folders: &[Folder],
+        search: &ServerQuery<'_>,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<SearchPage> {
-        let url = match cursor {
-            Some(link) => link.to_owned(),
-            None => {
-                let Some(kql) = kql::kql(query) else {
-                    return Ok(SearchPage::default());
-                };
-                // Graph refuses `$orderby` and `$filter` with `$search`; it
-                // sorts by date sent itself.
-                self.client.url_with_query(
-                    "/me/messages",
-                    &[
-                        ("$search", &kql::search_param(&kql)),
-                        ("$select", &format!("{SUMMARY_FIELDS},parentFolderId")),
-                        ("$top", &limit.to_string()),
-                    ],
-                )
-            }
+        let page: Page<GraphMessage> = match cursor {
+            // Refuses a cursor that isn't a link to Graph, so the token stays.
+            Some(link) => self.client.get_page(link, &[PREFER_IMMUTABLE_ID]).await?,
+            None if search.query.is_empty() => return Ok(SearchPage::default()),
+            None => self.first_search_page(search, limit).await?,
         };
-        // Refuses a cursor that isn't a link to Graph, so the token stays.
-        let page: Page<GraphMessage> = self.client.get_page(&url, &[PREFER_IMMUTABLE_ID]).await?;
+        let folders = search.folders;
         let stored: HashSet<&str> = folders.iter().map(|f| f.remote_id.as_str()).collect();
         let mut unknown: Vec<&str> = page
             .value
@@ -608,6 +604,68 @@ impl GraphProvider {
             messages,
             next: page.next_link,
         })
+    }
+
+    /// The first page of a search; see [`Self::search_page`]. A mailbox that
+    /// answers a search with dates with 400 is asked again without them,
+    /// and from then on never sent them.
+    async fn first_search_page(
+        &self,
+        search: &ServerQuery<'_>,
+        limit: u32,
+    ) -> Result<Page<GraphMessage>> {
+        let base = match search.scope {
+            Some([folder]) => format!("/me/mailFolders/{}/messages", segment(&folder.remote_id)),
+            _ => "/me/messages".to_owned(),
+        };
+        let select = format!("{SUMMARY_FIELDS},parentFolderId");
+        let top = limit.to_string();
+        let search_url = |kql: &str| {
+            self.client.url_with_query(
+                &base,
+                &[
+                    ("$search", &kql::search_param(kql)),
+                    ("$select", &select),
+                    ("$top", &top),
+                ],
+            )
+        };
+        let dates = if self.kql_dates_refused.load(Ordering::Relaxed) {
+            Received::default()
+        } else {
+            search.received
+        };
+        let Some(kql) = kql::kql(search.query, dates) else {
+            let url = self.client.url_with_query(
+                &base,
+                &[
+                    ("$filter", &kql::graph_filter(search.query, search.received)),
+                    ("$orderby", "receivedDateTime desc"),
+                    ("$select", &select),
+                    ("$top", &top),
+                ],
+            );
+            return Ok(self.client.get_page(&url, &[PREFER_IMMUTABLE_ID]).await?);
+        };
+        let error = match self
+            .client
+            .get_page(&search_url(&kql), &[PREFER_IMMUTABLE_ID])
+            .await
+        {
+            Ok(page) => return Ok(page),
+            Err(failure) => Error::from(failure),
+        };
+        let undated = kql::kql(search.query, Received::default()).unwrap_or_default();
+        if error.code != ErrorCode::Provider || error.http_status() != Some(400) || undated == kql {
+            return Err(error);
+        }
+        self.kql_dates_refused.store(true, Ordering::Relaxed);
+        // Never the query: it is the user's words.
+        tracing::debug!("the mailbox refused dates in a search; leaving them to the device");
+        Ok(self
+            .client
+            .get_page(&search_url(&undated), &[PREFER_IMMUTABLE_ID])
+            .await?)
     }
 
     /// Of folder ids that aren't the stored folders' own, those that name a
@@ -1155,12 +1213,11 @@ impl MailProvider for GraphProvider {
 
     async fn search(
         &self,
-        query: &SearchQuery,
-        folders: &[Folder],
+        search: &ServerQuery<'_>,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<SearchPage> {
-        self.search_page(query, folders, cursor, limit).await
+        self.search_page(search, cursor, limit).await
     }
 
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {

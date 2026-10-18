@@ -15,11 +15,12 @@ use crate::error::ErrorCode;
 use crate::model::{
     AccountSettings, AdminConsentLink, AttachmentMeta, EmailAddress, EventDraft, Folder,
     FolderRole, ImapAccountUpdate, ImapSettings, Importance, Message, MessageQuery, MessageSummary,
-    OutgoingMessage, ServerSearchStatus, ShowAs, TaskDraft, TaskPatch, TaskStatus,
+    OutgoingMessage, SearchOptions, SearchSort, ServerSearchStatus, ShowAs, TaskDraft, TaskPatch,
+    TaskStatus,
 };
 use crate::providers::{
     ChangeSubscriptions, FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator,
-    SyncWindow,
+    ServerQuery, SyncWindow,
 };
 use crate::push::graph::{CONSENT_HINT, EVENTS_RESOURCE, INBOX_RESOURCE, RelaySource};
 use crate::push::relay::RelayEvent;
@@ -62,6 +63,13 @@ pub(crate) struct FakeServer {
     pub search_hold: Option<Arc<tokio::sync::Notify>>,
     /// Server searches of these accounts fail so.
     pub search_failures: HashMap<String, Error>,
+    /// How often servers were searched (pages asked for).
+    pub search_calls: usize,
+    /// When set, server searches answer these pages, in turn, whatever
+    /// the query (the cursor is a page's index).
+    pub search_pages: Option<Vec<Vec<MessageSummary>>>,
+    /// The scripted page at this index fails so.
+    pub search_page_failure: Option<(usize, Error)>,
     /// Runs when the folders are listed, as a mail sync starts.
     pub on_list_folders: Option<Box<dyn Fn() + Send>>,
     next_uid: u32,
@@ -301,11 +309,12 @@ impl MailProvider for FakeMail {
     }
 
     /// Every term somewhere in the subject, preview or sender, newest
-    /// first; the cursor is where the next page starts.
+    /// first; the cursor is where the next page starts. As a server that
+    /// can't say them, it leaves out read, flagged, dates and folders: the
+    /// service checks those.
     async fn search(
         &self,
-        query: &crate::search::SearchQuery,
-        _folders: &[Folder],
+        search: &ServerQuery<'_>,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<crate::providers::SearchPage> {
@@ -314,9 +323,10 @@ impl MailProvider for FakeMail {
             gate.notified().await;
         }
         let (page, answered, hold) = {
-            let server = self.server.lock().unwrap();
+            let mut server = self.server.lock().unwrap();
+            server.search_calls += 1;
             (
-                self.search_page(&server, query, cursor, limit),
+                self.search_page(&server, search.query, cursor, limit),
                 server.search_answered.clone(),
                 server.search_hold.clone(),
             )
@@ -350,6 +360,18 @@ impl FakeMail {
     ) -> Result<crate::providers::SearchPage> {
         if let Some(e) = server.search_failures.get(&self.account_id) {
             return Err(e.clone());
+        }
+        if let Some(pages) = &server.search_pages {
+            let at: usize = cursor.map_or(0, |c| c.parse().unwrap());
+            if let Some((failing, e)) = &server.search_page_failure
+                && *failing == at
+            {
+                return Err(e.clone());
+            }
+            return Ok(crate::providers::SearchPage {
+                messages: pages[at].clone(),
+                next: (at + 1 < pages.len()).then(|| (at + 1).to_string()),
+            });
         }
         let matches = |m: &MessageSummary| {
             let from = m
@@ -868,7 +890,11 @@ async fn sync_failure_is_recorded_on_the_account() {
 async fn reading_a_message_fetches_sanitises_and_caches_it() {
     let h = harness();
     let account = account_with_mail(&h).await;
-    let id = h.service.search_messages("welcome", None, &[]).unwrap()[0]
+    let id = h
+        .service
+        .search_messages("welcome", None, &[], SearchOptions::default())
+        .unwrap()[0]
+        .summary
         .id
         .clone();
 
@@ -975,7 +1001,11 @@ async fn flags_moves_and_deletes_go_to_server_then_store() {
 async fn sending_validates_recipients_and_links_replies() {
     let h = harness();
     let account = account_with_mail(&h).await;
-    let original = h.service.search_messages("invoice", None, &[]).unwrap()[0]
+    let original = h
+        .service
+        .search_messages("invoice", None, &[], SearchOptions::default())
+        .unwrap()[0]
+        .summary
         .id
         .clone();
     let mut message = OutgoingMessage {
@@ -1526,10 +1556,10 @@ fn on_server_only(
 
 fn local_ids(h: &Harness, text: &str, include: &[String]) -> Vec<String> {
     h.service
-        .search_messages(text, None, include)
+        .search_messages(text, None, include, SearchOptions::default())
         .unwrap()
         .into_iter()
-        .map(|m| m.id)
+        .map(|m| m.summary.id)
         .collect()
 }
 
@@ -1549,7 +1579,13 @@ async fn server_search_stores_results_outside_the_window_and_local_search_includ
 
     let found = h
         .service
-        .search_server("s-1", "zebracorn", &account.id, false)
+        .search_server(
+            "s-1",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(found.status, ServerSearchStatus::Done);
@@ -1582,7 +1618,13 @@ async fn server_search_stores_results_outside_the_window_and_local_search_includ
     // Found again: nothing new.
     let again = h
         .service
-        .search_server("s-1", "zebracorn", &account.id, false)
+        .search_server(
+            "s-1",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!((again.message_ids.len(), again.added), (1, 0));
@@ -1618,16 +1660,26 @@ async fn a_new_search_cancels_the_previous_one() {
         400,
     );
     h.server.lock().unwrap().search_gate = Some(Arc::new(tokio::sync::Notify::new()));
-    let first = h
-        .service
-        .search_server("a", "zebracorn", &account.id, false);
+    let first = h.service.search_server(
+        "a",
+        "zebracorn",
+        &account.id,
+        false,
+        SearchOptions::default(),
+    );
     let second = async {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
         h.server.lock().unwrap().search_gate = None;
         h.service
-            .search_server("b", "zebracorn", &account.id, false)
+            .search_server(
+                "b",
+                "zebracorn",
+                &account.id,
+                false,
+                SearchOptions::default(),
+            )
             .await
     };
     let (first, second) = tokio::join!(first, second);
@@ -1641,13 +1693,25 @@ async fn a_new_search_cancels_the_previous_one() {
     // A call for the first arriving late doesn't replace the second.
     let late = h
         .service
-        .search_server("a", "zebracorn", &account.id, false)
+        .search_server(
+            "a",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(late.status, ServerSearchStatus::Cancelled);
     let more = h
         .service
-        .search_server("b", "zebracorn", &account.id, true)
+        .search_server(
+            "b",
+            "zebracorn",
+            &account.id,
+            true,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1670,9 +1734,13 @@ async fn cancel_server_search_cancels_pending_calls() {
     );
     let gate = Arc::new(tokio::sync::Notify::new());
     h.server.lock().unwrap().search_gate = Some(gate.clone());
-    let pending = h
-        .service
-        .search_server("a", "zebracorn", &account.id, false);
+    let pending = h.service.search_server(
+        "a",
+        "zebracorn",
+        &account.id,
+        false,
+        SearchOptions::default(),
+    );
     let cancel = async {
         for _ in 0..10 {
             tokio::task::yield_now().await;
@@ -1687,7 +1755,13 @@ async fn cancel_server_search_cancels_pending_calls() {
     h.server.lock().unwrap().search_gate = None;
     let again = h
         .service
-        .search_server("a", "zebracorn", &account.id, false)
+        .search_server(
+            "a",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(again.status, ServerSearchStatus::Cancelled);
@@ -1695,7 +1769,13 @@ async fn cancel_server_search_cancels_pending_calls() {
     h.service.cancel_server_search("c");
     let early = h
         .service
-        .search_server("c", "zebracorn", &account.id, false)
+        .search_server(
+            "c",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(early.status, ServerSearchStatus::Cancelled);
@@ -1716,8 +1796,10 @@ async fn server_search_errors_are_per_account() {
         Error::network("Could not reach imap.example.com."),
     );
     let (work_result, home_result) = tokio::join!(
-        h.service.search_server("s", "invoice", &work.id, false),
-        h.service.search_server("s", "invoice", &home.id, false),
+        h.service
+            .search_server("s", "invoice", &work.id, false, SearchOptions::default()),
+        h.service
+            .search_server("s", "invoice", &home.id, false, SearchOptions::default()),
     );
     let work_result = work_result.unwrap();
     assert_eq!(work_result.status, ServerSearchStatus::Done);
@@ -1743,7 +1825,7 @@ async fn server_search_times_out() {
     let started = tokio::time::Instant::now();
     let result = h
         .service
-        .search_server("s", "invoice", &account.id, false)
+        .search_server("s", "invoice", &account.id, false, SearchOptions::default())
         .await
         .unwrap();
     assert_eq!(result.status, ServerSearchStatus::Failed);
@@ -1772,7 +1854,10 @@ async fn show_more_continues_from_the_cursor_and_stops() {
             100 + i,
         );
     }
-    let search = |more| h.service.search_server("s", "purchase", &account.id, more);
+    let search = |more| {
+        h.service
+            .search_server("s", "purchase", &account.id, more, SearchOptions::default())
+    };
     let first = search(false).await.unwrap();
     assert_eq!(
         (first.message_ids.len(), first.added, first.has_more),
@@ -1809,7 +1894,7 @@ async fn an_empty_or_too_broad_query_is_done_with_nothing() {
     for text in ["", "  ", "to:", "has:pdf", "a b", "from:a"] {
         let result = h
             .service
-            .search_server("s", text, &account.id, false)
+            .search_server("s", text, &account.id, false, SearchOptions::default())
             .await
             .unwrap();
         assert_eq!(result.status, ServerSearchStatus::Done, "{text:?}");
@@ -1823,14 +1908,14 @@ async fn unknown_account_rejects() {
     let account = account_with_mail(&h).await;
     let error = h
         .service
-        .search_server("s", "invoice", "nobody", false)
+        .search_server("s", "invoice", "nobody", false, SearchOptions::default())
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotFound);
     for id in [String::new(), "x".repeat(101)] {
         let error = h
             .service
-            .search_server(&id, "invoice", &account.id, false)
+            .search_server(&id, "invoice", &account.id, false, SearchOptions::default())
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidInput);
@@ -1838,7 +1923,13 @@ async fn unknown_account_rejects() {
     let longest = "x".repeat(100);
     assert!(
         h.service
-            .search_server(&longest, "invoice", &account.id, false)
+            .search_server(
+                &longest,
+                "invoice",
+                &account.id,
+                false,
+                SearchOptions::default()
+            )
             .await
             .is_ok()
     );
@@ -1859,7 +1950,13 @@ async fn opening_a_search_result_touches_it_and_a_gone_one_is_removed() {
     );
     let found = h
         .service
-        .search_server("s", "zebracorn", &account.id, false)
+        .search_server(
+            "s",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(found.message_ids, [kept.clone(), gone.clone()]);
@@ -1902,7 +1999,13 @@ async fn stale_search_results_are_pruned_after_sync() {
     let stale = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
     let fresh = on_server_only(&h, &account, "INBOX", "INBOX:70", "Zebracorn invoice", 300);
     h.service
-        .search_server("s", "zebracorn", &account.id, false)
+        .search_server(
+            "s",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     let fifteen_days_ago = (Utc::now() - Duration::days(SEARCH_RESULT_TTL_DAYS + 1)).timestamp();
@@ -1931,7 +2034,9 @@ async fn a_search_answered_before_a_deletion_doesnt_bring_it_back() {
         server.search_hold = Some(hold.clone());
     }
     let invoice = local_id(&account.id, EntityKind::Message, "INBOX:2");
-    let search = h.service.search_server("s", "invoice", &account.id, false);
+    let search =
+        h.service
+            .search_server("s", "invoice", &account.id, false, SearchOptions::default());
     let delete = async {
         answered.notified().await;
         h.service
@@ -1953,9 +2058,12 @@ async fn a_search_answered_before_a_deletion_doesnt_bring_it_back() {
         .unwrap();
     for _ in 0..2 {
         assert!(h.service.store().get_message_summary(&invoice).is_err());
-        let hits = h.service.search_messages("invoice", None, &[]).unwrap();
+        let hits = h
+            .service
+            .search_messages("invoice", None, &[], SearchOptions::default())
+            .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
-        assert_eq!(hits[0].folder_id, trash.id);
+        assert_eq!(hits[0].summary.folder_id, trash.id);
         h.service.sync_account(&account.id).await.unwrap();
     }
 }
@@ -1970,7 +2078,13 @@ async fn new_mail_found_by_a_search_first_still_alerts() {
     on_server_only(&h, &account, "INBOX", "INBOX:4", "Old zebracorn", 400);
     let found = h
         .service
-        .search_server("s", "zebracorn", &account.id, false)
+        .search_server(
+            "s",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(found.added, 2);
@@ -1990,7 +2104,13 @@ async fn search_results_are_pruned_even_when_the_sync_fails() {
     let account = account_with_mail(&h).await;
     let stale = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
     h.service
-        .search_server("s", "zebracorn", &account.id, false)
+        .search_server(
+            "s",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     h.service
@@ -2003,7 +2123,13 @@ async fn search_results_are_pruned_even_when_the_sync_fails() {
 
     // Nor does a sign-in that expired keep them.
     h.service
-        .search_server("t", "zebracorn", &account.id, false)
+        .search_server(
+            "t",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     h.service
@@ -2013,6 +2139,245 @@ async fn search_results_are_pruned_even_when_the_sync_fails() {
     let error = h.service.sync_account(&account.id).await.unwrap_err();
     assert_eq!(error.code, ErrorCode::AuthRequired);
     assert!(h.service.store().get_message_summary(&stale).is_err());
+}
+
+/// Changes a message only on the server.
+fn on_server(h: &Harness, remote: &str, change: impl FnOnce(&mut MessageSummary)) {
+    let mut server = h.server.lock().unwrap();
+    change(&mut server.server_only.get_mut(remote).unwrap().1);
+}
+
+fn server_search_calls(h: &Harness) -> usize {
+    h.server.lock().unwrap().search_calls
+}
+
+/// A scripted page of a server search: `n` old messages in Archive, none
+/// flagged but the one at `flagged`.
+fn scripted_page(
+    account: &Account,
+    page: usize,
+    n: usize,
+    flagged: Option<usize>,
+) -> Vec<MessageSummary> {
+    (0..n)
+        .map(|i| {
+            let remote = format!("Archive:{page}-{i}");
+            let mut m = summary(&account.id, "Archive", &remote, &format!("Old {page}-{i}"));
+            m.received_at =
+                Utc::now() - Duration::days(400) - Duration::minutes((page * n + i) as i64);
+            m.is_flagged = flagged == Some(i);
+            m
+        })
+        .collect()
+}
+
+async fn search_with(
+    h: &Harness,
+    text: &str,
+    account: &Account,
+    more: bool,
+) -> crate::model::ServerSearchResult {
+    h.service
+        .search_server("s", text, &account.id, more, SearchOptions::default())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn server_hits_that_fail_the_filters_are_not_stored() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let flagged = on_server_only(
+        &h,
+        &account,
+        "Archive",
+        "Archive:7",
+        "Zebracorn flagged",
+        400,
+    );
+    let plain = on_server_only(&h, &account, "Archive", "Archive:8", "Zebracorn plain", 401);
+    on_server(&h, "Archive:7", |m| m.is_flagged = true);
+    let found = search_with(&h, "zebracorn is:flagged", &account, false).await;
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert_eq!(found.message_ids, [flagged.as_str()]);
+    assert_eq!((found.added, found.has_more), (1, false));
+    assert!(h.service.store().get_message_summary(&plain).is_err());
+    // Filters alone are asked for too.
+    let calls = server_search_calls(&h);
+    let found = search_with(&h, "is:flagged", &account, false).await;
+    assert_eq!(found.message_ids, [flagged.as_str()]);
+    assert_eq!(server_search_calls(&h), calls + 1);
+}
+
+#[tokio::test]
+async fn a_call_reads_pages_until_enough_pass_the_filters() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    h.server.lock().unwrap().search_pages = Some(vec![
+        scripted_page(&account, 0, 50, None),
+        scripted_page(&account, 1, 50, Some(3)),
+    ]);
+    let found = search_with(&h, "x is:flagged", &account, false).await;
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert_eq!(
+        (found.message_ids.len(), found.added, found.has_more),
+        (1, 1, false)
+    );
+    assert_eq!(
+        h.service
+            .store()
+            .get_message_summary(&found.message_ids[0])
+            .unwrap()
+            .subject,
+        "Old 1-3"
+    );
+    assert_eq!(server_search_calls(&h), 2);
+}
+
+#[tokio::test]
+async fn a_call_reads_five_pages_at_most_and_more_goes_on() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let mut pages: Vec<Vec<MessageSummary>> = (0..5)
+        .map(|p| scripted_page(&account, p, 50, None))
+        .collect();
+    pages.push(scripted_page(&account, 5, 50, Some(0)));
+    h.server.lock().unwrap().search_pages = Some(pages);
+    let first = search_with(&h, "is:flagged", &account, false).await;
+    assert_eq!(first.status, ServerSearchStatus::Done);
+    assert!(first.message_ids.is_empty());
+    assert!(first.has_more);
+    assert_eq!(server_search_calls(&h), SERVER_SEARCH_MAX_PAGES as usize);
+    // Nothing that failed the filters was stored.
+    assert!(local_ids(&h, "old", &[]).is_empty());
+    let more = search_with(&h, "is:flagged", &account, true).await;
+    assert_eq!(
+        (more.message_ids.len(), more.added, more.has_more),
+        (1, 1, false)
+    );
+    assert_eq!(server_search_calls(&h), 6);
+}
+
+#[tokio::test]
+async fn a_later_page_that_fails_keeps_what_passed_and_asks_again() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    {
+        let mut server = h.server.lock().unwrap();
+        server.search_pages = Some(vec![
+            scripted_page(&account, 0, 50, Some(1)),
+            scripted_page(&account, 1, 50, Some(2)),
+        ]);
+        server.search_page_failure = Some((1, Error::network("Connection reset.")));
+    }
+    let found = search_with(&h, "is:flagged", &account, false).await;
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert!(found.error.is_none());
+    assert_eq!((found.message_ids.len(), found.has_more), (1, true));
+    // "Show more results" asks for the page that failed again.
+    let failed = search_with(&h, "is:flagged", &account, true).await;
+    assert_eq!(failed.status, ServerSearchStatus::Failed);
+    assert_eq!(failed.error.unwrap().code, ErrorCode::Network);
+    h.server.lock().unwrap().search_page_failure = None;
+    let more = search_with(&h, "is:flagged", &account, true).await;
+    assert_eq!(more.status, ServerSearchStatus::Done);
+    assert_eq!((more.message_ids.len(), more.has_more), (1, false));
+    assert_ne!(more.message_ids, found.message_ids);
+}
+
+#[tokio::test]
+async fn searches_for_another_account_or_folder_or_no_time_ask_nothing() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let archived = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
+    on_server_only(&h, &account, "INBOX", "INBOX:70", "Zebracorn invoice", 300);
+    for text in [
+        "zebracorn account:someone@else.example",
+        "zebracorn in:nowhere",
+        "zebracorn received:2026-10-15..2026-10-01",
+        "zebracorn received:today received:yesterday",
+    ] {
+        let found = search_with(&h, text, &account, false).await;
+        assert_eq!(found.status, ServerSearchStatus::Done, "{text}");
+        assert!(found.message_ids.is_empty() && !found.has_more, "{text}");
+        assert_eq!(server_search_calls(&h), 0, "{text}");
+        assert!(local_ids(&h, text, &[]).is_empty(), "{text}");
+    }
+    // The account by its address or name; a folder by its role or name.
+    let found = search_with(&h, "zebracorn account:me@example.com", &account, false).await;
+    assert_eq!(found.message_ids.len(), 2);
+    let found = search_with(&h, "zebracorn account:Me in:archive", &account, false).await;
+    assert_eq!(found.message_ids, [archived.as_str()]);
+    // Locally alike.
+    assert_eq!(
+        local_ids(&h, "zebracorn in:archive", &[]),
+        [archived.as_str()]
+    );
+    assert_eq!(local_ids(&h, "zebracorn account:me", &[]).len(), 2);
+    assert!(local_ids(&h, "zebracorn account:else", &[]).is_empty());
+    let other_account = h
+        .service
+        .search_messages("zebracorn", Some("nobody"), &[], SearchOptions::default())
+        .unwrap();
+    assert!(other_account.is_empty());
+}
+
+#[tokio::test]
+async fn local_search_is_best_first_or_newest_on_request() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    on_server_only(
+        &h,
+        &account,
+        "Archive",
+        "Archive:7",
+        "Zebracorn report",
+        300,
+    );
+    on_server_only(&h, &account, "INBOX", "INBOX:70", "Notes", 10);
+    on_server(&h, "INBOX:70", |m| {
+        m.preview = "A zebracorn sighting".into()
+    });
+    let found = search_with(&h, "zebracorn", &account, false).await;
+    assert_eq!(found.message_ids.len(), 2);
+    let subjects = |sort| -> Vec<String> {
+        h.service
+            .search_messages(
+                "zebracorn",
+                None,
+                &found.message_ids,
+                SearchOptions {
+                    sort,
+                    week_starts_on: 1,
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|m| m.summary.subject)
+            .collect()
+    };
+    assert_eq!(
+        subjects(SearchSort::Relevance),
+        ["Zebracorn report", "Notes"]
+    );
+    assert_eq!(subjects(SearchSort::Newest), ["Notes", "Zebracorn report"]);
+    let hits = h
+        .service
+        .search_messages("zebracorn", None, &[], SearchOptions::default())
+        .unwrap();
+    assert!(hits[0].snippet.is_none());
+    assert!(hits[1].snippet.is_some());
+}
+
+#[tokio::test]
+async fn an_empty_box_suggests_recent_correspondents() {
+    let h = harness();
+    account_with_mail(&h).await;
+    for text in ["", "  "] {
+        let suggested = h.service.suggest_addresses(text).unwrap();
+        assert_eq!(suggested.len(), 1, "{text:?}");
+        assert_eq!(suggested[0].address, "grace@navy.example");
+    }
 }
 
 /// A service with background work and a scripted push watcher.
