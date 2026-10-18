@@ -868,10 +868,9 @@ async fn search_filtered(
     let query = SearchQuery::parse(text);
     let received = dates::resolve(&query.dates, Utc::now(), &Utc, 0);
     let search = ServerQuery {
-        query: &query,
         received,
-        folders,
         scope,
+        ..ServerQuery::whole_mailbox(&query, folders)
     };
     provider
         .search(&search, None, 50)

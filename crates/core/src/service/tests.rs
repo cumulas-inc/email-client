@@ -70,6 +70,10 @@ pub(crate) struct FakeServer {
     pub search_pages: Option<Vec<Vec<MessageSummary>>>,
     /// The scripted page at this index fails so.
     pub search_page_failure: Option<(usize, Error)>,
+    /// Each page of a server search takes this long.
+    pub search_delay: Option<std::time::Duration>,
+    /// The dates each server search was asked with.
+    pub searched_dates: Vec<crate::search::dates::Received>,
     /// Runs when the folders are listed, as a mail sync starts.
     pub on_list_folders: Option<Box<dyn Fn() + Send>>,
     next_uid: u32,
@@ -318,9 +322,16 @@ impl MailProvider for FakeMail {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<crate::providers::SearchPage> {
-        let gate = self.server.lock().unwrap().search_gate.clone();
+        let (gate, delay) = {
+            let mut server = self.server.lock().unwrap();
+            server.searched_dates.push(search.received);
+            (server.search_gate.clone(), server.search_delay)
+        };
         if let Some(gate) = gate {
             gate.notified().await;
+        }
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
         }
         let (page, answered, hold) = {
             let mut server = self.server.lock().unwrap();
@@ -2283,6 +2294,55 @@ async fn a_later_page_that_fails_keeps_what_passed_and_asks_again() {
     assert_eq!(more.status, ServerSearchStatus::Done);
     assert_eq!((more.message_ids.len(), more.has_more), (1, false));
     assert_ne!(more.message_ids, found.message_ids);
+}
+
+/// A slow server (IMAP looking through many folders) that found little:
+/// what it found comes when it does, with no page started that the call
+/// has no time left for.
+#[tokio::test(start_paused = true)]
+async fn a_call_starts_no_page_it_has_no_time_for() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    {
+        let mut server = h.server.lock().unwrap();
+        let mut first = scripted_page(&account, 0, 50, None);
+        for m in &mut first[..3] {
+            m.is_flagged = true;
+        }
+        server.search_pages = Some(vec![first, scripted_page(&account, 1, 50, Some(0))]);
+        server.search_delay = Some(std::time::Duration::from_secs(25));
+    }
+    let started = tokio::time::Instant::now();
+    let found = search_with(&h, "is:flagged", &account, false).await;
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert_eq!((found.message_ids.len(), found.has_more), (3, true));
+    assert_eq!(server_search_calls(&h), 1);
+    // The first page's 25 seconds, not the whole call's 45.
+    assert!(SERVER_SEARCH_TIMEOUT - std::time::Duration::from_secs(25) < SERVER_SEARCH_PAGE_TIME);
+    assert!(started.elapsed() < std::time::Duration::from_secs(26));
+    // "Show more results" asks for the page that wasn't started.
+    let more = search_with(&h, "is:flagged", &account, true).await;
+    assert_eq!(more.status, ServerSearchStatus::Done);
+    assert_eq!((more.message_ids.len(), more.has_more), (1, false));
+    assert_eq!(server_search_calls(&h), 2);
+}
+
+/// Servers are told the dates they can say: a mistyped year (0201 for
+/// 2021) isn't one.
+#[tokio::test]
+async fn servers_are_asked_for_dates_they_can_say() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    for text in ["zebracorn after:0201-10-01", "zebracorn before:9999-12-31"] {
+        search_with(&h, text, &account, false).await;
+    }
+    search_with(&h, "zebracorn received:2026-10-01", &account, false).await;
+    let dates = std::mem::take(&mut h.server.lock().unwrap().searched_dates);
+    let [typo, far, october] = &dates[..] else {
+        panic!("{dates:?}");
+    };
+    assert!(typo.is_open() && far.is_open());
+    assert!(october.since.is_some() && october.before.is_some());
 }
 
 #[tokio::test]

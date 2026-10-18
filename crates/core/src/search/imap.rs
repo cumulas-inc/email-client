@@ -54,6 +54,12 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
+/// Whether `SEARCH` can say the day: its year has four digits (RFC 3501
+/// `date-year`).
+fn sayable(date: &NaiveDate) -> bool {
+    (1000..=9999).contains(&date.year())
+}
+
 /// A `SEARCH` date: `1-Oct-2026`.
 fn search_date(date: NaiveDate) -> String {
     format!(
@@ -71,7 +77,9 @@ impl ImapCriteria {
     /// zone of its `INTERNALDATE` (RFC 3501 §6.4.4), which may be any from
     /// UTC−12 to UTC+14: `since` is the day it is in UTC−12 then, and
     /// `before` the day after the one it is in UTC+14, so the server's set
-    /// is always a superset of the device's.
+    /// is always a superset of the device's. A day whose year isn't four
+    /// digits, which `SEARCH` can't say, is left out (the caller keeps
+    /// bounds to years it can: `Received::for_servers`).
     pub fn new(query: &SearchQuery, received: Received) -> Option<Self> {
         if query.is_empty() {
             return None;
@@ -101,11 +109,15 @@ impl ImapCriteria {
             flagged: query.flagged,
             since: received
                 .since
-                .map(|since| (since - Duration::hours(12)).date_naive()),
-            before: received.before.map(|before| {
-                let day = (before + Duration::hours(14)).date_naive();
-                day.checked_add_days(Days::new(1)).unwrap_or(day)
-            }),
+                .map(|since| (since - Duration::hours(12)).date_naive())
+                .filter(sayable),
+            before: received
+                .before
+                .map(|before| {
+                    let day = (before + Duration::hours(14)).date_naive();
+                    day.checked_add_days(Days::new(1)).unwrap_or(day)
+                })
+                .filter(sayable),
         })
     }
 
@@ -315,6 +327,20 @@ mod tests {
         assert_eq!(
             dated("before:2026-10-01 is:unread", -4),
             ["UNSEEN BEFORE 2-Oct-2026 UNDELETED"]
+        );
+        // Days whose years aren't four digits can't be said, so they go
+        // unsaid (the server finds more, never less).
+        assert_eq!(
+            dated("x after:0201-10-01", 0),
+            [format!("{} UNDELETED", anywhere("\"x\""))]
+        );
+        assert_eq!(
+            dated("x before:9999-12-31", 0),
+            [format!("{} UNDELETED", anywhere("\"x\""))]
+        );
+        assert_eq!(
+            dated("x received:0999-12-31", 0),
+            [format!("{} BEFORE 2-Jan-1000 UNDELETED", anywhere("\"x\""))]
         );
         // In order, after the words and the flags, before the attachment
         // key; the charset and older UIDs first.

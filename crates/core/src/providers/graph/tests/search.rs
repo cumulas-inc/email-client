@@ -458,6 +458,37 @@ async fn dates_go_with_the_words_until_the_mailbox_refuses_them() {
 }
 
 #[tokio::test]
+async fn dates_stay_when_the_mailbox_refuses_the_search_without_them_too() {
+    let (server, provider) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/me/messages"))
+        .respond_with(graph_error(400, "BadRequest", "Syntax error."))
+        .expect(4)
+        .mount(&server)
+        .await;
+    let query = SearchQuery::parse("invoice received:2026-10-01");
+    let folders = folders();
+    let search = ServerQuery {
+        received: october_first(),
+        ..ServerQuery::whole_mailbox(&query, &folders)
+    };
+    let error = provider.search(&search, None, 50).await.unwrap_err();
+    assert_eq!(error.http_status(), Some(400));
+    // Not the dates' fault: the next search sends them again.
+    provider.search(&search, None, 50).await.unwrap_err();
+    let asked: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(searched)
+        .collect();
+    let dated = r#""invoice* AND received>=09/30/2026 AND received<=10/03/2026""#;
+    let undated = r#""invoice*""#;
+    assert_eq!(asked, [dated, undated, dated, undated]);
+}
+
+#[tokio::test]
 async fn other_failures_with_dates_are_not_asked_again() {
     let (server, provider) = setup().await;
     Mock::given(method("GET"))

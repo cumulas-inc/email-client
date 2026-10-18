@@ -37,8 +37,12 @@ pub const SERVER_SEARCH_TIMEOUT: Duration = Duration::from_secs(45);
 /// A call keeps fetching pages until this many messages pass the query's
 /// filters (half a page)...
 pub const SERVER_SEARCH_MIN_HITS: usize = 25;
-/// ...the server has no more, or it fetched this many.
+/// ...the server has no more, or it fetched this many...
 pub const SERVER_SEARCH_MAX_PAGES: u32 = 5;
+/// ...or less time is left than another page may take: an IMAP page looks
+/// through folders for up to 20 seconds, then fetches its summaries. A page
+/// the timeout cut off would be lost, and its IMAP session with it.
+pub const SERVER_SEARCH_PAGE_TIME: Duration = Duration::from_secs(30);
 /// Search results not returned or opened for this long go at the next sync
 /// of their account, whether or not it succeeds.
 pub const SEARCH_RESULT_TTL_DAYS: i64 = 14;
@@ -162,7 +166,8 @@ impl CoreService {
     /// rows) and returns their local ids. Since the server can't say every
     /// filter, a call reads pages until [`SERVER_SEARCH_MIN_HITS`] messages
     /// pass, the server has no more, or it read
-    /// [`SERVER_SEARCH_MAX_PAGES`], all within [`SERVER_SEARCH_TIMEOUT`].
+    /// [`SERVER_SEARCH_MAX_PAGES`], all within [`SERVER_SEARCH_TIMEOUT`]:
+    /// it starts no page with less than [`SERVER_SEARCH_PAGE_TIME`] left.
     /// Starting a search with a new `search_id` cancels the previous
     /// search. A query too broad for the servers (see
     /// `SearchQuery::is_narrow_enough_for_servers`), or for another
@@ -244,16 +249,19 @@ impl CoreService {
         }
         let scope_ids: Option<HashSet<String>> =
             (!query.folders.is_empty()).then(|| scoped.iter().map(|f| f.id.clone()).collect());
-        let server_query = ServerQuery {
-            query: &query,
-            received,
-            folders: &folders,
-            scope: (!scoped.is_empty()).then_some(&scoped[..]),
-        };
-
         // Changes made here while the server answers win over its answer.
         let page_mark = self.store.search_page_started();
         let deadline = tokio::time::Instant::now() + SERVER_SEARCH_TIMEOUT;
+        let server_query = ServerQuery {
+            query: &query,
+            // The dates exactly, as far as servers can say them; what they
+            // find is checked against `received` itself.
+            received: received.for_servers(),
+            folders: &folders,
+            scope: (!scoped.is_empty()).then_some(&scoped[..]),
+            deadline,
+        };
+
         let mut cursor = cursor;
         let mut admitted = Vec::new();
         let mut pages = 0;
@@ -298,6 +306,9 @@ impl CoreService {
             if admitted.len() >= SERVER_SEARCH_MIN_HITS
                 || cursor.is_none()
                 || pages == SERVER_SEARCH_MAX_PAGES
+                // What was found comes now; "Show more results" goes on.
+                || deadline.saturating_duration_since(tokio::time::Instant::now())
+                    < SERVER_SEARCH_PAGE_TIME
             {
                 break;
             }

@@ -22,8 +22,8 @@ pub const OTHER_FIELD_SHARE: f64 = 0.3;
 pub const BM25_SHARE: f64 = 0.25;
 /// Matched only inside words (the trigram index: subjects and senders).
 pub const INFIX_RELEVANCE: f64 = 0.6;
-/// A server hit the index doesn't match: it matched in the body beyond the
-/// preview (OTHER_FIELD_SHARE × (1 − BM25_SHARE)).
+/// A server hit the local search doesn't match: it matched in the body
+/// beyond the preview (OTHER_FIELD_SHARE × (1 − BM25_SHARE)).
 pub const SERVER_RELEVANCE: f64 = 0.225;
 pub const RECENCY_HALF_LIFE_DAYS: f64 = 30.0;
 pub const RECENCY_FLOOR: f64 = 0.4;
@@ -40,7 +40,11 @@ pub struct Candidate {
     /// With `bm25`: the mean over the ranked terms of 1.0 (in the subject or
     /// sender) or OTHER_FIELD_SHARE. Ignored without.
     pub field: f64,
+    /// A server found it: kept whatever the limit.
     pub from_server: bool,
+    /// The local search's words matched it (by bm25, or inside a subject or
+    /// sender), whether or not a server found it too.
+    pub matched_locally: bool,
 }
 
 /// Best first: score desc, then received_at desc, then id asc.
@@ -75,8 +79,8 @@ pub fn score(c: &Candidate, best_bm25: Option<f64>, now: i64) -> f64 {
             };
             c.field * (1.0 - BM25_SHARE + BM25_SHARE * strength)
         }
-        None if c.from_server => SERVER_RELEVANCE,
-        None => INFIX_RELEVANCE,
+        None if c.matched_locally => INFIX_RELEVANCE,
+        None => SERVER_RELEVANCE,
     };
     // Mail dated in the future is as recent as can be.
     let age_days = now.saturating_sub(c.received_at).max(0) as f64 / SECONDS_PER_DAY;
@@ -99,6 +103,7 @@ mod tests {
             bm25,
             field,
             from_server: false,
+            matched_locally: true,
         }
     }
 
@@ -109,12 +114,15 @@ mod tests {
     #[test]
     fn subject_and_sender_first_then_strength_then_recency() {
         let mut e = candidate("E", None, 0.0, 2);
-        e.from_server = true;
+        (e.from_server, e.matched_locally) = (true, false);
+        // A server found it too, but the words matched it here.
+        let mut d = candidate("D", None, 0.0, 0);
+        d.from_server = true;
         let mut candidates = vec![
             candidate("C", Some(-3.0), OTHER_FIELD_SHARE, 0),
             candidate("B", Some(-10.0), 1.0, 365),
             e,
-            candidate("D", None, 0.0, 0),
+            d,
             candidate("F", Some(-10.0), 0.65, 0),
             candidate("A", Some(-10.0), 1.0, 1),
         ];

@@ -12,8 +12,11 @@
 pub mod graph;
 pub mod imap;
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use tokio::time::Instant;
 
 use crate::error::{Error, Result};
 use crate::model::{
@@ -124,6 +127,10 @@ pub struct SearchPage {
     pub next: Option<String>,
 }
 
+/// How long a page of a server search may take when nothing says
+/// otherwise ([`ServerQuery::whole_mailbox`]).
+const SEARCH_PAGE_TIME: Duration = Duration::from_secs(45);
+
 /// What a provider searches its server for: a query, its dates resolved, and where.
 #[derive(Debug, Clone, Copy)]
 pub struct ServerQuery<'a> {
@@ -133,16 +140,20 @@ pub struct ServerQuery<'a> {
     pub folders: &'a [Folder],
     /// The folders `in:` names in this account (non-empty), or None: the whole mailbox.
     pub scope: Option<&'a [Folder]>,
+    /// When the caller stops waiting for the page: a provider that takes
+    /// its time (IMAP looks through folder after folder) keeps within it.
+    pub deadline: Instant,
 }
 
 impl<'a> ServerQuery<'a> {
-    /// `query` anywhere in the mailbox, at any time.
+    /// `query` anywhere in the mailbox, at any time, within 45 seconds.
     pub fn whole_mailbox(query: &'a SearchQuery, folders: &'a [Folder]) -> Self {
         Self {
             query,
             received: Received::default(),
             folders,
             scope: None,
+            deadline: Instant::now() + SEARCH_PAGE_TIME,
         }
     }
 }

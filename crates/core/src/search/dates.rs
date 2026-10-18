@@ -65,6 +65,26 @@ impl Received {
     pub fn contains(&self, t: DateTime<Utc>) -> bool {
         self.since.is_none_or(|since| t >= since) && self.before.is_none_or(|before| t < before)
     }
+
+    /// The bounds as servers can be told them: within 1970 through 9998,
+    /// so that their dates, widened by a day or so, keep four-digit years,
+    /// as IMAP's `SEARCH` dates must (RFC 3501 `date-year`). A bound beyond
+    /// is dropped, or moved to the edge, only ever taking in more: the
+    /// device checks what the servers find against the exact bounds.
+    pub fn for_servers(&self) -> Received {
+        let earliest = DateTime::UNIX_EPOCH;
+        let latest = NaiveDate::from_ymd_opt(9998, 12, 31)
+            .expect("a valid date")
+            .and_time(NaiveTime::MIN)
+            .and_utc();
+        Received {
+            since: self.since.filter(|&t| t >= earliest).map(|t| t.min(latest)),
+            before: self
+                .before
+                .filter(|&t| t <= latest)
+                .map(|t| t.max(earliest)),
+        }
+    }
 }
 
 /// The keywords, as typed (lowercased, one space between words).
@@ -477,6 +497,55 @@ mod tests {
             }
             .contains(before + chrono::Duration::days(9000))
         );
+    }
+
+    #[test]
+    fn servers_hear_dates_with_four_digit_years_only() {
+        let utc = |y, m, d| Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+        let bounds = |since, before| Received { since, before };
+        let resolved = |clauses: &[(DateOp, &str)]| {
+            let clauses: Vec<DateClause> = clauses
+                .iter()
+                .map(|(op, value)| parse_clause(*op, value).unwrap())
+                .collect();
+            resolve(&clauses, utc(2026, 10, 18), &Utc, 0)
+        };
+        // Within the years servers take: as they are.
+        let october = bounds(Some(utc(2026, 10, 1)), Some(utc(2026, 10, 2)));
+        assert_eq!(october.for_servers(), october);
+        assert_eq!(Received::default().for_servers(), Received::default());
+        // A mistyped year (0201 for 2021): no lower bound, or one that
+        // takes in all a server has.
+        let typo = resolved(&[(DateOp::After, "0201-10-01")]);
+        assert!(typo.since.unwrap().year() < 1000);
+        assert_eq!(typo.for_servers(), Received::default());
+        assert_eq!(
+            resolved(&[(DateOp::Before, "0201-10-01")]).for_servers(),
+            bounds(None, Some(utc(1970, 1, 1)))
+        );
+        // The far end of the calendar.
+        assert_eq!(
+            resolved(&[(DateOp::Received, "9999-12-31")]).for_servers(),
+            bounds(Some(utc(9998, 12, 31)), None)
+        );
+        assert_eq!(
+            resolved(&[(DateOp::Before, "9999-12-31")]).for_servers(),
+            Received::default()
+        );
+        // Never less than the exact bounds.
+        for (since, before) in [
+            (Some(utc(1969, 12, 31)), Some(utc(2026, 1, 1))),
+            (Some(utc(2026, 1, 1)), Some(utc(9999, 6, 1))),
+        ] {
+            let exact = bounds(since, before);
+            let sent = exact.for_servers();
+            for t in [
+                since.unwrap(),
+                before.unwrap() - chrono::Duration::seconds(1),
+            ] {
+                assert!(exact.contains(t) && sent.contains(t), "{t}");
+            }
+        }
     }
 
     /// Where midnight doesn't happen (the clocks skip it), a day starts

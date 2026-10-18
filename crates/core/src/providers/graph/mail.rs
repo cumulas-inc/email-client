@@ -608,7 +608,7 @@ impl GraphProvider {
 
     /// The first page of a search; see [`Self::search_page`]. A mailbox that
     /// answers a search with dates with 400 is asked again without them,
-    /// and from then on never sent them.
+    /// and, if that works, never sent them from then on.
     async fn first_search_page(
         &self,
         search: &ServerQuery<'_>,
@@ -659,13 +659,15 @@ impl GraphProvider {
         if error.code != ErrorCode::Provider || error.http_status() != Some(400) || undated == kql {
             return Err(error);
         }
+        // Refused again: the dates weren't why, and later searches keep them.
+        let page = self
+            .client
+            .get_page(&search_url(&undated), &[PREFER_IMMUTABLE_ID])
+            .await?;
         self.kql_dates_refused.store(true, Ordering::Relaxed);
         // Never the query: it is the user's words.
         tracing::debug!("the mailbox refused dates in a search; leaving them to the device");
-        Ok(self
-            .client
-            .get_page(&search_url(&undated), &[PREFER_IMMUTABLE_ID])
-            .await?)
+        Ok(page)
     }
 
     /// Of folder ids that aren't the stored folders' own, those that name a

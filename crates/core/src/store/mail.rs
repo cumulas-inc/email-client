@@ -695,6 +695,7 @@ fn query_candidates(
             bm25: None,
             field: 0.0,
             from_server,
+            matched_locally: !from_server,
         })
     })?;
     rows.collect()
@@ -723,6 +724,11 @@ fn score_candidates(
     steps: &mut Steps,
 ) -> rusqlite::Result<()> {
     let rowids: Vec<i64> = candidates.iter().filter_map(|c| c.fts_rowid).collect();
+    // Each statement runs its MATCH over the whole index before keeping to
+    // the rows asked for: none asked for is none to run.
+    if rowids.is_empty() {
+        return Ok(());
+    }
     let bm25: HashMap<i64, f64> =
         query_rows(conn, &SCORE_SQL, params![expression, to_json(&rowids)])?
             .into_iter()
@@ -732,6 +738,7 @@ fn score_candidates(
     let mut shares: Vec<(FieldShare, HashSet<i64>)> = Vec::new();
     for share in fts::field_shares(query) {
         let found = match &share {
+            FieldShare::Probe(_) if scored.is_empty() => HashSet::new(),
             FieldShare::Probe(probe) => conn
                 .prepare(FIELD_SQL)?
                 .query_map(params![probe, to_json(&scored)], |r| r.get(0))?
@@ -1123,12 +1130,16 @@ impl Store {
                 .collect();
             for c in found {
                 match at.get(&c.id) {
+                    // Kept past the limit; its words matched here all the same.
                     Some(&i) => all[i].from_server = true,
                     None => all.push(c),
                 }
             }
         }
         steps.done("included");
+        if all.is_empty() {
+            return Ok((Vec::new(), steps.took));
+        }
 
         match rank_expression.as_deref().filter(|_| ranked) {
             Some(expression) => {
@@ -1156,12 +1167,12 @@ impl Store {
         };
         steps.done("summaries");
         let mut snippets: HashMap<i64, Vec<TextRun>> = HashMap::new();
-        if let Some(expression) = &rank_expression {
-            let first: Vec<i64> = all
-                .iter()
-                .take(MAX_SNIPPETS)
-                .filter_map(|c| c.fts_rowid)
-                .collect();
+        let first: Vec<i64> = all
+            .iter()
+            .take(MAX_SNIPPETS)
+            .filter_map(|c| c.fts_rowid)
+            .collect();
+        if let Some(expression) = rank_expression.as_ref().filter(|_| !first.is_empty()) {
             let raw: Vec<(i64, String)> = query_rows(
                 &conn,
                 SNIPPET_SQL,
@@ -3344,6 +3355,48 @@ mod tests {
         assert_eq!(subjects(&found), ["Invoice 42", "Call notes", "Old report"]);
         let snippets: Vec<bool> = found.iter().map(|h| h.snippet.is_some()).collect();
         assert_eq!(snippets, [false, true, false]);
+
+        // A server that finds what the words matched here too (IMAP matches
+        // inside words) changes nothing of where it ranks.
+        let include = [infix.id.clone(), server.id.clone()];
+        let again = hits(
+            &store,
+            &LocalSearch {
+                include_ids: &include,
+                ..LocalSearch::new(&query)
+            },
+        );
+        assert_eq!(subjects(&again), ["Invoice 42", "Call notes", "Old report"]);
+    }
+
+    /// Words found nowhere that the filters leave: no statement on the
+    /// index runs (each would run its MATCH over every row first).
+    #[test]
+    fn nothing_left_to_rank_asks_the_index_nothing() {
+        let (store, inbox, _) = setup();
+        let lunch = aged(&inbox, "1", "Re: lunch", "See you there", 1);
+        apply(&store, &inbox, upserts(&[&lunch]));
+        let query = SearchQuery::parse("re is:flagged");
+        let (found, steps) = store.search_timed(&LocalSearch::new(&query)).unwrap();
+        assert!(found.is_empty());
+        let names: Vec<&str> = steps.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["candidates", "included"]);
+        // With something left, all of them.
+        let query = SearchQuery::parse("re is:unread");
+        let (found, steps) = store.search_timed(&LocalSearch::new(&query)).unwrap();
+        assert_eq!(subjects(&found), ["Re: lunch"]);
+        let names: Vec<&str> = steps.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "candidates",
+                "included",
+                "bm25",
+                "fields",
+                "summaries",
+                "snippets"
+            ]
+        );
     }
 
     #[test]

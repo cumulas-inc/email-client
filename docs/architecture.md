@@ -328,8 +328,9 @@ list newest first, as "Newest" does):
   field share is the mean over its ranked terms;
 - bm25 (columns weighted 10, 8, 3, 2 and 1) decides the last quarter of that,
   relative to the best match: relevance is `field × (0.75 + 0.25 × bm25/best)`;
-  a match only inside words gets 0.6, a server hit the index doesn't match
-  (it matched text the device hasn't seen) 0.225;
+  a match only inside words gets 0.6 (whether or not a server found it
+  too), a server hit the words don't match here (it matched text the device
+  hasn't seen) 0.225;
 - recency decides all but 0.4 of the score, halving every 30 days.
 
 So a match in the subject or sender (at least `0.75 × 0.4 = 0.3`) ranks above
@@ -340,7 +341,8 @@ private-use marks that indexing keeps out of mail, returned as runs of text
 the UI never parses). Every statement that matches `messages_fts` and limits
 rowids writes `+rowid IN (…)`: as `rowid IN (…)`, FTS5 would run the match
 again for every rowid (4 s for 200 of 5,000 rows, against 19 ms), and a test
-checks the plans. At 50,000 messages, two letters that match nearly every one
+checks the plans. Since the match runs over every row first, none runs
+without rows to keep. At 50,000 messages, two letters that match nearly every one
 rank in about 0.3 s (an ignored test measures it; a prefix index is the next
 step if that grows).
 
@@ -351,18 +353,23 @@ one folder's messages when `in:` names exactly one there, and pages by its
 own next links; filters alone go to `$filter` with
 `$orderby=receivedDateTime desc` (`receivedDateTime` first, as Graph needs),
 which finds old unread or flagged mail `$search` can't say. A mailbox that
-answers a search with dates with 400 is asked again without them, and the
-provider leaves dates to the device from then on (until the app restarts).
+answers a search with dates with 400 is asked again without them, and when
+that works, the provider leaves dates to the device from then on (until the
+app restarts). Servers are told dates from 1970 through 9998 only (IMAP's
+must have four-digit years), a bound beyond dropped or moved out, so they
+find more, never less.
 IMAP asks about 25 folders per round trip (or the ones `in:` names),
 pipelined (`EXAMINE` and `UID SEARCH` for each, then the arrival dates of
 their newest 200 matches), and pages through what it found by date; a page
-spends 20 seconds at most looking, and the cursor keeps the folders it
+spends 20 seconds at most looking (less when the call has less left, keeping
+10 for its summaries), and the cursor keeps the folders it
 didn't get to, and the older matches of busier folders (`UID 1:n`), for the
 pages after. Servers can't say every filter (Graph has no read or flagged
 with words, nor several folders; IMAP's dates are in each server's zones), so
 each message they find is checked against the query's filters, exactly,
 before it is stored; since that can empty a page, one call reads pages until
-25 messages pass, the server has no more, or it read 5. A search for another
+25 messages pass, the server has no more, it read 5, or less than 30 seconds
+are left (a page cut off would be lost, and an IMAP session with it). A search for another
 account (`account:`), for no folder there or for no time asks nothing. A
 search id names the search over every account: a new one cancels the one
 before, whose pending calls come back `cancelled` and store nothing. A call

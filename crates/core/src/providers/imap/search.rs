@@ -7,11 +7,13 @@
 //! where one folder at a time took three. Each batch holds the account's
 //! session on its own, so syncs and opening messages go on between them.
 //!
-//! A page spends [`SEARCH_TIME`] at most looking: what it found by then is
-//! the page, and the cursor keeps the folders it didn't get to, and the
-//! older matches of folders with more than [`MAX_PER_FOLDER`], for the
-//! pages after it. The cursor carries the matches found too, so later pages
-//! ask the server for nothing but their summaries, and those folders.
+//! A page spends [`SEARCH_TIME`] at most looking, less when its caller's
+//! deadline leaves less ([`SUMMARY_TIME`] is kept for its summaries): what
+//! it found by then is the page, and the cursor keeps the folders it didn't
+//! get to, and the older matches of folders with more than
+//! [`MAX_PER_FOLDER`], for the pages after it. The cursor carries the
+//! matches found too, so later pages ask the server for nothing but their
+//! summaries, and those folders.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -34,9 +36,12 @@ const MAX_PER_FOLDER: usize = 200;
 const MAX_HELD: usize = 2000;
 /// Folders asked about in one round trip.
 const FOLDERS_PER_TRIP: usize = 25;
-/// How long a page may spend looking through folders, well within the 45
-/// seconds a page may take, its summaries included.
+/// How long a page may spend looking through folders at most. A batch
+/// that has started is finished, so it may go over by one.
 const SEARCH_TIME: Duration = Duration::from_secs(20);
+/// Time a page keeps before its caller's deadline, to fetch its summaries
+/// once it has looked.
+const SUMMARY_TIME: Duration = Duration::from_secs(10);
 
 /// A message that matched: its folder, UIDVALIDITY, UID and the date it
 /// arrived (`INTERNALDATE`, as Unix seconds) when the server said.
@@ -252,7 +257,11 @@ impl ImapProvider {
             None => Cursor::new(search.scope.unwrap_or(folders)),
         };
         let limit = limit.max(1) as usize;
-        self.look(&criteria, folders, &mut cursor, limit, SEARCH_TIME)
+        // Looking past the deadline would be lost: the caller drops the
+        // page, and the session with it.
+        let left = search.deadline.saturating_duration_since(Instant::now());
+        let time = SEARCH_TIME.min(left.saturating_sub(SUMMARY_TIME));
+        self.look(&criteria, folders, &mut cursor, limit, time)
             .await?;
         order(&mut cursor.c);
         let page: Vec<Candidate> = cursor.c.drain(..limit.min(cursor.c.len())).collect();
@@ -291,11 +300,12 @@ impl ImapProvider {
 
     /// Looks in the folders the cursor has left, in turn, adding what they
     /// match to its candidates: every folder never searched, unless
-    /// [`MAX_HELD`] are held or `time` is up, and older matches of a folder
-    /// only while the page needs them. A folder the server refuses to
-    /// search is skipped; the first refusal is the error when every folder
-    /// refused. A failure of the connection once some folders were
-    /// searched ends the looking, keeping the rest for the next page.
+    /// [`MAX_HELD`] are held or `time` is up (none at all without time),
+    /// and older matches of a folder only while the page needs them. A
+    /// folder the server refuses to search is skipped; the first refusal is
+    /// the error when every folder refused. A failure of the connection once
+    /// some folders were searched ends the looking, keeping the rest for the
+    /// next page.
     async fn look(
         &self,
         criteria: &ImapCriteria,
@@ -743,10 +753,9 @@ mod tests {
             before: Some(chrono::DateTime::from_timestamp(1_790_913_600, 0).unwrap()),
         };
         let search = ServerQuery {
-            query: &query,
             received,
-            folders: &folders,
             scope: Some(&folders[1..3]),
+            ..ServerQuery::whole_mailbox(&query, &folders)
         };
         let page = provider.search_mailbox(&search, None, 50).await.unwrap();
         // This server tells nothing but UIDs and dates.
@@ -764,6 +773,39 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_page_looks_only_while_its_caller_waits() {
+        let mailbox = Mailbox {
+            folders: folders(3, 2),
+            ..Default::default()
+        };
+        let folders = stored(&mailbox);
+        let (provider, seen) = serve(mailbox).await;
+        let query = SearchQuery::parse("zebracorn");
+        // Less time left than the summaries need: no folder is looked in,
+        // and they all wait for the next page.
+        let late = ServerQuery {
+            deadline: Instant::now() + SUMMARY_TIME / 2,
+            ..ServerQuery::whole_mailbox(&query, &folders)
+        };
+        let page = provider.search_mailbox(&late, None, 50).await.unwrap();
+        assert!(page.messages.is_empty());
+        assert!(seen.lock().unwrap().searches.is_empty());
+        let next = page.next.expect("the folders wait");
+        assert_eq!(Cursor::parse(&next).unwrap().f.len(), 3);
+        // With the time, the next page looks in them.
+        let page = provider
+            .search_mailbox(
+                &ServerQuery::whole_mailbox(&query, &folders),
+                Some(&next),
+                50,
+            )
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().searches.len(), 3);
+        assert_eq!(page.next, None);
     }
 
     #[test]
