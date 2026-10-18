@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{Store, from_ts, ts};
-use crate::auth::microsoft::{self, legacy_graph_scopes};
+use crate::auth::microsoft::{self, is_personal_tenant, legacy_graph_scopes};
 use crate::error::{Error, Result};
 use crate::model::{Account, AccountFeature, AccountKind, AccountSettings, MicrosoftGrant};
 
@@ -28,15 +28,16 @@ fn row_to_account(row: &Row<'_>) -> rusqlite::Result<Account> {
         AccountKind::Imap
     };
     let id: String = row.get(0)?;
-    let (needs_permission, refused_features) = match kind {
-        AccountKind::Microsoft => {
+    let (needs_permission, refused_features) = match &settings {
+        AccountSettings::Microsoft(m) => {
             let grant = parse_grant(&id, row.get(9)?);
+            let personal = is_personal_tenant(&m.tenant_id);
             (
-                microsoft::needs_permission(grant.as_ref()),
-                microsoft::refused_features(grant.as_ref()),
+                microsoft::needs_permission(grant.as_ref(), personal),
+                microsoft::refused_features(grant.as_ref(), personal),
             )
         }
-        AccountKind::Imap => (Vec::new(), Vec::new()),
+        AccountSettings::Imap(_) => (Vec::new(), Vec::new()),
     };
     Ok(Account {
         id,
@@ -91,11 +92,14 @@ fn write_grant(conn: &Connection, id: &str, grant: &MicrosoftGrant) -> Result<()
 }
 
 /// What the UI shows of a grant: the features needing permission and those
-/// refused.
+/// refused. Only to compare two grants of one account, so as for a work
+/// account: a personal account's grant never has the permission of the
+/// features personal accounts can't have, so the comparison comes out the
+/// same either way.
 fn shown(grant: Option<&MicrosoftGrant>) -> (Vec<AccountFeature>, Vec<AccountFeature>) {
     (
-        microsoft::needs_permission(grant),
-        microsoft::refused_features(grant),
+        microsoft::needs_permission(grant, false),
+        microsoft::refused_features(grant, false),
     )
 }
 
@@ -295,7 +299,8 @@ impl Store {
         {
             return Ok(Vec::new());
         }
-        Ok(microsoft::refused_features(Some(&grant)))
+        // As for a work account: see `shown`.
+        Ok(microsoft::refused_features(Some(&grant), false))
     }
 
     /// A refused feature tried again answered: it is refused no more.
@@ -370,7 +375,9 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         store.insert_account(&microsoft_account("m")).unwrap();
         assert_eq!(store.microsoft_grant("m").unwrap(), None);
-        assert_eq!(shown_of(&store, "m"), (vec![], vec![]));
+        // Unrecorded: what every account had before, which never included
+        // sensitivity labels.
+        assert_eq!(shown_of(&store, "m"), (vec![SensitivityLabels], vec![]));
 
         store.set_sign_in_grant("m", &mail_only()).unwrap();
         assert_eq!(
@@ -382,7 +389,10 @@ mod tests {
         assert!(store.refuse_feature("m", Tasks).unwrap());
         assert_eq!(
             shown_of(&store, "m"),
-            (vec![Calendar, Contacts, MailboxSettings], vec![Tasks])
+            (
+                vec![Calendar, Contacts, MailboxSettings, SensitivityLabels],
+                vec![Tasks]
+            )
         );
         // A sign-in checks everything again.
         store.set_sign_in_grant("m", &with_tasks).unwrap();
@@ -400,6 +410,24 @@ mod tests {
             store.microsoft_grant("m").unwrap().unwrap().scopes,
             with_tasks
         );
+
+        // Personal accounts never need sensitivity labels.
+        let mut personal = microsoft_account("p");
+        personal.settings = AccountSettings::Microsoft(crate::model::MicrosoftSettings {
+            tenant_id: crate::signatures::CONSUMER_TENANT.into(),
+            user_id: "user-p".into(),
+        });
+        store.insert_account(&personal).unwrap();
+        assert_eq!(shown_of(&store, "p"), (vec![], vec![]));
+        store.set_sign_in_grant("p", &mail_only()).unwrap();
+        assert_eq!(
+            shown_of(&store, "p"),
+            (vec![Calendar, Contacts, Tasks, MailboxSettings], vec![])
+        );
+        store
+            .set_sign_in_grant("p", &legacy_graph_scopes())
+            .unwrap();
+        assert_eq!(shown_of(&store, "p"), (vec![], vec![]));
 
         // IMAP accounts never show any.
         store.insert_account(&imap_account("i")).unwrap();
@@ -430,7 +458,10 @@ mod tests {
         assert!(refused_at.is_some());
         // The same again: unchanged, and still refused.
         assert!(!store.record_granted_scopes("m", &everything).unwrap());
-        assert_eq!(shown_of(&store, "m"), (vec![], vec![Calendar, Contacts]));
+        assert_eq!(
+            shown_of(&store, "m"),
+            (vec![SensitivityLabels], vec![Calendar, Contacts])
+        );
         // Calendars taken away: needs permission now, rather than refused.
         let without_calendar: Vec<String> = everything
             .iter()
@@ -438,13 +469,19 @@ mod tests {
             .cloned()
             .collect();
         assert!(store.record_granted_scopes("m", &without_calendar).unwrap());
-        assert_eq!(shown_of(&store, "m"), (vec![Calendar], vec![Contacts]));
+        assert_eq!(
+            shown_of(&store, "m"),
+            (vec![Calendar, SensitivityLabels], vec![Contacts])
+        );
         // Given back: checked again; Contacts, granted all along, stays refused.
         assert!(store.record_granted_scopes("m", &everything).unwrap());
         let grant = store.microsoft_grant("m").unwrap().unwrap();
         assert_eq!(grant.refused, [Contacts]);
         assert_eq!(grant.refused_at, refused_at);
-        assert_eq!(shown_of(&store, "m"), (vec![], vec![Contacts]));
+        assert_eq!(
+            shown_of(&store, "m"),
+            (vec![SensitivityLabels], vec![Contacts])
+        );
         // Spelled another way, it is the same permission.
         let lower: Vec<String> = everything.iter().map(|s| s.to_ascii_lowercase()).collect();
         assert!(!store.record_granted_scopes("m", &lower).unwrap());
@@ -466,7 +503,13 @@ mod tests {
         assert_eq!(grant.scopes, legacy_graph_scopes());
         assert_eq!(grant.refused, [AccountFeature::Tasks]);
         assert!(grant.refused_at.unwrap() >= before - chrono::Duration::seconds(1));
-        assert_eq!(shown_of(&store, "m"), (vec![], vec![AccountFeature::Tasks]));
+        assert_eq!(
+            shown_of(&store, "m"),
+            (
+                vec![AccountFeature::SensitivityLabels],
+                vec![AccountFeature::Tasks]
+            )
+        );
         // Again: nothing changes.
         assert!(!store.refuse_feature("m", AccountFeature::Tasks).unwrap());
     }
@@ -485,7 +528,7 @@ mod tests {
         assert!(store.due_refused("m", day).unwrap().is_empty());
         assert_eq!(shown_of(&store, "m").1, [Calendar]);
         assert!(store.clear_refused("m").unwrap());
-        assert_eq!(shown_of(&store, "m"), (vec![], vec![]));
+        assert_eq!(shown_of(&store, "m"), (vec![SensitivityLabels], vec![]));
         assert!(!store.clear_refused("m").unwrap());
 
         // Refused more than a day ago: due, and still refused.
@@ -531,8 +574,11 @@ mod tests {
         store.insert_account(&microsoft_account("m")).unwrap();
         store.execute_for_tests("UPDATE accounts SET microsoft_grant = 'not json' WHERE id = 'm'");
         assert_eq!(store.microsoft_grant("m").unwrap(), None);
-        // Every permission, not none.
-        assert_eq!(shown_of(&store, "m"), (vec![], vec![]));
+        // Every permission accounts had, not none.
+        assert_eq!(
+            shown_of(&store, "m"),
+            (vec![AccountFeature::SensitivityLabels], vec![])
+        );
         // What's recorded next replaces it.
         store.record_granted_scopes("m", &mail_only()).unwrap();
         assert_eq!(
@@ -565,7 +611,10 @@ mod tests {
         assert!(grant.refused_at.is_some());
         assert_eq!(
             shown_of(&store, "m"),
-            (vec![Calendar, Contacts, MailboxSettings], vec![Tasks])
+            (
+                vec![Calendar, Contacts, MailboxSettings, SensitivityLabels],
+                vec![Tasks]
+            )
         );
     }
 }

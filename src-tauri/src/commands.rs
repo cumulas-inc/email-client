@@ -1,15 +1,16 @@
 //! Commands invoked from the UI (`src/api/tauri.ts`). They are thin wrappers
 //! around [`cumulas_core::CoreService`]; argument names arrive in camelCase.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
 use cumulas_core::model::{
-    Account, AccountSignature, ActiveReminder, AdminConsentLink, Calendar, ComposeSignature,
-    Contact, ContactDraft, EmailAddress, Event, EventDraft, EventResponse, Folder,
-    ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount,
-    OutgoingMessage, PermissionRequest, ReplyKind, ServerSearchResult, Settings, Snooze,
-    SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
+    Account, AccountSignature, ActiveReminder, AdminConsentLink, Calendar, CheckItem,
+    ComposeSignature, Contact, ContactDraft, EmailAddress, Event, EventDraft, EventResponse,
+    Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, MessageSummary, NewImapAccount,
+    OutgoingMessage, PermissionRequest, ProtectionSetup, ReplyKind, ServerSearchResult, Settings,
+    Snooze, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::push::PushStatus;
 use cumulas_core::service::builtin_microsoft_client_id;
@@ -76,6 +77,18 @@ pub fn open_link(app: AppHandle, url: String) -> Result<()> {
             "Only web and email links can be opened.",
         ));
     }
+    app.opener()
+        .open_url(parsed.as_str(), None::<&str>)
+        .map_err(|e| Error::internal(format!("could not open link: {e}")))
+}
+
+/// Opens a link to Outlook on the web that the service fetched from
+/// Microsoft 365, checked again to be https.
+fn open_https(app: &AppHandle, link: &str) -> Result<()> {
+    let parsed = url::Url::parse(link)
+        .ok()
+        .filter(|u| u.scheme() == "https")
+        .ok_or_else(|| Error::provider("Microsoft 365 didn't give a link to this message."))?;
     app.opener()
         .open_url(parsed.as_str(), None::<&str>)
         .map_err(|e| Error::internal(format!("could not open link: {e}")))
@@ -453,6 +466,78 @@ pub async fn get_compose_signature(
         .await
 }
 
+// --- protection and sensitivity labels ------------------------------------------
+
+#[tauri::command]
+pub async fn get_protection_setup(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<ProtectionSetup> {
+    let service = state.service.clone();
+    blocking(move || service.protection_setup(&account_id)).await
+}
+
+#[tauri::command]
+pub async fn refresh_sensitivity_labels(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<ProtectionSetup> {
+    state.service.refresh_sensitivity_labels(&account_id).await
+}
+
+#[tauri::command]
+pub async fn check_protection(
+    state: State<'_, AppState>,
+    account_id: String,
+    items: Vec<CheckItem>,
+) -> Result<ProtectionSetup> {
+    state.service.check_protection(&account_id, &items).await
+}
+
+#[tauri::command]
+pub async fn refresh_protection_check(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<ProtectionSetup> {
+    state.service.refresh_protection_check(&account_id).await
+}
+
+/// Opens a check's test message in Outlook on the web.
+#[tauri::command]
+pub async fn open_protection_check_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+    item: CheckItem,
+) -> Result<()> {
+    let link = state
+        .service
+        .check_message_web_link(&account_id, &item)
+        .await?;
+    open_https(&app, &link)
+}
+
+/// Opens a message in Outlook on the web; its link is fetched now.
+#[tauri::command]
+pub async fn open_in_outlook(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    message_id: String,
+) -> Result<()> {
+    let link = state.service.message_web_link(&message_id).await?;
+    open_https(&app, &link)
+}
+
+/// What the app knows of a message's protection and label, for a bug
+/// report.
+#[tauri::command]
+pub async fn get_message_diagnostics(
+    state: State<'_, AppState>,
+    message_id: String,
+) -> Result<String> {
+    state.service.message_diagnostics(&message_id).await
+}
+
 // --- mail -----------------------------------------------------------------------
 
 #[tauri::command]
@@ -637,7 +722,14 @@ pub async fn save_attachment(
     Ok(Some(path.display().to_string()))
 }
 
-/// Opens an attachment with the default application for its type.
+/// Where opened attachments are written, under the app's cache.
+const ATTACHMENT_CACHE: &str = "attachments";
+/// Opened attachments older than this are removed when another is opened.
+const ATTACHMENT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Opens an attachment with the default application for its type. It's
+/// written where only this user can read it; the files that hold a
+/// protected message's content are refused.
 #[tauri::command]
 pub async fn open_attachment(
     app: AppHandle,
@@ -647,20 +739,126 @@ pub async fn open_attachment(
 ) -> Result<()> {
     let attachment = state
         .service
-        .get_attachment(&message_id, &attachment_id)
+        .get_attachment_to_open(&message_id, &attachment_id)
         .await?;
-    let dir = app
+    let cache = app
         .path()
         .app_cache_dir()
         .map_err(|e| Error::internal(e.to_string()))?
-        .join("attachments")
-        .join(&message_id);
-    tokio::fs::create_dir_all(&dir).await?;
-    let path = dir.join(safe_file_name(&attachment.meta.name));
-    tokio::fs::write(&path, &attachment.data).await?;
+        .join(ATTACHMENT_CACHE);
+    let name = safe_file_name(&attachment.meta.name);
+    let path = blocking(move || {
+        sweep_attachment_cache(&cache, ATTACHMENT_MAX_AGE);
+        Ok(write_private(
+            &cache.join(&message_id),
+            &name,
+            &attachment.data,
+        )?)
+    })
+    .await?;
     app.opener()
         .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| Error::internal(format!("could not open the attachment: {e}")))
+}
+
+/// Writes `data` to `dir/name`, readable by this user only (`0600` in a
+/// `0700` directory, on Unix).
+fn write_private(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write as _;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        builder.mode(0o700);
+        builder.create(dir)?;
+        // Made by an earlier version, with the default mode.
+        for made in [dir, dir.parent().unwrap_or(dir)] {
+            std::fs::set_permissions(made, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    builder.create(dir)?;
+    let path = dir.join(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // An earlier copy keeps its mode when opened again.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(data)?;
+    Ok(path)
+}
+
+/// Removes opened attachments older than `max_age` from `dir` (one folder
+/// per message), and the folders left empty. Best effort.
+pub(crate) fn sweep_attachment_cache(dir: &Path, max_age: Duration) {
+    let Ok(messages) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    let old = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| now.duration_since(modified).is_ok_and(|age| age > max_age))
+    };
+    for message in messages.flatten() {
+        let folder = message.path();
+        let Ok(files) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.is_file() && old(&path) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        // Only when empty.
+        let _ = std::fs::remove_dir(&folder);
+    }
+}
+
+/// Moves the cache of opened attachments aside (to
+/// `attachments.old-<pid>-<unix millis>`), so that a new one starts at
+/// once while the old one is removed in the background. `None` when
+/// there's none, or it can't be moved.
+pub(crate) fn retire_attachment_cache(cache_dir: &Path) -> Option<PathBuf> {
+    let millis = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let retired = cache_dir.join(format!(
+        "{ATTACHMENT_CACHE}.old-{}-{millis}",
+        std::process::id()
+    ));
+    match std::fs::rename(cache_dir.join(ATTACHMENT_CACHE), &retired) {
+        Ok(()) => Some(retired),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            tracing::warn!("could not move the opened attachments aside: {e}");
+            None
+        }
+    }
+}
+
+/// Removes every attachment cache moved aside, this run's and earlier
+/// ones'. Best effort.
+pub(crate) fn sweep_retired_caches(cache_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    let prefix = format!("{ATTACHMENT_CACHE}.old-");
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix)
+            && let Err(e) = std::fs::remove_dir_all(entry.path())
+        {
+            tracing::debug!("could not remove an old attachment cache: {e}");
+        }
+    }
 }
 
 // --- calendar -------------------------------------------------------------------
@@ -794,13 +992,80 @@ pub async fn delete_task(state: State<'_, AppState>, task_id: String) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{AppInfo, safe_file_name};
+    use std::time::{Duration, SystemTime};
+
+    use super::{
+        AppInfo, retire_attachment_cache, safe_file_name, sweep_attachment_cache,
+        sweep_retired_caches, write_private,
+    };
 
     #[test]
     fn attachment_names_cannot_escape() {
         assert_eq!(safe_file_name("../../etc/passwd"), "_.._etc_passwd");
         assert_eq!(safe_file_name("..."), "attachment");
         assert_eq!(safe_file_name("report.pdf"), "report.pdf");
+    }
+
+    fn set_age(path: &std::path::Path, age: Duration) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - age).unwrap();
+    }
+
+    #[test]
+    fn opened_attachments_are_private_and_swept_after_a_day() {
+        let cache = tempfile::tempdir().unwrap();
+        let dir = cache.path().join("attachments");
+        let new = write_private(&dir.join("message-a"), "new.pdf", b"new").unwrap();
+        let old = write_private(&dir.join("message-b"), "old.pdf", b"old").unwrap();
+        assert_eq!(std::fs::read(&new).unwrap(), b"new");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode =
+                |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&new), 0o600);
+            assert_eq!(mode(&dir), 0o700);
+            assert_eq!(mode(&dir.join("message-a")), 0o700);
+            // Written again over a copy with another mode: private again.
+            std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o644)).unwrap();
+            write_private(&dir.join("message-a"), "new.pdf", b"newer").unwrap();
+            assert_eq!(mode(&new), 0o600);
+            assert_eq!(std::fs::read(&new).unwrap(), b"newer");
+        }
+        set_age(&old, Duration::from_secs(25 * 60 * 60));
+        sweep_attachment_cache(&dir, Duration::from_secs(24 * 60 * 60));
+        assert!(new.exists());
+        assert!(!old.exists());
+        assert!(!dir.join("message-b").exists());
+        assert!(dir.join("message-a").exists());
+        // Nothing to sweep: nothing happens.
+        sweep_attachment_cache(&cache.path().join("missing"), Duration::ZERO);
+    }
+
+    #[test]
+    fn the_attachment_cache_is_retired_at_once_and_removed_after() {
+        let cache = tempfile::tempdir().unwrap();
+        assert_eq!(retire_attachment_cache(cache.path()), None);
+        let earlier = cache.path().join("attachments.old-1-2");
+        std::fs::create_dir_all(earlier.join("message")).unwrap();
+        std::fs::write(earlier.join("message/x.pdf"), b"x").unwrap();
+        write_private(&cache.path().join("attachments/message"), "a.pdf", b"a").unwrap();
+
+        let retired = retire_attachment_cache(cache.path()).unwrap();
+        let name = retired.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with(&format!("attachments.old-{}-", std::process::id())),
+            "{name}"
+        );
+        assert!(retired.join("message/a.pdf").exists());
+        // A new cache can start right away.
+        assert!(!cache.path().join("attachments").exists());
+        write_private(&cache.path().join("attachments/message"), "b.pdf", b"b").unwrap();
+
+        sweep_retired_caches(cache.path());
+        assert!(!retired.exists());
+        assert!(!earlier.exists());
+        assert!(cache.path().join("attachments/message/b.pdf").exists());
     }
 
     /// The shape `src/api/types.ts` mirrors.

@@ -274,6 +274,20 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE accounts ADD COLUMN microsoft_grant TEXT;
     "#,
+    // 7: protected mail. Per account: what its setup checks found (JSON, see
+    // store::protection::StoredChecks), and the sensitivity labels Microsoft
+    // 365 last listed (JSON, see model::LabelCatalog).
+    r#"
+    CREATE TABLE account_protection (
+        account_id         TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        checks_json        TEXT NOT NULL DEFAULT '{}',
+        catalog_json       TEXT,              -- NULL until first listed, or after the permission went
+        catalog_listed_at  INTEGER,           -- the last successful listing
+        catalog_error      TEXT,              -- the last listing's failure; NULL after a success
+        catalog_failures   INTEGER NOT NULL DEFAULT 0,  -- failures in a row (backoff); 0 after a success
+        catalog_failed_at  INTEGER            -- the last failure
+    );
+    "#,
 ];
 
 pub(super) fn migrate(conn: &Connection) -> Result<()> {
@@ -438,7 +452,11 @@ mod tests {
         }
         let store = crate::store::Store::open(&path).unwrap();
         let account = store.get_account("a").unwrap();
-        assert!(account.needs_permission.is_empty());
+        // Everything it had, which never included sensitivity labels.
+        assert_eq!(
+            account.needs_permission,
+            [crate::model::AccountFeature::SensitivityLabels]
+        );
         assert!(account.refused_features.is_empty());
         assert_eq!(store.microsoft_grant("a").unwrap(), None);
         drop(store);
@@ -451,6 +469,61 @@ mod tests {
             .query_row("SELECT microsoft_grant FROM accounts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(grant, None);
+    }
+
+    #[test]
+    fn the_protection_migration_adds_a_table_that_goes_with_the_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        {
+            // A database as the previous version left it, with an account.
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..6] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 6).unwrap();
+            conn.execute_batch(
+                r#"INSERT INTO accounts VALUES ('a', 'microsoft', 'A', 'a@contoso.com', '#000',
+                     '{"kind":"microsoft","tenantId":"t","userId":"u"}', 0, NULL, NULL, NULL);"#,
+            )
+            .unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version as usize, MIGRATIONS.len());
+        // A row takes the defaults, and goes with its account.
+        conn.execute(
+            "INSERT INTO account_protection (account_id) VALUES ('a')",
+            [],
+        )
+        .unwrap();
+        let (checks, catalog, failures): (String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT checks_json, catalog_json, catalog_failures FROM account_protection",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((checks.as_str(), catalog, failures), ("{}", None, 0));
+        conn.execute("DELETE FROM accounts WHERE id = 'a'", [])
+            .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM account_protection", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        // Only for accounts that exist.
+        assert!(
+            conn.execute(
+                "INSERT INTO account_protection (account_id) VALUES ('gone')",
+                []
+            )
+            .is_err()
+        );
     }
 
     /// Ids of the messages whose rows in `table` match `query`.

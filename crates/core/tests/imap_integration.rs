@@ -244,6 +244,8 @@ async fn imap_provider_end_to_end() {
                 importance: Some(Importance::High),
                 reply_to_message_id: None,
                 reply_kind: None,
+                protect: None,
+                label_id: None,
             },
             None,
         )

@@ -526,6 +526,20 @@
             </tbody>
             <tbody>
               <tr>
+                <th colspan="2" scope="colgroup">
+                  For sensitivity labels (optional, work and school accounts)
+                </th>
+              </tr>
+              <tr>
+                <td><code>InformationProtectionPolicy.Read</code></td>
+                <td>
+                  Listing the sensitivity labels the person may apply to mail, and your label
+                  policy. Asked for only when the person turns labels on.
+                </td>
+              </tr>
+            </tbody>
+            <tbody>
+              <tr>
                 <th colspan="2" scope="colgroup">For instant updates (Cumulas Mail's own API)</th>
               </tr>
               <tr>
@@ -545,8 +559,22 @@
             >.
           </p>
           <p>
-            Calendar, contacts, tasks and mailbox settings are optional: people can start with mail
-            if your settings allow it, and turn the rest on later.
+            Calendar, contacts, tasks, mailbox settings and sensitivity labels are optional: people
+            can start with mail if your settings allow it, and turn the rest on later.
+          </p>
+        </section>
+
+        <section>
+          <h2>Protected mail</h2>
+          <p>
+            Cumulas Mail can't open mail protected with Microsoft Purview or S/MIME; it opens it in
+            Outlook on the web instead, for reading, replying and forwarding. To let people encrypt
+            or label mail they send from Cumulas Mail, set up the mail flow rules and auto-labeling
+            policies in
+            <a
+              href="https://github.com/cumulas-inc/email-client/blob/main/docs/microsoft-365.md#sensitivity-labels-and-encryption-it-admins"
+              >the admin guide</a
+            >. Cumulas Mail offers each option only after a test message shows that it works.
           </p>
         </section>
 
@@ -554,7 +582,7 @@
           <h2>Approve it for everyone</h2>
           <a
             class="approve"
-            href="https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&amp;scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&amp;redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F"
+            href="https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&amp;scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FInformationProtectionPolicy.Read+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&amp;redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F"
             >Approve for your organization</a
           >
           <p>
@@ -570,7 +598,7 @@
           </p>
           <details class="link">
             <summary>Copy the link to open it in another browser</summary>
-            <pre><code>https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&amp;scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&amp;redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F</code></pre>
+            <pre><code>https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&amp;scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FInformationProtectionPolicy.Read+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&amp;redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F</code></pre>
           </details>
 
           <h3>Or in the Microsoft Entra admin center</h3>

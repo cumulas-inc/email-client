@@ -31,15 +31,19 @@ Accounts and the Calendar, People and Tasks modules say so, with **Turn on**
 (asks Microsoft for that permission) and **Ask IT** (the approval link and an
 email for IT).
 
-| Permission             | Used for                                           | Without it                                                          |
-| ---------------------- | -------------------------------------------------- | ------------------------------------------------------------------- |
-| `MailboxSettings.Read` | Time zone and mailbox preferences                  | All-day events and due dates use the computer's time zone           |
-| `Calendars.ReadWrite`  | Calendar views, creating events, meeting responses | The account has no calendars, events or reminders in the app        |
-| `Contacts.ReadWrite`   | Contacts and address autocomplete                  | The account's contacts aren't in the app or in address autocomplete |
-| `Tasks.ReadWrite`      | Microsoft To Do lists and tasks                    | The account has no task lists                                       |
+| Permission                         | Used for                                                                                                               | Without it                                                          |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `MailboxSettings.Read`             | Time zone and mailbox preferences                                                                                      | All-day events and due dates use the computer's time zone           |
+| `Calendars.ReadWrite`              | Calendar views, creating events, meeting responses                                                                     | The account has no calendars, events or reminders in the app        |
+| `Contacts.ReadWrite`               | Contacts and address autocomplete                                                                                      | The account's contacts aren't in the app or in address autocomplete |
+| `Tasks.ReadWrite`                  | Microsoft To Do lists and tasks                                                                                        | The account has no task lists                                       |
+| `InformationProtectionPolicy.Read` | The sensitivity labels people may apply to mail, and the label policy (work and school accounts; Microsoft Graph beta) | No sensitivity labels when writing mail                             |
 
-Adding an account asks for both groups at once, so one approval covers
-everything; **Try with mail only** asks for the first group alone (see
+Adding an account asks for both groups at once, so one approval covers everything, except
+`InformationProtectionPolicy.Read`: it's asked for only when someone turns sensitivity labels on,
+because personal accounts can't have it and a new permission in the first sign-in would make
+organizations that approved Cumulas Mail approve it again before anyone else could sign in.
+**Try with mail only** asks for the first group alone (see
 ["Need admin approval"](#need-admin-approval)).
 
 One more scope is not a Graph permission but the app's own:
@@ -73,6 +77,7 @@ permission is there.
   at the account's first sync a day later, or at once with **Check again**.
 
 Accounts added before the app recorded permissions count as having all of them
+(but `InformationProtectionPolicy.Read`, which no earlier version asked for)
 until their first refresh records what Microsoft says.
 
 ## "Need admin approval"
@@ -158,7 +163,7 @@ for the tenant `organizations` (a Rust unit test and
 this link the same):
 
 ```text
-https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F
+https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FInformationProtectionPolicy.Read+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F
 ```
 
 A Global Administrator, Privileged Role Administrator, Cloud Application
@@ -492,6 +497,271 @@ client ID too:
 or `flatpak run --env=CUMULAS_SIGNATURE_CLIENT_ID=none co.cumulas.Mail` to
 turn company signatures off for that run.
 
+## Sensitivity labels and encryption (IT admins)
+
+### Receiving protected mail
+
+Cumulas Mail can't open mail protected with Microsoft Purview (a sensitivity label that encrypts,
+**Encrypt**, **Do Not Forward**) or encrypted with S/MIME: Microsoft Graph gives apps the protected
+wrapper, not its content, and the only supported way to decrypt it is Microsoft's closed-source
+SDK, which an open-source app can't ship. So Cumulas Mail:
+
+- recognizes protected mail (a `message.rpmsg` attachment or its `_v2`–`_v4` variants,
+  `Content-Class: rpmsg.message`, the S/MIME message classes and files, and links to Microsoft's
+  encrypted message portal), says so with the sender's address, and offers **Open in Outlook on
+  the web**, or a button to Microsoft's encrypted message portal when the message links to it;
+- doesn't list those files as attachments, since nothing on the computer can open them;
+- shows the attachments of S/MIME-signed mail, which Exchange keeps inside the signature file;
+- opens Outlook on the web for **Reply**, **Reply all** and **Forward** on encrypted mail, so it
+  never sends an unprotected copy;
+- shows a message's sensitivity label when its `msip_labels` header (or Exchange's copy of it)
+  names a label of the account's own organization. Once people have turned sensitivity labels
+  on, only labels Microsoft 365 lists for them are shown, with their names from that list.
+
+Outlook on the web shows protected mail only once Exchange Online uses Azure Rights Management:
+`Get-IRMConfiguration` shows `AzureRMSLicensingEnabled : True`, and
+`Test-IRMConfiguration -Sender you@contoso.com -Recipient you@contoso.com` ends with PASS. A mail
+flow rule with **Remove Office 365 Message Encryption and rights protection** makes your
+organization's protected mail arrive readable in every app, Cumulas Mail included, but removes
+its protection; we don't recommend it.
+
+**More actions → Copy diagnostic details** copies what Cumulas Mail found about a message (the
+signals above, file types and sizes), never its subject, addresses, text or links, for a bug
+report.
+
+### Sending protected mail
+
+Microsoft Graph gives apps no way to encrypt or label a message. Cumulas Mail marks the message
+with a header, and your mail server does the rest with rules you set up:
+
+| Header              | Values                      | Set up with                                               |
+| ------------------- | --------------------------- | --------------------------------------------------------- |
+| `x-cumulas-protect` | `encrypt`, `do-not-forward` | [Mail flow rules](#encrypt-and-do-not-forward)            |
+| `x-cumulas-label`   | the label's ID, a GUID      | [One auto-labeling policy per label](#sensitivity-labels) |
+
+Cumulas Mail sets these on the message's draft (as Exchange Internet-header properties), checks
+that the draft kept them, and only then sends it; otherwise nothing is sent. Only Microsoft 365
+work and school accounts can send protected mail; IMAP accounts can't.
+
+#### How the check works
+
+Nothing is offered until it's checked. In **Settings → Accounts →** (the account) **→ Sensitivity
+labels and encryption**, people select **Check**. Cumulas Mail sends them a control message
+without any header and a test message for each option with its header, all with the same kind of
+subject (`Cumulas Mail setup check [k7q2m9xa]`, with a random code) and the same short text, which
+names no option or label. An option is offered when writing mail only when its test message
+arrives encrypted (or with the label) and the control doesn't, and, for **Encrypt** and **Do Not
+Forward**, when the arrived message no longer has `x-cumulas-protect` (your rule removes it).
+Otherwise the check says why:
+
+- **Couldn't tell:** another rule already encrypts or labels the control too (for example a rule
+  that encrypts all internal mail, or a default label applied to all mail), or the encryption rule
+  doesn't remove the header.
+- **Arrived without it:** the rule or policy didn't act (not created yet, in simulation, a wrong
+  pattern or group).
+- **Couldn't check:** the test messages didn't arrive in the Inbox within 15 minutes (an Inbox
+  rule that moves them elsewhere has this effect too).
+
+Once Cumulas Mail has read the test messages, the control included, it moves them to Deleted
+Items. A passed check lasts 90 days; then the option isn't offered until people select **Check
+again**, and Settings says when it was last checked. The copy in the sender's Sent Items is saved
+before your rules run, so it usually isn't encrypted or labeled; Cumulas Mail shows it as
+"requested". A check sends at most 20 messages, under Exchange Online's 30 messages a minute.
+
+#### Encrypt and Do Not Forward
+
+In Exchange Online PowerShell:
+
+```powershell
+Connect-ExchangeOnline
+
+# The template names can differ; Get-RMSTemplate lists them.
+New-TransportRule -Name "Cumulas Mail: Encrypt" `
+  -FromScope InOrganization `
+  -HeaderMatchesMessageHeader "x-cumulas-protect" `
+  -HeaderMatchesPatterns "^encrypt$" `
+  -ApplyRightsProtectionTemplate "Encrypt" `
+  -RemoveHeader "x-cumulas-protect"
+
+New-TransportRule -Name "Cumulas Mail: Do Not Forward" `
+  -FromScope InOrganization `
+  -HeaderMatchesMessageHeader "x-cumulas-protect" `
+  -HeaderMatchesPatterns "^do-not-forward$" `
+  -ApplyRightsProtectionTemplate "Do Not Forward" `
+  -RemoveHeader "x-cumulas-protect"
+
+# Check each rule's template: the check can't tell Do Not Forward from Encrypt.
+Get-TransportRule "Cumulas Mail: Do Not Forward" | Format-List State,Mode,FromScope,HeaderMatchesMessageHeader,HeaderMatchesPatterns,ApplyRightsProtectionTemplate,RemoveHeader
+Get-TransportRule "Cumulas Mail: Encrypt" | Format-List State,Mode,FromScope,HeaderMatchesMessageHeader,HeaderMatchesPatterns,ApplyRightsProtectionTemplate,RemoveHeader
+```
+
+Or in the [Exchange admin center](https://admin.exchange.microsoft.com):
+
+1. **Mail flow → Rules → Add a rule → Create a new rule.** Name: `Cumulas Mail: Encrypt`.
+2. **Apply this rule if:** **The sender → is external/internal → Inside the organization**. Then
+   add a condition: **A message header → matches these text patterns**: header
+   `x-cumulas-protect`, pattern `^encrypt$`.
+3. **Do the following:** **Modify the message security → Apply Office 365 Message Encryption and
+   rights protection → Encrypt**. Then add an action: **Modify the message properties → remove a
+   message header → `x-cumulas-protect`**.
+4. Keep **Enforce**, finish, and turn the rule on.
+5. Repeat for `Cumulas Mail: Do Not Forward`, with the pattern `^do-not-forward$` and the **Do Not
+   Forward** template.
+
+- **Only mail from inside the organization** (`-FromScope InOrganization`): the header in mail
+  from anywhere else does nothing. The rules remove the header, so recipients never see it, and
+  the check relies on that.
+- **Don't add a recipient condition or exception to these rules, in either direction** (inside or
+  outside the organization): people's checks send the test message to themselves, so a rule
+  limited to some recipients would pass the check and miss other mail.
+- People can confirm Do Not Forward with **Open test message** next to the check: Outlook on the
+  web shows that the message can't be forwarded.
+- **Licensing:** Purview Message Encryption comes with Microsoft 365 E3, E5 and Business Premium,
+  among others; check your plan.
+- **Cumulas Signatures relay:** if your organization's mail goes through the relay to get its
+  signature, the rules must also wait for the relay; see
+  [With the Cumulas Signatures relay](#with-the-cumulas-signatures-relay).
+
+#### Sensitivity labels
+
+1. **Approve `InformationProtectionPolicy.Read`.** The [approval link](#approving-cumulas-mail-it-admins)
+   includes it, or people select **Turn on** in Settings → Accounts if your settings let them
+   approve it. Work and school accounts only. Cumulas Mail then lists the labels your label
+   policies publish to each person (Microsoft Graph beta), with the policy's default label and
+   whether a label is required. Graph gives one default and one "required" setting, not separate
+   ones for email, so Cumulas Mail may apply your document defaults to mail.
+2. **Choose who may label mail from Cumulas Mail:** a distribution group or mail-enabled security
+   group (not a Microsoft 365 group) of the people who use it, or of all staff. The policies below
+   apply only to mail these people send, so mail from outside your organization can never ask for
+   a label. A small group also makes a good pilot.
+3. **Create an auto-labeling policy for each label** people should be able to choose in Cumulas
+   Mail (each auto-labeling policy applies one label). In Security & Compliance PowerShell:
+
+   ```powershell
+   Connect-IPPSSession
+
+   # The labels and their IDs (the GUID goes in the header):
+   Get-Label | Format-Table DisplayName, Name, Guid
+
+   $group = "cumulas-mail-users@contoso.com"   # the group from step 2
+   $label = "Confidential"                     # the label's Name
+   $id    = (Get-Label -Identity $label).Guid
+   $name  = "Cumulas Mail: $label"
+
+   New-AutoSensitivityLabelPolicy -Name $name `
+     -ApplySensitivityLabel $label `
+     -ExchangeLocation All `
+     -ExchangeSenderMemberOf $group `
+     -OverwriteLabel $true `
+     -Mode TestWithoutNotifications
+   New-AutoSensitivityLabelRule -Policy $name -Name "$name (header)" `
+     -Workload Exchange `
+     -HeaderMatchesPatterns @{ "x-cumulas-label" = "^$id$" }
+
+   # After reviewing the simulation in the Microsoft Purview portal:
+   Set-AutoSensitivityLabelPolicy -Identity $name -Mode Enable
+   ```
+
+   Or in the [Microsoft Purview portal](https://purview.microsoft.com): **Solutions → Information
+   Protection → Policies → Auto-labeling policies → Create auto-labeling policy → Custom policy**;
+   name it `Cumulas Mail: Confidential`; choose **Exchange email** only and, under **Included**,
+   the group from step 2 instead of all users; under **Advanced rules**, add a rule with the
+   condition **Header matches patterns**: header `x-cumulas-label`, pattern
+   `^<the label's GUID>$`; choose the label; under **Additional settings for email**, select
+   **Replace existing labels that have the same or lower priority**; run it in simulation, then
+   turn it on.
+
+   `-OverwriteLabel $true` (the portal's "Replace existing labels") matters: a reply or forward
+   can carry the original message's label, which counts as chosen by a person and isn't replaced
+   by default. Cumulas Mail also refuses to send a reply whose copied label differs from the one
+   the person picked.
+
+4. **Remove label requests from all other mail.** This mail flow rule removes the header from
+   every message that isn't authenticated mail from inside your organization (including mail that
+   only pretends to come from one of your domains):
+
+   ```powershell
+   New-TransportRule -Name "Cumulas Mail: ignore label requests from outside" `
+     -ExceptIfFromScope InOrganization `
+     -RemoveHeader "x-cumulas-label" `
+     -Priority 0
+   ```
+
+   Or in the Exchange admin center: a new rule `Cumulas Mail: ignore label requests from outside`,
+   **Apply this rule if: Apply to all messages**, **Do the following: Modify the message
+   properties → remove a message header → `x-cumulas-label`**, **Except if: The sender → is
+   external/internal → Inside the organization**, and move it to the top of the list.
+
+   Microsoft doesn't document whether mail flow rules run before auto-labeling, so the sender
+   group in step 3 is what keeps outside mail out; this rule is a second line. Watch the
+   policies' simulation results for mail from outside.
+
+- **Don't add a recipient condition or exception to these policies**: people's checks send the
+  test message to themselves.
+- **Licensing:** auto-labeling needs Microsoft 365 E5, E5 Compliance, or an Information
+  Protection add-on; check your plan.
+- A policy in simulation applies nothing: people's checks say "Arrived without it" until it's
+  turned on. A default label applied to all mail makes the check for that same label say
+  "Couldn't tell".
+- Labels configured for S/MIME can't be applied this way.
+- Replies and forwards keep the original's label when it's offered. When it isn't and your label
+  policy requires a label, Cumulas Mail sends the reply or forward only once the person has chosen
+  one. When your label policy asks for a reason to lower a label, people lower it in Outlook:
+  Cumulas Mail can't record a reason.
+- An organization's own app registration needs `InformationProtectionPolicy.Read` (delegated)
+  added too.
+
+#### With the Cumulas Signatures relay
+
+When your organization's outgoing mail goes through the Cumulas Signatures relay to get its
+signature, the relay must see each message before it's encrypted: it can't sign an encrypted
+message, and passes it on unsigned. The relay adds the header `X-Signature-Stamped: 1` to every
+message it handles, signed or not, and keeps the `x-cumulas-*` headers; its routing rule sends it
+only messages without that header. So the rules and policies above must act only on messages
+that carry `X-Signature-Stamped`, once the relay has handed them back. People's checks go through
+the relay like any other mail, so they show whether this works.
+
+- **Encrypt and Do Not Forward:** add this condition to both rules (each already uses its one
+  "matches these text patterns" condition for `x-cumulas-protect`):
+
+  ```powershell
+  Set-TransportRule "Cumulas Mail: Encrypt" `
+    -HeaderContainsMessageHeader "X-Signature-Stamped" -HeaderContainsWords "1"
+  Set-TransportRule "Cumulas Mail: Do Not Forward" `
+    -HeaderContainsMessageHeader "X-Signature-Stamped" -HeaderContainsWords "1"
+  ```
+
+  In the Exchange admin center: **A message header → includes any of these words**, header
+  `X-Signature-Stamped`, word `1`.
+
+- **Sensitivity labels:** an auto-labeling rule looks at one header, so a mail flow rule for each
+  label passes the request on in another header only once the message carries the stamp, and the
+  policy's rule looks for that header instead of `x-cumulas-label`:
+
+  ```powershell
+  # Exchange Online PowerShell, with $label and $id as in step 3:
+  New-TransportRule -Name "Cumulas Mail: $label after the signature" `
+    -FromScope InOrganization `
+    -HeaderMatchesMessageHeader "x-cumulas-label" -HeaderMatchesPatterns "^$id$" `
+    -HeaderContainsMessageHeader "X-Signature-Stamped" -HeaderContainsWords "1" `
+    -SetHeaderName "x-cumulas-label-stamped" -SetHeaderValue "$id"
+
+  # Security & Compliance PowerShell: the policy's rule, instead of the one in step 3.
+  New-AutoSensitivityLabelRule -Policy $name -Name "$name (header)" `
+    -Workload Exchange `
+    -HeaderMatchesPatterns @{ "x-cumulas-label-stamped" = "^$id$" }
+
+  # Exchange Online PowerShell: step 4's rule for this header too.
+  New-TransportRule -Name "Cumulas Mail: ignore stamped label requests from outside" `
+    -ExceptIfFromScope InOrganization `
+    -RemoveHeader "x-cumulas-label-stamped" `
+    -Priority 0
+  ```
+
+  If auto-labeling runs before mail flow rules in your organization (Microsoft doesn't document
+  the order), the policy never sees the header and people's checks say "Arrived without it", so
+  Cumulas Mail never offers a label this way that doesn't work.
+
 ## Using your organization's own registration (IT admins)
 
 Organizations that prefer to control the app themselves can register it in
@@ -508,23 +778,27 @@ flatpak.cumulas.co is for the published registration only and doesn't apply.
 
 ## Troubleshooting
 
-| What the user sees                                                                                                                      | Meaning                                                                                                                                                                                                                                        |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "Your organization needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981)                                           | The organization requires an administrator to approve the app. The app shows the approval link with **Email IT** and **Open approval page**, and offers **Try with mail only**.                                                                |
-| Same screen, with **Request approval** as the main button (AADSTS90095)                                                                 | The organization has the admin consent workflow on: the user can request approval on Microsoft's page, then select **Try again** once IT has approved.                                                                                         |
-| "Cumulas Mail doesn't have permission yet" (AADSTS65004)                                                                                | The permission prompt was declined. Microsoft also sends this when the user selects "Back to app" after requesting approval, so try again once IT has approved.                                                                                |
-| "You haven't been given access to Cumulas Mail" (AADSTS50105)                                                                           | The organization requires assignment to the app: an administrator assigns the user under Enterprise apps → Cumulas Mail → Users and groups.                                                                                                    |
-| "Your organization has blocked Cumulas Mail" (AADSTS7000112)                                                                            | The app is disabled in the organization, for example after a consent request was blocked: Enterprise apps → Cumulas Mail → Properties → Enabled for users to sign in.                                                                          |
-| "Your organization isn't set up for Cumulas Mail yet" (AADSTS65005)                                                                     | The organization is missing something the app needs; approving the app usually fixes it. If it doesn't, [let Cumulas know](https://github.com/cumulas-inc/email-client/issues).                                                                |
-| "Your organization's Microsoft 365 is missing a service" (AADSTS650052)                                                                 | The organization hasn't subscribed to or enabled a service the app needs, usually Exchange Online. Approving the app doesn't help.                                                                                                             |
-| "Set up your sign-in security info first" (AADSTS53004, 53010)                                                                          | The user must finish setting up multifactor authentication or other security info, which Microsoft couldn't do during this sign-in.                                                                                                            |
-| "Your organization's sign-in rules …" or "Your organization only allows apps it has approved" (AADSTS53000–53003, 53011, 530000–530999) | A Conditional Access policy blocked the sign-in; the Entra sign-in logs show which. A sign-in through the browser on Linux may not meet policies that require a compliant or managed device or an approved client app.                         |
-| "Calendar needs permission", or "Needs permission: …" in Settings → Accounts                                                            | The feature's optional permission wasn't granted. **Turn on** asks for it; **Ask IT** shows the approval link. An approval given later is picked up within a couple of hours.                                                                  |
-| "Microsoft 365 refused access to your calendar" (or contacts, tasks)                                                                    | The permission is granted, but Graph refused the feature (403), often because the mailbox's license doesn't include it. The app checks again daily, or at once with **Check again**; **Email IT** asks IT to look.                             |
-| "Sign-in timed out"                                                                                                                     | Microsoft's page didn't send the browser back within 5 minutes, often because it showed an error of its own. **Microsoft said I need admin approval** and **Microsoft showed an error code** lead to the matching screen.                      |
-| "Signing in without instant updates" (in the browser)                                                                                   | The push service's scope needs an administrator's approval or was declined. The sign-in continues in a new tab without it; see [Instant updates](#what-users-see-before-it-is-set-up).                                                         |
-| "Sign in again to keep … up to date"                                                                                                    | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction). When Microsoft says it's one of the blocks above, the account shows that reason instead, with its AADSTS code. |
-| Sign-in never returns to the app                                                                                                        | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again. If Microsoft's page shows an error, use **Microsoft showed an error code**.                                       |
+| What the user sees                                                                                                                      | Meaning                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Your organization needs to approve Cumulas Mail" (AADSTS65001, 90093, 90094, 900941, 900981)                                           | The organization requires an administrator to approve the app. The app shows the approval link with **Email IT** and **Open approval page**, and offers **Try with mail only**.                                                                                                       |
+| Same screen, with **Request approval** as the main button (AADSTS90095)                                                                 | The organization has the admin consent workflow on: the user can request approval on Microsoft's page, then select **Try again** once IT has approved.                                                                                                                                |
+| "Cumulas Mail doesn't have permission yet" (AADSTS65004)                                                                                | The permission prompt was declined. Microsoft also sends this when the user selects "Back to app" after requesting approval, so try again once IT has approved.                                                                                                                       |
+| "You haven't been given access to Cumulas Mail" (AADSTS50105)                                                                           | The organization requires assignment to the app: an administrator assigns the user under Enterprise apps → Cumulas Mail → Users and groups.                                                                                                                                           |
+| "Your organization has blocked Cumulas Mail" (AADSTS7000112)                                                                            | The app is disabled in the organization, for example after a consent request was blocked: Enterprise apps → Cumulas Mail → Properties → Enabled for users to sign in.                                                                                                                 |
+| "Your organization isn't set up for Cumulas Mail yet" (AADSTS65005)                                                                     | The organization is missing something the app needs; approving the app usually fixes it. If it doesn't, [let Cumulas know](https://github.com/cumulas-inc/email-client/issues).                                                                                                       |
+| "Your organization's Microsoft 365 is missing a service" (AADSTS650052)                                                                 | The organization hasn't subscribed to or enabled a service the app needs, usually Exchange Online. Approving the app doesn't help.                                                                                                                                                    |
+| "Set up your sign-in security info first" (AADSTS53004, 53010)                                                                          | The user must finish setting up multifactor authentication or other security info, which Microsoft couldn't do during this sign-in.                                                                                                                                                   |
+| "Your organization's sign-in rules …" or "Your organization only allows apps it has approved" (AADSTS53000–53003, 53011, 530000–530999) | A Conditional Access policy blocked the sign-in; the Entra sign-in logs show which. A sign-in through the browser on Linux may not meet policies that require a compliant or managed device or an approved client app.                                                                |
+| "Calendar needs permission", or "Needs permission: …" in Settings → Accounts                                                            | The feature's optional permission wasn't granted. **Turn on** asks for it; **Ask IT** shows the approval link. An approval given later is picked up within a couple of hours.                                                                                                         |
+| "Microsoft 365 refused access to your calendar" (or contacts, tasks)                                                                    | The permission is granted, but Graph refused the feature (403), often because the mailbox's license doesn't include it. The app checks again daily, or at once with **Check again**; **Email IT** asks IT to look.                                                                    |
+| "Sign-in timed out"                                                                                                                     | Microsoft's page didn't send the browser back within 5 minutes, often because it showed an error of its own. **Microsoft said I need admin approval** and **Microsoft showed an error code** lead to the matching screen.                                                             |
+| "Signing in without instant updates" (in the browser)                                                                                   | The push service's scope needs an administrator's approval or was declined. The sign-in continues in a new tab without it; see [Instant updates](#what-users-see-before-it-is-set-up).                                                                                                |
+| "Sign in again to keep … up to date"                                                                                                    | The refresh token expired or was revoked (password change, admin action, or a Conditional Access policy requiring interaction). When Microsoft says it's one of the blocks above, the account shows that reason instead, with its AADSTS code.                                        |
+| Sign-in never returns to the app                                                                                                        | The browser could not reach `http://localhost:<port>`; check that nothing blocks loopback connections. Cancel and try again. If Microsoft's page shows an error, use **Microsoft showed an error code**.                                                                              |
+| "Protected message" in the reading pane                                                                                                 | The message is encrypted with Microsoft Purview (a sensitivity label, Encrypt or Do Not Forward). Cumulas Mail can't open it; **Open in Outlook on the web** does. See [Sensitivity labels and encryption](#sensitivity-labels-and-encryption-it-admins).                             |
+| A check in Settings says "Arrived without it"                                                                                           | The test message arrived without the encryption or label. Check the mail flow rule or auto-labeling policy (turned on, not in simulation; the header pattern; the sender group; with the Cumulas Signatures relay, the `X-Signature-Stamped` condition), then select **Check again**. |
+| A check in Settings says "Couldn't tell"                                                                                                | Another rule already encrypts or labels the control message, or the encryption rule doesn't remove `x-cumulas-protect`. See [How the check works](#how-the-check-works).                                                                                                              |
+| "Microsoft 365 refused access to your sensitivity labels"                                                                               | The permission is granted, but Graph refused the label list (403), often for licensing.                                                                                                                                                                                               |
 
 After an administrator approves Cumulas Mail with the published registration's
 link, Microsoft brings their browser back to

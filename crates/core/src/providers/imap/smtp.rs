@@ -287,6 +287,8 @@ mod tests {
             importance: Some(Importance::High),
             reply_to_message_id: Some("local".into()),
             reply_kind: Some(ReplyKind::Reply),
+            protect: None,
+            label_id: None,
         }
     }
 
@@ -319,6 +321,9 @@ mod tests {
             internet_message_id: Some("<parent@example.com>".into()),
             in_reply_to: None,
             references: vec!["<root@example.com>".into()],
+            protection: None,
+            label: None,
+            requested: None,
         }
     }
 

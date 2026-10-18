@@ -15,7 +15,8 @@ use mail_parser::{Encoding, HeaderValue, MessageParser, MessagePart, MimeHeaders
 
 use crate::html::{html_to_text, make_preview, text_to_html};
 use crate::model::{AttachmentMeta, EmailAddress, Importance};
-use crate::providers::MessageContent;
+use crate::protection::{LABEL_HEADER, PROTECT_HEADER, smime_content_of};
+use crate::providers::{MessageContent, MessageSignals, SmimeContent};
 
 /// Length of message previews, in characters.
 const PREVIEW_CHARS: usize = 200;
@@ -369,7 +370,8 @@ fn importance(message: &mail_parser::Message<'_>) -> Importance {
 
 /// Parses a complete message (`BODY[]`) for the reading pane. Attachment ids
 /// are IMAP section paths (`2`, `1.3`), usable with [`attachment_content`].
-pub(super) fn parse_message(raw: &[u8]) -> MessageContent {
+/// Graph reads a clear-signed S/MIME message's MIME with it too.
+pub(crate) fn parse_message(raw: &[u8]) -> MessageContent {
     let Some(message) = MessageParser::default().parse(raw) else {
         // Not MIME at all: show it as text rather than failing.
         return MessageContent {
@@ -443,7 +445,86 @@ pub(super) fn parse_message(raw: &[u8]) -> MessageContent {
         internet_message_id: headers.message_id,
         in_reply_to: headers.in_reply_to,
         references: headers.references,
+        signals: message_signals(&message),
     }
+}
+
+/// Bytes of an opaque S/MIME body read to tell signed from encrypted.
+const SMIME_PREFIX_BYTES: usize = 512;
+
+/// What the message's headers and top-level type say of its protection and
+/// label (see [`crate::protection`]).
+fn message_signals(message: &mail_parser::Message<'_>) -> MessageSignals {
+    let header = |name: &str| {
+        message
+            .header_raw(name)
+            .map(unfold)
+            .filter(|v| !v.is_empty())
+    };
+    let content_type = message.parts.first().and_then(|p| p.content_type());
+    let parameter = |name: &str| {
+        content_type?
+            .attributes()?
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .map(|a| a.value.trim().to_ascii_lowercase())
+    };
+    let mime_type = content_type.map(|ct| {
+        let mut mime = match ct.subtype() {
+            Some(sub) => format!("{}/{}", ct.ctype(), sub),
+            None => ct.ctype().to_owned(),
+        }
+        .to_ascii_lowercase();
+        for name in ["smime-type", "protocol"] {
+            if let Some(value) = parameter(name) {
+                mime.push_str(&format!("; {name}={value}"));
+            }
+        }
+        mime
+    });
+    let opaque = mime_type.as_deref().is_some_and(|m| {
+        m.starts_with("application/pkcs7-mime") || m.starts_with("application/x-pkcs7-mime")
+    });
+    let smime_content = match parameter("smime-type").as_deref() {
+        Some("signed-data") => Some(SmimeContent::Signed),
+        Some("enveloped-data" | "authenveloped-data") => Some(SmimeContent::Enveloped),
+        _ if opaque => message.parts.first().and_then(|root| {
+            let contents = root.contents();
+            smime_content_of(&contents[..contents.len().min(SMIME_PREFIX_BYTES)])
+        }),
+        _ => None,
+    };
+    let msip_labels = header("msip_labels");
+    MessageSignals {
+        content_class: header("Content-Class"),
+        msip_labels_source: msip_labels.as_ref().map(|_| "header".to_owned()),
+        msip_labels,
+        mime_type,
+        smime_content,
+        requested_action: header(PROTECT_HEADER),
+        requested_label: header(LABEL_HEADER),
+        ..MessageSignals::default()
+    }
+}
+
+/// A raw header value on one line: folding (a line break and the spaces or
+/// tabs after it) removed, trimmed.
+fn unfold(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(c, '\r' | '\n') {
+            while chars
+                .peek()
+                .is_some_and(|c| matches!(c, '\r' | '\n' | ' ' | '\t'))
+            {
+                chars.next();
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out.trim().to_owned()
 }
 
 fn strip_angle_brackets(id: &str) -> String {
@@ -599,7 +680,7 @@ fn percent_decode(value: &str) -> String {
 
 /// The decoded content of the attachment `id` (a section path from
 /// [`parse_message`]) of a complete message.
-pub(super) fn attachment_content(raw: &[u8], id: &str) -> Option<Vec<u8>> {
+pub(crate) fn attachment_content(raw: &[u8], id: &str) -> Option<Vec<u8>> {
     let message = MessageParser::default().parse(raw)?;
     let part_id = section_paths(&message)
         .into_iter()
@@ -959,5 +1040,168 @@ Inner body.
         assert_eq!(h.importance, Importance::High);
         assert!(h.is_mixed);
         assert_eq!(h.conversation_id(), None);
+    }
+
+    #[test]
+    fn signals_come_from_the_headers() {
+        let label = "6c1b3b5e-0d4f-4b1e-9d3a-2f0e6a7b8c9d";
+        let raw = crlf(&format!(
+            "From: dana@contoso.com\nSubject: Q4\nContent-Class: rpmsg.message\n\
+             msip_labels: MSIP_Label_{label}_Enabled=true;\n \
+             MSIP_Label_{label}_SiteId=72f988bf-86f1-41af-91ab-2d7cd011db47;\n\t\
+             MSIP_Label_{label}_Name=Confidential\n\
+             X-Cumulas-Protect:  encrypt \nx-cumulas-label: {label}\n\
+             Content-Type: multipart/mixed; boundary=\"b\"\n\n\
+             --b\nContent-Type: text/plain\n\nOpen it in Outlook.\n\
+             --b\nContent-Type: application/x-microsoft-rpmsg-message; name=\"message.rpmsg\"\n\
+             Content-Transfer-Encoding: base64\n\nAAEC\n--b--\n"
+        ));
+        let content = parse_message(&raw);
+        let signals = &content.signals;
+        assert_eq!(signals.content_class.as_deref(), Some("rpmsg.message"));
+        // Unfolded.
+        assert_eq!(
+            signals.msip_labels.as_deref(),
+            Some(
+                format!(
+                    "MSIP_Label_{label}_Enabled=true;MSIP_Label_{label}_SiteId=\
+                     72f988bf-86f1-41af-91ab-2d7cd011db47;MSIP_Label_{label}_Name=Confidential"
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(signals.msip_labels_source.as_deref(), Some("header"));
+        assert_eq!(signals.requested_action.as_deref(), Some("encrypt"));
+        assert_eq!(signals.requested_label.as_deref(), Some(label));
+        assert_eq!(signals.mime_type.as_deref(), Some("multipart/mixed"));
+        assert_eq!(signals.smime_content, None);
+        assert!(!signals.properties_unavailable);
+        assert_eq!(content.attachments[0].name, "message.rpmsg");
+        let protection = crate::protection::detect(
+            signals,
+            &content.attachments,
+            content.body_html.as_deref(),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(protection.kind, crate::model::ProtectionKind::RightsManaged);
+        assert_eq!(protection.container_ids, ["2"]);
+
+        // Without any, none.
+        let plain = parse_message(&crlf("Subject: x\nContent-Type: text/plain\n\nHi\n"));
+        assert_eq!(plain.signals.content_class, None);
+        assert_eq!(plain.signals.msip_labels, None);
+        assert_eq!(plain.signals.msip_labels_source, None);
+        assert_eq!(plain.signals.mime_type.as_deref(), Some("text/plain"));
+        // Not MIME at all: nothing to read.
+        assert_eq!(
+            parse_message(b"\xff\xfe").signals,
+            MessageSignals::default()
+        );
+    }
+
+    /// The start of a CMS ContentInfo with this OID's last byte (signedData
+    /// 0x02, envelopedData 0x03).
+    fn content_info(last: u8) -> Vec<u8> {
+        let mut bytes = vec![0x30, 0x80, 0x06, 0x09];
+        bytes.extend_from_slice(&[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, last]);
+        bytes.extend_from_slice(&[0xA0, 0x80, 0x30, 0x80, 0x02, 0x01, 0x01]);
+        bytes
+    }
+
+    fn opaque(content_type: &str, body: &[u8]) -> Vec<u8> {
+        crlf(&format!(
+            "From: ben@example.com\nSubject: Tax documents\nMIME-Version: 1.0\n\
+             Content-Type: {content_type}\n\
+             Content-Disposition: attachment; filename=\"smime.p7m\"\n\
+             Content-Transfer-Encoding: base64\n\n{}\n",
+            BASE64.encode(body)
+        ))
+    }
+
+    #[test]
+    fn smime_roots_say_what_they_hold() {
+        let enveloped = parse_message(&opaque(
+            "application/pkcs7-mime; smime-type=enveloped-data; name=\"smime.p7m\"",
+            &content_info(0x02),
+        ));
+        assert_eq!(
+            enveloped.signals.mime_type.as_deref(),
+            Some("application/pkcs7-mime; smime-type=enveloped-data")
+        );
+        // smime-type wins over the bytes.
+        assert_eq!(
+            enveloped.signals.smime_content,
+            Some(SmimeContent::Enveloped)
+        );
+        assert_eq!(enveloped.attachments.len(), 1);
+        assert_eq!(enveloped.attachments[0].name, "smime.p7m");
+        let protection = crate::protection::detect(
+            &enveloped.signals,
+            &enveloped.attachments,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            protection.kind,
+            crate::model::ProtectionKind::SmimeEncrypted
+        );
+        assert_eq!(protection.container_ids, ["1"]);
+
+        // Without smime-type: from the content's first bytes.
+        let signed = parse_message(&opaque(
+            "application/x-pkcs7-mime; name=\"smime.p7m\"",
+            &content_info(0x02),
+        ));
+        assert_eq!(signed.signals.smime_content, Some(SmimeContent::Signed));
+        let encrypted = parse_message(&opaque("application/pkcs7-mime", &content_info(0x03)));
+        assert_eq!(
+            encrypted.signals.smime_content,
+            Some(SmimeContent::Enveloped)
+        );
+        let unknown = parse_message(&opaque("application/pkcs7-mime", b"not a content info"));
+        assert_eq!(unknown.signals.smime_content, None);
+    }
+
+    #[test]
+    fn multipart_signed_roots_name_their_protocol() {
+        let raw = crlf(&format!(
+            "From: it@contoso.com\nSubject: VPN\nMIME-Version: 1.0\n\
+             Content-Type: multipart/signed; protocol=\"application/pkcs7-signature\"; \
+             micalg=sha-256; boundary=\"s\"\n\n\
+             --s\nContent-Type: text/plain\n\nRenew your certificate.\n\
+             --s\nContent-Type: application/pkcs7-signature; name=\"smime.p7s\"\n\
+             Content-Disposition: attachment; filename=\"smime.p7s\"\n\
+             Content-Transfer-Encoding: base64\n\n{}\n--s--\n",
+            BASE64.encode(content_info(0x02))
+        ));
+        let content = parse_message(&raw);
+        assert_eq!(
+            content.signals.mime_type.as_deref(),
+            Some("multipart/signed; protocol=application/pkcs7-signature")
+        );
+        assert_eq!(content.signals.smime_content, None);
+        let protection = crate::protection::detect(
+            &content.signals,
+            &content.attachments,
+            content.body_html.as_deref(),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(protection.kind, crate::model::ProtectionKind::SmimeSigned);
+        assert!(!protection.content_hidden);
+        assert_eq!(
+            content
+                .attachments
+                .iter()
+                .filter(|a| protection.container_ids.contains(&a.id))
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            ["smime.p7s"]
+        );
     }
 }

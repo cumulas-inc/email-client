@@ -13,7 +13,7 @@ use crate::model::{
     AttachmentMeta, EmailAddress, EntityKind, Folder, FolderRole, Importance, MessagePage,
     MessageQuery, MessageSummary, local_id,
 };
-use crate::providers::{MessageBatch, MessageContent};
+use crate::providers::{MessageBatch, MessageContent, MessageSignals};
 use crate::search::{SearchQuery, fts};
 
 const FOLDER_COLUMNS: &str =
@@ -133,15 +133,30 @@ impl BatchOutcome {
     }
 }
 
+/// The version of what a message's cached content holds. Content cached by
+/// an older version lacks something this one reads (the signals of
+/// protected mail, for 1), so it's fetched again when opened.
+const CONTENT_VERSION: u32 = 1;
+/// Fetches in a row that couldn't read a Graph message's named properties
+/// before its content is kept as it is: a tenant that always refuses them
+/// mustn't make every open fetch the message again.
+pub(crate) const MAX_PROPERTY_ATTEMPTS: u8 = 3;
+
 /// Header fields that are only known once the full message has been fetched.
+/// Fields a version added read as their defaults from content an older one
+/// kept.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct StoredContent {
+    /// 0 for content from before versions, or kept to be fetched again.
+    version: u32,
     bcc: Vec<EmailAddress>,
     reply_to: Vec<EmailAddress>,
     attachments: Vec<AttachmentMeta>,
     internet_message_id: Option<String>,
     in_reply_to: Option<String>,
     references: Vec<String>,
+    signals: MessageSignals,
 }
 
 fn row_to_folder(row: &Row<'_>) -> rusqlite::Result<Folder> {
@@ -843,6 +858,14 @@ impl Store {
     /// Returns the cached content of a message, or `None` if the body has not
     /// been fetched yet.
     pub fn get_message_content(&self, id: &str) -> Result<Option<MessageContent>> {
+        Ok(self.cached_message_content(id)?.map(|(content, _)| content))
+    }
+
+    /// The cached content of a message, and whether it's outdated: kept by
+    /// an older version, or while its named properties couldn't be read
+    /// (see [`MAX_PROPERTY_ATTEMPTS`]), so that it should be fetched again.
+    /// `None` if the body has not been fetched yet.
+    pub fn cached_message_content(&self, id: &str) -> Result<Option<(MessageContent, bool)>> {
         let row: Option<(Option<String>, Option<String>, Option<String>)> = self
             .conn()
             .query_row(
@@ -858,7 +881,8 @@ impl Store {
             return Ok(None);
         };
         let stored: StoredContent = from_json(&content_json);
-        Ok(Some(MessageContent {
+        let outdated = stored.version < CONTENT_VERSION;
+        let content = MessageContent {
             body_html,
             body_text,
             bcc: stored.bcc,
@@ -867,17 +891,27 @@ impl Store {
             internet_message_id: stored.internet_message_id,
             in_reply_to: stored.in_reply_to,
             references: stored.references,
-        }))
+            signals: stored.signals,
+        };
+        Ok(Some((content, outdated)))
     }
 
+    /// Caches a message's content. Content whose named properties couldn't
+    /// be read is kept as outdated, to be fetched again, until that failed
+    /// [`MAX_PROPERTY_ATTEMPTS`] times in a row.
     pub fn save_message_content(&self, id: &str, content: &MessageContent) -> Result<()> {
+        let signals = &content.signals;
+        let retry =
+            signals.properties_unavailable && signals.properties_attempts < MAX_PROPERTY_ATTEMPTS;
         let stored = StoredContent {
+            version: if retry { 0 } else { CONTENT_VERSION },
             bcc: content.bcc.clone(),
             reply_to: content.reply_to.clone(),
             attachments: content.attachments.clone(),
             internet_message_id: content.internet_message_id.clone(),
             in_reply_to: content.in_reply_to.clone(),
             references: content.references.clone(),
+            signals: signals.clone(),
         };
         let mut conn = self.conn();
         let tx = conn.transaction()?;
@@ -2188,6 +2222,81 @@ mod tests {
         assert_eq!(search(&store, "pineapple").unwrap().len(), 1);
         let content = store.get_message_content(&m.id).unwrap().unwrap();
         assert!(content.body_html.unwrap().contains("Pineapple"));
+    }
+
+    #[test]
+    fn content_from_older_versions_reads_intact_and_outdated() {
+        let (store, inbox, _) = setup();
+        let m = message(&inbox, "1", "Quarterly numbers", false);
+        apply(&store, &inbox, upserts(&[&m]));
+        // As the version before content versions kept it.
+        let old = serde_json::json!({
+            "bcc": [{ "name": "Audit", "address": "audit@contoso.com" }],
+            "reply_to": [],
+            "attachments": [{
+                "id": "att-1", "name": "message.rpmsg",
+                "contentType": "application/x-microsoft-rpmsg-message",
+                "size": 48213, "isInline": false, "contentId": null,
+            }],
+            "internet_message_id": "<a@contoso.com>",
+            "in_reply_to": null,
+            "references": ["<r@contoso.com>"],
+        });
+        store.execute_for_tests(&format!(
+            "UPDATE messages SET content_json = '{old}', body_html = '<p>Hi</p>' WHERE id = '{}'",
+            m.id
+        ));
+        let (content, outdated) = store.cached_message_content(&m.id).unwrap().unwrap();
+        assert!(outdated);
+        assert_eq!(content.body_html.as_deref(), Some("<p>Hi</p>"));
+        assert_eq!(content.bcc[0].address, "audit@contoso.com");
+        assert_eq!(content.attachments[0].name, "message.rpmsg");
+        assert_eq!(
+            content.internet_message_id.as_deref(),
+            Some("<a@contoso.com>")
+        );
+        assert_eq!(content.references, ["<r@contoso.com>"]);
+        assert_eq!(content.signals, MessageSignals::default());
+
+        // Kept by this version: current, signals and all.
+        let signals = MessageSignals {
+            content_class: Some("rpmsg.message".into()),
+            msip_labels: Some("MSIP_Label_x_Enabled=true".into()),
+            msip_labels_source: Some("property".into()),
+            ..MessageSignals::default()
+        };
+        let fetched = MessageContent {
+            signals: signals.clone(),
+            ..content
+        };
+        store.save_message_content(&m.id, &fetched).unwrap();
+        let (content, outdated) = store.cached_message_content(&m.id).unwrap().unwrap();
+        assert!(!outdated);
+        assert_eq!(content.signals, signals);
+        assert_eq!(content.attachments.len(), 1);
+        assert!(store.get_message_content(&m.id).unwrap().is_some());
+
+        // Properties that couldn't be read: fetched again, three times.
+        for (attempts, outdated) in [(1, true), (2, true), (3, false), (4, false)] {
+            let unread = MessageContent {
+                signals: MessageSignals {
+                    properties_unavailable: true,
+                    properties_attempts: attempts,
+                    ..MessageSignals::default()
+                },
+                ..fetched.clone()
+            };
+            store.save_message_content(&m.id, &unread).unwrap();
+            let (content, is_outdated) = store.cached_message_content(&m.id).unwrap().unwrap();
+            assert_eq!(is_outdated, outdated, "{attempts} attempts");
+            assert_eq!(content.signals.properties_attempts, attempts);
+        }
+
+        // Never fetched, and unknown.
+        let other = message(&inbox, "2", "Other", false);
+        apply(&store, &inbox, upserts(&[&other]));
+        assert!(store.cached_message_content(&other.id).unwrap().is_none());
+        assert!(store.cached_message_content("gone").is_err());
     }
 
     /// Words with combining marks are whole words, and accents typed on

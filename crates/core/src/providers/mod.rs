@@ -5,21 +5,25 @@
 //! Providers return fully-formed model types with local ids already derived via
 //! [`crate::model::local_id`] from the account id and the remote id.
 //!
-//! Microsoft accounts implement all four traits on top of Microsoft Graph.
-//! IMAP accounts implement [`MailProvider`] only; their calendar, contacts and
-//! tasks live in the local store.
+//! Microsoft accounts implement all four traits on top of Microsoft Graph,
+//! and work and school accounts [`LabelsProvider`] too. IMAP accounts
+//! implement [`MailProvider`] only; their calendar, contacts and tasks live
+//! in the local store.
 
 pub mod graph;
 pub mod imap;
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::model::{
     AttachmentMeta, Calendar, Contact, ContactDraft, EmailAddress, Event, EventDraft,
-    EventResponse, Folder, Message, MessageSummary, OutgoingMessage, Task, TaskDraft, TaskList,
-    TaskPatch,
+    EventResponse, Folder, LabelCatalog, Message, MessageSummary, OutgoingMessage, ProtectAction,
+    Task, TaskDraft, TaskList, TaskPatch,
 };
 use crate::search::SearchQuery;
 
@@ -136,6 +140,65 @@ pub struct MessageContent {
     pub internet_message_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    /// What bears on protection and labels (see [`MessageSignals`]).
+    pub signals: MessageSignals,
+}
+
+/// S/MIME content, from the CMS ContentInfo OID (or IMAP's smime-type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SmimeContent {
+    Signed,
+    Enveloped,
+}
+
+/// What the server says that bears on protection and labels; kept with the
+/// content so detection and diagnostics work from the cache.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MessageSignals {
+    /// Content-Class: Graph's named property, else the header.
+    pub content_class: Option<String>,
+    /// The MAPI message class (Graph `String 0x001A`, in the detail GET).
+    pub message_class: Option<String>,
+    /// The top-level MIME type, lowercase, with its `smime-type` and
+    /// `protocol` parameters when present (IMAP, Graph's MIME fallback):
+    /// "multipart/signed; protocol=application/pkcs7-signature".
+    pub mime_type: Option<String>,
+    /// What the `.p7m` holds: IMAP's smime-type, or its first bytes.
+    pub smime_content: Option<SmimeContent>,
+    /// The msip_labels value, unfolded, unparsed.
+    pub msip_labels: Option<String>,
+    /// Where it came from: Some("header") | Some("property").
+    pub msip_labels_source: Option<String>,
+    /// Graph's hasAttachments.
+    pub has_attachments_flag: Option<bool>,
+    /// The x-cumulas-protect and x-cumulas-label values, trimmed: the named
+    /// properties first, else the headers.
+    pub requested_action: Option<String>,
+    pub requested_label: Option<String>,
+    /// Graph: the batched named properties couldn't be read this time.
+    pub properties_unavailable: bool,
+    /// Graph: fetches in a row that couldn't read them (the service counts;
+    /// the cache retries while below `MAX_PROPERTY_ATTEMPTS`).
+    pub properties_attempts: u8,
+    /// Graph: the body and attachments came from the message's MIME.
+    pub body_from_mime: bool,
+}
+
+/// What a message that asks for protection or a label must carry when it's
+/// sent, and what the provider checks on its draft before sending it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderRequest {
+    pub protect: Option<ProtectAction>,
+    /// Lowercase GUID.
+    pub label_id: Option<String>,
+    /// The account's tenant: an enabled label of it already on a reply's or
+    /// forward's draft must be `label_id`.
+    pub tenant_id: String,
+    /// The requested label encrypts: no label of the tenant may already be
+    /// on the draft.
+    pub label_encrypts: bool,
 }
 
 #[async_trait]
@@ -201,6 +264,52 @@ pub trait MailProvider: Send + Sync {
             "This account can't be searched on the server.",
         ))
     }
+
+    /// The address that opens the message in the provider's web app
+    /// (Graph's webLink, https only); `None` when there's none.
+    async fn web_link(&self, _message: &MessageLocator) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// The newest Inbox message received since `since` whose subject
+    /// contains `[token]` (ASCII case ignored), for each token found.
+    /// Microsoft only.
+    async fn find_in_inbox(
+        &self,
+        _tokens: &[String],
+        _since: DateTime<Utc>,
+    ) -> Result<HashMap<String, MessageLocator>> {
+        Err(Error::unsupported(
+            "Only Microsoft 365 accounts can look for test messages.",
+        ))
+    }
+
+    /// The mailbox's own address (Graph `mail`, else `userPrincipalName`).
+    async fn own_address(&self) -> Result<Option<EmailAddress>> {
+        Ok(None)
+    }
+
+    /// Sends a message that asks for protection or a label: a draft, the
+    /// x-cumulas-* named properties, a read-back, then send. Nothing is sent
+    /// unless the read-back matches `request`.
+    async fn send_requesting(
+        &self,
+        _message: &OutgoingMessage,
+        _original: Option<&Message>,
+        _request: &HeaderRequest,
+    ) -> Result<()> {
+        Err(Error::unsupported(
+            crate::protection::PROTECTED_SENDING_UNSUPPORTED,
+        ))
+    }
+}
+
+/// The sensitivity labels of a Microsoft 365 work or school account.
+#[async_trait]
+pub trait LabelsProvider: Send + Sync {
+    /// The labels the person may apply to email, and their label policy
+    /// (Graph beta). Fails with HTTP 403 when Microsoft 365 refuses it.
+    async fn label_catalog(&self) -> Result<LabelCatalog>;
 }
 
 /// A Microsoft Graph change subscription, as Graph lists it.

@@ -137,15 +137,17 @@ pub enum AccountFeature {
     Contacts,
     Tasks,
     MailboxSettings,
+    SensitivityLabels,
 }
 
 impl AccountFeature {
     /// Every feature, in display order.
-    pub const ALL: [AccountFeature; 4] = [
+    pub const ALL: [AccountFeature; 5] = [
         AccountFeature::Calendar,
         AccountFeature::Contacts,
         AccountFeature::Tasks,
         AccountFeature::MailboxSettings,
+        AccountFeature::SensitivityLabels,
     ];
 
     /// What the feature is called in messages: "the {noun} of {email}".
@@ -155,7 +157,21 @@ impl AccountFeature {
             AccountFeature::Contacts => "contacts",
             AccountFeature::Tasks => "tasks",
             AccountFeature::MailboxSettings => "mailbox time zone",
+            AccountFeature::SensitivityLabels => "sensitivity labels",
         }
+    }
+
+    /// Asked for only when turned on by itself ("Turn on"), never with the
+    /// others at the first sign-in or by "Sign in again" without a record:
+    /// personal accounts can't have it, and an organization that approved
+    /// the app before it existed would have to approve again.
+    pub fn on_request_only(self) -> bool {
+        matches!(self, Self::SensitivityLabels)
+    }
+
+    /// Whether a personal Microsoft account can have it.
+    pub fn for_personal_accounts(self) -> bool {
+        !matches!(self, Self::SensitivityLabels)
     }
 }
 
@@ -406,6 +422,122 @@ pub struct Message {
     pub internet_message_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    /// How the message is protected; None for ordinary mail.
+    #[serde(default)]
+    pub protection: Option<Protection>,
+    /// Its sensitivity label from the account's own organization (Microsoft
+    /// work and school accounts); None without one. See
+    /// [`crate::protection::own_label`].
+    #[serde(default)]
+    pub label: Option<MessageLabel>,
+    /// A copy in a Sent folder of mail Cumulas Mail sent: what it asked for.
+    #[serde(default)]
+    pub requested: Option<RequestedProtection>,
+}
+
+// --- Protected mail -----------------------------------------------------------
+
+/// How a message is protected, as far as the app can tell (see
+/// [`crate::protection`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProtectionKind {
+    /// Microsoft Purview encryption (a label that encrypts, Encrypt, Do Not
+    /// Forward): the content is in `message.rpmsg`, which the app can't open.
+    RightsManaged,
+    /// S/MIME encryption (`smime.p7m`), or S/MIME content the app couldn't
+    /// classify (its `.p7m` couldn't be read).
+    SmimeEncrypted,
+    /// Signed with S/MIME; the signature isn't checked.
+    SmimeSigned,
+    /// Purview Message Encryption's "Read the message" form: a link to
+    /// Microsoft's encrypted message portal.
+    PortalLink,
+}
+
+impl ProtectionKind {
+    /// Its content is encrypted: replies and forwards go through Outlook on
+    /// the web.
+    pub fn is_encrypted(self) -> bool {
+        matches!(self, Self::RightsManaged | Self::SmimeEncrypted)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Protection {
+    pub kind: ProtectionKind,
+    /// Attachments that only hold the protected content or the signature
+    /// (message.rpmsg, smime.p7m, smime.p7s): explained, never offered.
+    pub container_ids: Vec<String>,
+    /// The first link in the message to Microsoft's encrypted message portal,
+    /// as written (a Safe Links wrapper kept); None without one, and always
+    /// None in Sent and Drafts.
+    pub portal_url: Option<String>,
+    /// Signed: some of the content (the attachments of a clear-signed message
+    /// on Microsoft 365, or all of an opaque-signed one) is inside a
+    /// container the app couldn't unpack.
+    pub content_hidden: bool,
+}
+
+/// A sensitivity label on a message (its organization's), or one asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageLabel {
+    /// The label's GUID, lowercase.
+    pub id: String,
+    /// "Parent › Child" from the account's labels, else the message's own
+    /// Name (cleaned); None when neither says.
+    pub name: Option<String>,
+    /// `#rrggbb` from the account's labels; None when unknown.
+    pub color: Option<String>,
+    /// The name and color come from the account's labels (Microsoft 365's
+    /// list), not from the message.
+    pub from_catalog: bool,
+}
+
+/// Encryption the organization's mail server can be asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProtectAction {
+    Encrypt,
+    DoNotForward,
+}
+
+impl ProtectAction {
+    /// The x-cumulas-protect value.
+    pub fn header_value(self) -> &'static str {
+        match self {
+            Self::Encrypt => "encrypt",
+            Self::DoNotForward => "do-not-forward",
+        }
+    }
+
+    /// The action an x-cumulas-protect value asks for (trimmed, ASCII case
+    /// ignored).
+    pub fn from_header_value(value: &str) -> Option<Self> {
+        let value = value.trim();
+        [Self::Encrypt, Self::DoNotForward]
+            .into_iter()
+            .find(|a| a.header_value().eq_ignore_ascii_case(value))
+    }
+
+    /// Microsoft's name for it, in messages and errors.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Encrypt => "Encrypt",
+            Self::DoNotForward => "Do Not Forward",
+        }
+    }
+}
+
+/// What a message sent from Cumulas Mail asked its organization's mail
+/// server for (its Sent Items copy's x-cumulas-* properties or headers).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestedProtection {
+    pub action: Option<ProtectAction>,
+    pub label: Option<MessageLabel>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -495,6 +627,163 @@ pub struct OutgoingMessage {
     pub reply_to_message_id: Option<String>,
     #[serde(default)]
     pub reply_kind: Option<ReplyKind>,
+    /// Encryption to ask the organization's mail server for
+    /// (x-cumulas-protect); refused unless the account's check found it
+    /// works (and not expired).
+    #[serde(default)]
+    pub protect: Option<ProtectAction>,
+    /// The sensitivity label to ask for (x-cumulas-label), a GUID; refused
+    /// unless the account's check found it works (and not expired).
+    #[serde(default)]
+    pub label_id: Option<String>,
+}
+
+// --- Protection setup ---------------------------------------------------------
+
+/// One thing a check sends a test message for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CheckItem {
+    Action { action: ProtectAction },
+    Label { label_id: String },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckState {
+    /// Never checked.
+    #[default]
+    NotChecked,
+    /// The test message went out; waiting for it (and the control) to arrive.
+    Waiting,
+    /// It arrived encrypted or labeled, and the control didn't: offered.
+    Applied,
+    /// Applied, but more than `CHECK_VALID_DAYS` ago: not offered until
+    /// checked again. Never stored; computed when the setup is read.
+    Expired,
+    /// It arrived without it (as far as the app can tell), or Microsoft 365
+    /// didn't keep the property on its draft (note `HeaderNotKept`).
+    NotApplied,
+    /// The app can't tell: see the note.
+    Unknown,
+}
+
+/// Why a check ended as it did, when the state alone doesn't say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckNote {
+    /// The control arrived encrypted (or with the same label) too: another
+    /// rule in the organization does it. (With `Unknown`.)
+    OtherRule,
+    /// It arrived encrypted, but x-cumulas-protect wasn't removed, so the
+    /// rule that encrypted it may not be Cumulas Mail's. (With `Unknown`.)
+    HeaderKept,
+    /// It, or the control, didn't arrive within `CHECK_TIMEOUT_MINUTES`.
+    /// (With `Unknown`.)
+    NotArrived,
+    /// Microsoft 365 didn't keep the property on the test message's draft,
+    /// so it wasn't sent. (With `NotApplied`.)
+    HeaderNotKept,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CheckResult {
+    pub state: CheckState,
+    /// When it was decided (or sent, while waiting); None if never checked.
+    pub at: Option<DateTime<Utc>>,
+    pub note: Option<CheckNote>,
+    /// The test message arrived and can be opened in Outlook on the web.
+    pub test_message: bool,
+}
+
+/// A sensitivity label Microsoft 365 lists for the person, for email.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogLabel {
+    /// GUID, lowercase.
+    pub id: String,
+    /// Graph's displayName, else its name.
+    pub name: String,
+    pub parent_name: Option<String>,
+    pub tooltip: Option<String>,
+    /// `#rrggbb` only.
+    pub color: Option<String>,
+    /// It encrypts (Graph's hasProtection).
+    pub has_protection: bool,
+    /// Higher is more sensitive; None when Microsoft 365 doesn't say.
+    pub sensitivity: Option<i32>,
+}
+
+impl CatalogLabel {
+    /// "Parent › Child", or the name.
+    pub fn title(&self) -> String {
+        match &self.parent_name {
+            Some(parent) => format!("{parent} › {}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LabelPolicy {
+    /// A label is required (isMandatory).
+    pub required: bool,
+    pub default_label_id: Option<String>,
+    /// Lowering a label needs a reason (isDowngradeJustificationRequired).
+    pub justify_downgrade: bool,
+    /// https only.
+    pub more_info_url: Option<String>,
+}
+
+/// What Microsoft 365 lists: the labels in its order, and the policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LabelCatalog {
+    pub labels: Vec<CatalogLabel>,
+    pub policy: LabelPolicy,
+}
+
+impl LabelCatalog {
+    /// The listed label with this id (ASCII case ignored).
+    pub fn label(&self, id: &str) -> Option<&CatalogLabel> {
+        self.labels.iter().find(|l| l.id.eq_ignore_ascii_case(id))
+    }
+}
+
+/// A label as Settings and the composer show it: with its check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelOption {
+    #[serde(flatten)]
+    pub label: CatalogLabel,
+    pub check: CheckResult,
+}
+
+/// What an account can send protected, and how its checks went.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtectionSetup {
+    pub account_id: String,
+    /// A Microsoft 365 work or school account: the only kind that can.
+    pub supported: bool,
+    pub encrypt: CheckResult,
+    pub do_not_forward: CheckResult,
+    /// Empty without the permission, or until first listed.
+    pub labels: Vec<LabelOption>,
+    pub policy: LabelPolicy,
+    /// When Microsoft 365 last listed the labels; None until then.
+    pub labels_listed_at: Option<DateTime<Utc>>,
+    /// Why the last listing failed; None after a success. `labels` are the
+    /// ones listed before.
+    pub labels_error: Option<String>,
+    /// A check is waiting for its messages.
+    pub checking: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -971,6 +1260,8 @@ pub enum DataKind {
     Tasks,
     /// An account's signatures (its own, or the organization's).
     Signatures,
+    /// An account's protection setup: its checks and its sensitivity labels.
+    Protection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1537,12 +1828,36 @@ mod tests {
         assert_eq!(PermissionRequest::default(), PermissionRequest::All);
         assert_eq!(
             serde_json::to_value(AccountFeature::ALL).unwrap(),
-            json!(["calendar", "contacts", "tasks", "mailboxSettings"])
+            json!([
+                "calendar",
+                "contacts",
+                "tasks",
+                "mailboxSettings",
+                "sensitivityLabels"
+            ])
         );
         // Enum order is the display order.
         let mut sorted = AccountFeature::ALL;
         sorted.sort();
         assert_eq!(sorted, AccountFeature::ALL);
+        // Sensitivity labels alone are asked for on request, and only by
+        // work and school accounts.
+        for feature in AccountFeature::ALL {
+            let labels = feature == AccountFeature::SensitivityLabels;
+            assert_eq!(feature.on_request_only(), labels, "{feature:?}");
+            assert_eq!(feature.for_personal_accounts(), !labels, "{feature:?}");
+        }
+        assert_eq!(
+            AccountFeature::SensitivityLabels.noun(),
+            "sensitivity labels"
+        );
+        assert_eq!(
+            serde_json::to_value(PermissionRequest::Feature {
+                feature: AccountFeature::SensitivityLabels
+            })
+            .unwrap(),
+            json!({ "kind": "feature", "feature": "sensitivityLabels" })
+        );
 
         let grant = MicrosoftGrant {
             scopes: vec!["User.Read".into()],
@@ -1573,6 +1888,269 @@ mod tests {
                 "tenant": "organizations",
                 "adminPageUrl": null,
             })
+        );
+    }
+
+    /// The shapes `src/api/types.ts` mirrors (section 3.2 of the design).
+    #[test]
+    fn protection_shapes_match_the_ui() {
+        use serde_json::json;
+        let kinds = [
+            (ProtectionKind::RightsManaged, "rightsManaged"),
+            (ProtectionKind::SmimeEncrypted, "smimeEncrypted"),
+            (ProtectionKind::SmimeSigned, "smimeSigned"),
+            (ProtectionKind::PortalLink, "portalLink"),
+        ];
+        for (kind, name) in kinds {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+        }
+        assert!(ProtectionKind::RightsManaged.is_encrypted());
+        assert!(ProtectionKind::SmimeEncrypted.is_encrypted());
+        assert!(!ProtectionKind::SmimeSigned.is_encrypted());
+        assert!(!ProtectionKind::PortalLink.is_encrypted());
+
+        assert_eq!(
+            serde_json::to_value(ProtectAction::DoNotForward).unwrap(),
+            "doNotForward"
+        );
+        assert_eq!(
+            serde_json::to_value(ProtectAction::Encrypt).unwrap(),
+            "encrypt"
+        );
+        assert_eq!(ProtectAction::DoNotForward.header_value(), "do-not-forward");
+        assert_eq!(
+            ProtectAction::from_header_value(" Do-Not-Forward "),
+            Some(ProtectAction::DoNotForward)
+        );
+        assert_eq!(
+            ProtectAction::from_header_value("ENCRYPT"),
+            Some(ProtectAction::Encrypt)
+        );
+        assert_eq!(ProtectAction::from_header_value("encrypt-all"), None);
+        assert_eq!(ProtectAction::DoNotForward.name(), "Do Not Forward");
+
+        let label = CheckItem::Label {
+            label_id: "6c1b3b5e-0000-4000-8000-000000000001".into(),
+        };
+        let wire = json!({ "kind": "label", "labelId": "6c1b3b5e-0000-4000-8000-000000000001" });
+        assert_eq!(serde_json::to_value(&label).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<CheckItem>(wire).unwrap(), label);
+        let action = json!({ "kind": "action", "action": "encrypt" });
+        assert_eq!(
+            serde_json::from_value::<CheckItem>(action).unwrap(),
+            CheckItem::Action {
+                action: ProtectAction::Encrypt
+            }
+        );
+        let states = [
+            (CheckState::NotChecked, "notChecked"),
+            (CheckState::Waiting, "waiting"),
+            (CheckState::Applied, "applied"),
+            (CheckState::Expired, "expired"),
+            (CheckState::NotApplied, "notApplied"),
+            (CheckState::Unknown, "unknown"),
+        ];
+        for (state, name) in states {
+            assert_eq!(serde_json::to_value(state).unwrap(), name);
+        }
+        let notes = [
+            (CheckNote::OtherRule, "otherRule"),
+            (CheckNote::HeaderKept, "headerKept"),
+            (CheckNote::NotArrived, "notArrived"),
+            (CheckNote::HeaderNotKept, "headerNotKept"),
+        ];
+        for (note, name) in notes {
+            assert_eq!(serde_json::to_value(note).unwrap(), name);
+        }
+        assert_eq!(
+            serde_json::to_value(DataKind::Protection).unwrap(),
+            "protection"
+        );
+        assert_eq!(
+            serde_json::to_value(crate::providers::SmimeContent::Enveloped).unwrap(),
+            "enveloped"
+        );
+
+        let at = "2026-10-16T09:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let general = CatalogLabel {
+            id: "6c1b3b5e-0000-4000-8000-000000000001".into(),
+            name: "All Employees".into(),
+            parent_name: Some("Confidential".into()),
+            tooltip: Some("For everyone here".into()),
+            color: Some("#b35f26".into()),
+            has_protection: true,
+            sensitivity: Some(3),
+        };
+        assert_eq!(general.title(), "Confidential › All Employees");
+        let setup = ProtectionSetup {
+            account_id: "a".into(),
+            supported: true,
+            encrypt: CheckResult {
+                state: CheckState::Applied,
+                at: Some(at),
+                note: None,
+                test_message: true,
+            },
+            do_not_forward: CheckResult {
+                state: CheckState::Unknown,
+                at: Some(at),
+                note: Some(CheckNote::OtherRule),
+                test_message: false,
+            },
+            labels: vec![LabelOption {
+                label: general,
+                check: CheckResult::default(),
+            }],
+            policy: LabelPolicy {
+                required: true,
+                default_label_id: Some("6c1b3b5e-0000-4000-8000-000000000001".into()),
+                justify_downgrade: false,
+                more_info_url: Some("https://contoso.com/labels".into()),
+            },
+            labels_listed_at: Some(at),
+            labels_error: None,
+            checking: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&setup).unwrap(),
+            json!({
+                "accountId": "a",
+                "supported": true,
+                "encrypt": {
+                    "state": "applied",
+                    "at": "2026-10-16T09:00:00Z",
+                    "note": null,
+                    "testMessage": true,
+                },
+                "doNotForward": {
+                    "state": "unknown",
+                    "at": "2026-10-16T09:00:00Z",
+                    "note": "otherRule",
+                    "testMessage": false,
+                },
+                "labels": [{
+                    "id": "6c1b3b5e-0000-4000-8000-000000000001",
+                    "name": "All Employees",
+                    "parentName": "Confidential",
+                    "tooltip": "For everyone here",
+                    "color": "#b35f26",
+                    "hasProtection": true,
+                    "sensitivity": 3,
+                    "check": { "state": "notChecked", "at": null, "note": null, "testMessage": false },
+                }],
+                "policy": {
+                    "required": true,
+                    "defaultLabelId": "6c1b3b5e-0000-4000-8000-000000000001",
+                    "justifyDowngrade": false,
+                    "moreInfoUrl": "https://contoso.com/labels",
+                },
+                "labelsListedAt": "2026-10-16T09:00:00Z",
+                "labelsError": null,
+                "checking": false,
+            })
+        );
+
+        let message = Message {
+            summary: MessageSummary {
+                id: "m".into(),
+                account_id: "a".into(),
+                folder_id: "f".into(),
+                remote_id: "r".into(),
+                conversation_id: None,
+                subject: "Q4".into(),
+                from: None,
+                to: vec![],
+                cc: vec![],
+                preview: String::new(),
+                received_at: at,
+                is_read: false,
+                is_flagged: false,
+                is_draft: false,
+                has_attachments: true,
+                importance: Importance::Normal,
+            },
+            bcc: vec![],
+            reply_to: vec![],
+            body_html: None,
+            body_text: None,
+            has_blocked_content: false,
+            attachments: vec![],
+            internet_message_id: None,
+            in_reply_to: None,
+            references: vec![],
+            protection: Some(Protection {
+                kind: ProtectionKind::RightsManaged,
+                container_ids: vec!["att-1".into()],
+                portal_url: Some("https://outlook.office365.com/Encryption/retrieve.ashx".into()),
+                content_hidden: false,
+            }),
+            label: Some(MessageLabel {
+                id: "6c1b3b5e-0000-4000-8000-000000000001".into(),
+                name: Some("Confidential › All Employees".into()),
+                color: Some("#b35f26".into()),
+                from_catalog: true,
+            }),
+            requested: Some(RequestedProtection {
+                action: Some(ProtectAction::Encrypt),
+                label: None,
+            }),
+        };
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(
+            value["protection"],
+            json!({
+                "kind": "rightsManaged",
+                "containerIds": ["att-1"],
+                "portalUrl": "https://outlook.office365.com/Encryption/retrieve.ashx",
+                "contentHidden": false,
+            })
+        );
+        assert_eq!(
+            value["label"],
+            json!({
+                "id": "6c1b3b5e-0000-4000-8000-000000000001",
+                "name": "Confidential › All Employees",
+                "color": "#b35f26",
+                "fromCatalog": true,
+            })
+        );
+        assert_eq!(
+            value["requested"],
+            json!({ "action": "encrypt", "label": null })
+        );
+        // Messages kept before these fields existed read without them.
+        let mut old = value.clone();
+        for field in ["protection", "label", "requested"] {
+            old.as_object_mut().unwrap().remove(field);
+        }
+        let read: Message = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            (read.protection, read.label, read.requested),
+            (None, None, None)
+        );
+
+        // The composer's payload without the new fields still reads.
+        let outgoing: OutgoingMessage = serde_json::from_value(json!({
+            "accountId": "a",
+            "to": [{ "name": null, "address": "pat@contoso.com" }],
+            "subject": "Hi",
+            "bodyHtml": "<p>Hi</p>",
+        }))
+        .unwrap();
+        assert_eq!((outgoing.protect, outgoing.label_id), (None, None));
+        let outgoing: OutgoingMessage = serde_json::from_value(json!({
+            "accountId": "a",
+            "to": [],
+            "subject": "Hi",
+            "bodyHtml": "<p>Hi</p>",
+            "protect": "doNotForward",
+            "labelId": "6c1b3b5e-0000-4000-8000-000000000001",
+        }))
+        .unwrap();
+        assert_eq!(outgoing.protect, Some(ProtectAction::DoNotForward));
+        assert_eq!(
+            outgoing.label_id.as_deref(),
+            Some("6c1b3b5e-0000-4000-8000-000000000001")
         );
     }
 }
