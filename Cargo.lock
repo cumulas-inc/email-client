@@ -872,6 +872,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures",
+ "iana-time-zone",
  "icu_normalizer",
  "icu_properties",
  "lettre",

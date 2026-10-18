@@ -1,6 +1,8 @@
 import { X } from "lucide-react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 
+import { useModals } from "./modals";
+
 interface DialogProps {
   open: boolean;
   onClose: () => void;
@@ -26,6 +28,12 @@ export function Dialog({ open, onClose, title, children, footer, width = 480 }: 
       if (typeof dialog.close === "function") dialog.close();
       else dialog.removeAttribute("open");
     }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    useModals.setState((s) => ({ open: s.open + 1 }));
+    return () => useModals.setState((s) => ({ open: s.open - 1 }));
   }, [open]);
 
   if (!open) return null;

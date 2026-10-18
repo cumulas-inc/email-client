@@ -24,14 +24,40 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 use url::Url;
 
-use super::{ApiTokenError, ApiTokens, SyncTokenError, SyncTokens, TokenSource};
+use super::{ApiTokenError, ApiTokens, GrantRecord, SyncTokenError, SyncTokens, TokenSource};
 use crate::error::{Error, ErrorCode, Result};
 use crate::html::escape_html;
+use crate::model::{AccountFeature, AdminConsentLink, MicrosoftGrant, PermissionRequest};
 use crate::secrets::{self, SecretStore, keys};
+use crate::signatures::CONSUMER_TENANT;
 
-/// Delegated Graph permissions requested at sign-in. All of them can be
-/// granted by users themselves (no admin consent needed by default).
-pub const SCOPES: &[&str] = &[
+/// Graph permissions every Microsoft account has: without them it can't be
+/// added. Frozen: a new permission is always optional (OPTIONAL_SCOPES).
+/// Under Microsoft's default consent policy since late 2025, users can't
+/// grant Mail.ReadWrite (nor the optional permissions) to apps outside
+/// Microsoft's own list of mail clients, so an administrator often must
+/// approve the app (docs/microsoft-365.md).
+pub const CORE_SCOPES: &[&str] = &[
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+    "User.Read",
+    "Mail.ReadWrite",
+    "Mail.Send",
+];
+
+/// Optional Graph permissions, one per feature.
+pub const OPTIONAL_SCOPES: &[(AccountFeature, &str)] = &[
+    (AccountFeature::MailboxSettings, "MailboxSettings.Read"),
+    (AccountFeature::Calendar, "Calendars.ReadWrite"),
+    (AccountFeature::Contacts, "Contacts.ReadWrite"),
+    (AccountFeature::Tasks, "Tasks.ReadWrite"),
+];
+
+/// What every account added before grants were recorded consented to (each
+/// of its sign-ins and refreshes asked for exactly this). Frozen.
+const LEGACY_SCOPES: &[&str] = &[
     "openid",
     "profile",
     "email",
@@ -45,6 +71,209 @@ pub const SCOPES: &[&str] = &[
     "Tasks.ReadWrite",
 ];
 
+/// Where Microsoft sends an administrator after approving the published registration.
+pub const ADMIN_CONSENT_LANDING_URI: &str = "https://flatpak.cumulas.co/admin-consent/";
+
+/// Whether the published registration's approval link also covers the push
+/// service's scope. Off only if Microsoft refuses it there (docs, release steps).
+pub const ADMIN_LINK_INCLUDES_PUSH: bool = true;
+
+/// Every Graph permission the account was granted, without a prompt: work
+/// and school accounts' refreshes ask for it.
+const GRAPH_DEFAULT_SCOPE: &str = "https://graph.microsoft.com/.default";
+
+/// The Graph permissions a sign-in can ask for: the core ones, then the
+/// optional ones in `OPTIONAL_SCOPES` order (OpenID Connect scopes first).
+pub fn all_scopes() -> Vec<&'static str> {
+    CORE_SCOPES
+        .iter()
+        .copied()
+        .chain(OPTIONAL_SCOPES.iter().map(|(_, scope)| *scope))
+        .collect()
+}
+
+/// The Graph permission a feature needs.
+pub fn feature_scope(feature: AccountFeature) -> &'static str {
+    match feature {
+        AccountFeature::Calendar => "Calendars.ReadWrite",
+        AccountFeature::Contacts => "Contacts.ReadWrite",
+        AccountFeature::Tasks => "Tasks.ReadWrite",
+        AccountFeature::MailboxSettings => "MailboxSettings.Read",
+    }
+}
+
+/// What an account added before grants were recorded has: the legacy
+/// scopes without the OpenID Connect ones.
+pub fn legacy_graph_scopes() -> Vec<String> {
+    LEGACY_SCOPES
+        .iter()
+        .filter(|s| !is_oidc_scope(s))
+        .map(|s| (*s).to_owned())
+        .collect()
+}
+
+/// Whether a Microsoft account's tenant is the one of personal accounts
+/// (Outlook.com, Hotmail): its id or `consumers`.
+pub fn is_personal_tenant(tenant_id: &str) -> bool {
+    tenant_id.eq_ignore_ascii_case(CONSUMER_TENANT) || tenant_id.eq_ignore_ascii_case("consumers")
+}
+
+/// Whether an email domain is one of Microsoft's personal accounts
+/// (outlook.com, hotmail.co.uk, live.com.au, ...), whose users have no
+/// administrator. Keep in step with `isConsumerDomain` in
+/// src/modules/settings/microsoft.ts.
+pub fn is_consumer_domain(domain: &str) -> bool {
+    let domain = domain.trim().to_ascii_lowercase();
+    if matches!(
+        domain.as_str(),
+        "outlook.com" | "hotmail.com" | "live.com" | "msn.com" | "passport.com" | "windowslive.com"
+    ) {
+        return true;
+    }
+    // ^(hotmail|live|outlook)\.((co|com)\.)?[a-z]{2}$
+    let country = |label: &str| label.len() == 2 && label.bytes().all(|b| b.is_ascii_lowercase());
+    match domain.split('.').collect::<Vec<_>>()[..] {
+        [brand, cc] => is_consumer_brand(brand) && country(cc),
+        [brand, "co" | "com", cc] => is_consumer_brand(brand) && country(cc),
+        _ => false,
+    }
+}
+
+fn is_consumer_brand(label: &str) -> bool {
+    matches!(label, "hotmail" | "live" | "outlook")
+}
+
+/// Whether `scope` (`Calendars.ReadWrite`) is among `scopes`, ignoring
+/// ASCII case.
+fn has_scope(scopes: &[String], scope: &str) -> bool {
+    scopes.iter().any(|s| s.eq_ignore_ascii_case(scope))
+}
+
+/// The optional features whose permission a recorded grant lacks, in enum
+/// order; none when nothing was recorded yet (an account from before grants
+/// were recorded has every permission).
+pub fn needs_permission(grant: Option<&MicrosoftGrant>) -> Vec<AccountFeature> {
+    let Some(grant) = grant else {
+        return Vec::new();
+    };
+    AccountFeature::ALL
+        .into_iter()
+        .filter(|f| !has_scope(&grant.scopes, feature_scope(*f)))
+        .collect()
+}
+
+/// The features Microsoft 365 refused although their permission is
+/// granted, in enum order; never `mailboxSettings`.
+pub fn refused_features(grant: Option<&MicrosoftGrant>) -> Vec<AccountFeature> {
+    let Some(grant) = grant else {
+        return Vec::new();
+    };
+    let missing = needs_permission(Some(grant));
+    AccountFeature::ALL
+        .into_iter()
+        .filter(|f| {
+            *f != AccountFeature::MailboxSettings
+                && grant.refused.contains(f)
+                && !missing.contains(f)
+        })
+        .collect()
+}
+
+/// The scopes a sign-in asks for (OpenID Connect first, then the core Graph
+/// permissions, then optional ones in `OPTIONAL_SCOPES` order). `recorded`
+/// is what the account signing in has (`None` when no account matches the
+/// login hint). Asking again for what an account has shows no prompt, and
+/// keeps the newest authorization covering what its refreshes ask for.
+pub fn sign_in_scopes(request: PermissionRequest, recorded: Option<&[String]>) -> Vec<String> {
+    let recorded_has = |scope: &str| recorded.is_none_or(|r| has_scope(r, scope));
+    let wanted = |feature: AccountFeature, scope: &str| match request {
+        PermissionRequest::All => true,
+        PermissionRequest::MailOnly => false,
+        PermissionRequest::Current => recorded_has(scope),
+        PermissionRequest::Feature { feature: asked } => {
+            feature == asked || recorded.is_some_and(|r| has_scope(r, scope))
+        }
+    };
+    CORE_SCOPES
+        .iter()
+        .copied()
+        .chain(
+            OPTIONAL_SCOPES
+                .iter()
+                .filter(|(feature, scope)| wanted(*feature, scope))
+                .map(|(_, scope)| *scope),
+        )
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The Graph permissions a token response's `scope` names: unqualified,
+/// spelled as here, without the OpenID Connect scopes, `.default` or other
+/// resources' scopes; known ones in [`all_scopes`] order, then unknown ones
+/// sorted.
+pub fn parse_granted_scopes(scope: &str) -> Vec<String> {
+    let known = all_scopes();
+    let mut found: Vec<&'static str> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+    let graph = format!("{GRAPH_RESOURCE}/");
+    for raw in scope.split_whitespace() {
+        let name = strip_prefix_ignore_case(raw, &graph).unwrap_or(raw);
+        if name.is_empty()
+            || is_oidc_scope(name)
+            || name.eq_ignore_ascii_case(".default")
+            || name.contains("://")
+            || strip_prefix_ignore_case(name, "api:").is_some()
+        {
+            continue;
+        }
+        match known.iter().find(|k| k.eq_ignore_ascii_case(name)) {
+            Some(k) => {
+                if !found.contains(k) {
+                    found.push(k);
+                }
+            }
+            None => {
+                if !unknown.iter().any(|u| u.eq_ignore_ascii_case(name)) {
+                    unknown.push(name.to_owned());
+                }
+            }
+        }
+    }
+    unknown.sort();
+    known
+        .into_iter()
+        .filter(|k| found.contains(k))
+        .map(str::to_owned)
+        .chain(unknown)
+        .collect()
+}
+
+/// `text` without `prefix`, compared ignoring ASCII case.
+fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
+}
+
+fn is_oidc_scope(scope: &str) -> bool {
+    OIDC_SCOPES.iter().any(|s| s.eq_ignore_ascii_case(scope))
+}
+
+/// What a Graph token refresh asks for. Work and school accounts ask for
+/// `.default`, every permission granted (a later approval included);
+/// `explicit` (personal accounts, and a work account whose `.default` was
+/// refused) names the core permissions and the optional ones `recorded`,
+/// the legacy set without a record, never more than the last authorization
+/// covered.
+fn graph_refresh_scope(explicit: bool, recorded: Option<&[String]>) -> String {
+    if !explicit {
+        return format!("{GRAPH_DEFAULT_SCOPE} offline_access");
+    }
+    let legacy = legacy_graph_scopes();
+    let recorded = recorded.unwrap_or(&legacy);
+    sign_in_scopes(PermissionRequest::Current, Some(recorded)).join(" ")
+}
+
 /// The scope the Cumulas push service (Cumulas Sync) accepts tokens for, on
 /// the app's own registration: `api://<client id>/Sync.Receive`.
 pub const SYNC_SCOPE: &str = "Sync.Receive";
@@ -57,10 +286,12 @@ pub fn sync_scope(client_id: &str) -> String {
 /// Microsoft Entra ID's public cloud authority.
 pub const DEFAULT_AUTHORITY_HOST: &str = "https://login.microsoftonline.com";
 
-/// Redirect URI of the admin consent link. It must be registered on the app
-/// (it is the same `http://localhost` entry used for sign-in). Nothing listens
-/// there once the administrator has granted consent, so their browser ends on
-/// a "can't connect" page; consent has been recorded by then.
+/// Redirect URI of the admin consent link for app registrations other than
+/// the published one, which sends administrators to
+/// [`ADMIN_CONSENT_LANDING_URI`]. It must be registered on the app (it is
+/// the same `http://localhost` entry used for sign-in). Nothing listens
+/// there once the administrator has granted consent, so their browser then
+/// ends on a "can't connect" page; consent has been recorded by then.
 pub const ADMIN_CONSENT_REDIRECT_URI: &str = "http://localhost";
 
 /// Resource prefix for fully qualified Graph scopes.
@@ -98,10 +329,10 @@ const USER_DECLINED_CODE: u32 = 65004;
 
 /// AADSTS codes meaning an organization's API (or the app registration it
 /// belongs to) isn't in the account's tenant: 500011
-/// InvalidResourceServicePrincipalNotFound, 650052 (the organization lacks a
-/// service principal for it), 650057 InvalidResource and 700016
-/// UnauthorizedClient_DoesNotMatchRequest (the application wasn't found in
-/// the directory).
+/// InvalidResourceServicePrincipalNotFound, 650052 (the organization hasn't
+/// subscribed to or enabled a service the app needs), 650057
+/// InvalidResource and 700016 UnauthorizedClient_DoesNotMatchRequest (the
+/// application wasn't found in the directory).
 const API_NOT_IN_TENANT_CODES: &[u32] = &[500011, 650052, 650057, 700016];
 
 /// Upper bound for the browser's request head on the loopback listener.
@@ -122,6 +353,12 @@ pub struct MicrosoftAuthConfig {
     /// Scopes of other resources the sign-in also asks consent for (the
     /// push service's), beyond the Graph scopes it redeems the code for.
     pub consent_scopes: Vec<String>,
+    /// What a sign-in asks for and redeems the code for: OpenID Connect
+    /// scopes and Graph permissions (see [`sign_in_scopes`]).
+    pub graph_scopes: Vec<String>,
+    /// Whether this is Cumulas Mail's published app registration, whose
+    /// approval link sends administrators to [`ADMIN_CONSENT_LANDING_URI`].
+    pub published: bool,
 }
 
 impl MicrosoftAuthConfig {
@@ -133,6 +370,8 @@ impl MicrosoftAuthConfig {
             tenant: tenant.unwrap_or_else(|| "common".into()),
             authority_host: DEFAULT_AUTHORITY_HOST.into(),
             consent_scopes: Vec::new(),
+            graph_scopes: all_scopes().into_iter().map(str::to_owned).collect(),
+            published: false,
         }
     }
 
@@ -166,6 +405,12 @@ pub struct SignInResult {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: Duration,
+    /// The Graph permissions the sign-in asked for (the config's
+    /// `graph_scopes` without the OpenID Connect ones).
+    pub requested_scopes: Vec<String>,
+    /// The Graph permissions the token response said the account has
+    /// (see [`parse_granted_scopes`]); empty when it didn't say.
+    pub response_scopes: Vec<String>,
     /// Set when consent to the config's `consent_scopes` (the push
     /// service's) was refused, and the sign-in went ahead with Graph's
     /// scopes alone: `AdminConsentRequired`, whose approval link covers
@@ -181,14 +426,15 @@ pub struct SignInResult {
 /// refused, the browser is opened again for Graph's scopes alone.
 ///
 /// Errors: `AdminConsentRequired` (with `details.adminConsentUrl`) when the
-/// tenant blocks user consent, `ConsentDeclined`, `SignInCancelled`.
+/// tenant blocks user consent, `ConsentDeclined`, `SignInBlocked` when the
+/// organization's settings keep the person out, `SignInCancelled`.
 pub async fn sign_in(
     config: &MicrosoftAuthConfig,
     open_browser: &(dyn Fn(&str) -> Result<()> + Send + Sync),
     login_hint: Option<&str>,
     timeout: Duration,
 ) -> Result<SignInResult> {
-    let (scope, graph) = (authorize_scope(config), SCOPES.join(" "));
+    let (scope, graph) = (authorize_scope(config), config.graph_scopes.join(" "));
     let continues_if_refused = !config.consent_scopes.is_empty();
     let listener = LoopbackListener::bind().await?;
     let first = authorize(
@@ -268,6 +514,17 @@ pub async fn sign_in(
         .name
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| email.clone());
+    let requested_scopes = config
+        .graph_scopes
+        .iter()
+        .filter(|s| !is_oidc_scope(s))
+        .cloned()
+        .collect();
+    let response_scopes = tokens
+        .scope
+        .as_deref()
+        .map(parse_granted_scopes)
+        .unwrap_or_default();
     Ok(SignInResult {
         email,
         display_name,
@@ -276,6 +533,8 @@ pub async fn sign_in(
         access_token: tokens.access_token,
         refresh_token,
         expires_in: Duration::from_secs(tokens.expires_in),
+        requested_scopes,
+        response_scopes,
         consent_refused,
     })
 }
@@ -320,6 +579,7 @@ async fn authorize(
             ErrorCode::SignInCancelled,
             "Sign-in was not completed in time. Try again.",
         )
+        .with_details(json!({ "reason": "timeout" }))
     })?;
     match response.outcome() {
         Ok(code) => Ok(Authorization {
@@ -331,8 +591,11 @@ async fn authorize(
     }
 }
 
-/// URL an administrator can open to grant tenant-wide consent: to the Graph
-/// scopes, and to the other resources' the sign-in asks consent for.
+/// URL an administrator can open to grant tenant-wide consent: to every
+/// Graph permission (the optional ones too, whatever the sign-in asked
+/// for), and to the other resources' scopes: the push service's for the
+/// published registration (see [`ADMIN_LINK_INCLUDES_PUSH`]), and those
+/// the sign-in asks consent for.
 ///
 /// `tenant_hint` is a tenant id or domain (e.g. the domain of the user's email
 /// address); without one the configured tenant is used when it is specific,
@@ -344,27 +607,54 @@ pub fn admin_consent_url(config: &MicrosoftAuthConfig, tenant_hint: Option<&str>
     // (learn.microsoft.com/entra/identity-platform/v2-admin-consent and
     // learn.microsoft.com/office/dev/add-ins/publish/publish-nested-app-auth-add-in).
     // The other resources' scopes are fully qualified already.
-    let scope = SCOPES
-        .iter()
+    let mut scopes: Vec<String> = all_scopes()
+        .into_iter()
         .map(|s| {
-            if OIDC_SCOPES.contains(s) {
-                (*s).to_owned()
+            if is_oidc_scope(s) {
+                s.to_owned()
             } else {
                 format!("{GRAPH_RESOURCE}/{s}")
             }
         })
-        .chain(config.consent_scopes.iter().cloned())
-        .collect::<Vec<_>>()
-        .join(" ");
+        .collect();
+    let push =
+        (config.published && ADMIN_LINK_INCLUDES_PUSH).then(|| sync_scope(&config.client_id));
+    for other in push.iter().chain(&config.consent_scopes) {
+        if !scopes.contains(other) {
+            scopes.push(other.clone());
+        }
+    }
+    let redirect_uri = if config.published {
+        ADMIN_CONSENT_LANDING_URI
+    } else {
+        ADMIN_CONSENT_REDIRECT_URI
+    };
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", &config.client_id)
-        .append_pair("scope", &scope)
-        .append_pair("redirect_uri", ADMIN_CONSENT_REDIRECT_URI)
+        .append_pair("scope", &scopes.join(" "))
+        .append_pair("redirect_uri", redirect_uri)
         .finish();
     format!(
         "{}/{tenant}/v2.0/adminconsent?{query}",
         config.authority_host.trim_end_matches('/')
     )
+}
+
+/// The approval link for `tenant_hint`'s organization (see
+/// [`admin_consent_url`]), the tenant it names and, for the published
+/// registration, the page for IT administrators.
+pub fn admin_consent_link(
+    config: &MicrosoftAuthConfig,
+    tenant_hint: Option<&str>,
+) -> AdminConsentLink {
+    let tenant = admin_consent_tenant(config, tenant_hint);
+    AdminConsentLink {
+        admin_consent_url: admin_consent_url(config, Some(&tenant)),
+        tenant,
+        admin_page_url: config
+            .published
+            .then(|| ADMIN_CONSENT_LANDING_URI.to_owned()),
+    }
 }
 
 /// Tenant for the admin consent link: the hint if it looks like a tenant id
@@ -390,12 +680,26 @@ pub struct MicrosoftTokenSource {
     account_id: String,
     secrets: Arc<dyn SecretStore>,
     http: reqwest::Client,
-    /// What the tokens are for: the Graph scopes, or the push service's.
-    scope: String,
+    /// What the tokens are for: Graph, or another resource (the push
+    /// service, an organization's API).
+    scope: RefreshScope,
     /// Held across the refresh so concurrent callers wait for one refresh
     /// instead of each redeeming the refresh token.
     cache: Mutex<Option<CachedToken>>,
     wall_clock: WallClock,
+}
+
+/// What a token source's refreshes ask for.
+enum RefreshScope {
+    /// Always this scope; nothing is recorded.
+    Fixed(String),
+    /// Graph's permissions: `.default` for work and school accounts, those
+    /// recorded for personal ones (see [`graph_refresh_scope`]). What
+    /// Microsoft says each refresh covers is recorded in `grant`.
+    Graph {
+        personal: bool,
+        grant: Arc<dyn GrantRecord>,
+    },
 }
 
 /// Reads the wall clock, which (unlike `Instant`) counts the time the
@@ -435,14 +739,23 @@ impl CachedToken {
 }
 
 impl MicrosoftTokenSource {
-    /// Token source for `account_id`, whose refresh token is stored under
-    /// [`keys::refresh_token`].
+    /// Graph token source for `account_id`, whose refresh token is stored
+    /// under [`keys::refresh_token`]. A `personal` account's refreshes name
+    /// the permissions `grant` recorded; a work or school account's ask for
+    /// `.default`. What Microsoft says each refresh covers goes to `grant`.
     pub fn new(
         config: MicrosoftAuthConfig,
         account_id: impl Into<String>,
         secrets: Arc<dyn SecretStore>,
+        personal: bool,
+        grant: Arc<dyn GrantRecord>,
     ) -> Self {
-        Self::with_scope(config, account_id, secrets, SCOPES.join(" "))
+        Self::build(
+            config,
+            account_id,
+            secrets,
+            RefreshScope::Graph { personal, grant },
+        )
     }
 
     fn with_scope(
@@ -450,6 +763,15 @@ impl MicrosoftTokenSource {
         account_id: impl Into<String>,
         secrets: Arc<dyn SecretStore>,
         scope: String,
+    ) -> Self {
+        Self::build(config, account_id, secrets, RefreshScope::Fixed(scope))
+    }
+
+    fn build(
+        config: MicrosoftAuthConfig,
+        account_id: impl Into<String>,
+        secrets: Arc<dyn SecretStore>,
+        scope: RefreshScope,
     ) -> Self {
         Self {
             config,
@@ -484,27 +806,39 @@ impl MicrosoftTokenSource {
         }
 
         let key = keys::refresh_token(&self.account_id);
-        let refresh_token = self
-            .secrets
-            .get(&key)
-            .await
-            .map_err(TokenFailure::Other)?
-            .ok_or_else(|| {
-                TokenFailure::Other(Error::auth_required(
-                    "The Microsoft sign-in for this account is missing. Sign in again.",
-                ))
-            })?;
-        let tokens = request_token(
-            &self.http,
-            &self.config,
-            &[
-                ("client_id", self.config.client_id.as_str()),
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token.as_str()),
-                ("scope", self.scope.as_str()),
-            ],
-        )
-        .await?;
+        // The refresh token and the grant are read together, under the
+        // account's lock, which a sign-in takes to save both: what a
+        // personal account's refresh names is what that token was granted.
+        let (refresh_token, recorded) = {
+            let _sign_in = secrets::lock_account(&self.account_id).await;
+            let refresh_token = self
+                .secrets
+                .get(&key)
+                .await
+                .map_err(TokenFailure::Other)?
+                .ok_or_else(|| {
+                    TokenFailure::Other(Error::auth_required(
+                        "The Microsoft sign-in for this account is missing. Sign in again.",
+                    ))
+                })?;
+            let recorded = match &self.scope {
+                RefreshScope::Fixed(_) => None,
+                RefreshScope::Graph { grant, .. } => {
+                    grant.granted().map_err(TokenFailure::Other)?
+                }
+            };
+            (refresh_token, recorded)
+        };
+        let (tokens, granted) = match &self.scope {
+            RefreshScope::Fixed(scope) => (self.redeem(&refresh_token, scope).await?, None),
+            RefreshScope::Graph { personal, grant } => {
+                let (tokens, sent) = self
+                    .redeem_graph(&refresh_token, *personal, recorded.as_deref())
+                    .await?;
+                let granted = granted_by_refresh(tokens.scope.as_deref(), *personal, &sent);
+                (tokens, Some((grant, granted)))
+            }
+        };
 
         // Microsoft may rotate the refresh token; the new one replaces the old.
         // The old one keeps working until it expires, so failing to store the
@@ -514,25 +848,43 @@ impl MicrosoftTokenSource {
         // person signed in again (or another refresh rotated it), and that
         // one stays. Under the account's lock, which removing it and signing
         // in also take, so neither comes between the comparison and the save.
-        if let Some(rotated) = tokens.refresh_token.as_deref()
-            && rotated != refresh_token
-        {
+        // What a Graph refresh says the account was granted is recorded
+        // likewise, and only over the grant it read: a sign-in (or another
+        // refresh) meanwhile recorded a newer one, which stays.
+        let rotated = tokens
+            .refresh_token
+            .as_deref()
+            .filter(|rotated| *rotated != refresh_token);
+        if rotated.is_some() || granted.is_some() {
             let _sign_in = secrets::lock_account(&self.account_id).await;
             match self.secrets.get(&key).await {
                 Ok(Some(current)) if current == refresh_token => {
-                    if let Err(e) = self.secrets.set(&key, rotated).await {
+                    if let Some(rotated) = rotated
+                        && let Err(e) = self.secrets.set(&key, rotated).await
+                    {
                         tracing::warn!("could not store the rotated refresh token: {e}");
+                    }
+                    if let Some((grant, Some(granted))) = &granted {
+                        match grant.granted() {
+                            Ok(current) if current == recorded => grant.record(granted),
+                            Ok(_) => tracing::info!(
+                                "not recording what a token refresh brought: account {} has a \
+                                 newer grant",
+                                self.account_id
+                            ),
+                            Err(e) => tracing::warn!("could not check the recorded grant: {e}"),
+                        }
                     }
                 }
                 Ok(Some(_)) => tracing::info!(
-                    "not keeping a rotated refresh token: account {} has a newer one",
+                    "not keeping what a token refresh brought: account {} has a newer sign-in",
                     self.account_id
                 ),
                 Ok(None) => tracing::info!(
-                    "not keeping a rotated refresh token: account {} was removed",
+                    "not keeping what a token refresh brought: account {} was removed",
                     self.account_id
                 ),
-                Err(e) => tracing::warn!("could not store the rotated refresh token: {e}"),
+                Err(e) => tracing::warn!("could not check the stored refresh token: {e}"),
             }
         }
         let token = CachedToken::new(
@@ -544,6 +896,81 @@ impl MicrosoftTokenSource {
         *cache = Some(token);
         Ok(access_token)
     }
+
+    /// Redeems the refresh token for `scope`.
+    async fn redeem(
+        &self,
+        refresh_token: &str,
+        scope: &str,
+    ) -> std::result::Result<TokenResponse, TokenFailure> {
+        request_token(
+            &self.http,
+            &self.config,
+            &[
+                ("client_id", self.config.client_id.as_str()),
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token),
+                ("scope", scope),
+            ],
+        )
+        .await
+    }
+
+    /// Redeems the refresh token for Graph; returns the tokens and the
+    /// scope asked for. A personal account's refresh names the permissions
+    /// `recorded` (the grant read with the token). Should Microsoft refuse
+    /// a work account's `.default`, it asks once more naming them too.
+    async fn redeem_graph(
+        &self,
+        refresh_token: &str,
+        personal: bool,
+        recorded: Option<&[String]>,
+    ) -> std::result::Result<(TokenResponse, String), TokenFailure> {
+        let explicit = || graph_refresh_scope(true, recorded);
+        if personal {
+            let scope = explicit();
+            return Ok((self.redeem(refresh_token, &scope).await?, scope));
+        }
+        let scope = graph_refresh_scope(false, None);
+        match self.redeem(refresh_token, &scope).await {
+            Err(TokenFailure::OAuth(e)) if e.error == "invalid_scope" || e.has_code(70011) => {
+                tracing::warn!(
+                    "Microsoft refused `.default` for account {}; naming the permissions instead",
+                    self.account_id
+                );
+                let scope = explicit();
+                Ok((self.redeem(refresh_token, &scope).await?, scope))
+            }
+            result => Ok((result?, scope)),
+        }
+    }
+}
+
+/// What a Graph refresh says the account was granted, to record: the
+/// response's `scope`, for a personal account only what was asked for
+/// (`sent`; Microsoft names nothing beyond the original authorization).
+/// `None` when it says nothing usable: no `scope`, or none of the core
+/// Graph permissions.
+fn granted_by_refresh(scope: Option<&str>, personal: bool, sent: &str) -> Option<Vec<String>> {
+    let granted = parse_granted_scopes(scope?);
+    let core = |scope: &String| {
+        CORE_SCOPES
+            .iter()
+            .any(|c| !is_oidc_scope(c) && c.eq_ignore_ascii_case(scope))
+    };
+    if !granted.iter().any(core) {
+        return None;
+    }
+    if !personal {
+        return Some(granted);
+    }
+    let sent = parse_granted_scopes(sent);
+    Some(
+        granted
+            .into_iter()
+            .filter(|s| has_scope(&sent, s))
+            .collect(),
+    )
 }
 
 fn graph_token_error(e: TokenFailure) -> Error {
@@ -683,10 +1110,11 @@ fn random_token(bytes: usize) -> String {
 /// Microsoft lets the authorization request cover several resources; the
 /// code is then redeemed for Graph's alone, as a token is for one resource.
 fn authorize_scope(config: &MicrosoftAuthConfig) -> String {
-    SCOPES
+    config
+        .graph_scopes
         .iter()
-        .copied()
-        .chain(config.consent_scopes.iter().map(String::as_str))
+        .chain(&config.consent_scopes)
+        .map(String::as_str)
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1013,6 +1441,9 @@ struct TokenResponse {
     refresh_token: Option<String>,
     id_token: Option<String>,
     expires_in: u64,
+    /// The scopes the access token is for, as Microsoft spells them.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// OAuth error from the authorization redirect or the token endpoint.
@@ -1100,10 +1531,101 @@ async fn request_token(
 // Errors
 // ---------------------------------------------------------------------------
 
+/// Why an organization's settings keep someone from signing in, in a way
+/// approving the app doesn't fix (except `AppNotSetUp`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockedReason {
+    /// AADSTS50105: the app requires assignment and the user isn't assigned.
+    NotAssigned,
+    /// AADSTS7000112: the app is disabled in the organization.
+    AppDisabled,
+    /// AADSTS65005: the app (or a permission it asks for) isn't set up in
+    /// the organization; approving it does.
+    AppNotSetUp,
+    /// AADSTS650052: the organization hasn't subscribed to or enabled a
+    /// service the app needs (usually Exchange Online).
+    ServiceNotEnabled,
+    /// AADSTS53004 and 53010: the user must first register security info
+    /// (multifactor authentication).
+    SecurityInfo,
+    /// AADSTS53000 to 53003, 53011 and 530xxx: Conditional Access.
+    ConditionalAccess,
+}
+
+impl BlockedReason {
+    /// Which of the reasons an AADSTS code is, if any.
+    fn of(code: u32) -> Option<Self> {
+        Some(match code {
+            50105 => Self::NotAssigned,
+            7000112 => Self::AppDisabled,
+            65005 => Self::AppNotSetUp,
+            650052 => Self::ServiceNotEnabled,
+            53004 | 53010 => Self::SecurityInfo,
+            53000..=53003 | 53011 | 530000..=530999 => Self::ConditionalAccess,
+            _ => return None,
+        })
+    }
+
+    /// The first code of `error` that is a reason, and the reason: from its
+    /// `error_codes`, then from the codes its description names.
+    fn find(error: &OAuthError) -> Option<(Self, u32)> {
+        error
+            .error_codes
+            .iter()
+            .copied()
+            .chain(aadsts_codes(&error.error_description))
+            .find_map(|code| Self::of(code).map(|reason| (reason, code)))
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAssigned => "notAssigned",
+            Self::AppDisabled => "appDisabled",
+            Self::AppNotSetUp => "appNotSetUp",
+            Self::ServiceNotEnabled => "serviceNotEnabled",
+            Self::SecurityInfo => "securityInfo",
+            Self::ConditionalAccess => "conditionalAccess",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::NotAssigned => {
+                "Your organization hasn't given you access to Cumulas Mail. Ask your IT team to \
+                 assign you to the app."
+            }
+            Self::AppDisabled => {
+                "Your organization has blocked Cumulas Mail. Ask your IT team whether they can \
+                 allow it."
+            }
+            Self::AppNotSetUp => {
+                "Microsoft 365 in your organization isn't set up for Cumulas Mail yet. Ask your \
+                 IT team to approve it."
+            }
+            Self::ServiceNotEnabled => {
+                "Your organization's Microsoft 365 doesn't include a service Cumulas Mail needs, \
+                 usually Exchange Online mail. Ask your IT team to check your subscription."
+            }
+            Self::SecurityInfo => {
+                "Your organization needs you to finish setting up your sign-in security info, \
+                 such as multifactor authentication. Ask your IT team for help."
+            }
+            Self::ConditionalAccess => {
+                "Your organization's sign-in rules didn't allow this sign-in, for example \
+                 because of the device, the app or where you're signing in from. Ask your IT \
+                 team what's required."
+            }
+        }
+    }
+}
+
 /// What an error from the authorization redirect or the code redemption
-/// means: `AdminConsentRequired`, `ConsentDeclined`, `SignInCancelled` or
-/// `Provider`.
+/// means: `SignInBlocked`, `AdminConsentRequired`, `ConsentDeclined`,
+/// `SignInCancelled` or `Provider`.
 fn sign_in_error_code(error: &OAuthError) -> ErrorCode {
+    if BlockedReason::find(error).is_some() {
+        return ErrorCode::SignInBlocked;
+    }
     if ADMIN_CONSENT_CODES.iter().any(|c| error.has_code(*c))
         || (error.error == "consent_required" && !error.has_code(USER_DECLINED_CODE))
     {
@@ -1148,10 +1670,24 @@ fn sign_in_error(
     login_hint: Option<&str>,
     error: &OAuthError,
 ) -> Error {
+    let hint = login_hint.and_then(|h| h.rsplit_once('@')).map(|(_, d)| d);
     match sign_in_error_code(error) {
+        ErrorCode::SignInBlocked => {
+            let (reason, code) = BlockedReason::find(error).expect("classified as blocked");
+            let link = admin_consent_link(config, hint);
+            let mut details = json!({
+                "reason": reason.as_str(),
+                "aadsts": code,
+                "tenant": link.tenant,
+                "adminPageUrl": link.admin_page_url,
+            });
+            if reason == BlockedReason::AppNotSetUp {
+                details["adminConsentUrl"] = json!(link.admin_consent_url);
+            }
+            Error::new(ErrorCode::SignInBlocked, reason.message()).with_details(details)
+        }
         ErrorCode::AdminConsentRequired => {
-            let hint = login_hint.and_then(|h| h.rsplit_once('@')).map(|(_, d)| d);
-            let tenant = admin_consent_tenant(config, hint);
+            let link = admin_consent_link(config, hint);
             // With the admin consent workflow enabled, Microsoft's page lets
             // the user send an approval request themselves.
             let can_request_approval = error.has_code(ADMIN_CONSENT_WORKFLOW_CODE);
@@ -1164,9 +1700,10 @@ fn sign_in_error(
                  you can sign in. Send the approval link to your IT department."
             };
             Error::new(ErrorCode::AdminConsentRequired, message).with_details(json!({
-                "adminConsentUrl": admin_consent_url(config, Some(&tenant)),
-                "tenant": tenant,
+                "adminConsentUrl": link.admin_consent_url,
+                "tenant": link.tenant,
                 "canRequestApproval": can_request_approval,
+                "adminPageUrl": link.admin_page_url,
             }))
         }
         ErrorCode::ConsentDeclined => consent_declined(),
@@ -1205,8 +1742,16 @@ fn push_consent_refused(error: Error) -> Error {
 /// Maps a failed refresh. `invalid_grant` covers expired, revoked or
 /// password-invalidated refresh tokens and withdrawn consent;
 /// `interaction_required` new MFA or Conditional Access requirements. Either
-/// way only an interactive sign-in helps.
+/// way only an interactive sign-in helps. When the organization's settings
+/// keep the person out, the error says why (Microsoft often shows that on
+/// its own page during a sign-in, which then never comes back), with
+/// `details { reason, aadsts }`; it stays `AuthRequired` for everything else
+/// that treats it as a sign-in that's gone.
 fn refresh_error(error: &OAuthError) -> Error {
+    if let Some((reason, code)) = BlockedReason::find(error) {
+        return Error::auth_required(format!("{} (AADSTS{code})", reason.message()))
+            .with_details(json!({ "reason": reason.as_str(), "aadsts": code }));
+    }
     match error.error.as_str() {
         "invalid_grant" | "interaction_required" | "consent_required" | "login_required" => {
             Error::auth_required(format!(
@@ -1330,7 +1875,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::auth::NoGrantRecord;
     use crate::secrets::MemorySecretStore;
+    use crate::service::PUBLISHED_MICROSOFT_CLIENT_ID;
 
     const CLIENT_ID: &str = "test-client-id";
 
@@ -1340,7 +1887,13 @@ mod tests {
             tenant: "common".into(),
             authority_host: server.uri(),
             consent_scopes: Vec::new(),
+            graph_scopes: strings(&all_scopes()),
+            published: false,
         }
+    }
+
+    fn strings(scopes: &[&str]) -> Vec<String> {
+        scopes.iter().map(|s| (*s).to_owned()).collect()
     }
 
     fn id_token(claims: serde_json::Value) -> String {
@@ -1484,7 +2037,7 @@ mod tests {
         assert_eq!(params["response_type"], "code");
         assert_eq!(params["redirect_uri"], "http://localhost:4242");
         assert_eq!(params["response_mode"], "query");
-        assert_eq!(params["scope"], SCOPES.join(" "));
+        assert_eq!(params["scope"], all_scopes().join(" "));
         assert_eq!(params["state"], "st");
         assert_eq!(params["code_challenge"], "ch");
         assert_eq!(params["code_challenge_method"], "S256");
@@ -1511,7 +2064,7 @@ mod tests {
         assert!(scopes.contains(&"https://graph.microsoft.com/Mail.ReadWrite"));
         assert!(scopes.contains(&"https://graph.microsoft.com/Tasks.ReadWrite"));
         assert!(!scopes.contains(&"https://graph.microsoft.com/openid"));
-        assert_eq!(scopes.len(), SCOPES.len());
+        assert_eq!(scopes.len(), all_scopes().len());
 
         // Without a usable hint: the configured tenant if specific, else
         // `organizations` (`common` is not accepted by the endpoint).
@@ -1529,8 +2082,259 @@ mod tests {
         let url = Url::parse(&admin_consent_url(&push, Some("contoso.com"))).unwrap();
         let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
         let scopes: Vec<&str> = params["scope"].split(' ').collect();
-        assert_eq!(scopes.len(), SCOPES.len() + 1);
+        assert_eq!(scopes.len(), all_scopes().len() + 1);
         assert_eq!(scopes.last(), Some(&"api://test-client-id/Sync.Receive"));
+
+        // Every permission, whatever the sign-in asked for.
+        let mail_only = MicrosoftAuthConfig {
+            graph_scopes: sign_in_scopes(PermissionRequest::MailOnly, None),
+            ..push
+        };
+        let url = Url::parse(&admin_consent_url(&mail_only, None)).unwrap();
+        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert!(params["scope"].contains("https://graph.microsoft.com/Calendars.ReadWrite"));
+    }
+
+    /// The link the landing page publishes (`packaging/flatpak/repo`), with
+    /// the push service's scope and without.
+    const PUBLISHED_LINK_WITH_PUSH: &str = "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F";
+    const PUBLISHED_LINK_WITHOUT_PUSH: &str = "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F";
+
+    fn published() -> MicrosoftAuthConfig {
+        MicrosoftAuthConfig {
+            published: true,
+            ..MicrosoftAuthConfig::new(PUBLISHED_MICROSOFT_CLIENT_ID, None)
+        }
+    }
+
+    #[test]
+    fn admin_consent_url_for_the_published_registration() {
+        let expected = if ADMIN_LINK_INCLUDES_PUSH {
+            PUBLISHED_LINK_WITH_PUSH
+        } else {
+            PUBLISHED_LINK_WITHOUT_PUSH
+        };
+        assert_eq!(admin_consent_url(&published(), None), expected);
+        let link = admin_consent_link(&published(), None);
+        assert_eq!(link.admin_consent_url, expected);
+        assert_eq!(link.tenant, "organizations");
+        assert_eq!(
+            link.admin_page_url.as_deref(),
+            Some(ADMIN_CONSENT_LANDING_URI)
+        );
+        // A sign-in that asks consent for the push service names it once.
+        let push = MicrosoftAuthConfig {
+            consent_scopes: vec![sync_scope(PUBLISHED_MICROSOFT_CLIENT_ID)],
+            ..published()
+        };
+        let pushes = admin_consent_url(&push, None)
+            .matches("Sync.Receive")
+            .count();
+        assert_eq!(pushes, 1);
+
+        // Another registration: back to localhost, and the push service's
+        // scope only when the sign-in asked for it.
+        let own = MicrosoftAuthConfig::new(PUBLISHED_MICROSOFT_CLIENT_ID, None);
+        let url = admin_consent_url(&own, Some("contoso.com"));
+        assert!(
+            url.ends_with("&redirect_uri=http%3A%2F%2Flocalhost"),
+            "{url}"
+        );
+        assert!(!url.contains("Sync.Receive"));
+        let link = admin_consent_link(&own, Some("contoso.com"));
+        assert_eq!(link.tenant, "contoso.com");
+        assert_eq!(link.admin_page_url, None);
+        let own_push = MicrosoftAuthConfig {
+            consent_scopes: vec![sync_scope(PUBLISHED_MICROSOFT_CLIENT_ID)],
+            ..own
+        };
+        assert!(admin_consent_url(&own_push, None).contains("Sync.Receive"));
+    }
+
+    #[test]
+    fn core_and_legacy_scopes_are_frozen() {
+        assert_eq!(
+            CORE_SCOPES,
+            [
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "User.Read",
+                "Mail.ReadWrite",
+                "Mail.Send",
+            ]
+        );
+        assert_eq!(
+            LEGACY_SCOPES,
+            [
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "User.Read",
+                "Mail.ReadWrite",
+                "Mail.Send",
+                "MailboxSettings.Read",
+                "Calendars.ReadWrite",
+                "Contacts.ReadWrite",
+                "Tasks.ReadWrite",
+            ]
+        );
+        assert_eq!(all_scopes(), LEGACY_SCOPES);
+        assert_eq!(legacy_graph_scopes(), LEGACY_SCOPES[4..]);
+        // One permission per feature, the same both ways.
+        assert_eq!(OPTIONAL_SCOPES.len(), AccountFeature::ALL.len());
+        for (feature, scope) in OPTIONAL_SCOPES {
+            assert_eq!(feature_scope(*feature), *scope);
+        }
+    }
+
+    #[test]
+    fn sign_in_scopes_per_request() {
+        let core = strings(CORE_SCOPES);
+        let with = |optional: &[&str]| [core.clone(), strings(optional)].concat();
+        let mail_only = strings(&["User.Read", "Mail.ReadWrite", "Mail.Send"]);
+        let legacy = legacy_graph_scopes();
+        let contacts = [mail_only.clone(), strings(&["Contacts.ReadWrite"])].concat();
+
+        assert_eq!(sign_in_scopes(PermissionRequest::All, None), LEGACY_SCOPES);
+        assert_eq!(
+            sign_in_scopes(PermissionRequest::All, Some(&mail_only)),
+            LEGACY_SCOPES
+        );
+        assert_eq!(sign_in_scopes(PermissionRequest::MailOnly, None), core);
+        assert_eq!(
+            sign_in_scopes(PermissionRequest::MailOnly, Some(&legacy)),
+            core
+        );
+
+        let current = PermissionRequest::Current;
+        assert_eq!(sign_in_scopes(current, Some(&mail_only)), core);
+        assert_eq!(sign_in_scopes(current, Some(&legacy)), LEGACY_SCOPES);
+        assert_eq!(sign_in_scopes(current, None), LEGACY_SCOPES);
+        assert_eq!(
+            sign_in_scopes(current, Some(&contacts)),
+            with(&["Contacts.ReadWrite"])
+        );
+
+        let calendar = PermissionRequest::Feature {
+            feature: AccountFeature::Calendar,
+        };
+        assert_eq!(
+            sign_in_scopes(calendar, Some(&contacts)),
+            with(&["Calendars.ReadWrite", "Contacts.ReadWrite"])
+        );
+        assert_eq!(
+            sign_in_scopes(calendar, None),
+            with(&["Calendars.ReadWrite"])
+        );
+        // Spelled any way.
+        let lower = strings(&["user.read", "contacts.readwrite"]);
+        assert_eq!(
+            sign_in_scopes(calendar, Some(&lower)),
+            with(&["Calendars.ReadWrite", "Contacts.ReadWrite"])
+        );
+    }
+
+    #[test]
+    fn parse_granted_scopes_normalizes() {
+        assert_eq!(
+            parse_granted_scopes(
+                "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read \
+                 openid profile email offline_access"
+            ),
+            ["User.Read", "Mail.ReadWrite"]
+        );
+        assert_eq!(
+            parse_granted_scopes(
+                "HTTPS://GRAPH.MICROSOFT.COM/tasks.readwrite mail.send Calendars.ReadWrite \
+                 User.Read Mail.Send"
+            ),
+            [
+                "User.Read",
+                "Mail.Send",
+                "Calendars.ReadWrite",
+                "Tasks.ReadWrite"
+            ]
+        );
+        // `.default`, other resources' scopes and the OpenID Connect ones go;
+        // permissions this app doesn't know stay as given, sorted.
+        assert_eq!(
+            parse_granted_scopes(
+                "https://graph.microsoft.com/.default .default api://x/Sync.Receive \
+                 https://outlook.office.com/Mail.Read OFFLINE_ACCESS Notes.Read Mail.Read \
+                 notes.read  User.Read\tPeople.Read"
+            ),
+            ["User.Read", "Mail.Read", "Notes.Read", "People.Read"]
+        );
+        assert!(parse_granted_scopes("").is_empty());
+        assert!(parse_granted_scopes("openid profile").is_empty());
+    }
+
+    #[test]
+    fn consumer_domains_and_personal_tenants() {
+        for domain in [
+            "outlook.com",
+            "Hotmail.com",
+            "hotmail.co.uk",
+            "live.com.au",
+            "outlook.de",
+            "live.nl",
+            "msn.com",
+            "passport.com",
+            " windowslive.com ",
+        ] {
+            assert!(is_consumer_domain(domain), "{domain}");
+        }
+        for domain in [
+            "contoso.com",
+            "live.unc.edu",
+            "outlook.contoso.com",
+            "hotmail.example",
+            "mylive.com",
+            "organizations",
+            "",
+            "live.co.u",
+            "outlook.c0m.de",
+        ] {
+            assert!(!is_consumer_domain(domain), "{domain}");
+        }
+        assert!(is_personal_tenant(CONSUMER_TENANT));
+        assert!(is_personal_tenant("9188040D-6C67-4C5B-B112-36A304B66DAD"));
+        assert!(is_personal_tenant("consumers"));
+        assert!(is_personal_tenant("Consumers"));
+        assert!(!is_personal_tenant("11111111-2222-3333-4444-555555555555"));
+        assert!(!is_personal_tenant("organizations"));
+        assert!(!is_personal_tenant("common"));
+    }
+
+    #[test]
+    fn what_a_grant_lacks_and_what_was_refused() {
+        let grant = |scopes: &[&str], refused: &[AccountFeature]| MicrosoftGrant {
+            scopes: strings(scopes),
+            refused: refused.to_vec(),
+            refused_at: None,
+        };
+        // Not recorded yet: everything, as every account had before.
+        assert!(needs_permission(None).is_empty());
+        assert!(refused_features(None).is_empty());
+        let mail_only = grant(&["User.Read", "Mail.ReadWrite", "Mail.Send"], &[]);
+        assert_eq!(needs_permission(Some(&mail_only)), AccountFeature::ALL);
+        let some = grant(
+            &["User.Read", "mailboxsettings.read", "Tasks.ReadWrite"],
+            &[
+                AccountFeature::Tasks,
+                AccountFeature::MailboxSettings,
+                AccountFeature::Calendar,
+            ],
+        );
+        assert_eq!(
+            needs_permission(Some(&some)),
+            [AccountFeature::Calendar, AccountFeature::Contacts]
+        );
+        // Never a feature lacking its permission, nor the time zone.
+        assert_eq!(refused_features(Some(&some)), [AccountFeature::Tasks]);
     }
 
     #[test]
@@ -1667,6 +2471,47 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::SignInCancelled);
+        // timeout_says_so_in_details
+        assert_eq!(
+            error.message,
+            "Sign-in was not completed in time. Try again."
+        );
+        assert_eq!(error.details.unwrap()["reason"], "timeout");
+    }
+
+    #[tokio::test]
+    async fn sign_in_asks_for_the_configured_graph_scopes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("grant_type=authorization_code"))
+            .respond_with(token_success())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let browser = fake_browser(vec![redirect_with("code=the-code")]);
+        let config = MicrosoftAuthConfig {
+            graph_scopes: sign_in_scopes(PermissionRequest::MailOnly, None),
+            ..config(&server)
+        };
+        let result = sign_in(&config, &*browser.open, None, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let core = CORE_SCOPES.join(" ");
+        let authorize = browser.authorize_url.lock().unwrap().clone().unwrap();
+        let authorize: HashMap<String, String> = authorize.query_pairs().into_owned().collect();
+        assert_eq!(authorize["scope"], core);
+        let requests = server.received_requests().await.unwrap();
+        let form: HashMap<String, String> = url::form_urlencoded::parse(&requests[0].body)
+            .into_owned()
+            .collect();
+        assert_eq!(form["scope"], core);
+        // What was asked for, and what Microsoft said (`Mail.ReadWrite
+        // User.Read`), as Graph permissions.
+        assert_eq!(
+            result.requested_scopes,
+            ["User.Read", "Mail.ReadWrite", "Mail.Send"]
+        );
+        assert_eq!(result.response_scopes, ["User.Read", "Mail.ReadWrite"]);
     }
 
     #[tokio::test]
@@ -1677,6 +2522,80 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.message, "no browser");
+    }
+
+    #[tokio::test]
+    async fn blocked_sign_ins_say_why() {
+        /// The redirect, the reason, its AADSTS code and whether the error
+        /// carries an approval link.
+        type Case = (&'static str, &'static str, u32, bool);
+        let cases: &[Case] = &[
+            (
+                "error=invalid_request&error_description=AADSTS50105%3a+Your+administrator+has+configured+the+application+to+block+users",
+                "notAssigned",
+                50105,
+                false,
+            ),
+            (
+                "error=unauthorized_client&error_description=AADSTS7000112%3a+Application+is+disabled.",
+                "appDisabled",
+                7000112,
+                false,
+            ),
+            (
+                "error=invalid_client&error_description=AADSTS65005%3a+Misconfigured+application.",
+                "appNotSetUp",
+                65005,
+                true,
+            ),
+            (
+                "error=invalid_client&error_description=AADSTS650052%3a+The+app+needs+access+to+a+service+that+your+organization+has+not+subscribed+to.",
+                "serviceNotEnabled",
+                650052,
+                false,
+            ),
+            (
+                "error=interaction_required&error_description=AADSTS53004%3a+Proof+up+required.",
+                "securityInfo",
+                53004,
+                false,
+            ),
+            (
+                "error=access_denied&error_description=AADSTS53003%3a+Access+has+been+blocked+by+Conditional+Access+policies.",
+                "conditionalAccess",
+                53003,
+                false,
+            ),
+            (
+                "error=access_denied&error_description=AADSTS530032%3a+Blocked+by+security+defaults.",
+                "conditionalAccess",
+                530032,
+                false,
+            ),
+            // The blocking code wins over one asking for approval.
+            (
+                "error=access_denied&error_description=AADSTS90094%3a+Admin+consent+required.+AADSTS53003%3a+Blocked.",
+                "conditionalAccess",
+                53003,
+                false,
+            ),
+        ];
+        for (query, reason, aadsts, link) in cases {
+            let server = MockServer::start().await;
+            let browser = fake_browser(vec![redirect_with(query)]);
+            let error = run_sign_in(&server, &browser, Some("adele@contoso.com"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::SignInBlocked, "{query}");
+            let details = error.details.expect("details");
+            assert_eq!(details["reason"], *reason, "{query}");
+            assert_eq!(details["aadsts"], *aadsts, "{query}");
+            assert_eq!(details["tenant"], "contoso.com");
+            assert_eq!(details["adminPageUrl"], serde_json::Value::Null);
+            assert_eq!(details.get("adminConsentUrl").is_some(), *link, "{query}");
+            assert!(!error.message.contains("AADSTS"), "{}", error.message);
+            assert_eq!(browser.wait_for(1).await, vec![200]);
+        }
     }
 
     #[tokio::test]
@@ -1725,6 +2644,11 @@ mod tests {
             (
                 "error=invalid_request&error_description=AADSTS50105%3a+Your+administrator+has+configured+the+application+to+block+users",
                 None,
+                ErrorCode::SignInBlocked,
+            ),
+            (
+                "error=invalid_request&error_description=AADSTS50000%3a+There+was+an+error+issuing+a+token.",
+                None,
                 ErrorCode::Provider,
             ),
         ];
@@ -1736,7 +2660,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code, *expected, "{query}");
             if let Some(tenant) = tenant {
-                let details = error.details.expect("admin consent details");
+                let details = error.details.as_ref().expect("admin consent details");
                 assert_eq!(details["tenant"], *tenant);
                 assert_eq!(
                     details["canRequestApproval"],
@@ -1749,15 +2673,61 @@ mod tests {
                     "{url}"
                 );
             }
+            if *expected == ErrorCode::SignInBlocked {
+                // More in `blocked_sign_ins_say_why`.
+                let details = error.details.as_ref().expect("blocked details");
+                assert_eq!(details["reason"], "notAssigned");
+                assert_eq!(details["aadsts"], 50105);
+            }
             if *expected == ErrorCode::Provider {
                 assert!(
-                    error.message.starts_with("AADSTS50105"),
+                    error.message.starts_with("AADSTS50000"),
                     "{}",
                     error.message
                 );
             }
             // The browser is told how it went.
             assert_eq!(browser.wait_for(1).await, vec![200]);
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_consent_details_name_the_admin_page_for_the_published_registration() {
+        const ADMIN: &str =
+            "error=access_denied&error_description=AADSTS90094%3a+Admin+consent+required";
+        for published in [true, false] {
+            let server = MockServer::start().await;
+            let browser = fake_browser(vec![redirect_with(ADMIN)]);
+            let config = MicrosoftAuthConfig {
+                published,
+                ..config(&server)
+            };
+            let error = sign_in(
+                &config,
+                &*browser.open,
+                Some("adele@contoso.com"),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::AdminConsentRequired);
+            let details = error.details.unwrap();
+            let url = Url::parse(details["adminConsentUrl"].as_str().unwrap()).unwrap();
+            let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+            if published {
+                assert_eq!(details["adminPageUrl"], ADMIN_CONSENT_LANDING_URI);
+                assert_eq!(params["redirect_uri"], ADMIN_CONSENT_LANDING_URI);
+                assert_eq!(
+                    params["scope"].contains("Sync.Receive"),
+                    ADMIN_LINK_INCLUDES_PUSH
+                );
+            } else {
+                assert_eq!(details["adminPageUrl"], serde_json::Value::Null);
+                assert_eq!(params["redirect_uri"], ADMIN_CONSENT_REDIRECT_URI);
+                assert!(!params["scope"].contains("Sync.Receive"));
+            }
+            assert_eq!(details["canRequestApproval"], false);
+            assert_eq!(details["tenant"], "contoso.com");
         }
     }
 
@@ -1833,7 +2803,430 @@ mod tests {
                 .await
                 .unwrap();
         }
-        MicrosoftTokenSource::new(config(server), "acct", secrets)
+        MicrosoftTokenSource::new(
+            config(server),
+            "acct",
+            secrets,
+            false,
+            Arc::new(NoGrantRecord),
+        )
+    }
+
+    /// Keeps what it's told, and records what refreshes say.
+    #[derive(Default)]
+    struct FakeGrant {
+        granted: StdMutex<Option<Vec<String>>>,
+        recorded: StdMutex<Vec<Vec<String>>>,
+    }
+
+    impl FakeGrant {
+        fn with(granted: Option<&[&str]>) -> Arc<Self> {
+            Arc::new(Self {
+                granted: StdMutex::new(granted.map(strings)),
+                ..Self::default()
+            })
+        }
+
+        fn recorded(&self) -> Vec<Vec<String>> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    impl GrantRecord for FakeGrant {
+        fn granted(&self) -> Result<Option<Vec<String>>> {
+            Ok(self.granted.lock().unwrap().clone())
+        }
+
+        fn record(&self, granted: &[String]) {
+            self.recorded.lock().unwrap().push(granted.to_vec());
+        }
+    }
+
+    /// A Graph token source for a work (or `personal`) account signed in
+    /// as refresh-0, recording in `grant`.
+    async fn graph_tokens(
+        server: &MockServer,
+        personal: bool,
+        grant: &Arc<FakeGrant>,
+    ) -> MicrosoftTokenSource {
+        let secrets = Arc::new(MemorySecretStore::default());
+        secrets
+            .set(&keys::refresh_token("acct"), "refresh-0")
+            .await
+            .unwrap();
+        MicrosoftTokenSource::new(config(server), "acct", secrets, personal, grant.clone())
+    }
+
+    /// A successful refresh whose `scope` is `scope`.
+    fn token_with_scope(scope: Option<&str>) -> ResponseTemplate {
+        let mut body = json!({
+            "token_type": "Bearer",
+            "expires_in": 3599,
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+        });
+        if let Some(scope) = scope {
+            body["scope"] = json!(scope);
+        }
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+
+    /// The `scope` each token request asked for.
+    async fn asked_scopes(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| {
+                url::form_urlencoded::parse(&r.body)
+                    .find(|(k, _)| k == "scope")
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn work_refresh_uses_default_and_records_the_grant() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .and(body_string_contains(
+                "scope=https%3A%2F%2Fgraph.microsoft.com%2F.default+offline_access",
+            ))
+            .respond_with(token_with_scope(Some(
+                "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read \
+                 https://graph.microsoft.com/Calendars.ReadWrite \
+                 https://graph.microsoft.com/Mail.Send openid profile email",
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Whatever was recorded before: `.default` covers a later approval.
+        let grant = FakeGrant::with(Some(&["User.Read", "Mail.ReadWrite", "Mail.Send"]));
+        let source = graph_tokens(&server, false, &grant).await;
+        assert_eq!(source.access_token().await.unwrap(), "access-1");
+        assert_eq!(
+            grant.recorded(),
+            [strings(&[
+                "User.Read",
+                "Mail.ReadWrite",
+                "Mail.Send",
+                "Calendars.ReadWrite"
+            ])]
+        );
+        // The rotated refresh token is kept too.
+        assert_eq!(
+            source
+                .secrets
+                .get(&keys::refresh_token("acct"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("refresh-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_without_scope_or_core_records_nothing() {
+        for scope in [
+            None,
+            Some(""),
+            Some("https://graph.microsoft.com/Calendars.ReadWrite openid profile"),
+            Some("api://test-client-id/Sync.Receive"),
+        ] {
+            for personal in [false, true] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(token_with_scope(scope))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let grant = FakeGrant::with(None);
+                let source = graph_tokens(&server, personal, &grant).await;
+                assert_eq!(source.access_token().await.unwrap(), "access-1");
+                assert!(grant.recorded().is_empty(), "{scope:?}");
+                // The refresh token is still kept.
+                assert_eq!(
+                    source
+                        .secrets
+                        .get(&keys::refresh_token("acct"))
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some("refresh-1")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_refused_as_invalid_scope_retries_once_with_the_explicit_list() {
+        let explicit = "openid profile email offline_access User.Read Mail.ReadWrite Mail.Send \
+                        Contacts.ReadWrite";
+        let recorded: &[&str] = &[
+            "User.Read",
+            "Mail.ReadWrite",
+            "Mail.Send",
+            "Contacts.ReadWrite",
+        ];
+        let refused = || {
+            token_error(
+                "invalid_scope",
+                "AADSTS70011: The provided request must include a 'scope' input parameter.",
+                &[70011],
+            )
+        };
+
+        // Named one by one, the permissions are granted.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(".default"))
+            .respond_with(refused())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("scope=openid+profile"))
+            .respond_with(token_success())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let grant = FakeGrant::with(Some(recorded));
+        let source = graph_tokens(&server, false, &grant).await;
+        assert_eq!(source.access_token().await.unwrap(), "access-1");
+        assert_eq!(
+            asked_scopes(&server).await,
+            [
+                format!("{GRAPH_DEFAULT_SCOPE} offline_access"),
+                explicit.to_owned()
+            ]
+        );
+        // A work account records what Microsoft said.
+        assert_eq!(
+            grant.recorded(),
+            [strings(&["User.Read", "Mail.ReadWrite"])]
+        );
+
+        // Refused that way too: no third try.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(refused())
+            .expect(2)
+            .mount(&server)
+            .await;
+        let grant = FakeGrant::with(Some(recorded));
+        let error = graph_tokens(&server, false, &grant)
+            .await
+            .access_token()
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Provider);
+        assert!(grant.recorded().is_empty());
+
+        // Other refusals aren't tried again.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(token_error(
+                "invalid_grant",
+                "AADSTS700082: Expired.",
+                &[700082],
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let grant = FakeGrant::with(Some(recorded));
+        let error = graph_tokens(&server, false, &grant)
+            .await
+            .access_token()
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::AuthRequired);
+    }
+
+    #[tokio::test]
+    async fn personal_refresh_names_only_recorded_permissions() {
+        /// Refreshes a personal account whose grant is `recorded`, Microsoft
+        /// answering that it has `answer`; returns the scope asked for and
+        /// what was recorded.
+        async fn refresh(recorded: Option<&[&str]>, answer: &str) -> (String, Vec<Vec<String>>) {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(token_with_scope(Some(answer)))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let grant = FakeGrant::with(recorded);
+            let source = graph_tokens(&server, true, &grant).await;
+            source.access_token().await.unwrap();
+            let asked = asked_scopes(&server).await.remove(0);
+            (asked, grant.recorded())
+        }
+        let mail_only: &[&str] = &["User.Read", "Mail.ReadWrite", "Mail.Send"];
+        let everything = LEGACY_SCOPES.join(" ");
+
+        // Not recorded yet: exactly what every refresh asked for before.
+        let (asked, _) = refresh(None, &everything).await;
+        assert_eq!(asked, everything);
+        // Mail only.
+        let (asked, recorded) = refresh(Some(mail_only), &everything).await;
+        assert_eq!(asked, CORE_SCOPES.join(" "));
+        // Microsoft naming more than was asked for doesn't add it.
+        assert_eq!(recorded, [strings(mail_only)]);
+        // A feature turned on since.
+        let with_calendar = [mail_only, &["Calendars.ReadWrite"]].concat();
+        let (asked, recorded) = refresh(Some(&with_calendar), "Mail.ReadWrite User.Read").await;
+        assert_eq!(
+            asked,
+            format!("{} Calendars.ReadWrite", CORE_SCOPES.join(" "))
+        );
+        assert_eq!(recorded, [strings(&["User.Read", "Mail.ReadWrite"])]);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_overtaken_by_a_sign_in_records_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(token_success().set_delay(Duration::from_millis(300)))
+            .mount(&server)
+            .await;
+        let grant = FakeGrant::with(None);
+        let source = Arc::new(graph_tokens(&server, false, &grant).await);
+        let refreshing = tokio::spawn({
+            let source = Arc::clone(&source);
+            async move { source.access_token().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // A sign-in meanwhile stores its refresh token (and its grant).
+        let key = keys::refresh_token("acct");
+        source.secrets.set(&key, "refresh-new").await.unwrap();
+        assert_eq!(refreshing.await.unwrap().unwrap(), "access-1");
+        assert!(grant.recorded().is_empty());
+        assert_eq!(
+            source.secrets.get(&key).await.unwrap().as_deref(),
+            Some("refresh-new")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_reads_its_token_and_grant_after_a_sign_in_saving_both() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(token_with_scope(Some(
+                "User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite",
+            )))
+            .mount(&server)
+            .await;
+        let mail_only: &[&str] = &["User.Read", "Mail.ReadWrite", "Mail.Send"];
+        let with_calendar = strings(&[mail_only, &["Calendars.ReadWrite"]].concat());
+        let grant = FakeGrant::with(Some(mail_only));
+        let secrets = Arc::new(MemorySecretStore::default());
+        let (id, key) = ("acct-turning-on", keys::refresh_token("acct-turning-on"));
+        secrets.set(&key, "refresh-0").await.unwrap();
+        let source = Arc::new(MicrosoftTokenSource::new(
+            config(&server),
+            id,
+            secrets,
+            true,
+            grant.clone(),
+        ));
+        // A personal account's sign-in turning the calendar on saves its
+        // refresh token, then its grant, as a refresh starts.
+        let signing_in = secrets::lock_account(id).await;
+        let refreshing = tokio::spawn({
+            let source = Arc::clone(&source);
+            async move { source.access_token().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        source.secrets.set(&key, "refresh-new").await.unwrap();
+        *grant.granted.lock().unwrap() = Some(with_calendar.clone());
+        drop(signing_in);
+        assert_eq!(refreshing.await.unwrap().unwrap(), "access-1");
+        // The refresh asked with the new token for what it was granted.
+        let requests = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert!(body.contains("refresh_token=refresh-new"), "{body}");
+        assert_eq!(
+            asked_scopes(&server).await,
+            [format!("{} Calendars.ReadWrite", CORE_SCOPES.join(" "))]
+        );
+        assert_eq!(grant.recorded(), [with_calendar]);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_keeps_a_grant_recorded_meanwhile() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                token_with_scope(Some("User.Read Mail.ReadWrite Mail.Send"))
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+        let grant = FakeGrant::with(Some(&["User.Read", "Mail.ReadWrite", "Mail.Send"]));
+        let source = Arc::new(graph_tokens(&server, true, &grant).await);
+        let refreshing = tokio::spawn({
+            let source = Arc::clone(&source);
+            async move { source.access_token().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Another refresh of the same token records a newer grant.
+        *grant.granted.lock().unwrap() = Some(strings(&[
+            "User.Read",
+            "Mail.ReadWrite",
+            "Mail.Send",
+            "Calendars.ReadWrite",
+        ]));
+        assert_eq!(refreshing.await.unwrap().unwrap(), "access-1");
+        assert!(grant.recorded().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_blocked_codes_explain_themselves() {
+        let cases: &[(&str, &str, u32, &str)] = &[
+            (
+                "invalid_grant",
+                "AADSTS50105: Your administrator has configured the application to block users.",
+                50105,
+                "notAssigned",
+            ),
+            (
+                "invalid_grant",
+                "AADSTS53003: Access has been blocked by Conditional Access policies.",
+                53003,
+                "conditionalAccess",
+            ),
+            (
+                "invalid_client",
+                "AADSTS7000112: Application is disabled.",
+                7000112,
+                "appDisabled",
+            ),
+        ];
+        for (error, description, code, reason) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(token_error(error, description, &[*code]))
+                .mount(&server)
+                .await;
+            let source = token_source(&server, Some("refresh-0")).await;
+            let failure = source.access_token().await.unwrap_err();
+            assert_eq!(failure.code, ErrorCode::AuthRequired);
+            assert!(
+                failure.message.ends_with(&format!("(AADSTS{code})")),
+                "{}",
+                failure.message
+            );
+            assert!(
+                failure.message.starts_with("Your organization"),
+                "{}",
+                failure.message
+            );
+            let details = failure.details.unwrap();
+            assert_eq!(details["reason"], *reason);
+            assert_eq!(details["aadsts"], *code);
+        }
     }
 
     #[tokio::test]
@@ -2018,14 +3411,14 @@ mod tests {
         let authorize = browser.authorize_url.lock().unwrap().clone().unwrap();
         let authorize: HashMap<String, String> = authorize.query_pairs().into_owned().collect();
         let scopes: Vec<&str> = authorize["scope"].split(' ').collect();
-        assert_eq!(scopes.len(), SCOPES.len() + 1);
+        assert_eq!(scopes.len(), all_scopes().len() + 1);
         assert_eq!(scopes.last(), Some(&"api://test-client-id/Sync.Receive"));
         // ...but the code is redeemed for Graph alone.
         let requests = server.received_requests().await.unwrap();
         let form: HashMap<String, String> = url::form_urlencoded::parse(&requests[0].body)
             .into_owned()
             .collect();
-        assert_eq!(form["scope"], SCOPES.join(" "));
+        assert_eq!(form["scope"], all_scopes().join(" "));
     }
 
     /// Plays a browser that answers each authorization request in turn with
@@ -2102,13 +3495,8 @@ mod tests {
             let (result, scopes) = sign_in_with_push(&server, &[refusal, "code=the-code"]).await;
             let result = result.unwrap();
             assert_eq!(result.access_token, "access-1");
-            assert_eq!(
-                scopes,
-                [
-                    format!("{} {sync_receive}", SCOPES.join(" ")),
-                    SCOPES.join(" ")
-                ]
-            );
+            let graph = config(&server).graph_scopes.join(" ");
+            assert_eq!(scopes, [format!("{graph} {sync_receive}"), graph]);
             let refused = result.consent_refused.expect("the refusal");
             assert_eq!(refused.code, code);
             assert!(refused.message.contains("Inbox is checked"), "{refused:?}");
@@ -2340,7 +3728,8 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let source = token_source(&server, Some("refresh-0")).await;
+        // A personal account's, which name the permissions.
+        let source = graph_tokens(&server, true, &FakeGrant::with(None)).await;
         source
             .prime("twenty-minutes", Duration::from_secs(20 * 60))
             .await;

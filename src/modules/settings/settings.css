@@ -557,13 +557,98 @@
 
 .consent-email {
   display: flex;
-  align-items: center;
-  gap: var(--space-3);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.consent-email__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .consent-email__hint {
   font-size: var(--text-sm);
   color: var(--fg-secondary);
+}
+
+/* "Try with mail only": the explanation, then its button. */
+.consent-mail-only {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+/* A blocked sign-in's way forward. */
+.blocked-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.blocked-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* "Stuck on Microsoft's page?" under the waiting, timeout and cancel panels. */
+.sign-in-help {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+  text-align: center;
+}
+
+.sign-in-help__lead {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.sign-in-help__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.sign-in-help__code {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-2) var(--space-3);
+  width: 100%;
+  max-width: 400px;
+  text-align: left;
+}
+
+.sign-in-help__code[hidden] {
+  display: none;
+}
+
+.sign-in-help__code .field {
+  flex: 1 1 220px;
+}
+
+/* In line with the field, not its label. */
+.sign-in-help__code > .btn {
+  margin-top: 22px;
+}
+
+.sign-in-help__unknown {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
 }
 
 /* "What Cumulas Mail asks for": a quiet disclosure. */
@@ -656,6 +741,101 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--fg-secondary);
+}
+
+/* Mail's permissions, then the optional ones, each under its heading. */
+.permission-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  text-align: left;
+}
+
+.permission-groups__heading {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+}
+
+.permission-groups__heading:not(:first-child) {
+  margin-top: var(--space-1);
+}
+
+/* --- A feature without permission (Calendar, People, Tasks) ---------------- */
+
+.feature-notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-3) var(--space-2) var(--space-2);
+  text-align: left;
+}
+
+.feature-notice__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--warning-subtle);
+}
+
+.feature-notice__title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-primary);
+  text-wrap: balance;
+}
+
+.feature-notice__rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Badge and address, then the buttons on a line of their own: the sidebar
+   is narrow. */
+.feature-notice__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px var(--space-2);
+}
+
+.feature-notice__email {
+  overflow: hidden;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.feature-notice__actions {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: var(--space-2);
+}
+
+.feature-notice__hint {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  text-wrap: pretty;
+}
+
+/* In an empty state the notice is the action; its width, not the pane's. */
+.empty-state__action .feature-notice {
+  width: min(360px, 100%);
+  margin: 0;
+}
+
+/* "Ask IT": the approval link for a feature. */
+.approval-dialog__loading {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-6) 0;
 }
 
 /* --- IMAP form ------------------------------------------------------------- */
@@ -1569,6 +1749,14 @@
   background: var(--success);
 }
 
+.account-status--warning {
+  color: var(--warning);
+}
+
+.account-status--warning .account-status__dot {
+  background: var(--warning);
+}
+
 .account-status--error {
   color: var(--danger);
   font-weight: var(--weight-medium);
@@ -1946,6 +2134,52 @@
 .link-button:focus-visible {
   border-radius: 2px;
   outline-offset: 2px;
+}
+
+/* Settings → Accounts: the features a Microsoft account can't use. */
+.permission-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.permission-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-4);
+}
+
+.permission-row__text {
+  display: flex;
+  flex: 1 1 220px;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.permission-row__note {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.permission-ask {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.permission-ask__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.permission-ask__body[hidden] {
+  display: none;
 }
 
 /* Settings → Accounts: how new mail reaches the account. */

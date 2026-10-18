@@ -6,6 +6,9 @@
 #   co.cumulas.Mail.flatpakref    installs the app in one click
 #   cumulas-flatpak.gpg           the public key the repository is signed with
 #   index.html, logo.svg          the install page
+#   admin-consent/index.html      the page for IT administrators, where
+#                                 Microsoft brings them back after they
+#                                 approve Cumulas Mail
 #
 # Usage: assemble-site.sh REPO PUBLIC-KEY SITE
 #   REPO        the repository, after update-repo.sh
@@ -88,9 +91,13 @@ EOF
 cp "$root/public/icon.svg" "$site/logo.svg"
 grouped=$(printf '%s\n' "$fingerprint" | sed 's/.\{4\}/& /g; s/ $//')
 sed "s/@FINGERPRINT@/$grouped/g" "$here/index.html" >"$site/index.html"
-if grep -q '@[A-Z_]*@' "$site/index.html"; then
-  die "index.html has a placeholder left: $(grep -o '@[A-Z_]*@' "$site/index.html" | head -1)"
-fi
+mkdir "$site/admin-consent"
+cp "$here/admin-consent.html" "$site/admin-consent/index.html"
+for page in index.html admin-consent/index.html; do
+  if grep -q '@[A-Z_]*@' "$site/$page"; then
+    die "$page has a placeholder left: $(grep -o '@[A-Z_]*@' "$site/$page" | head -1)"
+  fi
+done
 
 bytes=$(du -sb "$site" | cut -f1)
 if [ "$bytes" -ge "$size_limit" ]; then

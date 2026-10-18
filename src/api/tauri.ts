@@ -10,6 +10,7 @@ import type {
   PushStatus,
   RemindersChangedEvent,
   SyncStatus,
+  UpdateState,
 } from "./types";
 
 function subscribe<T>(event: string, handler: (payload: T) => void): Unsubscribe {
@@ -34,9 +35,18 @@ export const tauriBackend: Backend = {
 
   listAccounts: () => invoke("list_accounts"),
   addImapAccount: (input) => invoke("add_imap_account", { input }),
-  addMicrosoftAccount: (loginHint) =>
-    invoke("add_microsoft_account", { loginHint: loginHint ?? null }),
+  addMicrosoftAccount: (loginHint, permissions) =>
+    invoke("add_microsoft_account", {
+      loginHint: loginHint ?? null,
+      permissions: permissions ?? null,
+    }),
   cancelMicrosoftSignIn: () => invoke("cancel_microsoft_sign_in"),
+  microsoftAdminConsent: (accountId, loginHint) =>
+    invoke("microsoft_admin_consent", {
+      accountId: accountId ?? null,
+      loginHint: loginHint ?? null,
+    }),
+  retryMicrosoftFeatures: (accountId) => invoke("retry_microsoft_features", { accountId }),
   updateImapAccount: (accountId, update) => invoke("update_imap_account", { accountId, update }),
   updateAccount: (accountId, displayName, color) =>
     invoke("update_account", {
@@ -59,6 +69,8 @@ export const tauriBackend: Backend = {
   setStartAtLogin: (enabled, hidden) => invoke("set_start_at_login", { enabled, hidden }),
   sendTestNotification: () => invoke("send_test_notification"),
   takePendingNavigation: () => invoke("take_pending_navigation"),
+  getUpdateState: () => invoke("get_update_state"),
+  restartApp: () => invoke("restart_app"),
 
   listActiveReminders: () => invoke("list_active_reminders"),
   snoozeReminder: (reminderKey, snooze) =>
@@ -130,4 +142,6 @@ export const tauriBackend: Backend = {
   onBackgroundState: (handler) => subscribe<BackgroundState>("background-state", handler),
   onRemindersChanged: (handler) => subscribe<RemindersChangedEvent>("reminders-changed", handler),
   onQuitRequested: (handler) => subscribe<null>("quit-requested", () => handler()),
+  onUpdateState: (handler) => subscribe<UpdateState>("update-state", handler),
+  onRestartRequested: (handler) => subscribe<null>("restart-requested", () => handler()),
 };

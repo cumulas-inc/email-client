@@ -115,6 +115,9 @@ pub struct AdminConsent {
     pub url: String,
     /// The organization: a tenant id or domain.
     pub tenant: String,
+    /// The page for IT administrators; only for the published app
+    /// registration.
+    pub admin_page_url: Option<String>,
 }
 
 impl AdminConsent {
@@ -132,6 +135,10 @@ impl AdminConsent {
                 .and_then(|t| t.as_str())
                 .unwrap_or_default()
                 .to_owned(),
+            admin_page_url: details
+                .get("adminPageUrl")
+                .and_then(|u| u.as_str())
+                .map(str::to_owned),
         })
     }
 }
@@ -195,4 +202,45 @@ pub enum WakeReason {
     Network,
     /// Asked for, e.g. "Check for new mail".
     User,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::error::ErrorCode;
+
+    #[test]
+    fn admin_consent_comes_from_the_errors_details() {
+        let error = Error::new(ErrorCode::AdminConsentRequired, "Ask IT.").with_details(json!({
+            "adminConsentUrl": "https://login.microsoftonline.com/contoso.com/v2.0/adminconsent",
+            "tenant": "contoso.com",
+            "canRequestApproval": false,
+            "adminPageUrl": "https://flatpak.cumulas.co/admin-consent/",
+        }));
+        assert_eq!(
+            AdminConsent::from_error(&error),
+            Some(AdminConsent {
+                url: "https://login.microsoftonline.com/contoso.com/v2.0/adminconsent".into(),
+                tenant: "contoso.com".into(),
+                admin_page_url: Some("https://flatpak.cumulas.co/admin-consent/".into()),
+            })
+        );
+        // Another registration's: no page for administrators.
+        let own = Error::new(ErrorCode::AdminConsentRequired, "Ask IT.").with_details(json!({
+            "adminConsentUrl": "https://login.microsoftonline.com/x",
+            "tenant": "x",
+            "adminPageUrl": null,
+        }));
+        assert_eq!(AdminConsent::from_error(&own).unwrap().admin_page_url, None);
+        // Only approval errors carry one.
+        let declined = Error::new(ErrorCode::ConsentDeclined, "No.");
+        assert_eq!(AdminConsent::from_error(&declined), None);
+        let wire = serde_json::to_value(AdminConsent::from_error(&error).unwrap()).unwrap();
+        assert_eq!(
+            wire["adminPageUrl"],
+            "https://flatpak.cumulas.co/admin-consent/"
+        );
+    }
 }

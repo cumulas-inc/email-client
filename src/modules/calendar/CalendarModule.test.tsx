@@ -4,9 +4,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { MockBackend } from "../../api/mock";
 import { useAppStore } from "../../app/store";
+import { useBackendEvents } from "../../app/useBackendEvents";
 import { useToasts } from "../../components/toast";
 import { Toaster } from "../../components/Toaster";
 import { renderWithBackend } from "../../test/render";
+import { AddAccountDialog } from "../settings/AddAccountDialog";
 import { CalendarModule } from "./CalendarModule";
 import type { CalendarView } from "./layout";
 import { toAllDayIso } from "./dates";
@@ -656,5 +658,118 @@ describe("CalendarModule", () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+});
+
+describe("calendar permission", () => {
+  const EMAIL = "alex.morgan@acme.example";
+
+  /** Applies the backend's data changes, as the app does. */
+  function Events() {
+    useBackendEvents();
+    return null;
+  }
+
+  function renderCalendar(backend: MockBackend) {
+    return renderWithBackend(
+      <>
+        <CalendarModule />
+        <Events />
+      </>,
+      { backend },
+    );
+  }
+
+  it("says which account's calendar needs permission, until it's granted", async () => {
+    const backend = new MockBackend({ missing: ["calendar"] });
+    renderCalendar(backend);
+
+    const notice = await screen.findByRole("region", { name: "Calendar needs permission" });
+    expect(within(notice).getByText(EMAIL)).toBeInTheDocument();
+    expect(
+      within(notice).getByRole("button", { name: `Turn on calendar for ${EMAIL}` }),
+    ).toBeInTheDocument();
+    expect(
+      within(notice).getByRole("button", { name: `Ask IT about calendar for ${EMAIL}` }),
+    ).toBeInTheDocument();
+    expect(
+      within(notice).getByText(
+        "Turn on asks Microsoft for permission. If your organization requires an administrator to approve it, select Ask IT to send them a link.",
+      ),
+    ).toBeInTheDocument();
+    // The other account's calendar is still there, and new events can go in it.
+    expect(
+      await screen.findByRole("checkbox", { name: "Calendar (Alex (Personal))" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Calendar (Alex Morgan)" })).toBeNull();
+    expect(screen.getByRole("button", { name: "New event" })).toBeEnabled();
+
+    act(() => backend.grantFeature("acct-work", "calendar"));
+    expect(
+      await screen.findByRole("checkbox", { name: "Calendar (Alex Morgan)" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Calendar needs permission" })).toBeNull();
+  });
+
+  it("says when Microsoft 365 refused it, and checks again", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ refused: ["calendar"] });
+    const retry = vi.spyOn(backend, "retryMicrosoftFeatures");
+    renderCalendar(backend);
+
+    const notice = await screen.findByRole("region", {
+      name: "Microsoft 365 refused access to your calendar",
+    });
+    expect(
+      within(notice).getByText(
+        "Your account has the permission, but Microsoft 365 refused access. This often means your mailbox doesn't include it, for example because of your license. Ask your IT team to check.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(notice).queryByRole("button", { name: /Turn on/ })).toBeNull();
+    await user.click(
+      within(notice).getByRole("button", { name: `Check calendar again for ${EMAIL}` }),
+    );
+    expect(retry).toHaveBeenCalledWith("acct-work");
+    expect(
+      within(notice).getByRole("button", { name: `Email IT about calendar for ${EMAIL}` }),
+    ).toBeInTheDocument();
+  });
+
+  it("gives the keyboard to New event once the sync after Turn on brings the calendar in", async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({ addAccountOpen: false });
+    const backend = new MockBackend({ missing: ["calendar"] });
+    await backend.removeAccount("acct-home");
+    renderWithBackend(
+      <>
+        <CalendarModule />
+        <Events />
+        <AddAccountDialog />
+      </>,
+      { backend },
+    );
+
+    const newEvent = await screen.findByRole("button", { name: "New event" });
+    await waitFor(() => expect(newEvent).toBeDisabled());
+    await user.click(screen.getByRole("button", { name: `Turn on calendar for ${EMAIL}` }));
+    await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
+    // Until the calendar is in, the sidebar holds the keyboard.
+    const sidebar = screen.getByRole("complementary", { name: "Calendar navigation" });
+    await waitFor(() => expect(sidebar).toHaveFocus());
+    expect(newEvent).toBeDisabled();
+    await waitFor(() => expect(newEvent).toHaveFocus(), { timeout: 3000 });
+    expect(sidebar).not.toHaveAttribute("tabindex");
+  });
+
+  it("explains an empty calendar that needs permission, once", async () => {
+    const backend = new MockBackend({ missing: ["calendar"] });
+    await backend.removeAccount("acct-home");
+    renderCalendar(backend);
+
+    expect(await screen.findByText("Your calendar needs permission")).toBeInTheDocument();
+    expect(screen.getByText("Turn it on, or ask your IT team to approve it.")).toBeInTheDocument();
+    expect(screen.getAllByRole("region", { name: "Calendar needs permission" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Manage accounts" })).toBeNull();
+    expect(screen.getByRole("button", { name: "New event" })).toBeDisabled();
   });
 });

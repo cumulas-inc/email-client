@@ -4,8 +4,10 @@
 import type { Backend, Unsubscribe } from "../backend";
 import type {
   Account,
+  AccountFeature,
   AccountSignature,
   ActiveReminder,
+  AdminConsentLink,
   AppInfo,
   BackendError,
   BackgroundState,
@@ -19,17 +21,27 @@ import type {
   MessageSummary,
   Navigate,
   OrganizationSignature,
+  PermissionRequest,
+  PermissionRequiredReason,
   PushStatus,
   RemindersChangedEvent,
   ReplyKind,
   ServerSearchResult,
   ServerSearchStatus,
   Settings,
+  SignInBlockedReason,
   SnoozeFor,
   SyncStatus,
   Task,
+  UpdateState,
 } from "../types";
 import { cleanFamily } from "../../lib/fonts";
+import {
+  FEATURE_COPY,
+  emailDomain,
+  isConsumerDomain,
+  isPersonalAccount,
+} from "../../modules/settings/microsoft";
 import { type MockState, createDemoState, recount } from "./data";
 import { isEmptySearch, isNarrowEnoughForServers, matchesSearch, parseSearch } from "./searchQuery";
 import { createWorstState } from "./worst";
@@ -281,6 +293,104 @@ export type DemoSignature = "addedOnSend" | "notAllowed" | "stale" | "notUsed" |
 /** Push states the demo can show for its Microsoft account (`?push=` in the URL). */
 export type DemoPush = "consent" | "refused" | "unreachable";
 
+/**
+ * An update of the Flatpak the demo has installed (`?update=` in the URL):
+ * restarting into it works ("installed"), or fails and can be tried again
+ * ("restartfails").
+ */
+export type DemoUpdate = "installed" | "restartfails";
+
+/** The installed update's commit in the demo. */
+export const DEMO_UPDATE_COMMIT = "demo-commit-2";
+
+const RESTART_FAILED = "Couldn't restart. Try again, or quit Cumulas Mail and open it again.";
+
+/** The optional features of a Microsoft account, in the order the core lists them. */
+const FEATURES: readonly AccountFeature[] = ["calendar", "contacts", "tasks", "mailboxSettings"];
+
+function inOrder(features: readonly AccountFeature[]): AccountFeature[] {
+  return FEATURES.filter((f) => features.includes(f));
+}
+
+/** Cumulas Mail's published app registration (connector.rs). */
+const PUBLISHED_CLIENT_ID = "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad";
+/** An organization's own app registration (`?customclient`). */
+const CUSTOM_CLIENT_ID = "11111111-2222-3333-4444-555555555555";
+/** Where Microsoft sends an administrator who approved the published registration. */
+const ADMIN_PAGE_URL = "https://flatpak.cumulas.co/admin-consent/";
+/** Every Graph permission, in the order the approval link names them. */
+const GRAPH_SCOPES = [
+  "User.Read",
+  "Mail.ReadWrite",
+  "Mail.Send",
+  "MailboxSettings.Read",
+  "Calendars.ReadWrite",
+  "Contacts.ReadWrite",
+  "Tasks.ReadWrite",
+];
+
+/**
+ * Like the core's admin consent link: for the published registration it
+ * covers the push service too and comes back to the page for administrators;
+ * for an organization's own (`customClient`), it comes back to localhost.
+ */
+export function mockAdminConsentUrl(tenant: string, customClient = false): string {
+  const clientId = customClient ? CUSTOM_CLIENT_ID : PUBLISHED_CLIENT_ID;
+  const scopes = [
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+    ...GRAPH_SCOPES.map((s) => `https://graph.microsoft.com/${s}`),
+    ...(customClient ? [] : [`api://${clientId}/Sync.Receive`]),
+  ];
+  // Encoded as the core's form_urlencoded does: spaces become "+".
+  const query = new URLSearchParams({
+    client_id: clientId,
+    scope: scopes.join(" "),
+    redirect_uri: customClient ? "http://localhost" : ADMIN_PAGE_URL,
+  });
+  return `https://login.microsoftonline.com/${tenant}/v2.0/adminconsent?${query.toString()}`;
+}
+
+/** Like the core's: where an administrator approves Cumulas Mail for `tenant`. */
+function adminConsentLink(tenant: string, customClient: boolean): AdminConsentLink {
+  return {
+    adminConsentUrl: mockAdminConsentUrl(tenant, customClient),
+    tenant,
+    adminPageUrl: customClient ? null : ADMIN_PAGE_URL,
+  };
+}
+
+/** The core's messages for sign-ins the organization's settings block. */
+const BLOCKED_MESSAGES: Record<SignInBlockedReason, string> = {
+  notAssigned:
+    "Your organization hasn't given you access to Cumulas Mail. Ask your IT team to assign you to the app.",
+  appDisabled:
+    "Your organization has blocked Cumulas Mail. Ask your IT team whether they can allow it.",
+  appNotSetUp:
+    "Microsoft 365 in your organization isn't set up for Cumulas Mail yet. Ask your IT team to approve it.",
+  serviceNotEnabled:
+    "Your organization's Microsoft 365 doesn't include a service Cumulas Mail needs, usually Exchange Online mail. Ask your IT team to check your subscription.",
+  securityInfo:
+    "Your organization needs you to finish setting up your sign-in security info, such as multifactor authentication. Ask your IT team for help.",
+  conditionalAccess:
+    "Your organization's sign-in rules didn't allow this sign-in, for example because of the device, the app or where you're signing in from. Ask your IT team what's required.",
+};
+
+/** Demo sign-ins the organization blocks, by the login hint's start, with Microsoft's code. */
+const BLOCKED_HINTS: [string, SignInBlockedReason, number][] = [
+  ["unassigned@", "notAssigned", 50105],
+  ["disabled@", "appDisabled", 7000112],
+  ["notsetup@", "appNotSetUp", 65005],
+  ["noservice@", "serviceNotEnabled", 650052],
+  ["mfa@", "securityInfo", 53004],
+  ["device@", "conditionalAccess", 53000],
+  ["blocked@", "conditionalAccess", 53003],
+];
+
+const NO_ADMIN_NEEDED = "Personal Microsoft accounts don't need an administrator's approval.";
+
 export interface MockOptions {
   /** Artificial latency in ms for every call (default 0). */
   latency?: number;
@@ -302,11 +412,24 @@ export interface MockOptions {
   background?: Partial<
     Pick<BackgroundState, "backgroundAllowed" | "autostart" | "trayAvailable" | "notifications">
   >;
+  /** The demo's Microsoft account lacks these features' permissions (`?missing=calendar,contacts,tasks,mailboxSettings`). */
+  missing?: AccountFeature[];
+  /** Microsoft 365 refuses these features of the demo's Microsoft account (`?refused=calendar,contacts,tasks`). */
+  refused?: AccountFeature[];
+  /** Microsoft sign-in uses an organization's own app registration: approval links return to localhost and there's no page for administrators (`?customclient`). */
+  customClient?: boolean;
+  /** An update of the Flatpak is installed (`?update=installed|restartfails`). */
+  update?: DemoUpdate;
+  /** Started by a restart into an update (`?updated`). */
+  restartedToUpdate?: boolean;
+  /** What a restart that works does; the browser demo reloads as restarted. */
+  onRestart?: () => void;
 }
 
 /** The demo's Microsoft account's push status for `?push=`. */
 function demoPush(
   kind: DemoPush,
+  customClient: boolean,
 ): Pick<PushStatus, "mode" | "health" | "detail" | "consentRefused" | "adminConsent"> {
   const polling = { kind: "polling", everySecs: 30 } as const;
   switch (kind) {
@@ -318,7 +441,8 @@ function demoPush(
         consentRefused: false,
         adminConsent: null,
       };
-    case "refused":
+    case "refused": {
+      const link = adminConsentLink("acme.example", customClient);
       return {
         mode: polling,
         health: { kind: "consentMissing" },
@@ -326,10 +450,12 @@ function demoPush(
           "Your organization requires an administrator to approve instant updates. Send the approval link to your IT department; until then, the Inbox is checked every 30 seconds.",
         consentRefused: true,
         adminConsent: {
-          url: "https://login.microsoftonline.com/acme.example/v2.0/adminconsent?client_id=00000000-0000-0000-0000-000000000000",
-          tenant: "acme.example",
+          url: link.adminConsentUrl,
+          tenant: link.tenant,
+          adminPageUrl: link.adminPageUrl,
         },
       };
+    }
     case "unreachable":
       return {
         mode: polling,
@@ -350,6 +476,13 @@ export class MockBackend implements Backend {
   private navigateHandlers = new Set<(to: Navigate) => void>();
   private backgroundHandlers = new Set<(state: BackgroundState) => void>();
   private quitHandlers = new Set<() => void>();
+  private updateHandlers = new Set<(state: UpdateState) => void>();
+  private restartHandlers = new Set<() => void>();
+  private update: UpdateState;
+  /** Restarting fails (`?update=restartfails`). */
+  private failRestart: boolean;
+  private restartedToUpdate: boolean;
+  private onRestart: (() => void) | undefined;
   private reminderHandlers = new Set<(event: RemindersChangedEvent) => void>();
   /** What became of reminders: snoozed until, or dismissed. */
   private reminderStates = new Map<string, { snoozedUntil?: number; dismissed?: boolean }>();
@@ -366,10 +499,16 @@ export class MockBackend implements Backend {
   >;
   private pendingNavigation: Navigate | null = null;
   /** Calls the desktop app would have acted on, for tests. */
-  readonly calls = { quit: 0, quitCanceled: 0, testNotifications: 0 };
+  readonly calls = { quit: 0, quitCanceled: 0, restart: 0, testNotifications: 0 };
   private seq = 1000;
   private latency: number;
   private pendingSignIn: (() => void) | null = null;
+  /** Microsoft sign-in uses an organization's own app registration (`?customclient`). */
+  private customClient: boolean;
+  /** "workflow@…" asked for approval once: Microsoft's page now offers no request. */
+  private approvalRequested = false;
+  /** Accounts a simulated sync runs for: their statuses say so, as the core's do. */
+  private syncing = new Set<string>();
   /** Messages sent through the mock, for tests. */
   readonly sent: Parameters<Backend["sendMessage"]>[0][] = [];
   /** Each account's signatures, once asked for. */
@@ -415,8 +554,28 @@ export class MockBackend implements Backend {
       notifications: "freedesktop",
       ...options.background,
     };
+    this.customClient = options.customClient ?? false;
+    this.update = options.update
+      ? { kind: "installed", commit: DEMO_UPDATE_COMMIT, restart: "idle" }
+      : { kind: "none" };
+    this.failRestart = options.update === "restartfails";
+    this.restartedToUpdate = options.restartedToUpdate ?? false;
+    this.onRestart = options.onRestart;
     const microsoft = this.state.accounts.find((a) => a.kind === "microsoft");
-    if (options.push && microsoft) this.pushOverrides.set(microsoft.id, demoPush(options.push));
+    if (options.push && microsoft) {
+      this.pushOverrides.set(microsoft.id, demoPush(options.push, this.customClient));
+    }
+    if (microsoft) {
+      // Like the core: the two lists never share a feature, and Microsoft 365
+      // never refuses the mailbox time zone (it falls back instead).
+      const missing = inOrder(options.missing ?? []);
+      const refused = inOrder(options.refused ?? []).filter(
+        (f) => f !== "mailboxSettings" && !missing.includes(f),
+      );
+      microsoft.needsPermission = missing;
+      microsoft.refusedFeatures = refused;
+      for (const feature of [...missing, ...refused]) this.dropFeatureData(microsoft.id, feature);
+    }
     for (const signature of this.state.signatures ?? []) {
       // As the core keeps them: sanitized.
       const organization = signature.organization;
@@ -482,6 +641,7 @@ export class MockBackend implements Backend {
       microsoftClientIdBuiltIn: true,
       syncServer: "sync.cumulas.co",
       signatureServer: "signature.cumulas.co",
+      restartedToUpdate: this.restartedToUpdate,
     };
   }
 
@@ -523,6 +683,8 @@ export class MockBackend implements Backend {
       createdAt: new Date().toISOString(),
       lastSyncedAt: new Date().toISOString(),
       syncError: null,
+      needsPermission: [],
+      refusedFeatures: [],
     };
     this.state.accounts.push(account);
     for (const [name, role] of [
@@ -565,24 +727,11 @@ export class MockBackend implements Backend {
     return clone(account);
   }
 
-  async addMicrosoftAccount(loginHint?: string) {
+  async addMicrosoftAccount(loginHint?: string, permissions: PermissionRequest = { kind: "all" }) {
     await this.delay();
     const hint = loginHint?.trim() ?? "";
-    // Demo hooks: "admin@..." simulates a tenant that blocks user consent,
-    // "cancel@..." a canceled browser sign-in.
-    if (hint.startsWith("admin")) {
-      const tenant = hint.split("@")[1] ?? "organizations";
-      fail(
-        "adminConsentRequired",
-        "Your organization requires an administrator to approve Cumulas Mail before you can sign in.",
-        {
-          tenant,
-          adminConsentUrl: `https://login.microsoftonline.com/${tenant}/v2.0/adminconsent?client_id=00000000-0000-0000-0000-000000000000`,
-        },
-      );
-    }
-    if (hint.startsWith("cancel")) fail("signInCancelled", "Sign-in was canceled.");
-    if (hint.startsWith("slow")) {
+    this.demoSignInFailure(hint, permissions);
+    if (hint.toLowerCase().startsWith("slow@")) {
       // Never finishes on its own, like a browser tab the user walked away from.
       await new Promise<void>((resolve) => {
         this.pendingSignIn = resolve;
@@ -590,6 +739,30 @@ export class MockBackend implements Backend {
       fail("signInCancelled", "Sign-in was canceled.");
     }
     const email = hint.includes("@") ? hint : "new.user@contoso.example";
+    // Like the core, which finds the account by Microsoft's user id: signing
+    // in again updates it.
+    const existing = this.state.accounts.find(
+      (a) => a.kind === "microsoft" && a.email.toLowerCase() === email.toLowerCase(),
+    );
+    if (existing) {
+      const before = [...existing.needsPermission, ...existing.refusedFeatures];
+      // Every sign-in checks refused features again.
+      existing.refusedFeatures = [];
+      if (permissions.kind === "all") existing.needsPermission = [];
+      else if (permissions.kind === "feature") {
+        existing.needsPermission = existing.needsPermission.filter(
+          (f) => f !== permissions.feature,
+        );
+      }
+      this.emit(["accounts"], existing.id);
+      // Like the core, which syncs the account after a sign-in: what came
+      // back arrives with that sync, after the sign-in returns.
+      const back = before.filter((f) => !existing.needsPermission.includes(f));
+      this.simulateSync(existing.id, () =>
+        back.flatMap((feature) => this.addDefaultContainer(existing, feature) ?? []),
+      );
+      return clone(existing);
+    }
     const account: Account = {
       id: this.id("acct"),
       kind: "microsoft",
@@ -600,6 +773,13 @@ export class MockBackend implements Backend {
       createdAt: new Date().toISOString(),
       lastSyncedAt: null,
       syncError: null,
+      needsPermission:
+        permissions.kind === "mailOnly"
+          ? [...FEATURES]
+          : permissions.kind === "feature"
+            ? FEATURES.filter((f) => f !== permissions.feature)
+            : [],
+      refusedFeatures: [],
     };
     this.state.accounts.push(account);
     this.state.folders.push({
@@ -616,9 +796,196 @@ export class MockBackend implements Backend {
     return clone(account);
   }
 
+  /**
+   * Demo hooks, by the login hint's start: how Microsoft answers sign-ins in
+   * organizations set up in different ways (docs/microsoft-365.md). Any
+   * other address signs in.
+   */
+  private demoSignInFailure(hint: string, permissions: PermissionRequest): void {
+    const lower = hint.toLowerCase();
+    const tenant = hint.split("@")[1] || "organizations";
+    const link = adminConsentLink(tenant, this.customClient);
+    const needsApproval = (canRequestApproval: boolean): never =>
+      fail(
+        "adminConsentRequired",
+        canRequestApproval
+          ? "Your organization requires an administrator to approve Cumulas Mail before you can sign in. You can request approval on Microsoft's sign-in page, or send the approval link to your IT department."
+          : "Your organization requires an administrator to approve Cumulas Mail before you can sign in. Send the approval link to your IT department.",
+        { ...link, canRequestApproval },
+      );
+    const declined = (): never =>
+      fail(
+        "consentDeclined",
+        "Cumulas Mail needs the requested permissions to show your mail, calendar, contacts and tasks. If you asked your administrator for approval, sign in again once it has been granted.",
+      );
+    // Microsoft's default: mail needs an administrator's approval too.
+    if (lower.startsWith("admin@")) needsApproval(false);
+    // An organization that approved mail but not the rest.
+    if (lower.startsWith("partial@") && permissions.kind !== "mailOnly") needsApproval(false);
+    if (lower.startsWith("workflow@")) {
+      if (this.approvalRequested) declined();
+      this.approvalRequested = true;
+      needsApproval(true);
+    }
+    if (lower.startsWith("declined@")) declined();
+    if (lower.startsWith("cancel@")) fail("signInCancelled", "Sign-in was canceled.");
+    if (lower.startsWith("timeout@")) {
+      fail("signInCancelled", "Sign-in was not completed in time. Try again.", {
+        reason: "timeout",
+      });
+    }
+    for (const [prefix, reason, aadsts] of BLOCKED_HINTS) {
+      if (!lower.startsWith(prefix)) continue;
+      fail("signInBlocked", BLOCKED_MESSAGES[reason], {
+        reason,
+        aadsts,
+        tenant,
+        adminPageUrl: link.adminPageUrl,
+        ...(reason === "appNotSetUp" ? { adminConsentUrl: link.adminConsentUrl } : {}),
+      });
+    }
+  }
+
   async cancelMicrosoftSignIn() {
     this.pendingSignIn?.();
     this.pendingSignIn = null;
+  }
+
+  async microsoftAdminConsent(accountId?: string, loginHint?: string) {
+    await this.delay();
+    let tenant = "organizations";
+    if (accountId) {
+      const account = this.account(accountId);
+      if (account.settings.kind !== "microsoft")
+        fail("invalidInput", "Only Microsoft accounts need this.");
+      if (isPersonalAccount(account)) fail("invalidInput", NO_ADMIN_NEEDED);
+      tenant = account.settings.tenantId;
+    } else {
+      const domain = emailDomain(loginHint);
+      if (domain && isConsumerDomain(domain)) fail("invalidInput", NO_ADMIN_NEEDED);
+      if (domain) tenant = domain;
+    }
+    return adminConsentLink(tenant, this.customClient);
+  }
+
+  async retryMicrosoftFeatures(accountId: string) {
+    await this.delay();
+    if (this.account(accountId).kind !== "microsoft") {
+      fail("invalidInput", "Only Microsoft accounts need this.");
+    }
+    // The demo's mailbox still lacks what Microsoft 365 refused, so checking
+    // again finds the same.
+    this.emit(["accounts"], accountId);
+  }
+
+  /**
+   * An administrator approved the feature, and a token refresh picked it up
+   * (tests, demos): it's on again, with its default container.
+   */
+  grantFeature(accountId: string, feature: AccountFeature): void {
+    const account = this.account(accountId);
+    account.needsPermission = account.needsPermission.filter((f) => f !== feature);
+    account.refusedFeatures = account.refusedFeatures.filter((f) => f !== feature);
+    const kind = this.addDefaultContainer(account, feature);
+    this.emit(kind ? ["accounts", kind] : ["accounts"], accountId);
+  }
+
+  /**
+   * The feature's permission is gone, or Microsoft 365 refused it (a 403 on
+   * its listing), as a sync would find (tests, demos): its data goes.
+   */
+  revokeFeature(
+    accountId: string,
+    feature: AccountFeature,
+    reason: PermissionRequiredReason = "notGranted",
+  ): void {
+    const account = this.account(accountId);
+    const others = (list: AccountFeature[]) => list.filter((f) => f !== feature);
+    if (reason === "notGranted") {
+      account.needsPermission = inOrder([...account.needsPermission, feature]);
+      account.refusedFeatures = others(account.refusedFeatures);
+    } else {
+      account.refusedFeatures = inOrder([...account.refusedFeatures, feature]);
+      account.needsPermission = others(account.needsPermission);
+    }
+    const kind = this.dropFeatureData(accountId, feature);
+    this.emit(kind ? ["accounts", kind] : ["accounts"], accountId);
+  }
+
+  /** Like the core: a feature's cached data goes when it can't be used. */
+  private dropFeatureData(accountId: string, feature: AccountFeature): DataKind | null {
+    const s = this.state;
+    const other = (item: { accountId: string }) => item.accountId !== accountId;
+    switch (feature) {
+      case "calendar":
+        s.calendars = s.calendars.filter(other);
+        s.events = s.events.filter(other);
+        return "calendar";
+      case "contacts":
+        s.contacts = s.contacts.filter(other);
+        return "contacts";
+      case "tasks":
+        s.taskLists = s.taskLists.filter(other);
+        s.tasks = s.tasks.filter(other);
+        return "tasks";
+      case "mailboxSettings":
+        return null;
+    }
+  }
+
+  /** As a sync after the feature comes back would find: its default calendar or task list. */
+  private addDefaultContainer(account: Account, feature: AccountFeature): DataKind | null {
+    switch (feature) {
+      case "calendar":
+        if (!this.state.calendars.some((c) => c.accountId === account.id)) {
+          const id = this.id("cal");
+          this.state.calendars.push({
+            id,
+            accountId: account.id,
+            remoteId: id,
+            name: "Calendar",
+            color: account.color,
+            canEdit: true,
+            isDefault: true,
+          });
+        }
+        return "calendar";
+      case "contacts":
+        return "contacts";
+      case "tasks":
+        if (!this.state.taskLists.some((l) => l.accountId === account.id)) {
+          const id = this.id("tl");
+          this.state.taskLists.push({
+            id,
+            accountId: account.id,
+            remoteId: id,
+            name: "Tasks",
+            isDefault: true,
+          });
+        }
+        return "tasks";
+      case "mailboxSettings":
+        return null;
+    }
+  }
+
+  /** Like the core's stand-in provider for a Microsoft account's feature it can't use. */
+  private checkFeature(accountId: string, feature: AccountFeature): void {
+    const account = this.account(accountId);
+    const reason: PermissionRequiredReason | null = account.needsPermission.includes(feature)
+      ? "notGranted"
+      : account.refusedFeatures.includes(feature)
+        ? "refused"
+        : null;
+    if (!reason) return;
+    const noun = FEATURE_COPY[feature].noun;
+    fail(
+      "permissionRequired",
+      reason === "notGranted"
+        ? `Cumulas Mail needs permission to use the ${noun} of ${account.email}. Turn it on in Settings → Accounts.`
+        : `Microsoft 365 refused access to the ${noun} of ${account.email}. See Settings → Accounts.`,
+      { feature, accountId, reason },
+    );
   }
 
   async updateImapAccount(accountId: string, update: Parameters<Backend["updateImapAccount"]>[1]) {
@@ -721,6 +1088,11 @@ export class MockBackend implements Backend {
   }
 
   async syncAccount(accountId: string) {
+    this.simulateSync(accountId);
+  }
+
+  /** Reports a sync, which ends a moment later with what `synced` brings in. */
+  private simulateSync(accountId: string, synced: () => DataKind[] = () => []): void {
     const account = this.account(accountId);
     const status = (state: SyncStatus["state"], message: string | null): SyncStatus => ({
       accountId,
@@ -728,11 +1100,15 @@ export class MockBackend implements Backend {
       message,
       lastSyncedAt: account.lastSyncedAt,
     });
+    this.syncing.add(accountId);
     this.syncHandlers.forEach((h) => h(status("syncing", "Syncing Inbox…")));
     setTimeout(() => {
+      this.syncing.delete(accountId);
+      if (!this.state.accounts.includes(account)) return;
       account.lastSyncedAt = new Date().toISOString();
+      const kinds = synced();
       this.syncHandlers.forEach((h) => h(status("idle", null)));
-      this.emit(["accounts"], accountId);
+      this.emit(["accounts", ...kinds], accountId);
     }, 600);
   }
 
@@ -846,6 +1222,42 @@ export class MockBackend implements Backend {
   /** What the tray's Quit does while the page is there: asks the page. */
   requestQuit() {
     this.quitHandlers.forEach((h) => h());
+  }
+
+  async getUpdateState() {
+    await this.delay();
+    return clone(this.update);
+  }
+
+  async restartApp() {
+    await this.delay();
+    const update = this.update;
+    if (update.kind !== "installed") fail("unsupported", "There's no new version to restart into.");
+    // Like the desktop app: one restart at a time.
+    if (update.restart === "restarting") return;
+    this.calls.restart += 1;
+    this.setUpdateState({ ...update, restart: "restarting" });
+    await this.delay();
+    if (this.failRestart) {
+      this.setUpdateState({ ...update, restart: "failed" });
+      fail("unsupported", RESTART_FAILED);
+    }
+    // The desktop app exits here, once the new version has taken over.
+    this.onRestart?.();
+  }
+
+  /** Sets the update state, as the Flatpak portal would report it (tests, demos). */
+  setUpdateState(state: UpdateState) {
+    this.update = clone(state);
+    queueMicrotask(() => this.updateHandlers.forEach((h) => h(clone(state))));
+  }
+
+  /**
+   * What the tray's Restart to update, or a notification's Restart, does while
+   * the page is there: asks the page.
+   */
+  requestRestart() {
+    this.restartHandlers.forEach((h) => h());
   }
 
   // --- reminders ----------------------------------------------------------------
@@ -978,11 +1390,12 @@ export class MockBackend implements Backend {
     return clone(this.checkReminders());
   }
 
-  async getSyncStatuses() {
+  async getSyncStatuses(): Promise<SyncStatus[]> {
     return this.state.accounts.map((a) => ({
       accountId: a.id,
-      state: a.syncError ? ("error" as const) : ("idle" as const),
-      message: a.syncError,
+      ...(this.syncing.has(a.id)
+        ? { state: "syncing", message: "Syncing Inbox…" }
+        : { state: a.syncError ? "error" : "idle", message: a.syncError }),
       lastSyncedAt: a.lastSyncedAt,
     }));
   }
@@ -1584,6 +1997,8 @@ export class MockBackend implements Backend {
 
   async createEvent(draft: Parameters<Backend["createEvent"]>[0]) {
     await this.delay();
+    const calendar = this.state.calendars.find((c) => c.id === draft.calendarId);
+    if (calendar) this.checkFeature(calendar.accountId, "calendar");
     const event = this.eventFromDraft(this.id("evt"), draft);
     this.state.events.push(event);
     this.emit(["calendar"], event.accountId);
@@ -1690,6 +2105,7 @@ export class MockBackend implements Backend {
 
   async createContact(draft: Parameters<Backend["createContact"]>[0]) {
     await this.delay();
+    this.checkFeature(draft.accountId, "contacts");
     const contact = this.contactFromDraft(this.id("contact"), draft);
     this.state.contacts.push(contact);
     this.emit(["contacts"], contact.accountId);
@@ -1744,6 +2160,7 @@ export class MockBackend implements Backend {
     const list =
       this.state.taskLists.find((l) => l.id === draft.listId) ??
       fail("notFound", "task list not found");
+    this.checkFeature(list.accountId, "tasks");
     const now = new Date().toISOString();
     const id = this.id("task");
     const task: Task = {
@@ -1830,6 +2247,16 @@ export class MockBackend implements Backend {
   onQuitRequested(handler: () => void): Unsubscribe {
     this.quitHandlers.add(handler);
     return () => this.quitHandlers.delete(handler);
+  }
+
+  onUpdateState(handler: (state: UpdateState) => void): Unsubscribe {
+    this.updateHandlers.add(handler);
+    return () => this.updateHandlers.delete(handler);
+  }
+
+  onRestartRequested(handler: () => void): Unsubscribe {
+    this.restartHandlers.add(handler);
+    return () => this.restartHandlers.delete(handler);
   }
 
   onRemindersChanged(handler: (event: RemindersChangedEvent) => void): Unsubscribe {

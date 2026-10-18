@@ -65,6 +65,8 @@ pub enum Action {
     Join(String),
     /// Mark the task complete, without showing the window.
     CompleteTask(String),
+    /// Restart into the installed update (see `desktop::update`).
+    RestartToUpdate,
 }
 
 impl Action {
@@ -83,6 +85,7 @@ impl Action {
             Action::Dismiss(key) => format!("dismiss:{key}"),
             Action::Join(url) => format!("join:{url}"),
             Action::CompleteTask(id) => format!("complete:{id}"),
+            Action::RestartToUpdate => "restart-update".into(),
         }
     }
 
@@ -91,6 +94,7 @@ impl Action {
         match encoded {
             "show" => return Some(Action::ShowWindow),
             "reminders" => return Some(Action::OpenReminders),
+            "restart-update" => return Some(Action::RestartToUpdate),
             _ => {}
         }
         let (verb, id) = encoded.split_once(':')?;
@@ -821,6 +825,8 @@ pub(crate) mod tests {
             created_at: Utc::now(),
             last_synced_at: None,
             sync_error: None,
+            needs_permission: vec![],
+            refused_features: vec![],
         }
     }
 
@@ -887,6 +893,7 @@ pub(crate) mod tests {
             Action::Dismiss("task:7a:1792040700".into()),
             Action::Join("https://teams.example/l/meetup-join/19%3a?context=%7b%7d".into()),
             Action::CompleteTask("t1".into()),
+            Action::RestartToUpdate,
         ] {
             assert_eq!(Action::decode(&action.encode()), Some(action));
         }
@@ -903,6 +910,7 @@ pub(crate) mod tests {
             "snooze:5:",
             "dismiss:",
             "reminders:x",
+            "restart-update:x",
         ] {
             assert_eq!(Action::decode(junk), None, "{junk:?}");
         }

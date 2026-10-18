@@ -10,6 +10,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { EmptyState } from "../../components/EmptyState";
 import { PaneSpinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
+import { FeaturePermissionNotice } from "../settings/FeaturePermission";
 import { useCreateTask, useDeleteTask, useTaskLists, useTasks, useUpdateTask } from "./queries";
 import { useTasksStore } from "./store";
 import { TaskDetails, TaskDetailsPane } from "./TaskDetails";
@@ -30,6 +31,9 @@ import {
   toDateString,
 } from "./taskUtils";
 import "./tasks.css";
+
+/** The New task button, which gets the keyboard after tasks are turned on. */
+const NEW_TASK_BUTTON_ID = "tasks-new-task";
 
 const EMPTY_TEXT = {
   starred: {
@@ -322,6 +326,7 @@ export function TasksModule() {
         className="tasks__sidebar"
         action={
           <button
+            id={NEW_TASK_BUTTON_ID}
             type="button"
             className="btn btn--primary"
             onClick={focusAdd}
@@ -342,6 +347,11 @@ export function TasksModule() {
           view={view}
           counts={counts}
           onSelect={(v) => setView(v)}
+        />
+        <FeaturePermissionNotice
+          feature="tasks"
+          accounts={accounts}
+          returnFocusId={NEW_TASK_BUTTON_ID}
         />
       </ModuleSidebar>
 

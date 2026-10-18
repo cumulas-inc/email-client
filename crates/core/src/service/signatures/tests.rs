@@ -14,7 +14,8 @@ use super::*;
 use crate::auth::microsoft::SignInResult;
 use crate::error::ErrorCode;
 use crate::model::{
-    Account, AccountKind, AccountSettings, MicrosoftSettings, ReplyKind, Settings, SyncStatus,
+    Account, AccountKind, AccountSettings, MicrosoftSettings, PermissionRequest, ReplyKind,
+    Settings, SyncStatus,
 };
 use crate::secrets::MemorySecretStore;
 use crate::service::tests::{FakeConnector, FakeServer};
@@ -161,6 +162,8 @@ fn microsoft_account(s: &Setup, tenant: &str) -> Account {
         created_at: Utc::now(),
         last_synced_at: None,
         sync_error: None,
+        needs_permission: vec![],
+        refused_features: vec![],
     };
     s.service.store().insert_account(&account).unwrap();
     account
@@ -1327,12 +1330,14 @@ async fn signing_in_asks_at_once() {
         access_token: "access".into(),
         refresh_token: "refresh".into(),
         expires_in: StdDuration::from_secs(3600),
+        requested_scopes: Vec::new(),
+        response_scopes: Vec::new(),
         consent_refused: None,
     });
     let sign_in = s.connector.sign_in.lock().unwrap().clone();
     let account = s
         .service
-        .add_microsoft_account(&|_| Ok(()), None)
+        .add_microsoft_account(&|_| Ok(()), None, PermissionRequest::All)
         .await
         .unwrap();
     settle().await;
@@ -1353,7 +1358,7 @@ async fn signing_in_asks_at_once() {
     });
     *s.connector.sign_in.lock().unwrap() = sign_in;
     s.service
-        .add_microsoft_account(&|_| Ok(()), None)
+        .add_microsoft_account(&|_| Ok(()), None, PermissionRequest::All)
         .await
         .unwrap();
     settle().await;

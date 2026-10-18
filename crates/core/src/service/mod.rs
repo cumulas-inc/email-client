@@ -8,6 +8,7 @@ mod alerts;
 mod background;
 mod connector;
 mod mail;
+mod permissions;
 mod pim;
 mod reminders;
 mod search;
@@ -33,11 +34,15 @@ pub use search::{
 };
 pub use targeted::SyncScope;
 
+use crate::auth::microsoft::{
+    is_personal_tenant, legacy_graph_scopes, parse_granted_scopes, sign_in_scopes,
+};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
-    Account, AccountKind, AccountSettings, ActiveReminder, Calendar, DataKind, EntityKind,
-    ImapAccountUpdate, ImapSettings, MicrosoftSettings, NewImapAccount, Settings, SyncState,
-    SyncStatus, TaskList, TlsMode, is_valid_font_family, local_id,
+    Account, AccountFeature, AccountKind, AccountSettings, ActiveReminder, Calendar, DataKind,
+    EntityKind, ImapAccountUpdate, ImapSettings, MicrosoftSettings, NewImapAccount,
+    PermissionRequest, Settings, SyncState, SyncStatus, TaskList, TlsMode, is_valid_font_family,
+    local_id,
 };
 use crate::providers::imap::ImapCredentials;
 use crate::push::PushStatus;
@@ -88,12 +93,20 @@ const ACCOUNT_COLORS: &[&str] = &[
 const LOCAL_CALENDAR_ID: &str = "local:calendar";
 const LOCAL_TASK_LIST_ID: &str = "local:tasks";
 
+/// An account's providers as the connector made them, before gating (see
+/// [`ProviderSet::gated`]), and the features the account needed permission
+/// for then.
+struct CachedProviders {
+    raw: ProviderSet,
+    needs_permission: Vec<AccountFeature>,
+}
+
 pub struct CoreService {
     store: Arc<Store>,
     secrets: Arc<dyn SecretStore>,
     connector: Arc<dyn Connector>,
     sink: Arc<dyn EventSink>,
-    providers: tokio::sync::Mutex<HashMap<String, ProviderSet>>,
+    providers: tokio::sync::Mutex<HashMap<String, CachedProviders>>,
     sync_status: Mutex<HashMap<String, SyncStatus>>,
     sync_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Cancels the Microsoft sign-in in progress, tagged with its sequence number.
@@ -142,15 +155,38 @@ impl CoreService {
     }
 
     /// Providers for an account, created on first use and then cached so that
-    /// connections and tokens are reused.
+    /// connections and tokens are reused, with the features it can't use
+    /// now gated. They are made afresh once the features it needs
+    /// permission for change: a provider keeps what it fell back on
+    /// without a permission (the computer's time zone).
     async fn providers_for(&self, account_id: &str) -> Result<ProviderSet> {
-        let mut cache = self.providers.lock().await;
-        if let Some(set) = cache.get(account_id) {
-            return Ok(set.clone());
-        }
+        self.providers_retrying(account_id, &[]).await
+    }
+
+    /// The providers for an account, with the refused features in
+    /// `retrying` not gated, so that a sync tries them again while they
+    /// still show as refused.
+    async fn providers_retrying(
+        &self,
+        account_id: &str,
+        retrying: &[AccountFeature],
+    ) -> Result<ProviderSet> {
         let account = self.store.get_account(account_id)?;
-        let set = self.connector.providers(&account).await?;
-        cache.insert(account_id.to_owned(), set.clone());
+        let mut cache = self.providers.lock().await;
+        if let Some(entry) = cache.get(account_id)
+            && entry.needs_permission == account.needs_permission
+        {
+            return Ok(entry.raw.gated(&account, retrying));
+        }
+        let raw = self.connector.providers(&account).await?;
+        let set = raw.gated(&account, retrying);
+        cache.insert(
+            account_id.to_owned(),
+            CachedProviders {
+                raw,
+                needs_permission: account.needs_permission.clone(),
+            },
+        );
         Ok(set)
     }
 
@@ -227,6 +263,8 @@ impl CoreService {
             created_at: Utc::now(),
             last_synced_at: None,
             sync_error: None,
+            needs_permission: vec![],
+            refused_features: vec![],
         };
         self.secrets
             .set(&keys::imap_password(&account.id), &input.password)
@@ -306,12 +344,26 @@ impl CoreService {
     }
 
     /// Signs in to a Microsoft account in the browser and adds it, or refreshes
-    /// the credentials of an account that was already added.
+    /// the credentials of an account that was already added. `request` is
+    /// what the sign-in asks permission for; the account comes back with
+    /// what Microsoft granted recorded.
     pub async fn add_microsoft_account(
         &self,
         open_browser: &BrowserOpener,
         login_hint: Option<&str>,
+        request: PermissionRequest,
     ) -> Result<Account> {
+        // What the account the login hint names has, if it was added.
+        let recorded = match self.microsoft_account_named(login_hint)? {
+            Some(account) => Some(self.granted_scopes(&account.id)?),
+            None => None,
+        };
+        let graph_scopes = sign_in_scopes(request, recorded.as_deref());
+        // Only when signing in again for what the account has: a refusal of
+        // something else on the first try would be blamed on the push
+        // service, and open the browser a second time.
+        let push_consent =
+            request == PermissionRequest::Current && self.wants_push_consent(login_hint);
         let seq = self
             .sign_in_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -325,9 +377,10 @@ impl CoreService {
         {
             let _ = previous.send(());
         }
-        let push_consent = self.wants_push_consent(login_hint);
         let outcome = tokio::select! {
-            result = self.connector.microsoft_sign_in(open_browser, login_hint, push_consent) => result,
+            result = self.connector.microsoft_sign_in(
+                open_browser, login_hint, &graph_scopes, push_consent,
+            ) => result,
             _ = cancel_rx => Err(Error::new(ErrorCode::SignInCancelled, "Sign-in was canceled.")),
         };
         {
@@ -340,6 +393,21 @@ impl CoreService {
         let existing = self.store.list_accounts()?.into_iter().find(
             |a| matches!(&a.settings, AccountSettings::Microsoft(m) if m.user_id == result.user_id),
         );
+        // What the sign-in proves the account has: consent covers all that
+        // was asked for or none of it. A work account also keeps what it
+        // had (its own, whichever account the hint named), and what
+        // Microsoft says; a personal account's refreshes may ask for no
+        // more than this authorization covered.
+        let granted = if is_personal_tenant(&result.tenant_id) {
+            result.requested_scopes.clone()
+        } else {
+            let previous = match &existing {
+                Some(account) => self.granted_scopes(&account.id)?,
+                None => Vec::new(),
+            };
+            let all = [&result.requested_scopes, &result.response_scopes, &previous];
+            parse_granted_scopes(&all.map(|s| s.join(" ")).join(" "))
+        };
         let account = match existing {
             Some(mut account) => {
                 account.display_name = result.display_name.clone();
@@ -363,6 +431,8 @@ impl CoreService {
                     created_at: Utc::now(),
                     last_synced_at: None,
                     sync_error: None,
+                    needs_permission: vec![],
+                    refused_features: vec![],
                 };
                 self.store.insert_account(&account)?;
                 account
@@ -371,12 +441,17 @@ impl CoreService {
         {
             // Under the account's lock, which removing it also takes: the
             // removal deletes what's saved here, or this finds the account
-            // gone and saves nothing.
+            // gone and saves nothing. A token refresh reads the refresh token
+            // and the grant under it too, so it never asks with this token
+            // for the grant before, and records a grant only while the token
+            // and grant it read are still stored, so one under way can't
+            // overwrite this newer grant.
             let _sign_in = secrets::lock_account(&account.id).await;
             self.store.get_account(&account.id)?;
             self.secrets
                 .set(&keys::refresh_token(&account.id), &result.refresh_token)
                 .await?;
+            self.store.set_sign_in_grant(&account.id, &granted)?;
         }
         self.push
             .set_consent_refusal(&account.id, result.consent_refused.clone());
@@ -385,7 +460,29 @@ impl CoreService {
         // A new sign-in may come with consent the organization gave since.
         self.check_signature_soon(&account.id);
         self.notify(&[DataKind::Accounts], Some(&account.id));
-        Ok(account)
+        self.store.get_account(&account.id)
+    }
+
+    /// The Microsoft account whose address `login_hint` is, if one was
+    /// added.
+    fn microsoft_account_named(&self, login_hint: Option<&str>) -> Result<Option<Account>> {
+        let Some(hint) = login_hint.map(str::trim).filter(|h| !h.is_empty()) else {
+            return Ok(None);
+        };
+        Ok(self
+            .store
+            .list_accounts()?
+            .into_iter()
+            .find(|a| a.kind == AccountKind::Microsoft && a.email.eq_ignore_ascii_case(hint)))
+    }
+
+    /// The Graph permissions a Microsoft account has: as recorded, or as
+    /// every account added before grants were recorded has.
+    fn granted_scopes(&self, account_id: &str) -> Result<Vec<String>> {
+        Ok(self
+            .store
+            .microsoft_grant(account_id)?
+            .map_or_else(legacy_graph_scopes, |grant| grant.scopes))
     }
 
     /// Whether signing in again as `login_hint` should also ask consent for

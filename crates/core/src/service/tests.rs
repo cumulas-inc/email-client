@@ -10,11 +10,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::auth::microsoft::SignInResult;
+use crate::auth::microsoft::{CORE_SCOPES, SignInResult, legacy_graph_scopes};
 use crate::error::ErrorCode;
 use crate::model::{
-    AccountSettings, AttachmentMeta, EmailAddress, EventDraft, Folder, FolderRole,
-    ImapAccountUpdate, ImapSettings, Importance, Message, MessageQuery, MessageSummary,
+    AccountSettings, AdminConsentLink, AttachmentMeta, EmailAddress, EventDraft, Folder,
+    FolderRole, ImapAccountUpdate, ImapSettings, Importance, Message, MessageQuery, MessageSummary,
     OutgoingMessage, ServerSearchStatus, ShowAs, TaskDraft, TaskPatch, TaskStatus,
 };
 use crate::providers::{
@@ -62,6 +62,8 @@ pub(crate) struct FakeServer {
     pub search_hold: Option<Arc<tokio::sync::Notify>>,
     /// Server searches of these accounts fail so.
     pub search_failures: HashMap<String, Error>,
+    /// Runs when the folders are listed, as a mail sync starts.
+    pub on_list_folders: Option<Box<dyn Fn() + Send>>,
     next_uid: u32,
 }
 
@@ -126,6 +128,9 @@ impl MailProvider for FakeMail {
     async fn list_folders(&self) -> Result<Vec<Folder>> {
         self.connect()?;
         let server = self.server.lock().unwrap();
+        if let Some(hook) = &server.on_list_folders {
+            hook();
+        }
         Ok(server
             .folders
             .iter()
@@ -387,10 +392,18 @@ pub(crate) struct FakeConnector {
     pub subscriptions: Mutex<Option<Arc<dyn ChangeSubscriptions>>>,
     /// Whether each Microsoft sign-in asked consent for the push service.
     pub push_consent: Mutex<Vec<bool>>,
+    /// What each Microsoft sign-in asked for.
+    pub sign_in_scopes: Mutex<Vec<Vec<String>>>,
     /// What the next Microsoft sign-in returns; it never finishes when unset.
     pub sign_in: Mutex<Option<SignInResult>>,
     /// The calendar of Microsoft accounts, when set.
     pub calendar: Mutex<Option<Arc<dyn crate::providers::CalendarProvider>>>,
+    /// The contacts of Microsoft accounts, when set.
+    pub contacts: Mutex<Option<Arc<dyn crate::providers::ContactsProvider>>>,
+    /// The tasks of Microsoft accounts, when set.
+    pub tasks: Mutex<Option<Arc<dyn crate::providers::TasksProvider>>>,
+    /// How often providers were made.
+    pub provider_sets: AtomicUsize,
     /// The signature service of Microsoft work accounts' organizations,
     /// when set.
     pub organization_signatures: Mutex<Option<Arc<dyn crate::signatures::OrganizationSignatures>>>,
@@ -408,8 +421,12 @@ impl FakeConnector {
             relay: Mutex::default(),
             subscriptions: Mutex::default(),
             push_consent: Mutex::default(),
+            sign_in_scopes: Mutex::default(),
             sign_in: Mutex::default(),
             calendar: Mutex::default(),
+            contacts: Mutex::default(),
+            tasks: Mutex::default(),
+            provider_sets: AtomicUsize::new(0),
             organization_signatures: Mutex::default(),
             organization_requests: AtomicUsize::new(0),
         }
@@ -419,17 +436,16 @@ impl FakeConnector {
 #[async_trait]
 impl Connector for FakeConnector {
     async fn providers(&self, account: &Account) -> Result<ProviderSet> {
+        self.provider_sets.fetch_add(1, Ordering::SeqCst);
+        let microsoft = account.kind == AccountKind::Microsoft;
         Ok(ProviderSet {
             mail: Arc::new(FakeMail {
                 account_id: account.id.clone(),
                 server: Arc::clone(&self.server),
             }),
-            calendar: match account.kind {
-                AccountKind::Microsoft => self.calendar.lock().unwrap().clone(),
-                AccountKind::Imap => None,
-            },
-            contacts: None,
-            tasks: None,
+            calendar: self.calendar.lock().unwrap().clone().filter(|_| microsoft),
+            contacts: self.contacts.lock().unwrap().clone().filter(|_| microsoft),
+            tasks: self.tasks.lock().unwrap().clone().filter(|_| microsoft),
             subscriptions: self.subscriptions.lock().unwrap().clone(),
         })
     }
@@ -450,15 +466,42 @@ impl Connector for FakeConnector {
         &self,
         _: &BrowserOpener,
         _: Option<&str>,
+        graph_scopes: &[String],
         push_consent: bool,
     ) -> Result<SignInResult> {
         self.push_consent.lock().unwrap().push(push_consent);
+        self.sign_in_scopes
+            .lock()
+            .unwrap()
+            .push(graph_scopes.to_vec());
         let result = self.sign_in.lock().unwrap().take();
         match result {
-            Some(result) => Ok(result),
+            // Like the real sign-in's: it asked for `graph_scopes`.
+            Some(result) => Ok(SignInResult {
+                requested_scopes: graph_scopes
+                    .iter()
+                    .filter(|s| {
+                        !matches!(
+                            s.as_str(),
+                            "openid" | "profile" | "email" | "offline_access"
+                        )
+                    })
+                    .cloned()
+                    .collect(),
+                ..result
+            }),
             // Like a user who never finishes signing in in the browser.
             None => std::future::pending().await,
         }
+    }
+
+    fn microsoft_admin_consent(&self, tenant: Option<&str>) -> Result<AdminConsentLink> {
+        let tenant = tenant.unwrap_or("organizations").to_owned();
+        Ok(AdminConsentLink {
+            admin_consent_url: format!("https://admin.test/{tenant}"),
+            tenant,
+            admin_page_url: None,
+        })
     }
 
     fn organization_signatures(
@@ -496,8 +539,14 @@ struct RemindersChanged {
     cleared: Vec<String>,
 }
 
+/// Hears every `data_changed` as it happens, as the UI would.
+type ChangeWatcher = Box<dyn Fn(&[DataKind], Option<&str>) + Send>;
+
 #[derive(Default)]
 struct RecordingSink {
+    /// Every `data_changed`: the kinds and the account.
+    changes: Mutex<Vec<(Vec<DataKind>, Option<String>)>>,
+    watcher: Mutex<Option<ChangeWatcher>>,
     reminders: Mutex<Vec<RemindersChanged>>,
     new_mail: Mutex<Vec<String>>,
     alerts: Mutex<Vec<MailAlert>>,
@@ -507,7 +556,15 @@ struct RecordingSink {
 }
 
 impl EventSink for RecordingSink {
-    fn data_changed(&self, _: &[DataKind], _: Option<&str>) {}
+    fn data_changed(&self, kinds: &[DataKind], account_id: Option<&str>) {
+        self.changes
+            .lock()
+            .unwrap()
+            .push((kinds.to_vec(), account_id.map(str::to_owned)));
+        if let Some(watcher) = &*self.watcher.lock().unwrap() {
+            watcher(kinds, account_id);
+        }
+    }
     fn sync_status(&self, status: &SyncStatus) {
         if status.state == SyncState::Idle {
             self.full_syncs.fetch_add(1, Ordering::SeqCst);
@@ -1141,7 +1198,8 @@ async fn updating_imap_account_verifies_and_stores_new_password() {
 async fn microsoft_sign_in_can_be_cancelled() {
     let h = harness();
     let service = &h.service;
-    let (result, ()) = tokio::join!(service.add_microsoft_account(&|_| Ok(()), None), async {
+    let sign_in = service.add_microsoft_account(&|_| Ok(()), None, PermissionRequest::All);
+    let (result, ()) = tokio::join!(sign_in, async {
         tokio::task::yield_now().await;
         service.cancel_microsoft_sign_in();
     });
@@ -2307,6 +2365,8 @@ async fn polls_back_off_while_syncs_keep_failing() {
         created_at: Utc::now(),
         last_synced_at: None,
         sync_error: None,
+        needs_permission: vec![],
+        refused_features: vec![],
     };
     b.service.store().insert_account(&account).unwrap();
     b.service.sync_account(&account.id).await.unwrap();
@@ -2484,6 +2544,8 @@ async fn a_locked_keyring_is_only_asked_at_the_periodic_sync() {
                 created_at: Utc::now(),
                 last_synced_at: Some(Utc::now()),
                 sync_error: None,
+                needs_permission: vec![],
+                refused_features: vec![],
             })
             .unwrap();
         store
@@ -2592,6 +2654,8 @@ fn microsoft_account(h: &Harness, email: &str) -> Account {
         created_at: Utc::now(),
         last_synced_at: None,
         sync_error: None,
+        needs_permission: vec![],
+        refused_features: vec![],
     };
     h.service.store().insert_account(&account).unwrap();
     add_message(h, &account, "INBOX", "INBOX:1", "Welcome");
@@ -2674,7 +2738,8 @@ async fn missing_consent_polls_and_offers_it_at_the_next_sign_in() {
     // too; as anyone else, not.
     for hint in [Some("ADELE@contoso.com"), Some("grace@contoso.com"), None] {
         let service = &r.b.service;
-        let (result, ()) = tokio::join!(service.add_microsoft_account(&|_| Ok(()), hint), async {
+        let sign_in = service.add_microsoft_account(&|_| Ok(()), hint, PermissionRequest::Current);
+        let (result, ()) = tokio::join!(sign_in, async {
             tokio::task::yield_now().await;
             service.cancel_microsoft_sign_in();
         });
@@ -2716,11 +2781,17 @@ async fn refused_push_consent_says_why_and_is_not_asked_again() {
         access_token: "access".into(),
         refresh_token: "refresh".into(),
         expires_in: std::time::Duration::from_secs(3600),
+        requested_scopes: legacy_graph_scopes(),
+        response_scopes: Vec::new(),
         consent_refused: Some(refusal.clone()),
     });
     let signed_in =
         r.b.service
-            .add_microsoft_account(&|_| Ok(()), Some("adele@contoso.com"))
+            .add_microsoft_account(
+                &|_| Ok(()),
+                Some("adele@contoso.com"),
+                PermissionRequest::Current,
+            )
             .await
             .unwrap();
     assert_eq!(signed_in.id, account.id);
@@ -2744,13 +2815,18 @@ async fn refused_push_consent_says_why_and_is_not_asked_again() {
             url: "https://login.microsoftonline.com/contoso.com/v2.0/adminconsent?client_id=x"
                 .into(),
             tenant: "contoso.com".into(),
+            admin_page_url: None,
         })
     );
 
     // A later sign-in doesn't ask again, which would open the browser twice.
     let service = &r.b.service;
     let (result, ()) = tokio::join!(
-        service.add_microsoft_account(&|_| Ok(()), Some("adele@contoso.com")),
+        service.add_microsoft_account(
+            &|_| Ok(()),
+            Some("adele@contoso.com"),
+            PermissionRequest::Current
+        ),
         async {
             tokio::task::yield_now().await;
             service.cancel_microsoft_sign_in();
@@ -2988,6 +3064,8 @@ async fn signed_in_service(
         created_at: Utc::now(),
         last_synced_at: None,
         sync_error: None,
+        needs_permission: vec![],
+        refused_features: vec![],
     };
     service.store().insert_account(&account).unwrap();
     keyring
@@ -3052,9 +3130,13 @@ async fn a_refresh_ending_as_its_account_is_removed_keeps_no_sign_in() {
             tenant: "common".into(),
             authority_host: server.uri(),
             consent_scopes: Vec::new(),
+            graph_scopes: Vec::new(),
+            published: false,
         },
         account.id.clone(),
         keyring.clone(),
+        false,
+        Arc::new(crate::auth::NoGrantRecord),
     ));
     // The refresh has found refresh-0 still kept, and is saving refresh-1,
     // when the account is removed.
@@ -3077,12 +3159,18 @@ async fn a_sign_in_ending_as_its_account_is_removed_keeps_no_sign_in() {
         access_token: "access".into(),
         refresh_token: "refresh-new".into(),
         expires_in: std::time::Duration::from_secs(3600),
+        requested_scopes: legacy_graph_scopes(),
+        response_scopes: Vec::new(),
         consent_refused: None,
     });
     // ...is saving the new refresh token when the account is removed.
     let signing_in = tokio::spawn({
         let service = Arc::clone(&service);
-        async move { service.add_microsoft_account(&|_| Ok(()), None).await }
+        async move {
+            service
+                .add_microsoft_account(&|_| Ok(()), None, PermissionRequest::Current)
+                .await
+        }
     });
     let (_, kept) = remove_while_saving(&keyring, &service, &account, signing_in).await;
     assert_eq!(kept, None);
@@ -3102,6 +3190,8 @@ async fn a_sign_in_finding_its_account_removed_keeps_no_sign_in() {
         access_token: "access".into(),
         refresh_token: "refresh-new".into(),
         expires_in: std::time::Duration::from_secs(3600),
+        requested_scopes: legacy_graph_scopes(),
+        response_scopes: Vec::new(),
         consent_refused: None,
     });
     // A removal holds the account's lock, deleting its secrets, when the
@@ -3109,7 +3199,11 @@ async fn a_sign_in_finding_its_account_removed_keeps_no_sign_in() {
     let removing = secrets::lock_account(&account.id).await;
     let signing_in = tokio::spawn({
         let service = Arc::clone(&service);
-        async move { service.add_microsoft_account(&|_| Ok(()), None).await }
+        async move {
+            service
+                .add_microsoft_account(&|_| Ok(()), None, PermissionRequest::Current)
+                .await
+        }
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     service.store().delete_account(&account.id).unwrap();
@@ -4055,4 +4149,1143 @@ async fn a_short_snooze_ends_on_time() {
     tokio::time::sleep(std::time::Duration::from_secs(31)).await;
     assert_eq!(b.h.sink.shown_reminders(), ["Standup", "Standup"]);
     b.service.shutdown().await;
+}
+
+// --- Microsoft accounts' permissions ------------------------------------------
+
+use crate::model::{
+    AccountFeature, Contact, ContactDraft, MicrosoftGrant, PermissionRequest, Task,
+};
+use crate::providers::{ContactsProvider, TasksProvider};
+use crate::signatures::CONSUMER_TENANT;
+
+const WORK_TENANT: &str = "11111111-2222-3333-4444-555555555555";
+
+/// Graph permissions by name.
+fn scopes(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| (*s).to_owned()).collect()
+}
+
+fn core_graph() -> Vec<String> {
+    scopes(&["User.Read", "Mail.ReadWrite", "Mail.Send"])
+}
+
+/// The scopes a sign-in asks for: the OpenID Connect and core ones, then
+/// `optional`.
+fn asked(optional: &[&str]) -> Vec<String> {
+    [scopes(CORE_SCOPES), scopes(optional)].concat()
+}
+
+/// What Graph answers a listing the account may not see.
+fn forbidden() -> Error {
+    Error::provider("Access is denied. Check credentials and try again.")
+        .with_details(serde_json::json!({ "status": 403, "code": "ErrorAccessDenied" }))
+}
+
+/// Microsoft 365's calendars, contacts and To Do for one account: two
+/// calendars and two task lists with an item each, and a contact. Any
+/// listing can be refused (HTTP 403), as can one calendar's or list's items.
+struct FakePim {
+    account_id: String,
+    /// Features whose listing Graph refuses.
+    refused: Mutex<Vec<AccountFeature>>,
+    /// Features whose listing gets no answer (the network is down).
+    offline: Mutex<Vec<AccountFeature>>,
+    /// Calendars and task lists (remote ids) whose items Graph refuses.
+    unreadable: Mutex<Vec<String>>,
+    /// How often anything was listed.
+    listings: AtomicUsize,
+}
+
+impl FakePim {
+    fn check(&self, feature: AccountFeature) -> Result<()> {
+        self.listings.fetch_add(1, Ordering::SeqCst);
+        if self.refused.lock().unwrap().contains(&feature) {
+            return Err(forbidden());
+        }
+        if self.offline.lock().unwrap().contains(&feature) {
+            return Err(Error::network("The connection dropped."));
+        }
+        Ok(())
+    }
+
+    fn readable(&self, remote_id: &str) -> Result<()> {
+        if self
+            .unreadable
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r == remote_id)
+        {
+            return Err(forbidden());
+        }
+        Ok(())
+    }
+
+    fn calendar(&self, remote: &str) -> Calendar {
+        Calendar {
+            id: local_id(&self.account_id, EntityKind::Calendar, remote),
+            account_id: self.account_id.clone(),
+            remote_id: remote.into(),
+            name: remote.into(),
+            color: "#0b7a75".into(),
+            can_edit: true,
+            is_default: remote == "cal-a",
+        }
+    }
+
+    fn task_list(&self, remote: &str) -> TaskList {
+        TaskList {
+            id: local_id(&self.account_id, EntityKind::TaskList, remote),
+            account_id: self.account_id.clone(),
+            remote_id: remote.into(),
+            name: remote.into(),
+            is_default: remote == "list-a",
+        }
+    }
+
+    fn contact(&self, remote: &str, name: &str) -> Contact {
+        Contact {
+            id: local_id(&self.account_id, EntityKind::Contact, remote),
+            account_id: self.account_id.clone(),
+            remote_id: remote.into(),
+            display_name: name.into(),
+            given_name: None,
+            surname: None,
+            emails: vec![],
+            phones: vec![],
+            company: None,
+            job_title: None,
+            department: None,
+            address: None,
+            birthday: None,
+            notes: None,
+        }
+    }
+}
+
+#[async_trait]
+impl CalendarProvider for FakePim {
+    async fn list_calendars(&self) -> Result<Vec<Calendar>> {
+        self.check(AccountFeature::Calendar)?;
+        Ok(vec![self.calendar("cal-a"), self.calendar("cal-b")])
+    }
+
+    async fn list_events(
+        &self,
+        calendar: &Calendar,
+        _: DateTime<Utc>,
+        _: DateTime<Utc>,
+    ) -> Result<Vec<Event>> {
+        self.readable(&calendar.remote_id)?;
+        let remote = format!("{}-event", calendar.remote_id);
+        let start = Utc::now() + Duration::days(1);
+        Ok(vec![Event {
+            id: local_id(&self.account_id, EntityKind::Event, &remote),
+            account_id: self.account_id.clone(),
+            calendar_id: calendar.id.clone(),
+            remote_id: remote.clone(),
+            subject: remote,
+            location: None,
+            body_html: None,
+            body_preview: None,
+            start,
+            end: start + Duration::minutes(30),
+            is_all_day: false,
+            organizer: None,
+            attendees: vec![],
+            show_as: ShowAs::Busy,
+            response_status: ResponseStatus::Organizer,
+            is_online_meeting: false,
+            online_meeting_url: None,
+            reminder_minutes: None,
+            is_recurring: false,
+            is_cancelled: false,
+        }])
+    }
+
+    async fn create_event(&self, _: &Calendar, _: &EventDraft) -> Result<Event> {
+        unimplemented!()
+    }
+
+    async fn update_event(&self, _: &Calendar, _: &str, _: &EventDraft) -> Result<Event> {
+        unimplemented!()
+    }
+
+    async fn delete_event(&self, _: &Calendar, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn respond_to_event(
+        &self,
+        _: &Calendar,
+        _: &str,
+        _: crate::model::EventResponse,
+        _: Option<&str>,
+        _: bool,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+}
+
+#[async_trait]
+impl ContactsProvider for FakePim {
+    async fn list_contacts(&self) -> Result<Vec<Contact>> {
+        self.check(AccountFeature::Contacts)?;
+        Ok(vec![self.contact("contact-1", "Grace Hopper")])
+    }
+
+    async fn create_contact(&self, draft: &ContactDraft) -> Result<Contact> {
+        Ok(self.contact("contact-new", &draft.display_name))
+    }
+
+    async fn update_contact(&self, _: &str, _: &ContactDraft) -> Result<Contact> {
+        unimplemented!()
+    }
+
+    async fn delete_contact(&self, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+}
+
+#[async_trait]
+impl TasksProvider for FakePim {
+    async fn list_task_lists(&self) -> Result<Vec<TaskList>> {
+        self.check(AccountFeature::Tasks)?;
+        Ok(vec![self.task_list("list-a"), self.task_list("list-b")])
+    }
+
+    async fn list_tasks(&self, list: &TaskList) -> Result<Vec<Task>> {
+        self.readable(&list.remote_id)?;
+        let remote = format!("{}-task", list.remote_id);
+        let now = Utc::now();
+        Ok(vec![Task {
+            id: local_id(&self.account_id, EntityKind::Task, &remote),
+            account_id: self.account_id.clone(),
+            list_id: list.id.clone(),
+            remote_id: remote.clone(),
+            title: remote,
+            notes: None,
+            status: TaskStatus::NotStarted,
+            importance: Importance::Normal,
+            due_date: None,
+            reminder_at: None,
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        }])
+    }
+
+    async fn create_task(&self, _: &TaskList, _: &TaskDraft) -> Result<Task> {
+        unimplemented!()
+    }
+
+    async fn update_task(&self, _: &TaskList, _: &Task, _: &TaskPatch) -> Result<Task> {
+        unimplemented!()
+    }
+
+    async fn delete_task(&self, _: &TaskList, _: &str) -> Result<()> {
+        unimplemented!()
+    }
+}
+
+/// A Microsoft account of `tenant` (signed in elsewhere: the fakes need no
+/// token) with its grant `granted` (`None`: added before grants were
+/// recorded), on a [`FakePim`] of its own.
+fn pim_account(
+    h: &Harness,
+    email: &str,
+    tenant: &str,
+    granted: Option<&[String]>,
+) -> (Account, Arc<FakePim>) {
+    let account = Account {
+        id: Uuid::new_v4().to_string(),
+        kind: AccountKind::Microsoft,
+        display_name: "Adele".into(),
+        email: email.into(),
+        color: "#0b7a75".into(),
+        settings: AccountSettings::Microsoft(MicrosoftSettings {
+            tenant_id: tenant.into(),
+            user_id: Uuid::new_v4().to_string(),
+        }),
+        created_at: Utc::now(),
+        last_synced_at: None,
+        sync_error: None,
+        needs_permission: vec![],
+        refused_features: vec![],
+    };
+    let store = h.service.store();
+    store.insert_account(&account).unwrap();
+    if let Some(granted) = granted {
+        store.set_sign_in_grant(&account.id, granted).unwrap();
+    }
+    let pim = Arc::new(FakePim {
+        account_id: account.id.clone(),
+        refused: Mutex::default(),
+        offline: Mutex::default(),
+        unreadable: Mutex::default(),
+        listings: AtomicUsize::new(0),
+    });
+    *h.connector.calendar.lock().unwrap() = Some(pim.clone());
+    *h.connector.contacts.lock().unwrap() = Some(pim.clone());
+    *h.connector.tasks.lock().unwrap() = Some(pim.clone());
+    let account = store.get_account(&account.id).unwrap();
+    (account, pim)
+}
+
+/// What Microsoft's sign-in says about `account` (its tenant and user),
+/// and that the account has `response`.
+fn signed_in_as(account: &Account, response: &[String]) -> SignInResult {
+    let AccountSettings::Microsoft(settings) = &account.settings else {
+        panic!("not a Microsoft account");
+    };
+    SignInResult {
+        email: account.email.clone(),
+        display_name: account.display_name.clone(),
+        tenant_id: settings.tenant_id.clone(),
+        user_id: settings.user_id.clone(),
+        access_token: "access".into(),
+        refresh_token: "refresh".into(),
+        expires_in: std::time::Duration::from_secs(3600),
+        requested_scopes: Vec::new(),
+        response_scopes: response.to_vec(),
+        consent_refused: None,
+    }
+}
+
+/// What Microsoft's sign-in says about an account not added yet.
+fn signed_in_anew(email: &str, tenant: &str, response: &[String]) -> SignInResult {
+    SignInResult {
+        email: email.into(),
+        display_name: "Adele".into(),
+        tenant_id: tenant.into(),
+        user_id: Uuid::new_v4().to_string(),
+        access_token: "access".into(),
+        refresh_token: "refresh".into(),
+        expires_in: std::time::Duration::from_secs(3600),
+        requested_scopes: Vec::new(),
+        response_scopes: response.to_vec(),
+        consent_refused: None,
+    }
+}
+
+/// Signs in, as `result` says, asking for `request` as `hint`.
+async fn sign_in_with(
+    h: &Harness,
+    result: SignInResult,
+    hint: Option<&str>,
+    request: PermissionRequest,
+) -> Result<Account> {
+    *h.connector.sign_in.lock().unwrap() = Some(result);
+    h.service
+        .add_microsoft_account(&|_| Ok(()), hint, request)
+        .await
+}
+
+fn grant_of(h: &Harness, account: &Account) -> Option<MicrosoftGrant> {
+    h.service.store().microsoft_grant(&account.id).unwrap()
+}
+
+/// The account's calendars, contacts and task lists in the store.
+fn cached(h: &Harness, account: &Account) -> (usize, usize, usize) {
+    let id = &account.id;
+    (
+        h.service
+            .list_calendars()
+            .unwrap()
+            .iter()
+            .filter(|c| &c.account_id == id)
+            .count(),
+        h.service.list_contacts(Some(id), None).unwrap().len(),
+        h.service
+            .list_task_lists()
+            .unwrap()
+            .iter()
+            .filter(|l| &l.account_id == id)
+            .count(),
+    )
+}
+
+/// How often `accounts` was notified for the account so far.
+fn accounts_notified(h: &Harness, account: &Account) -> usize {
+    h.sink
+        .changes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(kinds, id)| {
+            kinds.contains(&DataKind::Accounts) && id.as_deref() == Some(account.id.as_str())
+        })
+        .count()
+}
+
+fn account_of(h: &Harness, account: &Account) -> Account {
+    h.service.store().get_account(&account.id).unwrap()
+}
+
+#[tokio::test]
+async fn a_mail_only_sign_in_records_the_grant_and_lists_missing_features() {
+    use AccountFeature::*;
+    for tenant in [WORK_TENANT, CONSUMER_TENANT] {
+        let h = harness();
+        // Microsoft says the account has a calendar permission an
+        // administrator gave before.
+        let response = [core_graph(), scopes(&["Calendars.ReadWrite"])].concat();
+        let account = sign_in_with(
+            &h,
+            signed_in_anew("adele@contoso.com", tenant, &response),
+            None,
+            PermissionRequest::MailOnly,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*h.connector.sign_in_scopes.lock().unwrap(), [asked(&[])]);
+        assert_eq!(*h.connector.push_consent.lock().unwrap(), [false]);
+        let granted = grant_of(&h, &account).unwrap();
+        assert!(granted.refused.is_empty());
+        if tenant == WORK_TENANT {
+            // A work account: what was asked for and what Microsoft said.
+            assert_eq!(granted.scopes, response);
+            assert_eq!(account.needs_permission, [Contacts, Tasks, MailboxSettings]);
+        } else {
+            // A personal account: only what was asked for, which its
+            // refreshes may name again.
+            assert_eq!(granted.scopes, core_graph());
+            assert_eq!(account.needs_permission, AccountFeature::ALL);
+        }
+        assert!(account.refused_features.is_empty());
+        // The account comes back as stored, and the UI hears of it.
+        assert_eq!(account, account_of(&h, &account));
+        assert!(accounts_notified(&h, &account) >= 1);
+    }
+}
+
+#[tokio::test]
+async fn turning_on_a_feature_asks_for_what_the_account_has_plus_it() {
+    use AccountFeature::*;
+    for tenant in [WORK_TENANT, CONSUMER_TENANT] {
+        let h = harness();
+        let with_contacts = [core_graph(), scopes(&["Contacts.ReadWrite"])].concat();
+        let (account, _) = pim_account(&h, "adele@contoso.com", tenant, Some(&with_contacts));
+        assert_eq!(account.needs_permission, [Calendar, Tasks, MailboxSettings]);
+        let signed_in = sign_in_with(
+            &h,
+            signed_in_as(&account, &[]),
+            Some("Adele@Contoso.com"),
+            PermissionRequest::Feature { feature: Calendar },
+        )
+        .await
+        .unwrap();
+        assert_eq!(signed_in.id, account.id);
+        assert_eq!(
+            *h.connector.sign_in_scopes.lock().unwrap(),
+            [asked(&["Calendars.ReadWrite", "Contacts.ReadWrite"])]
+        );
+        // Never with the push service's consent.
+        assert_eq!(*h.connector.push_consent.lock().unwrap(), [false]);
+        // The feature is on, whatever Microsoft's answer said.
+        assert_eq!(signed_in.needs_permission, [Tasks, MailboxSettings]);
+        assert!(signed_in.refused_features.is_empty());
+        assert_eq!(
+            grant_of(&h, &account).unwrap().scopes,
+            [
+                core_graph(),
+                scopes(&["Calendars.ReadWrite", "Contacts.ReadWrite"])
+            ]
+            .concat()
+        );
+    }
+
+    // An address no account has: what mail needs, and the feature.
+    let h = harness();
+    sign_in_with(
+        &h,
+        signed_in_anew("grace@contoso.com", WORK_TENANT, &[]),
+        Some("grace@contoso.com"),
+        PermissionRequest::Feature { feature: Tasks },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *h.connector.sign_in_scopes.lock().unwrap(),
+        [asked(&["Tasks.ReadWrite"])]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn signing_in_again_asks_for_what_the_account_has() {
+    let r = relay_background();
+    // The push service's consent is missing, so signing in again offers it.
+    r.tokens.refuse(SyncTokenError::ConsentMissing);
+    let account = microsoft_account(&r.b.h, "adele@contoso.com");
+    let with_contacts = [core_graph(), scopes(&["Contacts.ReadWrite"])].concat();
+    r.b.h
+        .service
+        .store()
+        .set_sign_in_grant(&account.id, &with_contacts)
+        .unwrap();
+    r.b.service.start_background();
+    r.b.settle().await;
+
+    let calendar = PermissionRequest::Feature {
+        feature: AccountFeature::Calendar,
+    };
+    for request in [
+        PermissionRequest::Current,
+        PermissionRequest::All,
+        PermissionRequest::MailOnly,
+        calendar,
+    ] {
+        let service = &r.b.service;
+        let sign_in =
+            service.add_microsoft_account(&|_| Ok(()), Some("adele@contoso.com"), request);
+        let (result, ()) = tokio::join!(sign_in, async {
+            tokio::task::yield_now().await;
+            service.cancel_microsoft_sign_in();
+        });
+        assert_eq!(result.unwrap_err().code, ErrorCode::SignInCancelled);
+    }
+    assert_eq!(
+        *r.b.h.connector.sign_in_scopes.lock().unwrap(),
+        [
+            asked(&["Contacts.ReadWrite"]),
+            scopes(&crate::auth::microsoft::all_scopes()),
+            asked(&[]),
+            asked(&["Calendars.ReadWrite", "Contacts.ReadWrite"]),
+        ]
+    );
+    // Only signing in again for what it has asks the push service's
+    // consent too.
+    assert_eq!(
+        *r.b.h.connector.push_consent.lock().unwrap(),
+        [true, false, false, false]
+    );
+
+    // An account added before grants were recorded has everything.
+    r.b.h
+        .service
+        .store()
+        .execute_for_tests("UPDATE accounts SET microsoft_grant = NULL");
+    let service = &r.b.service;
+    let sign_in = service.add_microsoft_account(
+        &|_| Ok(()),
+        Some("adele@contoso.com"),
+        PermissionRequest::Current,
+    );
+    let (result, ()) = tokio::join!(sign_in, async {
+        tokio::task::yield_now().await;
+        service.cancel_microsoft_sign_in();
+    });
+    assert_eq!(result.unwrap_err().code, ErrorCode::SignInCancelled);
+    assert_eq!(
+        r.b.h.connector.sign_in_scopes.lock().unwrap().last(),
+        Some(&scopes(&crate::auth::microsoft::all_scopes()))
+    );
+    r.b.service.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_sign_in_as_another_account_keeps_grants_apart() {
+    for b_tenant in [WORK_TENANT, CONSUMER_TENANT] {
+        let h = harness();
+        let a_grant = [core_graph(), scopes(&["Contacts.ReadWrite"])].concat();
+        let (a, _) = pim_account(&h, "adele@contoso.com", WORK_TENANT, Some(&a_grant));
+        let (b, _) = pim_account(&h, "grace@contoso.com", b_tenant, Some(&core_graph()));
+        // The hint names A; Microsoft's account picker signs in B.
+        let signed_in = sign_in_with(
+            &h,
+            signed_in_as(&b, &core_graph()),
+            Some("adele@contoso.com"),
+            PermissionRequest::MailOnly,
+        )
+        .await
+        .unwrap();
+        assert_eq!(signed_in.id, b.id);
+        assert_eq!(grant_of(&h, &b).unwrap().scopes, core_graph(), "{b_tenant}");
+        assert_eq!(signed_in.needs_permission, AccountFeature::ALL);
+        assert_eq!(grant_of(&h, &a).unwrap().scopes, a_grant);
+    }
+}
+
+#[tokio::test]
+async fn a_legacy_account_signing_in_mail_only_keeps_its_features() {
+    let h = harness();
+    let (account, _) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    let signed_in = sign_in_with(
+        &h,
+        signed_in_as(&account, &scopes(&["User.Read", "Mail.ReadWrite"])),
+        Some("adele@contoso.com"),
+        PermissionRequest::MailOnly,
+    )
+    .await
+    .unwrap();
+    // It has had every permission all along.
+    assert_eq!(
+        grant_of(&h, &account).unwrap().scopes,
+        legacy_graph_scopes()
+    );
+    assert!(signed_in.needs_permission.is_empty());
+}
+
+#[tokio::test]
+async fn legacy_accounts_count_as_fully_granted() {
+    let h = harness();
+    let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    assert_eq!(grant_of(&h, &account), None);
+    assert!(account.needs_permission.is_empty());
+    assert!(account.refused_features.is_empty());
+    let json = serde_json::to_value(&account).unwrap();
+    assert_eq!(json["needsPermission"], serde_json::json!([]));
+    assert_eq!(json["refusedFeatures"], serde_json::json!([]));
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(cached(&h, &account), (2, 1, 2));
+    assert_eq!(pim.listings.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn a_microsoft_account_without_contacts_permission_never_gets_local_contacts() {
+    for with_provider in [true, false] {
+        let h = harness();
+        let (account, _) = pim_account(&h, "adele@contoso.com", WORK_TENANT, Some(&core_graph()));
+        if !with_provider {
+            *h.connector.contacts.lock().unwrap() = None;
+            *h.connector.tasks.lock().unwrap() = None;
+        }
+        let error = h
+            .service
+            .create_contact(ContactDraft {
+                account_id: account.id.clone(),
+                display_name: "Grace Hopper".into(),
+                given_name: None,
+                surname: None,
+                emails: vec![],
+                phones: vec![],
+                company: None,
+                job_title: None,
+                department: None,
+                address: None,
+                birthday: None,
+                notes: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::PermissionRequired);
+        assert_eq!(
+            error.message,
+            "Cumulas Mail needs permission to use the contacts of adele@contoso.com. Turn it on \
+             in Settings → Accounts."
+        );
+        let details = error.details.unwrap();
+        assert_eq!(details["feature"], "contacts");
+        assert_eq!(details["accountId"], account.id.as_str());
+        assert_eq!(details["reason"], "notGranted");
+        assert_eq!(cached(&h, &account), (0, 0, 0));
+        // Nor a local calendar or task list, as IMAP accounts get.
+        h.service.sync_account(&account.id).await.unwrap();
+        assert_eq!(cached(&h, &account), (0, 0, 0));
+    }
+
+    // A calendar whose permission was lost: still cached until the next
+    // sync, but nothing goes into it.
+    let h = harness();
+    let (account, _) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    h.service.sync_account(&account.id).await.unwrap();
+    let calendar = h.service.list_calendars().unwrap().remove(0);
+    h.service
+        .store()
+        .record_granted_scopes(&account.id, &core_graph())
+        .unwrap();
+    let start = Utc::now();
+    let error = h
+        .service
+        .create_event(EventDraft {
+            calendar_id: calendar.id.clone(),
+            subject: "Dentist".into(),
+            location: None,
+            body_html: None,
+            start,
+            end: start + Duration::hours(1),
+            is_all_day: false,
+            attendees: vec![],
+            reminder_minutes: None,
+            show_as: ShowAs::Busy,
+            is_online_meeting: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::PermissionRequired);
+    assert_eq!(error.details.unwrap()["feature"], "calendar");
+    let events = h
+        .service
+        .list_events(start - Duration::days(1), start + Duration::days(2), None)
+        .unwrap();
+    assert!(events.iter().all(|e| e.subject != "Dentist"));
+}
+
+#[tokio::test]
+async fn missing_features_are_skipped_and_their_cache_dropped() {
+    let h = harness();
+    let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(cached(&h, &account), (2, 1, 2));
+    let listings = pim.listings.load(Ordering::SeqCst);
+
+    // A refresh says only mail is granted now.
+    h.service
+        .store()
+        .record_granted_scopes(&account.id, &core_graph())
+        .unwrap();
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(cached(&h, &account), (0, 0, 0));
+    // Graph wasn't asked.
+    assert_eq!(pim.listings.load(Ordering::SeqCst), listings);
+    let account = account_of(&h, &account);
+    assert_eq!(account.sync_error, None);
+    assert_eq!(account.needs_permission, AccountFeature::ALL);
+    assert!(account.last_synced_at.is_some());
+}
+
+#[tokio::test]
+async fn a_403_listing_calendars_marks_it_refused_not_the_account() {
+    let h = harness();
+    let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(cached(&h, &account), (2, 1, 2));
+    let notified = accounts_notified(&h, &account);
+
+    pim.refused.lock().unwrap().push(AccountFeature::Calendar);
+    h.service.sync_account(&account.id).await.unwrap();
+    let refused = account_of(&h, &account);
+    assert_eq!(refused.sync_error, None);
+    assert_eq!(refused.refused_features, [AccountFeature::Calendar]);
+    assert!(refused.needs_permission.is_empty());
+    assert_eq!(cached(&h, &account), (0, 1, 2));
+    // Once when refused, once at the end of the sync.
+    assert_eq!(accounts_notified(&h, &account), notified + 2);
+    let grant = grant_of(&h, &account).unwrap();
+    assert_eq!(grant.scopes, legacy_graph_scopes());
+    assert!(grant.refused_at.is_some());
+
+    // A 403 on one calendar's events is about that calendar.
+    let h = harness();
+    let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    pim.unreadable.lock().unwrap().push("cal-a".into());
+    pim.unreadable.lock().unwrap().push("list-b".into());
+    h.service.sync_account(&account.id).await.unwrap();
+    let synced = account_of(&h, &account);
+    assert_eq!(synced.sync_error, None);
+    assert!(synced.refused_features.is_empty());
+    assert_eq!(cached(&h, &account), (2, 1, 2));
+    let events = h
+        .service
+        .list_events(Utc::now(), Utc::now() + Duration::days(3), None)
+        .unwrap();
+    let subjects: Vec<&str> = events.iter().map(|e| e.subject.as_str()).collect();
+    assert_eq!(subjects, ["cal-b-event"]);
+    let tasks: Vec<String> = h
+        .service
+        .list_tasks(None, true)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.title)
+        .collect();
+    assert_eq!(tasks, ["list-a-task"]);
+}
+
+/// Refuses the account's calendar (Graph answers 403), then lets Graph
+/// list it again: it stays refused until something checks again.
+async fn refused_calendar(h: &Harness) -> (Account, Arc<FakePim>) {
+    let (account, pim) = pim_account(h, "adele@contoso.com", WORK_TENANT, None);
+    pim.refused.lock().unwrap().push(AccountFeature::Calendar);
+    h.service.sync_account(&account.id).await.unwrap();
+    pim.refused.lock().unwrap().clear();
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(
+        account_of(h, &account).refused_features,
+        [AccountFeature::Calendar]
+    );
+    assert_eq!(cached(h, &account).0, 0);
+    (account, pim)
+}
+
+#[tokio::test]
+async fn a_refused_feature_returns_after_sign_in_retry_new_grant_or_a_day() {
+    // Signing in again.
+    let h = harness();
+    let (account, _) = refused_calendar(&h).await;
+    let signed_in = sign_in_with(
+        &h,
+        signed_in_as(&account, &[]),
+        Some("adele@contoso.com"),
+        PermissionRequest::Current,
+    )
+    .await
+    .unwrap();
+    assert!(signed_in.refused_features.is_empty());
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(cached(&h, &account).0, 2);
+
+    // Check again.
+    let h = harness();
+    let (account, _) = refused_calendar(&h).await;
+    let notified = accounts_notified(&h, &account);
+    h.service.retry_microsoft_features(&account.id).unwrap();
+    assert!(account_of(&h, &account).refused_features.is_empty());
+    assert_eq!(accounts_notified(&h, &account), notified + 1);
+    // Nothing left to check: nothing to tell.
+    h.service.retry_microsoft_features(&account.id).unwrap();
+    assert_eq!(accounts_notified(&h, &account), notified + 1);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(cached(&h, &account).0, 2);
+
+    // Its permission granted anew (taken away, then given back).
+    let h = harness();
+    let (account, _) = refused_calendar(&h).await;
+    let store = h.service.store();
+    let without = scopes(&[
+        "User.Read",
+        "Mail.ReadWrite",
+        "Mail.Send",
+        "Contacts.ReadWrite",
+    ]);
+    assert!(store.record_granted_scopes(&account.id, &without).unwrap());
+    // Not granted, rather than refused.
+    assert_eq!(
+        account_of(&h, &account).needs_permission,
+        [
+            AccountFeature::Calendar,
+            AccountFeature::Tasks,
+            AccountFeature::MailboxSettings
+        ]
+    );
+    assert!(account_of(&h, &account).refused_features.is_empty());
+    assert!(
+        store
+            .record_granted_scopes(&account.id, &legacy_graph_scopes())
+            .unwrap()
+    );
+    let account = account_of(&h, &account);
+    assert!(account.needs_permission.is_empty());
+    assert!(account.refused_features.is_empty());
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(cached(&h, &account).0, 2);
+
+    // A day later.
+    let h = harness();
+    let (account, pim) = refused_calendar(&h).await;
+    let a_day_ago = Utc::now() - Duration::hours(25);
+    let refused_a_day_ago = || {
+        h.service.store().execute_for_tests(&format!(
+            "UPDATE accounts SET microsoft_grant =
+               json_set(microsoft_grant, '$.refusedAt', '{}')",
+            a_day_ago.to_rfc3339()
+        ))
+    };
+    // Still refused: checked again, and refused as of now. Nothing the UI
+    // shows changed; only the sync's end is told.
+    refused_a_day_ago();
+    pim.refused.lock().unwrap().push(AccountFeature::Calendar);
+    let notified = accounts_notified(&h, &account);
+    h.service.sync_account(&account.id).await.unwrap();
+    let grant = h.service.store().microsoft_grant(&account.id).unwrap();
+    let grant = grant.unwrap();
+    assert_eq!(grant.refused, [AccountFeature::Calendar]);
+    assert!(grant.refused_at.unwrap() > a_day_ago);
+    assert_eq!(cached(&h, &account).0, 0);
+    assert_eq!(accounts_notified(&h, &account), notified + 1);
+    // Back: told at the sync's end.
+    refused_a_day_ago();
+    pim.refused.lock().unwrap().clear();
+    let notified = accounts_notified(&h, &account);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert!(account_of(&h, &account).refused_features.is_empty());
+    assert_eq!(cached(&h, &account).0, 2);
+    assert_eq!(accounts_notified(&h, &account), notified + 1);
+
+    // Not while the sign-in is gone: the calendar wasn't checked.
+    let h = harness();
+    let (account, _) = refused_calendar(&h).await;
+    h.service.store().execute_for_tests(&format!(
+        "UPDATE accounts SET microsoft_grant =
+           json_set(microsoft_grant, '$.refusedAt', '{}')",
+        a_day_ago.to_rfc3339()
+    ));
+    h.server.lock().unwrap().failure = Some(Error::auth_required("Sign in again."));
+    h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(
+        account_of(&h, &account).refused_features,
+        [AccountFeature::Calendar]
+    );
+}
+
+#[tokio::test]
+async fn a_refused_feature_tried_again_looks_back_on_only_once_it_answers() {
+    use AccountFeature::{Calendar, Tasks};
+    let h = harness();
+    let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    pim.refused.lock().unwrap().extend([Calendar, Tasks]);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(account_of(&h, &account).refused_features, [Calendar, Tasks]);
+    let a_day_ago = Utc::now() - Duration::hours(25);
+    let refused_a_day_ago = || {
+        h.service.store().execute_for_tests(&format!(
+            "UPDATE accounts SET microsoft_grant =
+               json_set(microsoft_grant, '$.refusedAt', '{}')",
+            a_day_ago.to_rfc3339()
+        ))
+    };
+    // What the UI reads of the account each time it hears it changed.
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    {
+        let (store, id, shown) = (
+            Arc::clone(h.service.store()),
+            account.id.clone(),
+            Arc::clone(&shown),
+        );
+        *h.sink.watcher.lock().unwrap() = Some(Box::new(move |kinds, account_id| {
+            if kinds.contains(&DataKind::Accounts) && account_id == Some(id.as_str()) {
+                let account = store.get_account(&id).unwrap();
+                shown.lock().unwrap().push(account.refused_features);
+            }
+        }));
+    }
+
+    // Both still refused: neither looks back on while the other is tried.
+    refused_a_day_ago();
+    h.service.sync_account(&account.id).await.unwrap();
+    let seen = std::mem::take(&mut *shown.lock().unwrap());
+    assert!(!seen.is_empty());
+    assert!(seen.iter().all(|f| f == &[Calendar, Tasks]), "{seen:?}");
+    assert!(grant_of(&h, &account).unwrap().refused_at.unwrap() > a_day_ago);
+
+    // The calendar answers, and the tasks' listing gets no answer, as on
+    // waking up before the network is: only the calendar is back, and the
+    // tasks are tried again at the next sync.
+    refused_a_day_ago();
+    pim.refused.lock().unwrap().clear();
+    pim.offline.lock().unwrap().push(Tasks);
+    let error = h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Network);
+    let seen = std::mem::take(&mut *shown.lock().unwrap());
+    assert!(!seen.is_empty());
+    assert!(seen.iter().all(|f| f.contains(&Tasks)), "{seen:?}");
+    assert_eq!(account_of(&h, &account).refused_features, [Tasks]);
+    assert_eq!(cached(&h, &account), (2, 1, 0));
+    pim.offline.lock().unwrap().clear();
+    h.service.sync_account(&account.id).await.unwrap();
+    assert!(account_of(&h, &account).refused_features.is_empty());
+    assert_eq!(cached(&h, &account), (2, 1, 2));
+}
+
+#[tokio::test]
+async fn refresh_events_skips_calendars_it_cant_read() {
+    let h = harness();
+    let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    h.service.sync_account(&account.id).await.unwrap();
+    let (start, end) = (
+        Utc::now() - Duration::days(1),
+        Utc::now() + Duration::days(3),
+    );
+    pim.unreadable.lock().unwrap().push("cal-a".into());
+    h.service.refresh_events(start, end).await.unwrap();
+    // The calendar it can't read keeps what it had; the other is read.
+    assert_eq!(h.service.list_events(start, end, None).unwrap().len(), 2);
+
+    // Without the calendar's permission (dropped at the next sync).
+    h.service
+        .store()
+        .record_granted_scopes(&account.id, &core_graph())
+        .unwrap();
+    h.service.refresh_events(start, end).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_mail_failure_doesnt_skip_calendar_contacts_tasks() {
+    let h = harness();
+    let (account, _) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    h.server.lock().unwrap().failure = Some(Error::network("The connection dropped."));
+    let error = h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Network);
+    assert_eq!(cached(&h, &account), (2, 1, 2));
+    assert_eq!(
+        account_of(&h, &account).sync_error.as_deref(),
+        Some("The connection dropped.")
+    );
+
+    // Unless the sign-in is gone: the rest would fail the same way.
+    let h = harness();
+    let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    h.server.lock().unwrap().failure = Some(Error::auth_required("Sign in again."));
+    let error = h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::AuthRequired);
+    assert_eq!(pim.listings.load(Ordering::SeqCst), 0);
+    assert_eq!(cached(&h, &account), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn a_grant_recorded_during_the_mail_sync_turns_the_feature_on_in_the_same_sync() {
+    let h = harness();
+    let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, Some(&core_graph()));
+    assert_eq!(account.needs_permission, AccountFeature::ALL);
+    // The mail sync's token refresh learns that an administrator approved.
+    let (store, id) = (Arc::clone(h.service.store()), account.id.clone());
+    h.server.lock().unwrap().on_list_folders = Some(Box::new(move || {
+        store
+            .record_granted_scopes(&id, &legacy_graph_scopes())
+            .unwrap();
+    }));
+    let notified = accounts_notified(&h, &account);
+    h.service.sync_account(&account.id).await.unwrap();
+    assert_eq!(cached(&h, &account), (2, 1, 2));
+    assert_eq!(pim.listings.load(Ordering::SeqCst), 3);
+    assert!(account_of(&h, &account).needs_permission.is_empty());
+    // The end of the sync tells the UI.
+    assert!(accounts_notified(&h, &account) > notified);
+}
+
+#[tokio::test]
+async fn a_mailbox_settings_grant_rebuilds_the_providers() {
+    let h = harness();
+    let mail_only = core_graph();
+    let (account, _) = pim_account(&h, "adele@contoso.com", WORK_TENANT, Some(&mail_only));
+    let built = || h.connector.provider_sets.load(Ordering::SeqCst);
+    h.service.providers_for(&account.id).await.unwrap();
+    h.service.providers_for(&account.id).await.unwrap();
+    assert_eq!(built(), 1);
+    // A refusal only gates the cached providers.
+    h.service
+        .store()
+        .refuse_feature(&account.id, AccountFeature::Calendar)
+        .unwrap();
+    h.service.providers_for(&account.id).await.unwrap();
+    assert_eq!(built(), 1);
+    // A new permission: made afresh, so the time zone is read again.
+    let with_settings = [mail_only, scopes(&["MailboxSettings.Read"])].concat();
+    h.service
+        .store()
+        .record_granted_scopes(&account.id, &with_settings)
+        .unwrap();
+    h.service.providers_for(&account.id).await.unwrap();
+    h.service.providers_for(&account.id).await.unwrap();
+    assert_eq!(built(), 2);
+}
+
+#[tokio::test]
+async fn a_blocked_refresh_shows_its_reason_as_the_sync_error() {
+    let h = harness();
+    let (account, _) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    let message = "Your organization hasn't given you access to Cumulas Mail. Ask your IT team \
+                   to assign you to the app. (AADSTS50105)";
+    h.server.lock().unwrap().failure = Some(
+        Error::auth_required(message)
+            .with_details(serde_json::json!({ "reason": "notAssigned", "aadsts": 50105 })),
+    );
+    h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(
+        account_of(&h, &account).sync_error.as_deref(),
+        Some(message)
+    );
+
+    // Any other expired sign-in.
+    h.server.lock().unwrap().failure = Some(Error::auth_required("expired"));
+    h.service.sync_account(&account.id).await.unwrap_err();
+    assert_eq!(
+        account_of(&h, &account).sync_error.as_deref(),
+        Some("Sign in again to keep adele@contoso.com up to date.")
+    );
+}
+
+#[tokio::test]
+async fn microsoft_admin_consent_uses_the_account_tenant_or_hint_domain() {
+    let h = harness();
+    let service = &h.service;
+    let (work, _) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
+    let (personal, _) = pim_account(&h, "adele@outlook.com", CONSUMER_TENANT, None);
+    let imap = service
+        .add_imap_account(new_imap_account("me@example.com"))
+        .await
+        .unwrap();
+
+    let link = service
+        .microsoft_admin_consent(Some(&work.id), None)
+        .unwrap();
+    assert_eq!(link.tenant, WORK_TENANT);
+    assert_eq!(
+        link.admin_consent_url,
+        format!("https://admin.test/{WORK_TENANT}")
+    );
+    // The account wins over the hint.
+    let link = service
+        .microsoft_admin_consent(Some(&work.id), Some("grace@fabrikam.com"))
+        .unwrap();
+    assert_eq!(link.tenant, WORK_TENANT);
+    let link = service
+        .microsoft_admin_consent(None, Some("grace@Fabrikam.com "))
+        .unwrap();
+    assert_eq!(link.tenant, "Fabrikam.com");
+    for hint in [None, Some("grace"), Some("grace@")] {
+        let link = service.microsoft_admin_consent(None, hint).unwrap();
+        assert_eq!(link.tenant, "organizations", "{hint:?}");
+    }
+
+    let personal_message = "Personal Microsoft accounts don't need an administrator's approval.";
+    for error in [
+        service.microsoft_admin_consent(Some(&personal.id), None),
+        service.microsoft_admin_consent(None, Some("adele@hotmail.co.uk")),
+        service.microsoft_admin_consent(None, Some("adele@Outlook.com")),
+    ] {
+        let error = error.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidInput);
+        assert_eq!(error.message, personal_message);
+    }
+    let error = service
+        .microsoft_admin_consent(Some(&imap.id), None)
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.message, "Only Microsoft accounts need this.");
+    let error = service
+        .microsoft_admin_consent(Some("missing"), None)
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+
+    // Checking refused features again: Microsoft accounts only.
+    let error = service.retry_microsoft_features(&imap.id).unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.message, "Only Microsoft accounts need this.");
+    let error = service.retry_microsoft_features("missing").unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+    service.retry_microsoft_features(&work.id).unwrap();
+}
+
+#[tokio::test]
+async fn refused_features_say_so() {
+    let h = harness();
+    let (account, _) = refused_calendar(&h).await;
+    let providers = h.service.providers_for(&account.id).await.unwrap();
+    let error = providers
+        .calendar
+        .unwrap()
+        .list_calendars()
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::PermissionRequired);
+    assert_eq!(
+        error.message,
+        "Microsoft 365 refused access to the calendar of adele@contoso.com. See Settings → \
+         Accounts."
+    );
+    let details = error.details.unwrap();
+    assert_eq!(details["reason"], "refused");
+    assert_eq!(details["feature"], "calendar");
+    // The others are untouched.
+    assert_eq!(
+        providers
+            .contacts
+            .unwrap()
+            .list_contacts()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }

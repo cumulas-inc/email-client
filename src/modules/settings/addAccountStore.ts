@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import type { AccountFeature, PermissionRequest } from "../../api/types";
 import { useAppStore } from "../../app/store";
 
 export type AddAccountStep = "choose" | "microsoft" | "imap";
@@ -10,6 +11,16 @@ export interface AddAccountRequest {
   email?: string;
   /** Microsoft: start signing in straight away ("Sign in again"). */
   autoStart?: boolean;
+  /**
+   * Microsoft: what to ask permission for; by default everything for a new
+   * account, and what the account has for "Sign in again".
+   */
+  permissions?: PermissionRequest;
+  /**
+   * The id of an element to focus once the sign-in succeeds, if it's there;
+   * otherwise the keyboard goes back to what opened the dialog.
+   */
+  returnFocusTo?: string;
 }
 
 const DEFAULT_REQUEST: AddAccountRequest = { step: "choose" };
@@ -26,6 +37,21 @@ export const useAddAccountRequest = create<{ request: AddAccountRequest }>(() =>
 export function openAddAccount(request: AddAccountRequest = DEFAULT_REQUEST): void {
   useAddAccountRequest.setState({ request });
   useAppStore.getState().setAddAccountOpen(true);
+}
+
+/**
+ * "Turn on": signs in again, asking for what the account has plus the
+ * feature. `returnFocusTo` gets the keyboard once it's on (the notice with
+ * the button goes then), or the region around it until it's enabled.
+ */
+export function openTurnOn(email: string, feature: AccountFeature, returnFocusTo?: string): void {
+  openAddAccount({
+    step: "microsoft",
+    email,
+    autoStart: true,
+    permissions: { kind: "feature", feature },
+    returnFocusTo,
+  });
 }
 
 /** Forgets the pending request once the dialog has read it. */

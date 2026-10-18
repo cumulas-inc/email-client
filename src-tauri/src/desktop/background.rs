@@ -276,7 +276,7 @@ pub async fn request(_app: &AppHandle, _autostart: bool, _hidden: bool) -> Resul
 /// Background portal only with a desktop backend for it (Sway, Hyprland,
 /// XFCE and others have none), or no portals run at all.
 #[cfg(target_os = "linux")]
-fn no_portal(e: &ashpd::Error) -> bool {
+pub(super) fn no_portal(e: &ashpd::Error) -> bool {
     use zbus::fdo::Error as Fdo;
 
     let e = match e {

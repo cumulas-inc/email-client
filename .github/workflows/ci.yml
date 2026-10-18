@@ -28,6 +28,10 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm test
+      # The page for IT administrators on flatpak.cumulas.co against the
+      # app's approval link and permissions; test.sh checks it again on
+      # the assembled site, but only in runs that touch the packaging.
+      - run: packaging/flatpak/repo/check-admin-consent.sh
       - run: npm run build
 
   rust:

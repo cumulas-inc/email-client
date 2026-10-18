@@ -775,6 +775,8 @@ export function createDemoState(): MockState {
       createdAt: iso(at(-90, 9)),
       lastSyncedAt: iso(new Date()),
       syncError: null,
+      needsPermission: [],
+      refusedFeatures: [],
     },
     {
       id: HOME,
@@ -795,6 +797,8 @@ export function createDemoState(): MockState {
       createdAt: iso(at(-60, 9)),
       lastSyncedAt: iso(new Date()),
       syncError: null,
+      needsPermission: [],
+      refusedFeatures: [],
     },
   ];
 
