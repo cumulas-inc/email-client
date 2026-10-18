@@ -45,13 +45,20 @@ and restarts into it when you choose Restart (see
   Ctrl+Shift+R, Ctrl+F, Ctrl+Q or Q to mark read…).
 - **Search**: instant and offline in the mail on your computer, and across
   each account's whole mailbox on its server, in every folder and however
-  old, with what the server finds added as it comes (newest first, 50 at a
-  time, up to 1,000). Words match by their start (and inside subjects and senders);
-  `"exact phrases"`, `from:`, `to:`, `cc:`, `subject:`, `body:` and
-  `has:attachment` narrow it down. Messages found on the server open, move
-  and flag like any other. On your computer, a message's text is searched
-  once you've opened it (its preview before that); Gmail's All Mail folder
-  isn't searched on the server.
+  old, with what the server finds added as it comes (50 at a time, up to
+  1,000). Best matches come first (messages with your words in the subject or
+  sender before those with them only in the text, recent mail leading), or
+  switch to newest first. Words match by their start (and inside subjects and
+  senders); `"exact phrases"`, `from:`, `to:`, `cc:`, `subject:`, `body:`,
+  `has:attachment`, `is:unread`, `is:read`, `is:flagged`, `in:`, `account:`,
+  `received:` (a day, a range such as `2026-10-01..2026-10-15`, or `today`,
+  `"this week"`…), `after:` and `before:` narrow it down, and the filters
+  above the results write them for you. Suggestions offer people, filters and
+  your recent searches, and the words found are highlighted in the results and
+  in the message (F3 for the next). Messages found on the server open, move
+  and flag like any other. On your computer, a message's text is searched once
+  you've opened it (its preview before that); Gmail's All Mail folder isn't
+  searched on the server.
 - **Signatures**: a signature of your own for each account and, for
   Microsoft 365 work and school accounts whose organization uses Cumulas
   Signatures, the company signature, added automatically with nothing to set
@@ -166,7 +173,7 @@ CI runs all of these, plus a Flatpak build.
 Not built yet: saving drafts to the server, conversation threading, recurring
 event editing (single occurrence vs series), CalDAV/CardDAV for IMAP accounts,
 `mailto:` handling, OAuth for Gmail/Yahoo IMAP (app passwords work today), and
-`OR`, `NOT` and dates in searches.
+`OR` and `NOT` in searches.
 
 ## License
 

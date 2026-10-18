@@ -11,7 +11,7 @@ signature when your organization sets one up there.
 Cumulas Mail has no telemetry, no analytics, no crash reporting and no
 advertising, and you don't need a Cumulas account.
 
-_Last updated: October 17, 2026._
+_Last updated: October 18, 2026._
 
 ## What the app keeps on your computer
 
@@ -31,6 +31,9 @@ _Last updated: October 17, 2026._
   same database.
 - **Attachments you open**, in the app's cache folder,
   `~/.cache/co.cumulas.Mail/`.
+- **Your recent searches** (the last 8), so the search box can suggest them, in
+  the app's data folder. "Clear recent searches" in the search box's suggestions
+  deletes them.
 - **Passwords and sign-in tokens**, in your desktop's keyring (GNOME Keyring
   or KWallet), never in the app's database.
 - **An installation ID**: a random string made once, which the push service
@@ -102,9 +105,9 @@ which serves the page, may log the request, as its
 [privacy statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement)
 describes.
 
-When you search your mail, the words you type go to the mail servers of your
-accounts (Microsoft, or your IMAP server), so that each can search your whole
-mailbox, and never to Cumulas.
+When you search your mail, the words you type and the filters you choose (such
+as dates, or unread) go to the mail servers of your accounts (Microsoft, or your
+IMAP server), so that each can search your whole mailbox, and never to Cumulas.
 
 Pictures and other content from the internet in messages are blocked unless
 you allow them, because loading them can tell senders when and where you
