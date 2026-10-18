@@ -890,6 +890,129 @@ async fn a_draft_that_refuses_the_properties_is_discarded() {
     );
 }
 
+/// A new message's draft `draft-1` whose PATCH is answered by `patch` and
+/// whose read-back batches by `read_back`; returns the result and the
+/// requests' log.
+async fn checked_draft(
+    patch: ResponseTemplate,
+    read_back: impl Fn(&wiremock::Request) -> ResponseTemplate + Send + Sync + 'static,
+) -> (crate::Result<()>, Vec<String>) {
+    let (server, provider) = setup().await;
+    Mock::given(method("POST"))
+        .and(path("/me/messages"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": "draft-1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/me/messages/draft-1"))
+        .respond_with(patch)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(read_back)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/me/messages/draft-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/me/messages/draft-1/send"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+    let result = provider
+        .send_requesting(
+            &outgoing(),
+            None,
+            &request(Some(ProtectAction::Encrypt), Some(LABEL), false),
+        )
+        .await;
+    (result, request_log(&server).await)
+}
+
+#[tokio::test]
+async fn a_draft_microsoft_365_didnt_answer_for_isnt_said_to_have_dropped_it() {
+    let kept = batch_responder(properties(&[
+        ("x-cumulas-protect", "encrypt"),
+        ("x-cumulas-label", LABEL),
+    ]));
+    // The PATCH keeps failing on the server's side.
+    let unavailable = graph_error(503, "ServiceUnavailable", "Service unavailable")
+        .insert_header("Retry-After", "0");
+    let (result, log) = checked_draft(unavailable, kept).await;
+    let error = result.unwrap_err();
+    assert!(!has_reason(&error, "headersNotKept"), "{error:?}");
+    assert_eq!(error.message, "Service unavailable");
+    assert!(log.contains(&"DELETE /me/messages/draft-1".to_owned()));
+    assert!(!log.iter().any(|l| l.ends_with("/send")));
+
+    // The read-back fails on the server's side, and what runs after it
+    // fails with it (424).
+    let failing = batch_responder(|r| match r["id"].as_str().unwrap() {
+        "protect" => (
+            500,
+            json!({ "error": { "code": "InternalServerError", "message": "oops" } }),
+        ),
+        _ => (
+            424,
+            json!({ "error": { "code": "FailedDependency", "message": "failed" } }),
+        ),
+    });
+    let (result, log) = checked_draft(ok_json(json!({ "id": "draft-1" })), failing).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Provider);
+    assert!(!has_reason(&error, "headersNotKept"), "{error:?}");
+    assert!(error.message.starts_with("Microsoft 365 didn't answer"));
+    assert!(log.contains(&"DELETE /me/messages/draft-1".to_owned()));
+    assert!(!log.iter().any(|l| l.ends_with("/send")));
+}
+
+#[tokio::test]
+async fn a_throttled_read_back_is_retried_with_what_runs_after_it() {
+    // The first round throttles the first read and fails the second with
+    // 424; both go again, and the draft is sent.
+    let answered = std::sync::atomic::AtomicBool::new(false);
+    let kept = properties(&[("x-cumulas-protect", "encrypt"), ("x-cumulas-label", LABEL)]);
+    let read_back = move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let first = !answered.swap(true, std::sync::atomic::Ordering::SeqCst);
+        let responses: Vec<Value> = body["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let (status, body) = match r["id"].as_str().unwrap() {
+                    "protect" if first => (429, json!({ "error": { "code": "TooManyRequests" } })),
+                    _ if first => (424, json!({ "error": { "code": "FailedDependency" } })),
+                    _ => kept(r),
+                };
+                json!({
+                    "id": r["id"],
+                    "status": status,
+                    "headers": { "Content-Type": "application/json", "Retry-After": "0" },
+                    "body": body,
+                })
+            })
+            .collect();
+        ok_json(json!({ "responses": responses }))
+    };
+    let (result, log) = checked_draft(ok_json(json!({ "id": "draft-1" })), read_back).await;
+    result.unwrap();
+    assert_eq!(
+        log,
+        [
+            "POST /me/messages",
+            "PATCH /me/messages/draft-1",
+            "POST /$batch",
+            "POST /$batch",
+            "POST /me/messages/draft-1/send",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn plain_sending_never_drops_a_request() {
     let (server, provider) = setup().await;

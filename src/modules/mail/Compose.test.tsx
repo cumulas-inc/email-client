@@ -731,14 +731,50 @@ describe("Encryption and sensitivity labels", () => {
     const user = userEvent.setup();
     await renderMail({ backend: new MockBackend({ protectedMail: true }) });
     const c = await newMessage(user);
+    // Nothing checked yet: the person's own step, not IT's.
     expect(
       await within(c).findByText(
-        "Your organization requires a sensitivity label on email. Cumulas Mail can't apply labels for alex.morgan@acme.example until your IT team sets them up.",
+        "Your organization requires a sensitivity label on email. Cumulas Mail can apply labels for alex.morgan@acme.example after a check in Settings → Accounts shows a test message arrives labeled.",
       ),
     ).toBeInTheDocument();
+    expect(within(c).queryByText(/your IT team/)).toBeNull();
     expect(within(c).queryByRole("button", { name: /^Encryption/ })).toBeNull();
     expect(within(c).queryByRole("button", { name: /^Sensitivity label/ })).toBeNull();
   });
+
+  it.each([
+    [
+      "waiting",
+      "Your organization requires a sensitivity label on email. Cumulas Mail is checking its labels for alex.morgan@acme.example; they appear here once a test message arrives labeled.",
+    ],
+    [
+      "expired",
+      "Your organization requires a sensitivity label on email. The labels for alex.morgan@acme.example were last checked more than 90 days ago. Check them again in Settings → Accounts to apply them here.",
+    ],
+    [
+      "notApplied",
+      "Your organization requires a sensitivity label on email. Cumulas Mail can't apply labels for alex.morgan@acme.example until your IT team sets them up.",
+    ],
+  ] as const)(
+    "says why a required label can't be applied when the checks are %s",
+    async (state, hint) => {
+      const user = userEvent.setup();
+      await withSetup({}, (setup) => ({
+        labels: setup.labels.map((l) => ({
+          ...l,
+          check: {
+            state,
+            at: "2026-06-01T09:00:00Z",
+            note: null,
+            testMessage: false,
+            passedAt: null,
+          },
+        })),
+      }));
+      const c = await newMessage(user);
+      expect(await within(c).findByText(hint)).toBeInTheDocument();
+    },
+  );
 
   it("replies to labeled mail directly when no label is in use from Cumulas Mail", async () => {
     const user = userEvent.setup();
@@ -844,7 +880,9 @@ describe("Encryption and sensitivity labels", () => {
     // Public passed its check too, here.
     const backend = await withSetup({ protection: "setup" }, (setup) => ({
       labels: setup.labels.map((l) =>
-        l.name === "Public" ? { ...l, check: { ...l.check, state: "applied", note: null } } : l,
+        l.name === "Public"
+          ? { ...l, check: { ...l.check, state: "applied", note: null, passedAt: l.check.at } }
+          : l,
       ),
     }));
     await open(user, /Updated org chart/);
@@ -895,6 +933,155 @@ describe("Encryption and sensitivity labels", () => {
     await user.click(within(c).getByRole("button", { name: "Send" }));
     await waitFor(() => expect(backend.sent).toHaveLength(1));
     expect(backend.sent[0]!.labelId).toBe(GENERAL);
+  });
+
+  it("sends a reply Outlook on the web only can when every label here is lower", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ protectedMail: true, protection: "setup" });
+    // The release notes, labeled Project Atlas: above every label offered.
+    const notes = (
+      backend as unknown as { state: { messages: import("../../api/types").Message[] } }
+    ).state.messages.find((m) => m.id === "msg-protected-8")!;
+    notes.label = {
+      id: ATLAS,
+      name: "Highly Confidential › Project Atlas",
+      color: "#a4262c",
+      fromCatalog: true,
+    };
+    await renderMail({ backend });
+    const openInOutlook = vi.spyOn(backend, "openInOutlook");
+    await open(user, /Atlas public release notes/);
+    await user.click(respondButton("Reply"));
+    const c = await screen.findByRole("region", { name: "Reply" });
+    await waitFor(() => expect(sensitivity("Sensitivity label")).toBeInTheDocument());
+
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    expect(within(c).getByRole("alert")).toHaveTextContent(
+      "The original is labeled Highly Confidential › Project Atlas. Cumulas Mail can't apply that label or one at least as sensitive, so send this reply from Outlook on the web.",
+    );
+    // No menu of labels that can't be chosen: the way out instead.
+    expect(screen.queryByRole("menu", { name: "Sensitivity label" })).toBeNull();
+    await user.click(
+      within(c).getByRole("button", { name: "Open original in Outlook on the web" }),
+    );
+    expect(openInOutlook).toHaveBeenCalledWith("msg-protected-8");
+    expect(backend.sent).toHaveLength(0);
+  });
+
+  it("replies to a Sent copy with the label it asked for, and won't lower it", async () => {
+    const user = userEvent.setup();
+    const backend = await withSetup({ protection: "setup" });
+    const account = screen.getByRole("treeitem", { name: /^Alex Morgan \(/ });
+    await user.click(within(account).getByText("Sent Items"));
+    await open(user, /Re: Atlas pricing/);
+    await user.click(respondButton("Reply all"));
+    await screen.findByRole("region", { name: "Reply" });
+    // Not the default (General): the Confidential the message asked for.
+    await waitFor(() => expect(sensitivity("Sensitivity label: Confidential")).toBeInTheDocument());
+    await user.click(sensitivity());
+    expect(screen.getByRole("menuitemcheckbox", { name: "General" })).toBeDisabled();
+    await user.keyboard("{Escape}");
+    await user.click(within(composer()).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(backend.sent).toHaveLength(1));
+    expect(backend.sent[0]).toMatchObject({ labelId: CONFIDENTIAL, replyKind: "replyAll" });
+  });
+
+  /** The demo's saved draft, labeled as Outlook saved it. */
+  async function editLabeledDraft(
+    user: User,
+    backend: MockBackend,
+    label: { id: string; name: string },
+  ) {
+    const get = backend.getMessage.bind(backend);
+    vi.spyOn(backend, "getMessage").mockImplementation(async (id, allow) => {
+      const m = await get(id, allow);
+      return m.isDraft ? { ...m, label: { ...label, color: null, fromCatalog: true } } : m;
+    });
+    const account = screen.getByRole("treeitem", { name: /^Alex Morgan \(/ });
+    await user.click(within(account).getByText("Drafts"));
+    await user.click(await screen.findByRole("option", { name: /Thoughts on the rollback plan/ }));
+    await user.click(await screen.findByRole("button", { name: "Continue editing" }));
+    return screen.findByRole("region", { name: "New message" });
+  }
+
+  it("keeps an edited draft's own label rather than the default, and won't lower it", async () => {
+    const user = userEvent.setup();
+    const backend = await withSetup({ protection: "setup" });
+    await editLabeledDraft(user, backend, { id: CONFIDENTIAL, name: "Confidential" });
+    await waitFor(() => expect(sensitivity("Sensitivity label: Confidential")).toBeInTheDocument());
+    await user.click(sensitivity());
+    expect(screen.getByRole("menuitemcheckbox", { name: "General" })).toBeDisabled();
+    await user.keyboard("{Escape}");
+    await user.click(within(composer()).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(backend.sent).toHaveLength(1));
+    expect(backend.sent[0]).toMatchObject({ labelId: CONFIDENTIAL, replyKind: null });
+  });
+
+  it("says when an edited draft's label can't be applied, rather than lowering it", async () => {
+    const user = userEvent.setup();
+    const backend = await withSetup({ protection: "setup" });
+    const c = await editLabeledDraft(user, backend, {
+      id: ATLAS,
+      name: "Highly Confidential › Project Atlas",
+    });
+    await waitFor(() => expect(sensitivity("Sensitivity label")).toBeInTheDocument());
+    // Nothing filled in: not the default.
+    expect(useMailStore.getState().compose?.labelId).toBeNull();
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    expect(within(c).getByRole("alert")).toHaveTextContent(
+      "This draft is labeled Highly Confidential › Project Atlas. Cumulas Mail can't apply that label or one at least as sensitive, so send this message from Outlook on the web.",
+    );
+    expect(backend.sent).toHaveLength(0);
+  });
+
+  it("keeps a choice that stopped being offered in view, and won't send it", async () => {
+    const user = userEvent.setup();
+    let failed = false;
+    const backend = new MockBackend({ protectedMail: true, protection: "setup" });
+    const get = backend.getProtectionSetup.bind(backend);
+    vi.spyOn(backend, "getProtectionSetup").mockImplementation(async (id) => {
+      const setup = await get(id);
+      // Checked again meanwhile: it didn't pass.
+      return failed
+        ? {
+            ...setup,
+            encrypt: { ...setup.encrypt, state: "notApplied", passedAt: null, testMessage: true },
+          }
+        : setup;
+    });
+    const { client } = await renderMail({ backend });
+    const c = await newMessage(user);
+    await waitFor(() => expect(sensitivity("Sensitivity label: General")).toBeInTheDocument());
+    await user.click(encryption());
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Encrypt" }));
+    failed = true;
+    await act(() => client.invalidateQueries());
+    await waitFor(() =>
+      expect(encryption("Encryption: Encrypt (not available now)")).toBeInTheDocument(),
+    );
+
+    await user.type(within(c).getByRole("combobox", { name: "To" }), "ann@example.org{Enter}");
+    await user.type(within(c).getByRole("textbox", { name: "Subject" }), "Numbers");
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    expect(within(c).getByRole("alert")).toHaveTextContent(
+      "Encrypt can't be applied: its latest check in Settings → Accounts didn't pass. Choose Don't encrypt.",
+    );
+    expect(encryption()).toHaveFocus();
+    expect(backend.sent).toHaveLength(0);
+
+    await user.click(encryption());
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "Encrypt (not available now)" }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Don't encrypt" }));
+    // Cleared: only what's offered is left to choose.
+    await user.click(encryption("Encryption"));
+    expect(screen.queryByRole("menuitemcheckbox", { name: /not available/ })).toBeNull();
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Encrypt" })).toBeNull();
+    await user.keyboard("{Escape}");
+    await user.click(within(c).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(backend.sent).toHaveLength(1));
+    expect(backend.sent[0]).toMatchObject({ protect: null, labelId: GENERAL });
   });
 
   it("asks before dropping the original's label when none is required", async () => {
@@ -997,8 +1184,10 @@ describe("Encryption and sensitivity labels", () => {
     const c = await screen.findByRole("region", { name: "Forward" });
     await user.type(within(c).getByRole("combobox", { name: "To" }), "ann@example.org{Enter}");
     await user.click(within(c).getByRole("button", { name: "Send" }));
-    expect(
-      await screen.findByRole("dialog", { name: "Forward in Outlook on the web" }),
-    ).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "Forward in Outlook on the web" });
+    // How it's protected wasn't said: no promise about what Outlook on the web keeps.
+    expect(dialog).toHaveTextContent(
+      "This message is encrypted. Cumulas Mail can't forward it without removing the encryption, so open it in Outlook on the web.",
+    );
   });
 });

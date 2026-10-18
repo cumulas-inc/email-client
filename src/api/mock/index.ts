@@ -438,7 +438,10 @@ const OPEN_CONTAINER =
   "This file holds a protected message's content, which Cumulas Mail can't open. Open the message in Outlook on the web.";
 const NO_TEST_MESSAGE = "There's no test message to open. Check again.";
 
-const NOT_CHECKED: CheckResult = { state: "notChecked", at: null, note: null, testMessage: false };
+/** What a check decided, as the core keeps it: never "expired" or "waiting". */
+type CheckRecord = Omit<CheckResult, "passedAt">;
+
+const NOT_CHECKED: CheckRecord = { state: "notChecked", at: null, note: null, testMessage: false };
 const NO_POLICY: LabelPolicy = {
   required: false,
   defaultLabelId: null,
@@ -449,21 +452,21 @@ const DAY_MS = 86_400_000;
 
 /** A work account's checks and labels, as the core keeps them. */
 interface MockProtection {
-  /** Never "expired": that's worked out when the setup is read. */
-  encrypt: CheckResult;
-  doNotForward: CheckResult;
-  labels: Map<string, CheckResult>;
+  /** What the last check decided, which stands while a new one waits. */
+  encrypt: CheckRecord;
+  doNotForward: CheckRecord;
+  labels: Map<string, CheckRecord>;
   /** What Microsoft 365 last listed; null until then, or without the permission. */
   catalog: { labels: CatalogLabel[]; policy: LabelPolicy } | null;
   listedAt: string | null;
   error: string | null;
-  /** The check waiting for its messages, and how often they were looked for. */
-  run: { items: CheckItem[]; looks: number } | null;
+  /** The check waiting for its messages, when it sent them, and how often they were looked for. */
+  run: { items: CheckItem[]; sentAt: string; looks: number } | null;
 }
 
 /** How each check of the demo's "setup" turned out: most arrived protected. */
-function demoOutcome(item: CheckItem, at: string): CheckResult {
-  const result = (state: CheckResult["state"], note: CheckResult["note"] = null): CheckResult => ({
+function demoOutcome(item: CheckItem, at: string): CheckRecord {
+  const result = (state: CheckResult["state"], note: CheckResult["note"] = null): CheckRecord => ({
     state,
     at,
     note,
@@ -478,6 +481,15 @@ function demoOutcome(item: CheckItem, at: string): CheckResult {
 
 function checkKey(item: CheckItem): string {
   return item.kind === "action" ? item.action : item.labelId;
+}
+
+/** Like the core: what a check decided as of now; a pass older than CHECK_VALID_DAYS is expired. */
+function decidedState(record: CheckRecord): CheckResult["state"] {
+  return record.state === "applied" &&
+    record.at &&
+    Date.now() - Date.parse(record.at) > CHECK_VALID_DAYS * DAY_MS
+    ? "expired"
+    : record.state;
 }
 
 /** Sizes as the core's diagnostics give them. */
@@ -1749,6 +1761,19 @@ export class MockBackend implements Backend {
     }
     const m = clone(this.message(messageId));
     this.opened.add(messageId);
+    // Like the core: without the account's labels, only that the message
+    // names one of its organization's, never by the name it gives.
+    const protection = this.protectionOf(this.account(m.accountId));
+    if (protection && !protection.catalog) {
+      const unlisted = (l: MessageLabel): MessageLabel => ({
+        id: l.id,
+        name: null,
+        color: null,
+        fromCatalog: false,
+      });
+      if (m.label) m.label = unlisted(m.label);
+      if (m.requested?.label) m.requested.label = unlisted(m.requested.label);
+    }
     const allow = allowRemote || this.settings.remoteContent === "allow";
     if (m.bodyHtml && !allow && REMOTE_IMG.test(m.bodyHtml)) {
       m.bodyHtml = m.bodyHtml.replace(REMOTE_IMG, "");
@@ -1890,12 +1915,14 @@ export class MockBackend implements Backend {
       fail("unsupported", account.kind === "imap" ? ENCRYPTED_ORIGINAL : PROTECTED_ORIGINAL, {
         reason: "protectedOriginal",
         messageId: original.id,
+        protection: original.protection!.kind,
       });
     }
     const setup = this.protectionSetup(account);
     const protect = message.protect ?? null;
     const labelId = message.labelId?.trim().toLowerCase() || null;
-    const applied = setup.labels.some((l) => l.check.state === "applied");
+    // Offered by the last decided check, while a new one waits too.
+    const applied = setup.labels.some((l) => l.check.passedAt !== null);
     if (!labelId && setup.policy.required && applied) {
       fail("invalidInput", "Choose a sensitivity label. Your organization requires one.", {
         reason: "labelRequired",
@@ -1917,12 +1944,26 @@ export class MockBackend implements Backend {
         "invalidInput",
         `${what} isn't set up for ${account.email}. Check it in Settings → Accounts.`,
       );
+    const protection = this.protectionOf(account);
+    /** Refuses `item` unless its last decided check passed less than CHECK_VALID_DAYS ago. */
+    const offered = (item: CheckItem, what: string) => {
+      if (!protection) return;
+      const state = decidedState(this.checkRecord(protection, item));
+      if (state === "applied") return;
+      if (this.isWaiting(protection, item)) {
+        fail(
+          "invalidInput",
+          `${what} is being checked for ${account.email}. Wait for the check in Settings → Accounts to finish.`,
+        );
+      }
+      if (state === "expired") tooOld(what);
+      notSetUp(what);
+    };
     // In the core's order: the label, then the encryption.
     let requestedLabel: MessageLabel | null = null;
     if (label) {
       const title = labelTitle(label);
-      if (label.check.state === "expired") tooOld(`The label ${title}`);
-      if (label.check.state !== "applied") notSetUp(`The label ${title}`);
+      offered({ kind: "label", labelId: label.id }, `The label ${title}`);
       requestedLabel = { id: label.id, name: title, color: label.color, fromCatalog: true };
     }
     if (protect) {
@@ -1932,9 +1973,7 @@ export class MockBackend implements Backend {
           `The label ${labelTitle(label)} already encrypts this message. Choose either the label or ${ACTION_NAMES[protect]}.`,
         );
       }
-      const check = protect === "encrypt" ? setup.encrypt : setup.doNotForward;
-      if (check.state === "expired") tooOld(ACTION_NAMES[protect]);
-      if (check.state !== "applied") notSetUp(ACTION_NAMES[protect]);
+      offered({ kind: "action", action: protect }, ACTION_NAMES[protect]);
     }
     return { action: protect, label: requestedLabel };
   }
@@ -2093,38 +2132,45 @@ export class MockBackend implements Backend {
         ).toISOString();
       }
     } else if (demo === "checking") {
-      protection.encrypt = {
-        state: "waiting",
-        at: new Date().toISOString(),
-        note: null,
-        testMessage: false,
+      protection.run = {
+        items: [{ kind: "action", action: "encrypt" }],
+        sentAt: new Date().toISOString(),
+        looks: 0,
       };
-      protection.run = { items: [{ kind: "action", action: "encrypt" }], looks: 0 };
     }
     this.protection.set(account.id, protection);
     return protection;
   }
 
-  private checkRecord(protection: MockProtection, item: CheckItem): CheckResult {
+  private checkRecord(protection: MockProtection, item: CheckItem): CheckRecord {
     if (item.kind === "label") return protection.labels.get(item.labelId) ?? { ...NOT_CHECKED };
     return item.action === "encrypt" ? protection.encrypt : protection.doNotForward;
   }
 
-  private setCheckRecord(protection: MockProtection, item: CheckItem, result: CheckResult): void {
+  /** Whether the waiting check sent a test message for `item`. */
+  private isWaiting(protection: MockProtection, item: CheckItem): boolean {
+    return !!protection.run?.items.some((i) => checkKey(i) === checkKey(item));
+  }
+
+  private setCheckRecord(protection: MockProtection, item: CheckItem, result: CheckRecord): void {
     if (item.kind === "label") protection.labels.set(item.labelId, result);
     else if (item.action === "encrypt") protection.encrypt = result;
     else protection.doNotForward = result;
   }
 
-  /** Like the core's protection_setup: a passed check older than CHECK_VALID_DAYS shows as expired. */
+  /**
+   * Like the core's protection_setup: a passed check older than
+   * CHECK_VALID_DAYS shows as expired; an item a check is waiting for shows
+   * as waiting, while the pass before it still counts (passedAt).
+   */
   private protectionSetup(account: Account): ProtectionSetup {
     const protection = this.protectionOf(account);
     if (!protection) {
       return {
         accountId: account.id,
         supported: false,
-        encrypt: { ...NOT_CHECKED },
-        doNotForward: { ...NOT_CHECKED },
+        encrypt: { ...NOT_CHECKED, passedAt: null },
+        doNotForward: { ...NOT_CHECKED, passedAt: null },
         labels: [],
         policy: { ...NO_POLICY },
         labelsListedAt: null,
@@ -2132,19 +2178,24 @@ export class MockBackend implements Backend {
         checking: false,
       };
     }
-    const shown = (r: CheckResult): CheckResult =>
-      r.state === "applied" && r.at && Date.now() - Date.parse(r.at) > CHECK_VALID_DAYS * DAY_MS
-        ? { ...r, state: "expired" }
-        : { ...r };
+    const run = protection.run;
+    const shown = (item: CheckItem): CheckResult => {
+      const record = this.checkRecord(protection, item);
+      const state = decidedState(record);
+      const passedAt = state === "applied" ? record.at : null;
+      return run && this.isWaiting(protection, item)
+        ? { state: "waiting", at: run.sentAt, note: null, testMessage: false, passedAt }
+        : { ...record, state, passedAt };
+    };
     const catalog = protection.catalog;
     return {
       accountId: account.id,
       supported: true,
-      encrypt: shown(protection.encrypt),
-      doNotForward: shown(protection.doNotForward),
+      encrypt: shown({ kind: "action", action: "encrypt" }),
+      doNotForward: shown({ kind: "action", action: "doNotForward" }),
       labels: (catalog?.labels ?? []).map((l) => ({
         ...l,
-        check: shown(protection.labels.get(l.id) ?? NOT_CHECKED),
+        check: shown({ kind: "label", labelId: l.id }),
       })),
       policy: { ...(catalog?.policy ?? NO_POLICY) },
       labelsListedAt: catalog ? protection.listedAt : null,
@@ -2205,16 +2256,8 @@ export class MockBackend implements Backend {
       fail("invalidInput", `Cumulas Mail checks at most ${MAX_CHECK_ITEMS} at a time.`);
     }
     if (protection.run) fail("invalidInput", "Wait for the check that's running to finish.");
-    const now = new Date().toISOString();
-    for (const item of items) {
-      this.setCheckRecord(protection, item, {
-        state: "waiting",
-        at: now,
-        note: null,
-        testMessage: false,
-      });
-    }
-    protection.run = { items: clone(items), looks: 0 };
+    // What each item's last check decided stands until its test message is judged.
+    protection.run = { items: clone(items), sentAt: new Date().toISOString(), looks: 0 };
     this.emit(["protection"], accountId);
     return this.protectionSetup(account);
   }

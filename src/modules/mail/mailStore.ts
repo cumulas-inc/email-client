@@ -85,7 +85,10 @@ export interface ProtectedReply {
   messageId: string;
   kind: ReplyKind;
   accountKind: AccountKind;
+  /** How the original is protected; null when the core refused a send and didn't say. */
   protection: ProtectionKind | null;
+  /** The original's verified link to Microsoft's encrypted message portal, if it has one. */
+  portalUrl: string | null;
 }
 
 export type SelectMode = "single" | "toggle" | "range";

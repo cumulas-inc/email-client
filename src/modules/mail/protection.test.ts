@@ -19,14 +19,22 @@ import {
   offeredActions,
   offeredLabels,
   sendProblem,
+  unofferedChoice,
 } from "./protection";
 
-const NOT_CHECKED: CheckResult = { state: "notChecked", at: null, note: null, testMessage: false };
+const NOT_CHECKED: CheckResult = {
+  state: "notChecked",
+  at: null,
+  note: null,
+  testMessage: false,
+  passedAt: null,
+};
 const APPLIED: CheckResult = {
   state: "applied",
   at: "2026-10-16T09:00:00Z",
   note: null,
   testMessage: true,
+  passedAt: "2026-10-16T09:00:00Z",
 };
 
 function label(id: string, sensitivity: number | null, check = APPLIED, extra = {}): LabelOption {
@@ -79,12 +87,48 @@ describe("what the composer offers", () => {
   it("offers only what a check found works, and nothing on unsupported accounts", () => {
     expect(offeredActions(setup())).toEqual(["encrypt"]);
     expect(offeredActions(setup({ doNotForward: APPLIED }))).toEqual(["encrypt", "doNotForward"]);
-    expect(offeredActions(setup({ encrypt: { ...APPLIED, state: "expired" } }))).toEqual([]);
+    expect(
+      offeredActions(setup({ encrypt: { ...APPLIED, state: "expired", passedAt: null } })),
+    ).toEqual([]);
     expect(offeredLabels(setup()).map((l) => l.id)).toEqual(["public", "general", "confidential"]);
     expect(offeredActions(setup({ supported: false }))).toEqual([]);
     expect(offeredLabels(setup({ supported: false }))).toEqual([]);
     expect(offeredActions(undefined)).toEqual([]);
     expect(offeredLabels(undefined)).toEqual([]);
+  });
+
+  it("keeps offering a pass while it's checked again, but not a check that never passed", () => {
+    const waiting = { ...APPLIED, state: "waiting" as const, at: "2026-10-18T09:00:00Z" };
+    const rechecked = setup({
+      encrypt: waiting,
+      labels: [label("general", 1, waiting), label("secret", 3, { ...waiting, passedAt: null })],
+    });
+    expect(offeredActions(rechecked)).toEqual(["encrypt"]);
+    expect(offeredLabels(rechecked).map((l) => l.id)).toEqual(["general"]);
+    expect(labelRequired(rechecked)).toBe(true);
+  });
+
+  it("finds what a draft holds that isn't offered any more", () => {
+    const failed = { ...APPLIED, state: "notApplied" as const, passedAt: null };
+    const now = setup({ doNotForward: failed });
+    expect(unofferedChoice({ protect: "encrypt", labelId: "general" }, now)).toEqual({
+      action: null,
+      label: null,
+    });
+    const stale = unofferedChoice({ protect: "doNotForward", labelId: "secret" }, now);
+    expect(stale.action).toBe("doNotForward");
+    expect(stale.label).toMatchObject({ id: "secret", name: "Secret" });
+    // A label gone from the list is still named by its id.
+    expect(unofferedChoice({ protect: null, labelId: "gone" }, now).label).toEqual({ id: "gone" });
+    // A label that encrypts makes the action moot.
+    const encrypting = setup({
+      labels: [label("atlas", 4, APPLIED, { hasProtection: true })],
+      doNotForward: failed,
+    });
+    expect(unofferedChoice({ protect: "doNotForward", labelId: "atlas" }, encrypting)).toEqual({
+      action: null,
+      label: null,
+    });
   });
 
   it("requires a label only when one can be applied", () => {
@@ -140,9 +184,9 @@ describe("what the composer offers", () => {
       labels: [
         label("recent", 1, { ...APPLIED, at: at(17) }),
         label("old", 1, { ...APPLIED, at: at(2) }),
-        label("expired", 1, { ...APPLIED, state: "expired", at: at(1) }),
+        label("expired", 1, { ...APPLIED, state: "expired", at: at(1), passedAt: null }),
         label("new", 1, NOT_CHECKED),
-        label("failed", 1, { ...APPLIED, state: "notApplied", at: at(10) }),
+        label("failed", 1, { ...APPLIED, state: "notApplied", at: at(10), passedAt: null }),
         label("waiting", 1, { ...APPLIED, state: "waiting", at: at(18) }),
         label("new2", 1, NOT_CHECKED),
       ],
@@ -187,16 +231,30 @@ describe("why Send waits", () => {
 
   it("makes the person choose when the original's label can't be kept and one is required", () => {
     const original = named("secret", "Secret");
-    expect(sendProblem(reply({ originalLabel: original }), setup())).toEqual({
+    const lowering = setup({ policy: { ...setup().policy, justifyDowngrade: false } });
+    expect(sendProblem(reply({ originalLabel: original }), lowering)).toEqual({
       kind: "chooseLabel",
       name: "Secret",
     });
     expect(
       sendProblem(
         reply({ originalLabel: original, labelId: "general", labelChosen: true }),
-        setup(),
+        lowering,
       ),
     ).toBeNull();
+    // Lowering it needs a reason: one at least as sensitive can be chosen…
+    const asSensitive = setup({
+      labels: [...setup().labels, label("restricted", 3)],
+    });
+    expect(sendProblem(reply({ originalLabel: original }), asSensitive)).toEqual({
+      kind: "chooseLabel",
+      name: "Secret",
+    });
+    // …and when none can, only Outlook on the web can send it.
+    expect(sendProblem(reply({ originalLabel: original }), setup())).toEqual({
+      kind: "outlookOnly",
+      name: "Secret",
+    });
     // The original's own label, offered: nothing to say.
     expect(
       sendProblem(reply({ originalLabel: named("general"), labelId: "general" }), setup()),
@@ -213,9 +271,12 @@ describe("why Send waits", () => {
       sendProblem(reply({ originalLabel: original, labelId: "confidential" }), notRequired),
     ).toEqual({ kind: "originalLabelDropped", name: null });
     // New messages have no original.
-    expect(
-      sendProblem(reply({ originalLabel: original, replyKind: null }), notRequired),
-    ).toBeNull();
+    expect(sendProblem(reply({ originalLabel: null, replyKind: null }), notRequired)).toBeNull();
+    // An edited draft's own label counts as an original's.
+    expect(sendProblem(reply({ originalLabel: original, replyKind: null }), notRequired)).toEqual({
+      kind: "originalLabelDropped",
+      name: null,
+    });
   });
 
   it("says nothing to people who don't use labels from Cumulas Mail", () => {

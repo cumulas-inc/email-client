@@ -513,7 +513,8 @@ impl GraphClient {
     }
 
     /// Runs requests through JSON batching (20 per round trip). Sub-requests
-    /// that were throttled are retried like single requests. Returns the
+    /// that were throttled are retried like single requests, with those that
+    /// failed only because one they run after was (424). Returns the
     /// responses by request id; callers check each status.
     pub async fn batch(
         &self,
@@ -536,19 +537,49 @@ impl GraphClient {
                     "requests": pending.iter().map(|r| r.to_json(prefer, &ids)).collect::<Vec<_>>(),
                 });
                 let envelope: Envelope = self.send_json(Method::POST, &url, &payload, &[]).await?;
-                let mut retry = Vec::new();
+                let mut retried: HashSet<String> = HashSet::new();
                 let mut delay = Duration::ZERO;
-                for response in envelope.responses {
-                    if is_retryable(response.status())
-                        && attempt < MAX_RETRIES
-                        && let Some(request) = pending.iter().find(|r| r.id == response.id)
-                    {
-                        delay =
-                            delay.max(retry_delay(response.header(RETRY_AFTER.as_str()), attempt));
-                        retry.push(*request);
-                        continue;
+                if attempt < MAX_RETRIES {
+                    for response in &envelope.responses {
+                        if is_retryable(response.status()) && ids.contains(response.id.as_str()) {
+                            delay = delay
+                                .max(retry_delay(response.header(RETRY_AFTER.as_str()), attempt));
+                            retried.insert(response.id.clone());
+                        }
                     }
-                    results.insert(response.id.clone(), response);
+                    // Graph fails what runs after a throttled request with
+                    // 424: it goes again with it, still after it.
+                    loop {
+                        let dependents: Vec<String> = envelope
+                            .responses
+                            .iter()
+                            .filter(|response| {
+                                response.status == StatusCode::FAILED_DEPENDENCY.as_u16()
+                                    && !retried.contains(&response.id)
+                                    && pending.iter().any(|r| {
+                                        r.id == response.id
+                                            && r.depends_on
+                                                .as_ref()
+                                                .is_some_and(|id| retried.contains(id))
+                                    })
+                            })
+                            .map(|response| response.id.clone())
+                            .collect();
+                        if dependents.is_empty() {
+                            break;
+                        }
+                        retried.extend(dependents);
+                    }
+                }
+                let retry: Vec<&BatchRequest> = pending
+                    .iter()
+                    .copied()
+                    .filter(|r| retried.contains(&r.id))
+                    .collect();
+                for response in envelope.responses {
+                    if !retried.contains(&response.id) {
+                        results.insert(response.id.clone(), response);
+                    }
                 }
                 if !retry.is_empty() {
                     attempt += 1;

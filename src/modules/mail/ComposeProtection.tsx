@@ -13,10 +13,12 @@ import {
   labelTitle,
   offeredActions,
   offeredLabels,
+  unofferedChoice,
 } from "./protection";
 
-/** Lets the composer point at the label choice when Send needs one. */
+/** Lets the composer point at the encryption or label choice when Send needs one. */
 export interface ComposeProtectionHandle {
+  focusEncryption: () => void;
   focusLabels: () => void;
   openLabels: () => void;
 }
@@ -36,7 +38,8 @@ interface ComposeProtectionProps {
 /**
  * The composer's Encrypt and Sensitivity buttons: only what a check in
  * Settings found the organization's mail server applies, and nothing at
- * all until then.
+ * all until then. A choice that stopped being offered (its check expired,
+ * or didn't pass again) stays in view, marked so, until it's cleared.
  */
 export function ComposeProtection({
   ref,
@@ -49,11 +52,13 @@ export function ComposeProtection({
   onLabel,
 }: ComposeProtectionProps) {
   const backend = useBackend();
+  const encryptButton = useRef<HTMLButtonElement | null>(null);
   const labelButton = useRef<HTMLButtonElement | null>(null);
   const labelMenu = useRef<MenuHandle>(null);
   useImperativeHandle(
     ref,
     () => ({
+      focusEncryption: () => encryptButton.current?.focus(),
       focusLabels: () => labelButton.current?.focus(),
       openLabels: () => labelMenu.current?.open(),
     }),
@@ -62,10 +67,15 @@ export function ComposeProtection({
 
   const actions = offeredActions(setup);
   const labels = offeredLabels(setup);
-  if (!setup || (actions.length === 0 && labels.length === 0)) return null;
+  const unoffered = unofferedChoice({ protect, labelId }, setup);
+  const showActions = actions.length > 0 || unoffered.action !== null;
+  const showLabels = labels.length > 0 || unoffered.label !== null;
+  if (!setup || (!showActions && !showLabels)) return null;
 
   const selected = labels.find((l) => l.id === labelId) ?? null;
-  const selectedTitle = selected ? labelTitle(selected) : null;
+  const stale = unoffered.label;
+  const staleTitle = stale ? ("name" in stale ? labelTitle(stale) : "Label you chose") : null;
+  const selectedTitle = selected ? labelTitle(selected) : staleTitle;
   // A label that encrypts brings its own encryption.
   const labelEncrypts = selected?.hasProtection ?? false;
   const chosenAction = protect && !labelEncrypts ? protect : null;
@@ -76,6 +86,17 @@ export function ComposeProtection({
       checked: chosenAction === action,
       onSelect: () => onProtect(action),
     })),
+    // Chosen, but no longer offered: shown, so it can be cleared.
+    ...(unoffered.action
+      ? [
+          {
+            label: `${ACTION_NAMES[unoffered.action]} (not available now)`,
+            checked: true,
+            disabled: true,
+            onSelect: () => undefined,
+          },
+        ]
+      : []),
     {
       label: "Don't encrypt",
       checked: chosenAction === null,
@@ -93,12 +114,21 @@ export function ComposeProtection({
     disabled: !canChooseLabel(setup, originalLabel, l),
     onSelect: () => onLabel(l.id),
   }));
-  if (!labelRequired(setup)) {
+  if (staleTitle) {
+    labelItems.push({
+      label: `${staleTitle} (not available now)`,
+      checked: true,
+      disabled: true,
+      onSelect: () => undefined,
+    });
+  }
+  // A choice that isn't offered can always be cleared.
+  if (!labelRequired(setup) || stale) {
     labelItems.push({
       label: "No label",
-      checked: selected === null,
+      checked: labelId === null,
       separator: true,
-      disabled: !canChooseLabel(setup, originalLabel, null),
+      disabled: !stale && !canChooseLabel(setup, originalLabel, null),
       onSelect: () => onLabel(null),
     });
   }
@@ -115,18 +145,26 @@ export function ComposeProtection({
 
   return (
     <>
-      {actions.length > 0 && (
+      {showActions && (
         <Menu
           label="Encryption"
           items={actionItems}
-          trigger={(props) => (
+          trigger={({ ref: triggerRef, ...props }) => (
             <button
               type="button"
+              ref={(el) => {
+                triggerRef.current = el;
+                encryptButton.current = el;
+              }}
               className={clsx(
                 "btn btn--subtle mail-tool mail-compose__protect",
                 chosenAction && "is-on",
               )}
-              aria-label={chosenAction ? `Encryption: ${ACTION_NAMES[chosenAction]}` : "Encryption"}
+              aria-label={
+                chosenAction
+                  ? `Encryption: ${ACTION_NAMES[chosenAction]}${unoffered.action ? " (not available now)" : ""}`
+                  : "Encryption"
+              }
               title={
                 labelEncrypts && selectedTitle
                   ? `The label ${selectedTitle} encrypts this message.`
@@ -144,7 +182,7 @@ export function ComposeProtection({
           )}
         />
       )}
-      {labels.length > 0 && (
+      {showLabels && (
         <Menu
           ref={labelMenu}
           label="Sensitivity label"
@@ -158,10 +196,12 @@ export function ComposeProtection({
               }}
               className={clsx(
                 "btn btn--subtle mail-tool mail-compose__sensitivity",
-                selected && "is-on",
+                selectedTitle && "is-on",
               )}
               aria-label={
-                selectedTitle ? `Sensitivity label: ${selectedTitle}` : "Sensitivity label"
+                selectedTitle
+                  ? `Sensitivity label: ${selectedTitle}${stale ? " (not available now)" : ""}`
+                  : "Sensitivity label"
               }
               title="Sensitivity label"
               disabled={disabled}

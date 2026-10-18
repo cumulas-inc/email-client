@@ -1325,6 +1325,16 @@
   max-width: 100%;
 }
 
+/* A label only the message names: told apart from the organization's own,
+   in its words and by its dashed outline. */
+.mail-tag--unverified {
+  background: transparent;
+  box-shadow: none;
+  outline: 1px dashed var(--border-control);
+  outline-offset: -1px;
+  color: var(--fg-secondary);
+}
+
 .mail-tag__name {
   min-width: 0;
   overflow: hidden;
@@ -2509,6 +2519,13 @@
 .mail-compose__protection-error svg {
   flex-shrink: 0;
   margin-top: 2px;
+}
+
+.mail-compose__protection-problem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
 }
 
 .mail-compose__warning {

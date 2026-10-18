@@ -61,19 +61,45 @@ export function checkDate(iso: string): string {
   return formatDate(date, date.getFullYear() === new Date().getFullYear() ? "short" : "shortYear");
 }
 
-/** Encrypt and Do Not Forward, when a check found they work (and not too long ago). */
+/**
+ * Encrypt and Do Not Forward, when a check found they work (and not too long
+ * ago); a pass still counts while a new check waits.
+ */
 export function offeredActions(setup: ProtectionSetup | undefined): ProtectAction[] {
   if (!setup?.supported) return [];
   const actions: ProtectAction[] = [];
-  if (setup.encrypt.state === "applied") actions.push("encrypt");
-  if (setup.doNotForward.state === "applied") actions.push("doNotForward");
+  if (setup.encrypt.passedAt !== null) actions.push("encrypt");
+  if (setup.doNotForward.passedAt !== null) actions.push("doNotForward");
   return actions;
 }
 
 /** The labels a check found work (and not too long ago), in Microsoft 365's order. */
 export function offeredLabels(setup: ProtectionSetup | undefined): LabelOption[] {
   if (!setup?.supported) return [];
-  return setup.labels.filter((l) => l.check.state === "applied");
+  return setup.labels.filter((l) => l.check.passedAt !== null);
+}
+
+/**
+ * What the draft asks for that isn't offered (any more): a check of it is
+ * running again, expired, or didn't pass. Sending it would be refused, so
+ * the composer says so and keeps the choice to clear it in view. A label
+ * that encrypts makes Encrypt moot.
+ */
+export function unofferedChoice(
+  draft: Pick<ComposeDraft, "protect" | "labelId">,
+  setup: ProtectionSetup | undefined,
+): { action: ProtectAction | null; label: LabelOption | { id: string } | null } {
+  const offered = offeredLabels(setup);
+  const label =
+    draft.labelId && !offered.some((l) => l.id === draft.labelId)
+      ? (setup?.labels.find((l) => l.id === draft.labelId) ?? { id: draft.labelId })
+      : null;
+  const encrypts = offered.find((l) => l.id === draft.labelId)?.hasProtection ?? false;
+  const action =
+    draft.protect && !encrypts && !offeredActions(setup).includes(draft.protect)
+      ? draft.protect
+      : null;
+  return { action, label };
 }
 
 /** The organization requires a label, and Cumulas Mail can apply at least one. */
@@ -146,33 +172,47 @@ export function noticeName(name: string | null | undefined, address: string): st
 /**
  * Why Send waits: a label is required and none is chosen; the original's
  * label can't be applied and the organization requires a label, so one has
- * to be chosen; or the original's label can't be applied, which the person
- * confirms.
+ * to be chosen; the same, but every label Cumulas Mail can apply is less
+ * sensitive than the original's, which needs a reason Cumulas Mail can't
+ * give, so only Outlook on the web can send it; or the original's label
+ * can't be applied, which the person confirms.
  */
 export type SendProblem =
   | { kind: "labelRequired" }
   | { kind: "chooseLabel"; name: string | null }
+  | { kind: "outlookOnly"; name: string | null }
   | { kind: "originalLabelDropped"; name: string | null };
 
-/** The original's label, when the draft might drop it (only for people who use labels here). */
+/**
+ * The original's label (a reply's or forward's original, or an edited
+ * draft's own), when the draft might drop it (only for people who use
+ * labels here).
+ */
 export function droppedLabel(
-  draft: Pick<ComposeDraft, "labelId" | "originalLabel" | "replyKind">,
+  draft: Pick<ComposeDraft, "labelId" | "originalLabel">,
   setup: ProtectionSetup | undefined,
 ): MessageLabel | null {
   const original = draft.originalLabel;
   const offered = offeredLabels(setup);
-  if (!draft.replyKind || !original || offered.length === 0) return null;
+  if (!original || offered.length === 0) return null;
   if (offered.some((l) => l.id === original.id) || draft.labelId === original.id) return null;
   return original;
 }
 
 export function sendProblem(
-  draft: Pick<ComposeDraft, "labelId" | "labelChosen" | "originalLabel" | "replyKind">,
+  draft: Pick<ComposeDraft, "labelId" | "labelChosen" | "originalLabel">,
   setup: ProtectionSetup | undefined,
 ): SendProblem | null {
   const dropped = droppedLabel(draft, setup);
   if (labelRequired(setup)) {
-    if (dropped && !draft.labelChosen) return { kind: "chooseLabel", name: dropped.name };
+    if (dropped && !draft.labelChosen && setup) {
+      const choosable = offeredLabels(setup).some((l) =>
+        canChooseLabel(setup, draft.originalLabel, l),
+      );
+      return choosable
+        ? { kind: "chooseLabel", name: dropped.name }
+        : { kind: "outlookOnly", name: dropped.name };
+    }
     return draft.labelId === null ? { kind: "labelRequired" } : null;
   }
   return dropped ? { kind: "originalLabelDropped", name: dropped.name } : null;

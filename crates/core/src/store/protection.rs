@@ -57,7 +57,9 @@ impl StoredChecks {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CheckRecord {
-    /// Never `Expired` here: that's worked out when the setup is read.
+    /// Never `Expired` here: that's worked out when the setup is read. Nor
+    /// `Waiting`: a check on its way is the run's, and this stays what the
+    /// last one decided until it's decided.
     pub state: CheckState,
     pub at: Option<DateTime<Utc>>,
     pub note: Option<CheckNote>,
@@ -389,7 +391,7 @@ mod tests {
                     note: None,
                     test_message_id: Some("AAMk-1".into()),
                 };
-                checks.record_mut(&encrypt).state = CheckState::Waiting;
+                checks.record_mut(&encrypt).state = CheckState::NotApplied;
                 checks.run = Some(CheckRun {
                     control_token: "k7q2m9xa".into(),
                     control_sent_at: at(9),
@@ -413,7 +415,7 @@ mod tests {
             checks.record(&label).test_message_id.as_deref(),
             Some("AAMk-1")
         );
-        assert_eq!(checks.record(&encrypt).state, CheckState::Waiting);
+        assert_eq!(checks.record(&encrypt).state, CheckState::NotApplied);
         assert_eq!(
             checks
                 .record(&CheckItem::Action {

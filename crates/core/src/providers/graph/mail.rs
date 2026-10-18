@@ -29,8 +29,8 @@ use crate::model::{
 };
 use crate::protection::{
     CONTENT_CLASS_PROPERTY, LABEL_HEADER, LABEL_PROPERTY, MESSAGE_CLASS_PROPERTY,
-    MSIP_LABELS_PROPERTY, PROTECT_HEADER, PROTECT_PROPERTY, headers_not_kept, is_blank,
-    label_copied, own_label, smime_content_of, wants_attachments,
+    MIME_ATTACHMENT_PREFIX, MSIP_LABELS_PROPERTY, PROTECT_HEADER, PROTECT_PROPERTY,
+    headers_not_kept, is_blank, label_copied, own_label, smime_content_of, wants_attachments,
 };
 use crate::providers::imap::mime;
 use crate::providers::{
@@ -66,10 +66,32 @@ const SMIME_PREFIX_BYTES: usize = 512;
 /// Largest message whose MIME is read to show a clear-signed message's
 /// content.
 const MAX_MIME_BYTES: usize = 25 * 1024 * 1024;
-/// Attachment ids of parts of a message's MIME: `mime:<section>`.
-const MIME_ATTACHMENT_PREFIX: &str = "mime:";
 /// Pages of Inbox messages a check's lookup reads.
 const MAX_INBOX_LOOKUP_PAGES: usize = 3;
+
+/// Whether Graph's answer to setting or reading back a draft's property
+/// refuses it, rather than failing to answer: the sign-in, a timeout,
+/// throttling, a request that failed only because the one before it did
+/// (424), or a server error say nothing of whether the draft keeps it.
+fn is_refusal(status: StatusCode) -> bool {
+    status.is_client_error()
+        && !matches!(
+            status,
+            StatusCode::UNAUTHORIZED
+                | StatusCode::REQUEST_TIMEOUT
+                | StatusCode::FAILED_DEPENDENCY
+                | StatusCode::TOO_MANY_REQUESTS
+        )
+}
+
+/// Microsoft 365 didn't answer while a draft's request was read back:
+/// nothing was sent, and nothing was learned of what it keeps.
+fn unanswered() -> Error {
+    Error::provider(
+        "Microsoft 365 didn't answer while Cumulas Mail checked the message before sending it, \
+         so it wasn't sent. Try again.",
+    )
+}
 
 /// Well-known folder names (Graph `mailFolder` docs) and the role they give.
 const WELL_KNOWN_FOLDERS: &[(&str, FolderRole)] = &[
@@ -1087,9 +1109,12 @@ impl GraphProvider {
     /// Reads back what a draft must carry before it's sent: each requested
     /// property exactly, and, for a reply or forward asking for a label, no
     /// other label of the organization copied from the original (nor any,
-    /// when the requested one encrypts).
+    /// when the requested one encrypts). Errors: `headersNotKept` when
+    /// Microsoft 365 answered without the value or refused to read it,
+    /// `labelCopied`, and [`unanswered`] (or the network's error) when it
+    /// didn't answer: nothing was learned of the draft then.
     async fn read_back(&self, draft_id: &str, reply: bool, request: &HeaderRequest) -> Result<()> {
-        let kind_error = || Error::internal("read-back failed");
+        let not_kept = || headers_not_kept(None);
         let mut properties: Vec<(&str, &str)> = Vec::new();
         if request.protect.is_some() {
             properties.push(("protect", PROTECT_PROPERTY));
@@ -1106,25 +1131,34 @@ impl GraphProvider {
             self.client.batch(&requests, &[PREFER_IMMUTABLE_ID]),
         )
         .await
-        .map_err(|_| kind_error())??;
+        .map_err(|_| unanswered())??;
         let mut value = |id: &str| -> Result<Option<String>> {
-            let response = responses.remove(id).ok_or_else(kind_error)?;
+            let response = responses.remove(id).ok_or_else(unanswered)?;
+            let status = response.status();
             if !response.is_success() {
-                tracing::debug!("reading back a draft's {id} returned {}", response.status());
-                return Err(kind_error());
+                tracing::debug!("reading back a draft's {id} returned {status}");
+                return Err(if is_refusal(status) {
+                    not_kept()
+                } else {
+                    unanswered()
+                });
             }
-            Ok(response.json::<WithProperties>()?.value())
+            // An answer that doesn't read is no answer about the value.
+            Ok(response
+                .json::<WithProperties>()
+                .map_err(|_| unanswered())?
+                .value())
         };
         if let Some(action) = request.protect
             && value("protect")?.as_deref() != Some(action.header_value())
         {
             tracing::debug!("the draft didn't keep {PROTECT_HEADER}");
-            return Err(kind_error());
+            return Err(not_kept());
         }
         if let Some(label) = &request.label_id {
             if value("label")?.as_deref() != Some(label.as_str()) {
                 tracing::debug!("the draft didn't keep {LABEL_HEADER}");
-                return Err(kind_error());
+                return Err(not_kept());
             }
             if reply
                 && let Some(copied) =
@@ -1590,15 +1624,20 @@ impl MailProvider for GraphProvider {
             .await;
         let checked = match patched {
             Ok(()) => self.read_back(&draft_id, reply.is_some(), request).await,
+            Err(Failure::Graph { status, .. }) if is_refusal(status) => {
+                tracing::debug!("setting a draft's properties was refused ({status})");
+                Err(headers_not_kept(kind))
+            }
             Err(e) => Err(e.into()),
         };
         if let Err(e) = checked {
             self.discard_draft(&draft_id).await;
-            if crate::protection::has_reason(&e, "labelCopied") {
-                return Err(e);
+            if crate::protection::has_reason(&e, "headersNotKept") {
+                tracing::debug!("a draft didn't keep what it asks for: {e}");
+                return Err(headers_not_kept(kind));
             }
-            tracing::debug!("a draft didn't keep what it asks for: {e}");
-            return Err(headers_not_kept(kind));
+            // labelCopied, or Microsoft 365 didn't answer: said as it is.
+            return Err(e);
         }
         if let Err(e) = self.add_attachments(&draft_id, &uploads).await {
             self.discard_draft(&draft_id).await;

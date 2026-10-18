@@ -486,13 +486,14 @@ pub struct Protection {
 pub struct MessageLabel {
     /// The label's GUID, lowercase.
     pub id: String,
-    /// "Parent › Child" from the account's labels, else the message's own
-    /// Name (cleaned); None when neither says.
+    /// "Parent › Child" from the account's labels; None without them. Never
+    /// the name a message gives, which any sender can write.
     pub name: Option<String>,
     /// `#rrggbb` from the account's labels; None when unknown.
     pub color: Option<String>,
-    /// The name and color come from the account's labels (Microsoft 365's
-    /// list), not from the message.
+    /// The label is one of the account's labels (Microsoft 365's list),
+    /// named and colored from it. Without that list, a message's label is
+    /// only one it names for the organization: unverified.
     pub from_catalog: bool,
 }
 
@@ -659,6 +660,8 @@ pub enum CheckState {
     #[default]
     NotChecked,
     /// The test message went out; waiting for it (and the control) to arrive.
+    /// Shown while a check runs, never stored: the last decided check still
+    /// counts until then (`CheckResult::passed_at`).
     Waiting,
     /// It arrived encrypted or labeled, and the control didn't: offered.
     Applied,
@@ -683,7 +686,8 @@ pub enum CheckNote {
     /// rule that encrypted it may not be Cumulas Mail's. (With `Unknown`.)
     HeaderKept,
     /// It, or the control, didn't arrive within `CHECK_TIMEOUT_MINUTES`.
-    /// (With `Unknown`.)
+    /// (With `Unknown`; or with `Applied`, when an earlier pass still
+    /// counts.)
     NotArrived,
     /// Microsoft 365 didn't keep the property on the test message's draft,
     /// so it wasn't sent. (With `NotApplied`.)
@@ -699,6 +703,10 @@ pub struct CheckResult {
     pub note: Option<CheckNote>,
     /// The test message arrived and can be opened in Outlook on the web.
     pub test_message: bool,
+    /// When the test message that lets the option be offered arrived: set
+    /// while that pass is less than `CHECK_VALID_DAYS` old, a new check
+    /// waiting or not; None when it isn't offered.
+    pub passed_at: Option<DateTime<Utc>>,
 }
 
 /// A sensitivity label Microsoft 365 lists for the person, for email.
@@ -1990,12 +1998,14 @@ mod tests {
                 at: Some(at),
                 note: None,
                 test_message: true,
+                passed_at: Some(at),
             },
             do_not_forward: CheckResult {
                 state: CheckState::Unknown,
                 at: Some(at),
                 note: Some(CheckNote::OtherRule),
                 test_message: false,
+                passed_at: None,
             },
             labels: vec![LabelOption {
                 label: general,
@@ -2021,12 +2031,14 @@ mod tests {
                     "at": "2026-10-16T09:00:00Z",
                     "note": null,
                     "testMessage": true,
+                    "passedAt": "2026-10-16T09:00:00Z",
                 },
                 "doNotForward": {
                     "state": "unknown",
                     "at": "2026-10-16T09:00:00Z",
                     "note": "otherRule",
                     "testMessage": false,
+                    "passedAt": null,
                 },
                 "labels": [{
                     "id": "6c1b3b5e-0000-4000-8000-000000000001",
@@ -2036,7 +2048,13 @@ mod tests {
                     "color": "#b35f26",
                     "hasProtection": true,
                     "sensitivity": 3,
-                    "check": { "state": "notChecked", "at": null, "note": null, "testMessage": false },
+                    "check": {
+                        "state": "notChecked",
+                        "at": null,
+                        "note": null,
+                        "testMessage": false,
+                        "passedAt": null,
+                    },
                 }],
                 "policy": {
                     "required": true,

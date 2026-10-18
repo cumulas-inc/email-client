@@ -188,6 +188,50 @@ fn smime_types_count_as_containers_only_with_a_signal() {
 }
 
 #[test]
+fn signed_documents_attached_to_signed_mail_stay_ordinary() {
+    // multipart/signed around the sender's files: a CAdES-signed contract
+    // and a detached signature of their own are theirs to open, only the
+    // message's signature part is a container.
+    let signed = mime("multipart/signed; protocol=application/pkcs7-signature");
+    for prefix in ["", MIME_ATTACHMENT_PREFIX] {
+        let files = [
+            file(
+                &format!("{prefix}1.2"),
+                "contract.pdf.p7m",
+                "application/pkcs7-mime",
+            ),
+            file(
+                &format!("{prefix}1.3"),
+                "document.pdf.p7s",
+                "application/pkcs7-signature",
+            ),
+            file(
+                &format!("{prefix}2"),
+                "signature",
+                "application/x-pkcs7-signature",
+            ),
+        ];
+        let found = detect(&signed, &files, Some("<p>Signed</p>"), false, false).unwrap();
+        assert_eq!(found.kind, ProtectionKind::SmimeSigned);
+        assert_eq!(found.container_ids, [format!("{prefix}2")]);
+        assert!(!found.content_hidden);
+    }
+    // An opaque root is its own content; a .p7m inside it isn't another.
+    let opaque = mime("application/pkcs7-mime; smime-type=enveloped-data");
+    let files = [
+        file("1", "encrypted", "application/pkcs7-mime"),
+        file("1.2", "fattura.xml.p7m", "application/pkcs7-mime"),
+    ];
+    let found = detect(&opaque, &files, None, true, false).unwrap();
+    assert_eq!(found.kind, ProtectionKind::SmimeEncrypted);
+    assert_eq!(found.container_ids, ["1"]);
+    // The exact names count wherever they are.
+    let named = [file("1.2", "smime.p7s", "application/pkcs7-signature")];
+    let found = detect(&signed, &named, Some("<p>Signed</p>"), false, false).unwrap();
+    assert_eq!(found.container_ids, ["1.2"]);
+}
+
+#[test]
 fn an_smime_p7m_without_other_signals_depends_on_the_body() {
     let p7m = [file("att-1", "smime.p7m", "multipart/signed")];
     // Next to a body: a clear-signed message's container on Graph.
@@ -287,6 +331,25 @@ fn portal_links_are_found_as_written() {
     assert_eq!(portal_link_in(&html).as_deref(), Some(wrapped.as_str()));
     let wrapping_another = "<a href=\"https://nam02.safelinks.protection.outlook.com/?url=https%3A%2F%2Fevil.example%2FEncryption%2F\">x</a>";
     assert_eq!(portal_link_in(wrapping_another), None);
+}
+
+#[test]
+fn a_safe_links_wrapper_must_itself_be_plain_https() {
+    // The wrapper is what the button opens: plain HTTP, another port or a
+    // user name would let it go elsewhere, whatever it wraps.
+    let inner = url::form_urlencoded::byte_serialize(PORTAL.as_bytes()).collect::<String>();
+    for wrapper in [
+        "http://nam01.safelinks.protection.outlook.com/",
+        "https://nam01.safelinks.protection.outlook.com:8080/",
+        "https://user@nam01.safelinks.protection.outlook.com/",
+        "https://user:pass@nam01.safelinks.protection.outlook.com/",
+    ] {
+        let html = format!(r#"<a href="{wrapper}?url={inner}&amp;data=x">Read the message</a>"#);
+        assert_eq!(portal_link_in(&html), None, "{wrapper}");
+    }
+    // Nor the portal itself with a user name.
+    let html = r#"<a href="https://user@outlook.office365.com/Encryption/retrieve.ashx">x</a>"#;
+    assert_eq!(portal_link_in(html), None);
 }
 
 #[test]
@@ -484,27 +547,6 @@ fn msip_labels_skip_what_doesnt_read() {
     assert_eq!(own_label(&raw, TENANT).unwrap().id, LABEL);
     assert!(parse_msip_labels("").is_empty());
     assert!(parse_msip_labels("MSIP_Label_").is_empty());
-}
-
-#[test]
-fn label_names_from_messages_are_cleaned() {
-    assert_eq!(
-        shown_label_name(" Confidential ").as_deref(),
-        Some("Confidential")
-    );
-    assert_eq!(shown_label_name(LABEL), None);
-    assert_eq!(shown_label_name(&LABEL.to_uppercase()), None);
-    assert_eq!(shown_label_name(" \u{202E} "), None);
-    assert_eq!(
-        shown_label_name("Inter\u{202E}nal\u{2066}\u{200F}\u{0007}").as_deref(),
-        Some("Internal")
-    );
-    let long = "x".repeat(100);
-    let shown = shown_label_name(&long).unwrap();
-    assert_eq!(shown.chars().count(), 64);
-    assert!(shown.ends_with('…'));
-    let wide = "é".repeat(64);
-    assert_eq!(shown_label_name(&wide).as_deref(), Some(wide.as_str()));
 }
 
 #[test]

@@ -160,22 +160,37 @@ function Recipients({ message }: { message: Message }) {
   );
 }
 
-/** A sensitivity label's tag: its name, said to be one; a dot in its color when known. */
+/** What an unverified label's tag says on hover: what it means and what would show more. */
+const UNVERIFIED_LABEL =
+  "The message says it has one of your organization's sensitivity labels. Without your organization's list of labels, Cumulas Mail can't tell which, or whether it's real: any sender can write this.";
+
+/**
+ * A sensitivity label's tag: its name, said to be one; a dot in its color
+ * when known. A label that isn't one of the account's labels (the account
+ * has no list) is only one the message names, which any sender can write:
+ * its tag says so in its text, and never shows a name.
+ */
 function LabelTag({ label, requested = false }: { label: MessageLabel; requested?: boolean }) {
-  // Named by the account's labels, or only by the message, which anyone can write.
-  const kind = label.fromCatalog ? "Sensitivity label" : "Label named in the message";
+  if (!label.fromCatalog && !requested) {
+    return (
+      <span className="mail-tag mail-tag--label mail-tag--unverified" title={UNVERIFIED_LABEL}>
+        <Tag size={14} strokeWidth={2} aria-hidden="true" />
+        <span className="mail-tag__name">Sensitivity label (unverified)</span>
+      </span>
+    );
+  }
   const name = label.name ?? "Sensitivity label";
   return (
     <span
       className="mail-tag mail-tag--label"
-      title={label.name ? `${kind}: ${label.name}` : undefined}
+      title={label.name ? `Sensitivity label: ${label.name}` : undefined}
     >
       {label.color ? (
         <span className="mail-tag__dot" style={{ background: label.color }} aria-hidden="true" />
       ) : (
         <Tag size={14} strokeWidth={2} aria-hidden="true" />
       )}
-      {label.name && <span className="visually-hidden">{kind}: </span>}
+      {label.name && <span className="visually-hidden">Sensitivity label: </span>}
       <span className="mail-tag__name">
         <bdi>{name}</bdi>
         {requested && " (requested)"}
@@ -322,19 +337,35 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
     label: "Copy diagnostic details",
     icon: <ClipboardList size={16} aria-hidden="true" />,
     onSelect: () => {
-      backend
-        .getMessageDiagnostics(message.id)
-        .then((text) => {
-          // Never "Copied" when nothing was.
-          if (!navigator.clipboard) throw new Error("Copying isn't available here.");
-          return navigator.clipboard.writeText(text);
-        })
+      // The write starts here, in the click: WebKit refuses one that starts
+      // only after the core answered, which can take a while. The text
+      // follows as a promise.
+      const text = backend.getMessageDiagnostics(message.id);
+      const copied =
+        typeof ClipboardItem !== "undefined" && navigator.clipboard?.write
+          ? navigator.clipboard.write([
+              new ClipboardItem({
+                "text/plain": text.then((t) => new Blob([t], { type: "text/plain" })),
+              }),
+            ])
+          : text.then((t) => {
+              // Never "Copied" when nothing was.
+              if (!navigator.clipboard) throw new Error("Copying isn't available here.");
+              return navigator.clipboard.writeText(t);
+            });
+      copied
         .then(() =>
           toast.success(
             "Copied diagnostic details. They describe the message's protection, not its content.",
           ),
         )
-        .catch((e: unknown) => toast.error(e));
+        // The core's own error says more than the clipboard's.
+        .catch((e: unknown) =>
+          text.then(
+            () => toast.error(e),
+            (reason: unknown) => toast.error(reason),
+          ),
+        );
     },
   });
   // Only designed mail (its own backgrounds) offers a choice of sheet.

@@ -63,7 +63,7 @@ and restarts into it when you choose Restart (see
   they stay protected; S/MIME signatures show, unchecked. Microsoft 365 work
   and school accounts can ask their organization's mail server to encrypt a
   message or apply a sensitivity label, once IT has set up the rules and a
-  check in Settings → Accounts shows they work (see
+  test message from Settings → Accounts arrives encrypted or labeled (see
   [the admin guide](docs/microsoft-365.md#sensitivity-labels-and-encryption-it-admins)).
 - **New mail within seconds**: IMAP accounts keep a connection open (IMAP
   IDLE, and NOTIFY where the server offers it); Microsoft accounts get

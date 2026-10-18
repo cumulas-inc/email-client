@@ -1,11 +1,12 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { MockBackend } from "../../api/mock";
 import { DEMO_PORTAL_URL } from "../../api/mock/data";
 import type { Message } from "../../api/types";
-import { folderTree, renderMail, respondButton, row, toolbarButton } from "./testUtils";
+import { SenderIdentity } from "./ProtectionNotice";
+import { deferred, folderTree, renderMail, respondButton, row, toolbarButton } from "./testUtils";
 
 // Full-module tests in jsdom; allow for slow, busy CI machines.
 vi.setConfig({ testTimeout: 20_000 });
@@ -180,11 +181,18 @@ describe("Protected messages", () => {
     expect(screen.getByText("S/MIME signature (not checked)")).toBeInTheDocument();
   });
 
-  it("names labels from the account's list, or as the message names them", async () => {
+  it("names labels from the account's list, never as a message names them", async () => {
     const user = userEvent.setup();
     const backend = protectedBackend();
     const [first, second] = messages(backend).filter((m) => m.folderId === "w-inbox" && !m.label);
-    first!.label = { id: "1", name: "Partner Only", color: null, fromCatalog: false };
+    // Not one of the account's labels: whatever name came with it, it's
+    // only a label the message says it has, which any sender can write.
+    first!.label = {
+      id: "1",
+      name: "Verified internal – Acme IT",
+      color: null,
+      fromCatalog: false,
+    };
     second!.label = { id: "2", name: null, color: null, fromCatalog: false };
     await renderMail({ backend });
 
@@ -193,14 +201,36 @@ describe("Protected messages", () => {
     // No notice for a label alone.
     expect(screen.queryByRole("note")).toBeNull();
 
-    await open(user, new RegExp(first!.subject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    expect(screen.getByTitle("Label named in the message: Partner Only")).toHaveTextContent(
-      "Label named in the message: Partner Only",
+    for (const message of [first!, second!]) {
+      await open(user, new RegExp(message.subject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      // Said in its visible text, not only on hover; never the message's name.
+      const tag = screen.getByText("Sensitivity label (unverified)");
+      expect(tag).toBeVisible();
+      expect(tag.closest(".mail-tag")).toHaveClass("mail-tag--unverified");
+      expect(tag.closest(".mail-tag")!.querySelector(".visually-hidden")).toBeNull();
+      expect(screen.queryByText(/Verified internal/)).toBeNull();
+    }
+  });
+
+  it("shows a label as unverified while the account's labels are off, as the core does", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend({ protectedMail: true, missing: ["sensitivityLabels"] });
+    await renderMail({ backend });
+    await open(user, /Updated org chart/);
+    expect(screen.getByText("Sensitivity label (unverified)")).toBeInTheDocument();
+    expect(screen.queryByText("General", { selector: ".mail-tag__name bdi" })).toBeNull();
+  });
+
+  it("shows a sender's name in its own isolate, without bidi controls", () => {
+    const { container } = render(
+      <p>
+        <SenderIdentity from={{ name: "Dana\u202e Whitfield", address: "dana@acme.example" }} />
+      </p>,
     );
-    await open(user, new RegExp(second!.subject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    expect(
-      screen.getByText("Sensitivity label", { selector: ".mail-tag__name bdi" }),
-    ).toBeInTheDocument();
+    const parts = Array.from(container.querySelectorAll("bdi")).map((b) => b.textContent);
+    expect(parts).toEqual(["Dana Whitfield", "dana@acme.example"]);
+    expect(container.textContent).toBe("Dana Whitfield (dana@acme.example)");
+    expect(container.textContent).not.toMatch(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
   });
 
   it("shows what a sent message asked for, and that the copy doesn't show the outcome", async () => {
@@ -221,6 +251,40 @@ describe("Protected messages", () => {
         "Cumulas Mail asked your organization's mail server for this when the message was sent. This copy doesn't show whether it did.",
       ),
     ).toBeVisible();
+  });
+
+  it("starts copying diagnostic details in the click, before they arrive", async () => {
+    const user = userEvent.setup();
+    const backend = protectedBackend();
+    const details = deferred<string>();
+    const get = vi.spyOn(backend, "getMessageDiagnostics").mockReturnValue(details.promise);
+    // WebKit only lets a write that starts in the click through: a
+    // ClipboardItem whose text follows.
+    class FakeClipboardItem {
+      constructor(readonly data: Record<string, Promise<Blob>>) {}
+    }
+    vi.stubGlobal("ClipboardItem", FakeClipboardItem);
+    onTestFinished(() => void vi.unstubAllGlobals());
+    await renderMail({ backend });
+    await open(user, /Atlas launch checklist/);
+    const write = vi.spyOn(navigator.clipboard, "write");
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+
+    await user.click(toolbarButton("More actions"));
+    await user.click(screen.getByRole("menuitem", { name: "Copy diagnostic details" }));
+    expect(get).toHaveBeenCalledWith("msg-1");
+    // Written while the details are still on their way.
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(writeText).not.toHaveBeenCalled();
+    const item = write.mock.calls[0]![0][0] as unknown as FakeClipboardItem;
+    details.resolve("Cumulas Mail 0.1.0-demo: protection details of one message\n");
+    const blob = await item.data["text/plain"]!;
+    expect(await blob.text()).toBe("Cumulas Mail 0.1.0-demo: protection details of one message\n");
+    expect(
+      await screen.findByText(
+        "Copied diagnostic details. They describe the message's protection, not its content.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("copies diagnostic details for every message, and opens Microsoft mail in Outlook on the web", async () => {
@@ -291,6 +355,65 @@ describe("Replying to protected mail", () => {
     expect(openInOutlook).toHaveBeenCalledWith("msg-protected-1");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(screen.queryByRole("region", { name: "Forward" })).toBeNull();
+  });
+
+  it("keeps the focus on Open while Outlook on the web is on its way", async () => {
+    const user = userEvent.setup();
+    const backend = protectedBackend();
+    const opened = deferred();
+    const openInOutlook = vi.spyOn(backend, "openInOutlook").mockReturnValue(opened.promise);
+    await renderMail({ backend });
+    await open(user, /Q4 forecast/);
+    await user.click(respondButton("Reply"));
+    const dialog = await screen.findByRole("dialog", { name: "Reply in Outlook on the web" });
+    const button = within(dialog).getByRole("button", { name: "Open in Outlook on the web" });
+    await user.click(button);
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveFocus();
+    await user.click(button);
+    expect(openInOutlook).toHaveBeenCalledTimes(1);
+    opened.resolve();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("doesn't promise Outlook on the web keeps S/MIME, which needs it set up there", async () => {
+    const user = userEvent.setup();
+    const backend = protectedBackend();
+    const forecast = messages(backend).find((m) => m.id === "msg-protected-1")!;
+    forecast.protection = { ...forecast.protection!, kind: "smimeEncrypted" };
+    await renderMail({ backend });
+    await open(user, /Q4 forecast/);
+    await user.click(respondButton("Forward"));
+    const dialog = await screen.findByRole("dialog", { name: "Forward in Outlook on the web" });
+    expect(dialog).toHaveTextContent(
+      "This message is encrypted. Cumulas Mail can't forward it without removing the encryption. Open it in Outlook on the web, which can forward it encrypted if S/MIME is set up there.",
+    );
+    expect(dialog).not.toHaveTextContent("which keeps it");
+  });
+
+  it("sends an IMAP account to Microsoft's portal when the message links to it", async () => {
+    const user = userEvent.setup();
+    const backend = protectedBackend();
+    const openLink = vi.spyOn(backend, "openLink").mockResolvedValue(undefined);
+    await renderMail({ backend });
+    await openHomeInbox(user);
+    await open(user, /Your protected message/);
+
+    await user.click(respondButton("Reply"));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Can't reply to a protected message",
+    });
+    expect(dialog).toHaveTextContent(
+      "Cumulas Mail can't reply to this message without removing its protection. Reply to it in Microsoft's encrypted message portal, with the button below.",
+    );
+    expect(dialog).not.toHaveTextContent("the app your organization provides");
+    await user.click(
+      within(dialog).getByRole("button", { name: "Open Microsoft's encrypted message portal" }),
+    );
+    expect(String(openLink.mock.lastCall?.[0])).toMatch(
+      /^https:\/\/outlook\.office365\.com\/Encryption\/retrieve\.ashx\?/,
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("tells IMAP accounts to use their organization's app", async () => {

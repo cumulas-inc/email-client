@@ -259,6 +259,24 @@ a {
   cursor: progress;
 }
 
+/* Unavailable while something else runs, but keeping the focus it has
+   (aria-disabled rather than disabled): it looks and reacts as disabled. */
+.btn[aria-disabled="true"]:not(.btn--busy) {
+  color: var(--fg-disabled);
+  cursor: default;
+}
+
+.btn[aria-disabled="true"]:not(.btn--busy):hover,
+.btn[aria-disabled="true"]:not(.btn--busy):active {
+  background: var(--bg-surface);
+  transform: none;
+}
+
+.btn--subtle[aria-disabled="true"]:not(.btn--busy):hover,
+.btn--subtle[aria-disabled="true"]:not(.btn--busy):active {
+  background: transparent;
+}
+
 /* A spinner in a button turns with the label's color, not teal on teal. */
 .btn .spinner {
   color: inherit;

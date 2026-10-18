@@ -402,9 +402,10 @@ async fn prefixes_stop_at_their_length() {
 }
 
 #[tokio::test]
-async fn sequential_batches_name_only_requests_sent_with_them() {
+async fn sequential_batches_retry_what_failed_after_a_throttled_request() {
     let (server, provider) = setup().await;
-    // b is throttled once; c, after it, fails as Graph fails a dependent.
+    // b is throttled once; c, after it, fails as Graph fails a dependent,
+    // and goes again with b, still after it.
     Mock::given(method("POST"))
         .and(path("/$batch"))
         .respond_with(batch_responder(|r| match r["id"].as_str().unwrap() {
@@ -433,13 +434,45 @@ async fn sequential_batches_name_only_requests_sent_with_them() {
     ];
     let responses = provider.client.batch(&requests, &[]).await.unwrap();
     assert!(responses["a"].is_success() && responses["b"].is_success());
-    assert_eq!(responses["c"].status, 424);
+    assert!(responses["c"].is_success());
     let sent = batched_requests(&server).await;
-    assert_eq!(sent.len(), 4);
+    assert_eq!(sent.len(), 5);
     assert_eq!(sent[0].get("dependsOn"), None);
     assert_eq!(sent[1]["dependsOn"], json!(["a"]));
     assert_eq!(sent[2]["dependsOn"], json!(["b"]));
-    // Retried alone: after nothing.
+    // Retried: b after nothing (a isn't sent again), c still after b.
     assert_eq!(sent[3]["id"], "b");
     assert_eq!(sent[3].get("dependsOn"), None);
+    assert_eq!(sent[4]["id"], "c");
+    assert_eq!(sent[4]["dependsOn"], json!(["b"]));
+}
+
+#[tokio::test]
+async fn a_dependent_that_failed_on_its_own_is_not_retried() {
+    let (server, provider) = setup().await;
+    // b failed for good (403), so c's 424 stands; nothing is sent again.
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(batch_responder(|r| match r["id"].as_str().unwrap() {
+            "a" => (200, json!({ "id": "a" })),
+            "b" => (
+                403,
+                json!({ "error": { "code": "ErrorAccessDenied", "message": "Access is denied." } }),
+            ),
+            _ => (
+                424,
+                json!({ "error": { "code": "FailedDependency", "message": "b failed" } }),
+            ),
+        }))
+        .mount(&server)
+        .await;
+    let requests = [
+        BatchRequest::get("a", "/me/messages/a".into()),
+        BatchRequest::get("b", "/me/messages/b".into()).after("a"),
+        BatchRequest::get("c", "/me/messages/c".into()).after("b"),
+    ];
+    let responses = provider.client.batch(&requests, &[]).await.unwrap();
+    assert_eq!(responses["b"].status, 403);
+    assert_eq!(responses["c"].status, 424);
+    assert_eq!(batched_requests(&server).await.len(), 3);
 }

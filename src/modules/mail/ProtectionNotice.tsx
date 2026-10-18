@@ -1,3 +1,4 @@
+import clsx from "clsx";
 import { ExternalLink, Link, LoaderCircle, Lock, Signature } from "lucide-react";
 import { type ReactNode, useId, useState } from "react";
 
@@ -143,6 +144,8 @@ export function ProtectionNotice({ message, microsoft }: ProtectionNoticeProps) 
   const outlook = microsoft && kind !== "portalLink";
 
   const openInOutlook = async () => {
+    // Busy, but keeping the focus: a second press waits for the first.
+    if (opening) return;
     setOpening(true);
     try {
       await backend.openInOutlook(message.id);
@@ -181,9 +184,9 @@ export function ProtectionNotice({ message, microsoft }: ProtectionNoticeProps) 
             {outlook && (
               <button
                 type="button"
-                className="btn btn--primary btn--sm"
+                className={clsx("btn btn--primary btn--sm", opening && "btn--busy")}
                 aria-busy={opening || undefined}
-                disabled={opening}
+                aria-disabled={opening || undefined}
                 onClick={() => void openInOutlook()}
               >
                 {opening ? (

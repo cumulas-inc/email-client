@@ -515,8 +515,11 @@ SDK, which an open-source app can't ship. So Cumulas Mail:
 - opens Outlook on the web for **Reply**, **Reply all** and **Forward** on encrypted mail, so it
   never sends an unprotected copy;
 - shows a message's sensitivity label when its `msip_labels` header (or Exchange's copy of it)
-  names a label of the account's own organization. Once people have turned sensitivity labels
-  on, only labels Microsoft 365 lists for them are shown, with their names from that list.
+  names a label of the account's own organization. Any sender can write that header, with any
+  name and your tenant ID, which is public, so Cumulas Mail never shows the name it gives. Once
+  people have turned sensitivity labels on, only labels Microsoft 365 lists for them are shown,
+  with their names from that list; until then, the message shows "Sensitivity label
+  (unverified)".
 
 Outlook on the web shows protected mail only once Exchange Online uses Azure Rights Management:
 `Get-IRMConfiguration` shows `AzureRMSLicensingEnabled : True`, and
@@ -560,11 +563,13 @@ Otherwise the check says why:
 - **Arrived without it:** the rule or policy didn't act (not created yet, in simulation, a wrong
   pattern or group).
 - **Couldn't check:** the test messages didn't arrive in the Inbox within 15 minutes (an Inbox
-  rule that moves them elsewhere has this effect too).
+  rule that moves them elsewhere has this effect too). An earlier pass that's still valid stays,
+  with a note that the latest test didn't arrive.
 
 Once Cumulas Mail has read the test messages, the control included, it moves them to Deleted
 Items. A passed check lasts 90 days; then the option isn't offered until people select **Check
-again**, and Settings says when it was last checked. The copy in the sender's Sent Items is saved
+again**, and Settings says when it was last checked. While a check runs again, the earlier pass
+still counts (and a required label stays required) until the new test message is judged. The copy in the sender's Sent Items is saved
 before your rules run, so it usually isn't encrypted or labeled; Cumulas Mail shows it as
 "requested". A check sends at most 20 messages, under Exchange Online's 30 messages a minute.
 

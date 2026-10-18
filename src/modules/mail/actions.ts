@@ -190,6 +190,7 @@ export function useMailActions(): MailActions {
               kind,
               accountKind: account?.kind ?? "microsoft",
               protection: original.protection?.kind ?? null,
+              portalUrl: original.protection?.portalUrl ?? null,
             });
             return;
           }
@@ -214,6 +215,9 @@ export function useMailActions(): MailActions {
             importance: draft.importance,
             // A saved draft has whatever signature it was written with.
             signature: "off",
+            // Its own label carries on, as a reply's original's does: kept
+            // when it can be applied, never quietly lowered to the default.
+            originalLabel: draft.label,
           });
         } catch (e) {
           toast.error(e);

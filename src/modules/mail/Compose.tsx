@@ -22,7 +22,13 @@ import {
 import { useBackend } from "../../api/context";
 import { errorMessage, isBackendError } from "../../api/errors";
 import { useAccounts, useProtectionSetup } from "../../api/queries";
-import type { EmailAddress, Importance, ProtectionSetup, ReplyKind } from "../../api/types";
+import type {
+  CheckResult,
+  EmailAddress,
+  Importance,
+  ProtectionSetup,
+  ReplyKind,
+} from "../../api/types";
 import { Dialog } from "../../components/Dialog";
 import { Menu } from "../../components/Menu";
 import { toast } from "../../components/toast";
@@ -43,6 +49,7 @@ import { type ComposeDraft, type DraftAttachment, useMailStore } from "./mailSto
 import { MessageBody } from "./MessageBody";
 import {
   ACTION_NAMES,
+  CHECK_VALID_DAYS,
   canChooseLabel,
   checkDate,
   droppedLabel,
@@ -51,6 +58,7 @@ import {
   offeredActions,
   offeredLabels,
   sendProblem,
+  unofferedChoice,
 } from "./protection";
 import { RecipientField, type RecipientFieldHandle } from "./RecipientField";
 import { useSendMessage } from "./queries";
@@ -95,14 +103,65 @@ export function DiscardDialog({
 
 const LABEL_REQUIRED = "Choose a sensitivity label. Your organization requires one.";
 
-/** "reply" or "forward", as the label copy names a draft. */
+/** "reply", "forward" or "message", as the label copy names a draft. */
 function draftNoun(kind: ReplyKind | null): string {
-  return kind === "forward" ? "forward" : "reply";
+  if (kind === "forward") return "forward";
+  return kind ? "reply" : "message";
 }
 
-/** The original's label, by name when it has one. */
-function originalLabeled(name: string | null): string {
-  return name ? `The original is labeled ${name}.` : "The original has a sensitivity label.";
+/**
+ * The original's label, by name when it has one: a reply's or forward's
+ * original, or (`kind` null) the saved draft being edited.
+ */
+function originalLabeled(name: string | null, kind: ReplyKind | null): string {
+  const whose = kind ? "The original" : "This draft";
+  return name ? `${whose} is labeled ${name}.` : `${whose} has a sensitivity label.`;
+}
+
+/**
+ * That the original's label can't be applied, so the message may go out
+ * without it: a reply or forward might keep it anyway (Exchange may copy
+ * it); a draft sent again as a new message won't.
+ */
+function labelDropText(name: string | null, kind: ReplyKind | null): string {
+  return `${originalLabeled(name, kind)} Cumulas Mail can't apply that label, so this ${draftNoun(kind)} ${kind ? "might not" : "won't"} keep it.`;
+}
+
+/**
+ * Why the organization's required label can't be applied from here: the
+ * person's own check is missing, running, or too old, or the checks ran
+ * and none arrived labeled (IT's part).
+ */
+function requiredLabelHint(setup: ProtectionSetup, email: string): string {
+  const required = "Your organization requires a sensitivity label on email.";
+  const states = setup.labels.map((l) => l.check.state);
+  if (states.includes("waiting")) {
+    return `${required} Cumulas Mail is checking its labels for ${email}; they appear here once a test message arrives labeled.`;
+  }
+  if (states.includes("notChecked")) {
+    return `${required} Cumulas Mail can apply labels for ${email} after a check in Settings → Accounts shows a test message arrives labeled.`;
+  }
+  if (states.includes("expired")) {
+    return `${required} The labels for ${email} were last checked more than ${CHECK_VALID_DAYS} days ago. Check them again in Settings → Accounts to apply them here.`;
+  }
+  return `${required} Cumulas Mail can't apply labels for ${email} until your IT team sets them up.`;
+}
+
+/**
+ * Why a choice the draft holds can't be sent: its check is running again,
+ * expired, or didn't pass. `clear` is what to choose instead.
+ */
+function unavailableText(name: string, check: CheckResult | null, clear: string): string {
+  switch (check?.state) {
+    case "waiting":
+      return `${name} is being checked in Settings → Accounts and can't be applied until the check passes. Choose ${clear}, or wait for the check.`;
+    case "expired":
+      return `${name} was last checked more than ${CHECK_VALID_DAYS} days ago, so it can't be applied. Check it again in Settings → Accounts, or choose ${clear}.`;
+    case undefined:
+      return `${name} isn't available for this account any more. Choose ${clear}.`;
+    default:
+      return `${name} can't be applied: its latest check in Settings → Accounts didn't pass. Choose ${clear}.`;
+  }
 }
 
 /** What the composer says under the fields about encryption and labels. */
@@ -117,7 +176,7 @@ function protectionHints(
   const label = labels.find((l) => l.id === draft.labelId) ?? null;
   const protect = draft.protect && !label?.hasProtection ? draft.protect : null;
   if (protect && offeredActions(setup).includes(protect)) {
-    const at = protect === "encrypt" ? setup.encrypt.at : setup.doNotForward.at;
+    const at = protect === "encrypt" ? setup.encrypt.passedAt : setup.doNotForward.passedAt;
     const asks =
       protect === "encrypt"
         ? "Cumulas Mail asks your organization's mail server to encrypt this message."
@@ -126,8 +185,8 @@ function protectionHints(
     hints.push(`${asks}${date} Your copy in Sent Items won't show it.`);
   }
   if (label) {
-    const date = label.check.at
-      ? ` A test message on ${checkDate(label.check.at)} arrived with it.`
+    const date = label.check.passedAt
+      ? ` A test message on ${checkDate(label.check.passedAt)} arrived with it.`
       : "";
     hints.push(
       `Cumulas Mail asks your organization's mail server to apply the label ${labelTitle(label)}.${date}` +
@@ -135,15 +194,11 @@ function protectionHints(
     );
   }
   if (setup.policy.required && labels.length === 0) {
-    hints.push(
-      `Your organization requires a sensitivity label on email. Cumulas Mail can't apply labels for ${email ?? "this account"} until your IT team sets them up.`,
-    );
+    hints.push(requiredLabelHint(setup, email ?? "this account"));
   }
   const dropped = droppedLabel(draft, setup);
   if (dropped) {
-    hints.push(
-      `${originalLabeled(dropped.name)} Cumulas Mail can't apply that label, so this ${draftNoun(draft.replyKind)} might not keep it.`,
-    );
+    hints.push(labelDropText(dropped.name, draft.replyKind));
   }
   const blocked =
     labels.some((l) => !canChooseLabel(setup, draft.originalLabel, l)) ||
@@ -186,8 +241,16 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
   const [confirmNoSubject, setConfirmNoSubject] = useState(false);
   /** The original's label that a send would drop, while asking whether to. */
   const [confirmLabelDrop, setConfirmLabelDrop] = useState<{ name: string | null } | null>(null);
-  /** Why Send stopped over the label or encryption: said under the fields. */
-  const [protectionError, setProtectionError] = useState<string | null>(null);
+  /**
+   * Why Send stopped over the label or encryption: said under the fields,
+   * with a button to the original in Outlook on the web when only it can send.
+   */
+  const [protectionError, setProtectionError] = useState<{
+    text: string;
+    openOriginal: boolean;
+  } | null>(null);
+  const showProtectionError = (text: string, openOriginal = false) =>
+    setProtectionError({ text, openOriginal });
   const [showQuote, setShowQuote] = useState(true);
   // Waiting for the account's signature before sending.
   const [preparing, setPreparing] = useState(false);
@@ -237,17 +300,43 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
       toRef.current?.focus();
       return;
     }
+    // A choice that stopped being offered would be refused: it's cleared
+    // or waited for, never dropped quietly.
+    const unoffered = unofferedChoice(draft, setup);
+    if (unoffered.label) {
+      const stale = unoffered.label;
+      const name = "name" in stale ? `The label ${labelTitle(stale)}` : "The label you chose";
+      const clear = setup?.policy.required ? "another label" : "another label or No label";
+      showProtectionError(unavailableText(name, "check" in stale ? stale.check : null, clear));
+      protectionRef.current?.focusLabels();
+      return;
+    }
+    if (unoffered.action && setup) {
+      const check = unoffered.action === "encrypt" ? setup.encrypt : setup.doNotForward;
+      showProtectionError(unavailableText(ACTION_NAMES[unoffered.action], check, "Don't encrypt"));
+      protectionRef.current?.focusEncryption();
+      return;
+    }
     const problem = sendProblem(draft, setup);
     if (problem?.kind === "labelRequired") {
-      setProtectionError(LABEL_REQUIRED);
+      showProtectionError(LABEL_REQUIRED);
       protectionRef.current?.focusLabels();
+      return;
+    }
+    if (problem?.kind === "outlookOnly") {
+      // Every label Cumulas Mail can apply is lower, which needs a reason it
+      // can't give, and one is required: only Outlook on the web can send it.
+      showProtectionError(
+        `${originalLabeled(problem.name, draft.replyKind)} Cumulas Mail can't apply that label or one at least as sensitive, so send this ${draftNoun(draft.replyKind)} from Outlook on the web.`,
+        microsoft && !!draft.replyToMessageId,
+      );
       return;
     }
     if (problem?.kind === "chooseLabel") {
       // The original's label can't be kept, and one is required: choosing
       // it is the person's, so the choice opens.
-      setProtectionError(
-        `${originalLabeled(problem.name)} Cumulas Mail can't apply that label, so choose one for this ${draftNoun(draft.replyKind)}. Your organization requires one.`,
+      showProtectionError(
+        `${originalLabeled(problem.name, draft.replyKind)} Cumulas Mail can't apply that label, so choose one for this ${draftNoun(draft.replyKind)}. Your organization requires one.`,
       );
       protectionRef.current?.openLabels();
       return;
@@ -315,7 +404,8 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
           messageId: current.replyToMessageId,
           kind: current.replyKind ?? "reply",
           accountKind: account?.kind ?? "microsoft",
-          protection: null,
+          protection: (isBackendError(e) && e.details?.protection) || null,
+          portalUrl: null,
         });
       } else if (
         reason === "labelRequired" ||
@@ -323,7 +413,7 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
         reason === "headersNotKept"
       ) {
         // Nothing was sent; the draft stays for another label, or Outlook on the web.
-        setProtectionError(errorMessage(e));
+        showProtectionError(errorMessage(e));
         if (reason === "labelRequired") protectionRef.current?.focusLabels();
       } else {
         toast.error(e);
@@ -625,10 +715,17 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
           {(hints.length > 0 || protectionError) && (
             <div className="mail-compose__protection">
               {protectionError && (
-                <p className="mail-compose__protection-error" role="alert">
-                  <CircleAlert size={14} aria-hidden="true" />
-                  {protectionError}
-                </p>
+                <div className="mail-compose__protection-problem">
+                  <p className="mail-compose__protection-error" role="alert">
+                    <CircleAlert size={14} aria-hidden="true" />
+                    {protectionError.text}
+                  </p>
+                  {protectionError.openOriginal && (
+                    <button type="button" className="btn btn--sm" onClick={openOriginal}>
+                      Open original in Outlook on the web
+                    </button>
+                  )}
+                </div>
               )}
               {hints.length > 0 && (
                 <div role="status">
@@ -772,10 +869,7 @@ export function Compose({ onMinimize }: { onMinimize: () => void }) {
           </>
         }
       >
-        <p>
-          {originalLabeled(confirmLabelDrop?.name ?? null)} Cumulas Mail can&apos;t apply that
-          label, so this {draftNoun(draft.replyKind)} might not keep it.
-        </p>
+        <p>{labelDropText(confirmLabelDrop?.name ?? null, draft.replyKind)}</p>
       </Dialog>
     </section>
   );

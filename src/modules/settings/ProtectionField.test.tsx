@@ -61,6 +61,8 @@ const result = (patch: Partial<CheckResult>): CheckResult => ({
   at: null,
   note: null,
   testMessage: false,
+  // A pass counts from when it arrived.
+  passedAt: patch.state === "applied" ? (patch.at ?? null) : null,
   ...patch,
 });
 
@@ -78,7 +80,7 @@ describe("Sensitivity labels and encryption", () => {
 
     expect(screen.getByText("Sensitivity labels and encryption")).toBeInTheDocument();
     expect(screen.getByText(/once your IT team has set that up/)).toHaveTextContent(
-      "Your organization's mail server can encrypt or label the mail you send from Cumulas Mail, once your IT team has set that up. Each option appears in new messages after a check here shows that it works, for 90 days.",
+      "Your organization's mail server can encrypt or label the mail you send from Cumulas Mail, once your IT team has set that up. Each option appears in new messages for 90 days after a test message here arrives encrypted or labeled.",
     );
     await user.click(screen.getByRole("button", { name: "How IT sets this up" }));
     expect(openLink).toHaveBeenCalledWith(PROTECTION_GUIDE_URL);
@@ -199,11 +201,18 @@ describe("Sensitivity labels and encryption", () => {
     expect(screen.getByText(/is waiting for them to arrive/)).toHaveTextContent(
       `Cumulas Mail sent test messages to ${EMAIL} and is waiting for them to arrive. This usually takes a minute or two.`,
     );
-    // Nothing else can be checked meanwhile.
-    expect(
-      screen.getByRole("button", { name: `Check Do Not Forward for ${EMAIL}` }),
-    ).toBeDisabled();
-    expect(screen.getByRole("button", { name: `Check labels for ${EMAIL}` })).toBeDisabled();
+    // Nothing else can be checked meanwhile; the buttons keep their place
+    // for the keyboard, and the one pressed says it's busy.
+    const pressed = screen.getByRole("button", { name: `Check Encrypt again for ${EMAIL}` });
+    expect(pressed).toHaveAttribute("aria-disabled", "true");
+    expect(pressed).toHaveClass("btn--busy");
+    for (const name of [`Check Do Not Forward for ${EMAIL}`, `Check labels for ${EMAIL}`]) {
+      const other = screen.getByRole("button", { name });
+      expect(other).toHaveAttribute("aria-disabled", "true");
+      expect(other).not.toHaveClass("btn--busy");
+      await user.click(other);
+    }
+    expect(check).toHaveBeenCalledTimes(1);
 
     // Every 10 seconds it looks; the demo's arrive by the second look.
     await act(() => vi.advanceTimersByTimeAsync(10_000));
@@ -242,7 +251,61 @@ describe("Sensitivity labels and encryption", () => {
     ]);
     await waitFor(() => expect(statusOf("Do Not Forward")).toHaveTextContent("Checking…"));
     // A check is waiting: the backend would refuse another.
-    expect(screen.getByRole("button", { name: `Check labels for ${EMAIL}` })).toBeDisabled();
+    const labels = screen.getByRole("button", { name: `Check labels for ${EMAIL}` });
+    expect(labels).toHaveAttribute("aria-disabled", "true");
+    await user.click(labels);
+    expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the keyboard on the button that started a check", async () => {
+    const user = userEvent.setup();
+    await renderField();
+    const button = screen.getByRole("button", { name: `Check Encrypt for ${EMAIL}` });
+    button.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(statusOf("Encrypt")).toHaveTextContent("Checking…"));
+    // The same button, now "Check again" and busy, still has the focus.
+    expect(button).toHaveAccessibleName(`Check Encrypt again for ${EMAIL}`);
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveFocus();
+  });
+
+  it("keeps the keyboard on Check all labels while every label is checked", async () => {
+    const user = userEvent.setup();
+    await renderField();
+    const button = await screen.findByRole("button", { name: `Check labels for ${EMAIL}` });
+    button.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(statusOf("General")).toHaveTextContent("Checking…"));
+    // All of them waiting leaves nothing more to check, but the button stays.
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveClass("btn--busy");
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveFocus();
+  });
+
+  it("says that a pass still applies while it's checked again, and when its test didn't arrive", async () => {
+    const at = "2026-10-04T09:00:00Z";
+    const on = checkDate(at);
+    const backend = new MockBackend();
+    await stubSetup(backend, () => ({
+      encrypt: result({ state: "waiting", at: "2026-10-18T09:00:00Z", passedAt: at }),
+      doNotForward: result({ state: "applied", at, note: "notArrived", testMessage: true }),
+    }));
+    await renderField(backend);
+    expect(statusOf("Encrypt")).toHaveTextContent("Checking…");
+    expect(
+      within(row("Encrypt")).getByText(
+        `Until this check is done, the one from ${on} still applies.`,
+      ),
+    ).toBeInTheDocument();
+    expect(statusOf("Do Not Forward")).toHaveTextContent(`Arrived encrypted · checked ${on}`);
+    expect(
+      within(row("Do Not Forward")).getByText(
+        "The latest test message didn't arrive in your Inbox within 15 minutes, so this earlier check still applies.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("checks 19 labels at a time: never checked first, then the oldest checks", async () => {

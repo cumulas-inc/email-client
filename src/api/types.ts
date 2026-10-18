@@ -151,11 +151,14 @@ export interface Protection {
 
 export interface MessageLabel {
   id: string;
-  /** "Parent › Child", the message's own (cleaned) name, or null. */
+  /** "Parent › Child" from the account's labels, or null. Never a name the message gives. */
   name: string | null;
   /** "#rrggbb" or null. */
   color: string | null;
-  /** Name and color come from the account's labels, not from the message. */
+  /**
+   * One of the account's labels, named and colored from them. Otherwise only
+   * a label the message names for the organization, which anyone can write: unverified.
+   */
   fromCatalog: boolean;
 }
 
@@ -249,6 +252,12 @@ export interface CheckResult {
   note: CheckNote | null;
   /** The test message arrived and can be opened in Outlook on the web. */
   testMessage: boolean;
+  /**
+   * When the test message that lets the composer offer it arrived: set while
+   * that pass is less than CHECK_VALID_DAYS old, also while a new check waits;
+   * null when it isn't offered.
+   */
+  passedAt: string | null;
 }
 
 /** A sensitivity label Microsoft 365 lists for the person, with its check. */
@@ -792,6 +801,8 @@ export interface BackendError {
     accountId?: string;
     /** protectedOriginal: the message replied to or forwarded. */
     messageId?: string;
+    /** protectedOriginal: how it's protected. */
+    protection?: ProtectionKind;
     /** labelCopied: the label already on the reply or forward. */
     labelId?: string;
     [key: string]: unknown;

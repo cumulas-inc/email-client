@@ -54,11 +54,21 @@ function describeCheck(
     case "notChecked":
       return { text: "Not checked yet", note: null, tone: "neutral" };
     case "waiting":
-      return { text: "Checking…", note: null, tone: "busy" };
+      return {
+        text: "Checking…",
+        // The pass before it still counts until this one is decided.
+        note: result.passedAt
+          ? `Until this check is done, the one from ${checkDate(result.passedAt)} still applies.`
+          : null,
+        tone: "busy",
+      };
     case "applied":
       return {
         text: checked(kind === "action" ? "Arrived encrypted" : "Arrived labeled"),
-        note: null,
+        note:
+          result.note === "notArrived"
+            ? `The latest test message didn't arrive in your Inbox within ${CHECK_TIMEOUT_MINUTES} minutes, so this earlier check still applies.`
+            : null,
         tone: "ok",
       };
     case "expired":
@@ -116,12 +126,58 @@ interface CheckRowProps {
   email: string;
   /** Checking can't start now: a check is waiting, or being sent. */
   busy: boolean;
+  /** The button that started the check that's running, if one here did. */
+  pressed: string | null;
   /** A note that always goes with the row. */
   extra?: string;
   title?: string;
-  onCheck: (items: CheckItem[]) => void;
+  onCheck: (items: CheckItem[], button: string) => void;
   onOpen: (item: CheckItem) => void;
 }
+
+/**
+ * A button that starts a check. While one runs it stays focusable
+ * (aria-disabled, not disabled), so the keyboard keeps its place in a long
+ * dialog; the one that started it shows that it's busy.
+ */
+function CheckButton({
+  id,
+  busy,
+  pressed,
+  unavailable = false,
+  className,
+  label,
+  onCheck,
+  children,
+}: {
+  id: string;
+  busy: boolean;
+  pressed: string | null;
+  /** Nothing to check (not a wait). */
+  unavailable?: boolean;
+  className?: string;
+  label: string;
+  onCheck: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className={clsx("btn btn--sm", className, busy && pressed === id && "btn--busy")}
+      aria-label={label}
+      aria-disabled={busy || undefined}
+      disabled={unavailable}
+      onClick={() => {
+        if (!busy) onCheck();
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+const checkButtonId = (item: CheckItem) =>
+  item.kind === "action" ? `check:${item.action}` : `check:${item.labelId}`;
 
 function CheckRow({
   name,
@@ -131,6 +187,7 @@ function CheckRow({
   kind,
   email,
   busy,
+  pressed,
   extra,
   title,
   onCheck,
@@ -166,15 +223,15 @@ function CheckRow({
             Open test message
           </button>
         )}
-        <button
-          type="button"
-          className="btn btn--sm"
-          aria-label={again ? `Check ${spoken} again for ${email}` : `Check ${spoken} for ${email}`}
-          disabled={busy}
-          onClick={() => onCheck([item])}
+        <CheckButton
+          id={checkButtonId(item)}
+          busy={busy}
+          pressed={pressed}
+          label={again ? `Check ${spoken} again for ${email}` : `Check ${spoken} for ${email}`}
+          onCheck={() => onCheck([item], checkButtonId(item))}
         >
           {again ? "Check again" : "Check"}
-        </button>
+        </CheckButton>
       </span>
     </li>
   );
@@ -187,13 +244,22 @@ interface LabelsGroupProps {
   account: Account;
   setup: ProtectionSetup;
   busy: boolean;
+  pressed: string | null;
   returnFocusId: string;
-  onCheck: (items: CheckItem[]) => void;
+  onCheck: (items: CheckItem[], button: string) => void;
   onOpen: (item: CheckItem) => void;
 }
 
 /** The labels part: its permission, the list Microsoft 365 gave, and their checks. */
-function LabelsGroup({ account, setup, busy, returnFocusId, onCheck, onOpen }: LabelsGroupProps) {
+function LabelsGroup({
+  account,
+  setup,
+  busy,
+  pressed,
+  returnFocusId,
+  onCheck,
+  onOpen,
+}: LabelsGroupProps) {
   const id = useId();
   const backend = useBackend();
   const refresh = useRefreshLabels();
@@ -363,17 +429,19 @@ function LabelsGroup({ account, setup, busy, returnFocusId, onCheck, onOpen }: L
       <div className="protection-group__head">
         {heading}
         {labels.length > 0 && (
-          <button
-            type="button"
-            className="btn btn--sm"
-            aria-label={`Check labels for ${email}`}
-            disabled={busy || toCheck.length === 0}
-            onClick={() => onCheck(toCheck.map(labelItem))}
+          <CheckButton
+            id="check:labels"
+            busy={busy}
+            pressed={pressed}
+            // While a check runs, every label may be in it: still focusable.
+            unavailable={!busy && toCheck.length === 0}
+            label={`Check labels for ${email}`}
+            onCheck={() => onCheck(toCheck.map(labelItem), "check:labels")}
           >
             {labels.length <= MAX_CHECK_ITEMS
               ? "Check all labels"
               : `Check ${MAX_CHECK_ITEMS} labels`}
-          </button>
+          </CheckButton>
         )}
       </div>
       {labelsError && (
@@ -431,6 +499,7 @@ function LabelsGroup({ account, setup, busy, returnFocusId, onCheck, onOpen }: L
                 kind="label"
                 email={email}
                 busy={busy}
+                pressed={pressed}
                 onCheck={onCheck}
                 onOpen={onOpen}
               />
@@ -471,9 +540,13 @@ export function ProtectionField({ account, returnFocusId }: ProtectionFieldProps
   const email = account.email;
   const busy = checking || check.isPending;
   const encryptionId = `${id}-encryption`;
+  // The button that started the check that's running, shown busy.
+  const [pressed, setPressed] = useState<string | null>(null);
 
-  const runCheck = (items: CheckItem[]) =>
+  const runCheck = (items: CheckItem[], button: string) => {
+    setPressed(button);
     check.mutate({ accountId: account.id, items }, { onError: (e: unknown) => toast.error(e) });
+  };
 
   const openTestMessage = (item: CheckItem) => {
     backend.openProtectionCheckMessage(account.id, item).catch((e: unknown) => toast.error(e));
@@ -495,8 +568,8 @@ export function ProtectionField({ account, returnFocusId }: ProtectionFieldProps
       <div>
         <p className="account-field__hint">
           Your organization&apos;s mail server can encrypt or label the mail you send from Cumulas
-          Mail, once your IT team has set that up. Each option appears in new messages after a check
-          here shows that it works, for {CHECK_VALID_DAYS} days.
+          Mail, once your IT team has set that up. Each option appears in new messages for{" "}
+          {CHECK_VALID_DAYS} days after a test message here arrives encrypted or labeled.
         </p>
         <p className="protection-field__progress" role="status">
           {checking
@@ -521,15 +594,17 @@ export function ProtectionField({ account, returnFocusId }: ProtectionFieldProps
               <h3 id={encryptionId} className="protection-group__title">
                 Encryption
               </h3>
-              <button
-                type="button"
-                className="btn btn--sm"
-                aria-label={`Check Encrypt and Do Not Forward for ${email}`}
-                disabled={busy}
-                onClick={() => runCheck([actionItem("encrypt"), actionItem("doNotForward")])}
+              <CheckButton
+                id="check:both"
+                busy={busy}
+                pressed={pressed}
+                label={`Check Encrypt and Do Not Forward for ${email}`}
+                onCheck={() =>
+                  runCheck([actionItem("encrypt"), actionItem("doNotForward")], "check:both")
+                }
               >
                 Check both
-              </button>
+              </CheckButton>
             </div>
             <ul className="protection-rows">
               {(["encrypt", "doNotForward"] as const).map((action) => (
@@ -542,6 +617,7 @@ export function ProtectionField({ account, returnFocusId }: ProtectionFieldProps
                   kind="action"
                   email={email}
                   busy={busy}
+                  pressed={pressed}
                   extra={action === "doNotForward" ? DNF_NOTE : undefined}
                   onCheck={runCheck}
                   onOpen={openTestMessage}
@@ -553,6 +629,7 @@ export function ProtectionField({ account, returnFocusId }: ProtectionFieldProps
             account={account}
             setup={setup}
             busy={busy}
+            pressed={pressed}
             returnFocusId={returnFocusId}
             onCheck={runCheck}
             onOpen={openTestMessage}

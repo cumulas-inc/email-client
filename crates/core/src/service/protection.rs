@@ -23,7 +23,8 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
     Account, AccountFeature, AccountKind, AccountSettings, CatalogLabel, CheckItem, CheckNote,
     CheckResult, CheckState, DataKind, EmailAddress, EntityKind, FolderRole, LabelCatalog,
-    LabelOption, LabelPolicy, OutgoingMessage, ProtectionKind, ProtectionSetup, local_id,
+    LabelOption, LabelPolicy, OutgoingMessage, ProtectAction, ProtectionKind, ProtectionSetup,
+    local_id,
 };
 use crate::protection::{
     CHECK_TIMEOUT_MINUTES, CHECK_VALID_DAYS, MAX_CHECK_ITEMS, PROTECTED_SENDING_UNSUPPORTED,
@@ -32,7 +33,7 @@ use crate::protection::{
 use crate::providers::{HeaderRequest, LabelsProvider, MessageContent, MessageLocator};
 use crate::signatures::config::is_guid;
 use crate::signatures::is_organization_tenant;
-use crate::store::{CheckRecord, CheckRun, ControlOutcome, RunItem, StoredCatalog};
+use crate::store::{CheckRecord, CheckRun, ControlOutcome, RunItem, StoredCatalog, StoredChecks};
 
 /// How long a listing of the labels is used before they're listed again.
 const LABELS_MAX_AGE: Duration = Duration::hours(6);
@@ -97,31 +98,61 @@ fn is_expired(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     at.is_some_and(|at| now - at > Duration::days(CHECK_VALID_DAYS))
 }
 
-/// A check as the UI shows it: an old pass shows as expired.
-fn check_result(record: &CheckRecord, now: DateTime<Utc>) -> CheckResult {
-    let expired = record.state == CheckState::Applied && is_expired(record.at, now);
-    CheckResult {
-        state: if expired {
-            CheckState::Expired
-        } else {
-            record.state
-        },
-        at: record.at,
-        note: record.note,
-        test_message: record.test_message_id.is_some(),
+/// What a check decided, as of `now`: an old pass is expired.
+fn decided_state(record: &CheckRecord, now: DateTime<Utc>) -> CheckState {
+    if record.state == CheckState::Applied && is_expired(record.at, now) {
+        CheckState::Expired
+    } else {
+        record.state
     }
 }
 
-/// How a passed check stands now: `Ok` when its option may be offered,
-/// else the state that keeps it from it (`Expired` for an old pass).
+/// A check as the UI shows it: an old pass shows as expired; an item whose
+/// test message is on its way (`waiting`) shows as waiting, while the pass
+/// before it, if any, still counts (`passed_at`).
+fn check_result(
+    record: &CheckRecord,
+    waiting: Option<&RunItem>,
+    now: DateTime<Utc>,
+) -> CheckResult {
+    let passed_at = offered(record, now).ok().and(record.at);
+    match waiting {
+        Some(waiting) => CheckResult {
+            state: CheckState::Waiting,
+            at: Some(waiting.sent_at),
+            note: None,
+            test_message: false,
+            passed_at,
+        },
+        None => CheckResult {
+            state: decided_state(record, now),
+            at: record.at,
+            note: record.note,
+            test_message: record.test_message_id.is_some(),
+            passed_at,
+        },
+    }
+}
+
+/// How the last decided check stands now: `Ok` when its option may be
+/// offered, else the state that keeps it from it (`Expired` for an old
+/// pass). A check on its way changes nothing until it's decided.
 pub(super) fn offered(
     record: &CheckRecord,
     now: DateTime<Utc>,
 ) -> std::result::Result<(), CheckState> {
-    match check_result(record, now).state {
+    match decided_state(record, now) {
         CheckState::Applied => Ok(()),
         other => Err(other),
     }
+}
+
+/// The waiting check's test message for `item`, if one is on its way.
+pub(super) fn waiting_for<'r>(checks: &'r StoredChecks, item: &CheckItem) -> Option<&'r RunItem> {
+    checks
+        .run
+        .as_ref()
+        .and_then(|run| run.items.iter().find(|waiting| waiting.item == *item))
 }
 
 /// What an item's test message asks for, which the provider makes sure its
@@ -239,8 +270,14 @@ impl CoreService {
         let now = Utc::now();
         let checks = self.store.protection_checks(account_id)?;
         setup.supported = true;
-        setup.encrypt = check_result(&checks.encrypt, now);
-        setup.do_not_forward = check_result(&checks.do_not_forward, now);
+        let result =
+            |item: &CheckItem| check_result(&checks.record(item), waiting_for(&checks, item), now);
+        setup.encrypt = result(&CheckItem::Action {
+            action: ProtectAction::Encrypt,
+        });
+        setup.do_not_forward = result(&CheckItem::Action {
+            action: ProtectAction::DoNotForward,
+        });
         setup.checking = checks.run.is_some();
         if labels_usable(&account) {
             let stored = self.store.label_catalog(account_id)?;
@@ -252,10 +289,9 @@ impl CoreService {
                     .labels
                     .into_iter()
                     .map(|label| LabelOption {
-                        check: check_result(
-                            &checks.labels.get(&label.id).cloned().unwrap_or_default(),
-                            now,
-                        ),
+                        check: result(&CheckItem::Label {
+                            label_id: label.id.clone(),
+                        }),
                         label,
                     })
                     .collect();
@@ -359,11 +395,12 @@ impl CoreService {
     }
 
     /// Sends the control and a test message for each item to the
-    /// mailbox's own address, marking each waiting as it goes. Errors:
-    /// `Unsupported` (not a work or school account), `InvalidInput` (none,
-    /// more than [`MAX_CHECK_ITEMS`], a label not listed, a check already
-    /// waiting), and the first send's error: the items not sent then keep
-    /// what they had, and the run waits for those sent.
+    /// mailbox's own address, adding each to the run as it goes; what each
+    /// item's last check decided stands until its test message is judged.
+    /// Errors: `Unsupported` (not a work or school account), `InvalidInput`
+    /// (none, more than [`MAX_CHECK_ITEMS`], a label not listed, a check
+    /// already waiting), and the first send's error: the items not sent
+    /// then keep what they had, and the run waits for those sent.
     pub async fn check_protection(
         &self,
         account_id: &str,
@@ -458,27 +495,18 @@ impl CoreService {
         let mut failure = None;
         for item in &wanted {
             let token = new_token();
-            let previous = self.store.update_protection_checks(account_id, |checks| {
-                let previous = checks.record(item);
-                let now = Utc::now();
-                *checks.record_mut(item) = CheckRecord {
-                    state: CheckState::Waiting,
-                    at: Some(now),
-                    note: None,
-                    test_message_id: None,
-                };
+            let added = self.store.update_protection_checks(account_id, |checks| {
                 if let Some(run) = &mut checks.run {
                     run.items.push(RunItem {
                         item: item.clone(),
                         token: token.clone(),
-                        sent_at: now,
+                        sent_at: Utc::now(),
                     });
                 }
-                previous
             })?;
-            let Some(previous) = previous else {
+            if added.is_none() {
                 break;
-            };
+            }
             let request = header_request(&tenant, item, catalog.as_ref());
             // These go out whatever the setup says: the point is to test it.
             let sent = providers
@@ -493,17 +521,15 @@ impl CoreService {
                 if let Some(run) = &mut checks.run {
                     run.items.retain(|i| i.token != token);
                 }
-                *checks.record_mut(item) = if not_kept {
-                    CheckRecord {
+                // Otherwise nothing was learned of it: it keeps its record.
+                if not_kept {
+                    *checks.record_mut(item) = CheckRecord {
                         state: CheckState::NotApplied,
                         at: Some(Utc::now()),
                         note: Some(CheckNote::HeaderNotKept),
                         test_message_id: None,
-                    }
-                } else {
-                    // Nothing was learned of it.
-                    previous
-                };
+                    };
+                }
             })?;
             if !not_kept {
                 failure = Some(e);
@@ -618,12 +644,14 @@ impl CoreService {
             }
             let mut changed = changed;
             current.control = control.clone();
-            let mut records = Vec::new();
+            // Each item that's done: what was decided of it, or `None` when
+            // its message never came.
+            let mut records: Vec<(CheckItem, Option<CheckRecord>)> = Vec::new();
             current.items.retain(|waiting| {
                 let decided = decided.iter().find(|(token, _)| *token == waiting.token);
                 let record = match decided {
-                    Some((_, record)) => record.clone(),
-                    None if control_late || now - waiting.sent_at > timeout => not_arrived.clone(),
+                    Some((_, record)) => Some(record.clone()),
+                    None if control_late || now - waiting.sent_at > timeout => None,
                     None => return true,
                 };
                 records.push((waiting.item.clone(), record));
@@ -631,6 +659,19 @@ impl CoreService {
             });
             changed |= !records.is_empty();
             for (item, record) in records {
+                let record = record.unwrap_or_else(|| {
+                    let previous = checks.record(&item);
+                    // Nothing was learned of it: a pass that still counts
+                    // stays, saying this test didn't arrive.
+                    if offered(&previous, now).is_ok() {
+                        CheckRecord {
+                            note: Some(CheckNote::NotArrived),
+                            ..previous
+                        }
+                    } else {
+                        not_arrived.clone()
+                    }
+                });
                 *checks.record_mut(&item) = record;
             }
             if checks.run.as_ref().is_some_and(|run| run.items.is_empty()) {

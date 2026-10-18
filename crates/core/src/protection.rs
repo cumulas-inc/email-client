@@ -8,8 +8,9 @@
 //! mail already on the device without fetching it again. No signal is
 //! trusted on its own where a sender could plant it: a file counts as the
 //! protected content only by its exact name, or by its type when a
-//! message-level signal agrees; a label shows only for the account's own
-//! organization.
+//! message-level signal agrees (and, in a MIME structure, it's where
+//! S/MIME keeps its content); a label shows only for the account's own
+//! organization, and only by the name the organization gives it.
 
 use url::Url;
 
@@ -50,6 +51,10 @@ pub const PROTECT_PROPERTY: &str =
 pub const LABEL_PROPERTY: &str =
     "String {00020386-0000-0000-C000-000000000046} Name x-cumulas-label";
 
+/// Attachment ids of the parts of a message's MIME read on Graph:
+/// `mime:<section>` (IMAP's are the bare section).
+pub const MIME_ATTACHMENT_PREFIX: &str = "mime:";
+
 /// Why sending protected mail, or checking it, isn't possible for an
 /// account.
 pub const PROTECTED_SENDING_UNSUPPORTED: &str =
@@ -80,9 +85,6 @@ const OID_ENVELOPED_DATA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x
 const OID_AUTH_ENVELOPED_DATA: &[u8] = &[
     0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x01, 0x17,
 ];
-
-/// Most characters of a label's own name shown.
-const MAX_LABEL_NAME_CHARS: usize = 64;
 
 // --- Errors ------------------------------------------------------------------
 
@@ -169,6 +171,42 @@ fn is_smime_type(content_type: &str) -> bool {
     SMIME_TYPES.contains(&base_type(content_type).as_str())
 }
 
+fn is_smime_signature_type(content_type: &str) -> bool {
+    matches!(
+        base_type(content_type).as_str(),
+        "application/pkcs7-signature" | "application/x-pkcs7-signature"
+    )
+}
+
+/// Whether a file of an S/MIME type is where the message's own S/MIME
+/// keeps its signature or content, so that it counts as a container.
+/// Read from a MIME structure (IMAP, or Graph's read of a signed message's
+/// MIME), only a `multipart/signed` root's signature part or an opaque
+/// S/MIME root itself is: a signed document attached to signed mail
+/// (`contract.pdf.p7m`, `document.pdf.p7s`) is the sender's file. Graph's
+/// own attachments have no structure; there the type and the message-level
+/// signal agreeing is enough.
+fn is_smime_part(signals: &MessageSignals, attachment: &AttachmentMeta) -> bool {
+    let Some(root) = signals.mime_type.as_deref() else {
+        return true;
+    };
+    let root = root.trim().to_ascii_lowercase();
+    let section = attachment
+        .id
+        .strip_prefix(MIME_ATTACHMENT_PREFIX)
+        .unwrap_or(&attachment.id);
+    if root.starts_with("multipart/signed") {
+        // The signed content is part 1, its signature part 2.
+        !section.contains('.') && is_smime_signature_type(&attachment.content_type)
+    } else if root.starts_with("application/pkcs7-mime")
+        || root.starts_with("application/x-pkcs7-mime")
+    {
+        section == "1"
+    } else {
+        false
+    }
+}
+
 fn lower(value: Option<&String>) -> String {
     value
         .map(|v| v.trim().to_ascii_lowercase())
@@ -221,7 +259,10 @@ pub fn detect(
         .collect();
     let smime_files: Vec<&AttachmentMeta> = attachments
         .iter()
-        .filter(|a| is_smime_name(&a.name) || (smime && is_smime_type(&a.content_type)))
+        .filter(|a| {
+            is_smime_name(&a.name)
+                || (smime && is_smime_type(&a.content_type) && is_smime_part(signals, a))
+        })
         .collect();
     let portal_url = if own_mail {
         None
@@ -285,6 +326,15 @@ pub fn portal_link_in(html: &str) -> Option<String> {
     hrefs(html).into_iter().find(|href| is_portal(href))
 }
 
+/// HTTPS on its default port, without a user name or password: the only
+/// form of Microsoft's own addresses, and of their Safe Links wrappers.
+fn is_plain_https(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
 fn is_portal(href: &str) -> bool {
     let Ok(mut url) = Url::parse(href) else {
         return false;
@@ -293,6 +343,10 @@ fn is_portal(href: &str) -> bool {
         .host_str()
         .is_some_and(|host| host.to_ascii_lowercase().ends_with(SAFE_LINKS_SUFFIX));
     if wrapped {
+        // The wrapper is what opens: it must be as safe as what it wraps.
+        if !is_plain_https(&url) {
+            return false;
+        }
         let Some(inner) = url
             .query_pairs()
             .find(|(key, _)| key == "url")
@@ -302,8 +356,7 @@ fn is_portal(href: &str) -> bool {
         };
         url = inner;
     }
-    url.scheme() == "https"
-        && url.port().is_none()
+    is_plain_https(&url)
         && url
             .host_str()
             .is_some_and(|host| PORTAL_HOSTS.iter().any(|p| host.eq_ignore_ascii_case(p)))
@@ -393,7 +446,8 @@ pub struct MsipLabel {
     pub enabled: bool,
     /// The tenant of the organization whose label it is.
     pub site_id: Option<String>,
-    /// As the message names it: any sender can write anything here.
+    /// As the message names it: any sender can write anything here, so
+    /// it's never shown; labels are named from the organization's list.
     pub name: Option<String>,
     pub method: Option<String>,
 }
@@ -466,25 +520,6 @@ fn is_bidi_control(c: char) -> bool {
         c,
         '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
     )
-}
-
-/// A label's own name, fit to show: without control and bidi characters,
-/// at most 64 characters; `None` when blank or GUID-shaped (Purview names
-/// labels by GUID).
-pub fn shown_label_name(name: &str) -> Option<String> {
-    let cleaned: String = name
-        .chars()
-        .filter(|c| !c.is_control() && !is_bidi_control(*c))
-        .collect();
-    let cleaned = cleaned.trim();
-    if cleaned.is_empty() || is_guid(cleaned) {
-        return None;
-    }
-    if cleaned.chars().count() <= MAX_LABEL_NAME_CHARS {
-        return Some(cleaned.to_owned());
-    }
-    let cut: String = cleaned.chars().take(MAX_LABEL_NAME_CHARS - 1).collect();
-    Some(format!("{}…", cut.trim_end()))
 }
 
 /// What a message sent from Cumulas Mail asked for: the action, and the

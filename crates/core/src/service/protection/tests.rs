@@ -920,6 +920,100 @@ async fn a_sync_moves_a_waiting_check_on() {
 }
 
 #[tokio::test]
+async fn checking_again_keeps_the_last_pass_until_its_decided() {
+    let s = setup().await;
+    s.labels.answer(Ok(LabelCatalog {
+        policy: LabelPolicy {
+            required: true,
+            ..LabelPolicy::default()
+        },
+        ..catalog()
+    }));
+    s.service
+        .refresh_sensitivity_labels(&s.account.id)
+        .await
+        .unwrap();
+    s.checked(&ENCRYPT, CheckState::Applied, 3);
+    s.checked(&label(GENERAL), CheckState::Applied, 3);
+    let passed = s.setup().encrypt.at;
+    assert_eq!(s.setup().encrypt.passed_at, passed);
+    s.server.lock().unwrap().hold = vec!["Cumulas Mail setup check".into()];
+    s.service
+        .check_protection(
+            &s.account.id,
+            &[ENCRYPT, label(GENERAL), label(CONFIDENTIAL)],
+        )
+        .await
+        .unwrap();
+
+    // Shown waiting, while the passes before still count.
+    let setup = s.setup();
+    assert_eq!(setup.encrypt.state, CheckState::Waiting);
+    assert_eq!(setup.encrypt.passed_at, passed);
+    assert!(!setup.encrypt.test_message);
+    let confidential = s.label_check(CONFIDENTIAL);
+    assert_eq!(confidential.state, CheckState::Waiting);
+    assert_eq!(confidential.passed_at, None);
+    // A label is still required, and the passed options still go out.
+    let error = s.service.send_message(outgoing(&s)).await.unwrap_err();
+    assert_eq!(error.details.unwrap(), json!({ "reason": "labelRequired" }));
+    s.service
+        .send_message(OutgoingMessage {
+            protect: Some(ProtectAction::Encrypt),
+            label_id: Some(GENERAL.into()),
+            ..outgoing(&s)
+        })
+        .await
+        .unwrap();
+    let error = s
+        .service
+        .send_message(OutgoingMessage {
+            label_id: Some(CONFIDENTIAL.into()),
+            ..outgoing(&s)
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "The label Confidential is being checked for adele@contoso.com. Wait for the check in \
+         Settings → Accounts to finish."
+    );
+
+    // The test messages never come: nothing was learned, so the passes
+    // stay, saying so; what hadn't passed couldn't be checked.
+    s.age_run(16);
+    let setup = s.refresh().await;
+    assert!(!setup.checking);
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::Applied, Some(CheckNote::NotArrived))
+    );
+    assert_eq!(setup.encrypt.at, passed);
+    assert_eq!(setup.encrypt.passed_at, passed);
+    assert!(setup.encrypt.test_message);
+    assert_eq!(s.label_check(GENERAL).state, CheckState::Applied);
+    let confidential = s.label_check(CONFIDENTIAL);
+    assert_eq!(
+        (confidential.state, confidential.note),
+        (CheckState::Unknown, Some(CheckNote::NotArrived))
+    );
+
+    // A check that's decided replaces the pass.
+    s.server.lock().unwrap().release();
+    s.server.lock().unwrap().hold.clear();
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT])
+        .await
+        .unwrap();
+    let setup = s.refresh().await;
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::NotApplied, None)
+    );
+    assert_eq!(setup.encrypt.passed_at, None);
+}
+
+#[tokio::test]
 async fn passed_checks_expire_after_90_days() {
     let s = setup().await;
     s.checked(&ENCRYPT, CheckState::Applied, 89);
@@ -1183,7 +1277,11 @@ async fn protected_originals_are_answered_in_outlook_on_the_web() {
         );
         assert_eq!(
             error.details.unwrap(),
-            json!({ "reason": "protectedOriginal", "messageId": original })
+            json!({
+                "reason": "protectedOriginal",
+                "messageId": original,
+                "protection": "rightsManaged",
+            })
         );
     }
 
@@ -1230,7 +1328,9 @@ async fn protected_originals_are_answered_in_outlook_on_the_web() {
         "This message is encrypted. Cumulas Mail can't reply to it or forward it without removing \
          the encryption."
     );
-    assert_eq!(error.details.unwrap()["reason"], "protectedOriginal");
+    let details = error.details.unwrap();
+    assert_eq!(details["reason"], "protectedOriginal");
+    assert_eq!(details["protection"], "smimeEncrypted");
     // Nor protected mail.
     let error = s
         .service
@@ -1284,6 +1384,29 @@ async fn a_copied_label_is_named_from_the_catalog() {
         error.details.unwrap(),
         json!({ "reason": "labelCopied", "labelId": GENERAL })
     );
+
+    // Listed, but not offered: choosing it isn't possible here.
+    for (state, days) in [
+        (CheckState::NotChecked, 0),
+        (CheckState::NotApplied, 1),
+        (CheckState::Applied, 91),
+    ] {
+        s.checked(&label(GENERAL), state, days);
+        copied(GENERAL);
+        let error = s
+            .service
+            .send_message(reply(CONFIDENTIAL))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "This reply already carries the label General from the original, and Cumulas Mail \
+             can't make sure your organization's mail server applies Confidential instead. Send \
+             it from Outlook on the web instead.",
+            "{state:?}"
+        );
+    }
+    s.checked(&label(GENERAL), CheckState::Applied, 1);
 
     let unknown = "6c1b3b5e-0d4f-4b1e-9d3a-00000000000f";
     copied(unknown);
@@ -1385,21 +1508,25 @@ async fn messages_show_their_protection_and_their_organizations_label() {
         None
     );
 
-    // Without a list, the message's own name, cleaned.
+    // Without a list, that a label is named, never the name the message
+    // gives it: anyone can write it, with the organization's public tenant.
     s.store()
         .set_sign_in_grant(&s.account.id, &legacy_graph_scopes())
         .unwrap();
-    let label = s
-        .service
-        .get_message(&forged, false)
-        .await
-        .unwrap()
-        .label
-        .unwrap();
-    assert_eq!(label.id, forged_id);
-    assert_eq!(label.name.as_deref(), Some("Highly Confidential"));
-    assert!(!label.from_catalog);
-    assert_eq!(label.color, None);
+    for id in [&forged, &protected] {
+        let label = s
+            .service
+            .get_message(id, false)
+            .await
+            .unwrap()
+            .label
+            .unwrap();
+        assert_eq!(label.name, None);
+        assert!(!label.from_catalog);
+        assert_eq!(label.color, None);
+    }
+    let label = s.service.get_message(&forged, false).await.unwrap().label;
+    assert_eq!(label.unwrap().id, forged_id);
 }
 
 #[tokio::test]

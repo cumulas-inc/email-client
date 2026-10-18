@@ -1167,6 +1167,51 @@ Inner body.
     }
 
     #[test]
+    fn signed_documents_in_signed_mail_can_be_opened() {
+        let raw = crlf(&format!(
+            "From: notaio@example.it\nSubject: Contratto\nMIME-Version: 1.0\n\
+             Content-Type: multipart/signed; protocol=\"application/pkcs7-signature\"; \
+             micalg=sha-256; boundary=\"s\"\n\n\
+             --s\nContent-Type: multipart/mixed; boundary=\"m\"\n\n\
+             --m\nContent-Type: text/plain\n\nIn allegato il contratto firmato.\n\
+             --m\nContent-Type: application/pkcs7-mime; name=\"contract.pdf.p7m\"\n\
+             Content-Disposition: attachment; filename=\"contract.pdf.p7m\"\n\
+             Content-Transfer-Encoding: base64\n\n{}\n--m--\n\
+             --s\nContent-Type: application/pkcs7-signature; name=\"smime.p7s\"\n\
+             Content-Disposition: attachment; filename=\"smime.p7s\"\n\
+             Content-Transfer-Encoding: base64\n\n{}\n--s--\n",
+            BASE64.encode(content_info(0x02)),
+            BASE64.encode(content_info(0x02))
+        ));
+        let content = parse_message(&raw);
+        let protection = crate::protection::detect(
+            &content.signals,
+            &content.attachments,
+            content.body_html.as_deref(),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(protection.kind, crate::model::ProtectionKind::SmimeSigned);
+        assert!(!protection.content_hidden);
+        let id_of = |name: &str| {
+            content
+                .attachments
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.id.clone())
+                .unwrap()
+        };
+        // Only the message's own signature is a container.
+        assert_eq!(protection.container_ids, [id_of("smime.p7s")]);
+        assert!(
+            !protection
+                .container_ids
+                .contains(&id_of("contract.pdf.p7m"))
+        );
+    }
+
+    #[test]
     fn multipart_signed_roots_name_their_protocol() {
         let raw = crlf(&format!(
             "From: it@contoso.com\nSubject: VPN\nMIME-Version: 1.0\n\

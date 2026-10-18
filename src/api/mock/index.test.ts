@@ -1147,8 +1147,14 @@ describe("the demo's protected mail", () => {
     expect(await backend.getProtectionSetup("acct-home")).toEqual({
       accountId: "acct-home",
       supported: false,
-      encrypt: { state: "notChecked", at: null, note: null, testMessage: false },
-      doNotForward: { state: "notChecked", at: null, note: null, testMessage: false },
+      encrypt: { state: "notChecked", at: null, note: null, testMessage: false, passedAt: null },
+      doNotForward: {
+        state: "notChecked",
+        at: null,
+        note: null,
+        testMessage: false,
+        passedAt: null,
+      },
       labels: [],
       policy: { required: false, defaultLabelId: null, justifyDowngrade: false, moreInfoUrl: null },
       labelsListedAt: null,
@@ -1234,6 +1240,24 @@ describe("the demo's protected mail", () => {
 
     await backend.openProtectionCheckMessage("acct-work", encrypt);
     expect(backend.calls.openedInOutlook).toEqual(["check:acct-work:encrypt"]);
+  });
+
+  it("keeps a pass while it's checked again, as the core does", async () => {
+    const backend = new MockBackend({ protection: "setup" });
+    const before = await backend.getProtectionSetup("acct-work");
+    const waiting = await backend.checkProtection("acct-work", [encrypt, general]);
+    expect(waiting.encrypt).toMatchObject({
+      state: "waiting",
+      testMessage: false,
+      passedAt: before.encrypt.at,
+    });
+    // Still offered, and still enforced: a label is required.
+    await expect(backend.sendMessage(message({ protect: "encrypt" }))).rejects.toMatchObject({
+      details: { reason: "labelRequired" },
+    });
+    await expect(
+      backend.sendMessage(message({ protect: "encrypt", labelId: GENERAL })),
+    ).resolves.toBeUndefined();
   });
 
   it("refuses checks it can't send", async () => {
@@ -1364,7 +1388,11 @@ describe("the demo's protected mail", () => {
     ).rejects.toEqual({
       code: "unsupported",
       message: "This message is protected. Reply to it or forward it in Outlook on the web.",
-      details: { reason: "protectedOriginal", messageId: "msg-protected-1" },
+      details: {
+        reason: "protectedOriginal",
+        messageId: "msg-protected-1",
+        protection: "rightsManaged",
+      },
     });
     await expect(
       backend.sendMessage(
@@ -1378,7 +1406,11 @@ describe("the demo's protected mail", () => {
       code: "unsupported",
       message:
         "This message is encrypted. Cumulas Mail can't reply to it or forward it without removing the encryption.",
-      details: { reason: "protectedOriginal", messageId: "msg-protected-5" },
+      details: {
+        reason: "protectedOriginal",
+        messageId: "msg-protected-5",
+        protection: "smimeEncrypted",
+      },
     });
     // Signed mail can be answered.
     await expect(

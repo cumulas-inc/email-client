@@ -355,6 +355,11 @@ describe("reply helpers", () => {
       });
     }
     expect(replyDraft(message(), "reply", accounts).originalLabel).toBeNull();
+    // A Sent copy rarely carries its label: the one it asked for counts.
+    const requested = { id: "l2", name: "Highly Confidential", color: null, fromCatalog: true };
+    const sent = message({ requested: { action: null, label: requested } });
+    expect(replyDraft(sent, "replyAll", accounts).originalLabel).toEqual(requested);
+    expect(replyDraft({ ...sent, label }, "reply", accounts).originalLabel).toEqual(label);
     expect(newDraft("a1")).toMatchObject({
       protect: null,
       labelId: null,

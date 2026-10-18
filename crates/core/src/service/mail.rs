@@ -5,18 +5,17 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::CoreService;
-use super::protection::{label_title, listed_label, offered, work_tenant};
+use super::protection::{label_title, listed_label, offered, waiting_for, work_tenant};
 use crate::error::{Error, ErrorCode, Result};
 use crate::html::sanitize_email_html;
 use crate::model::{
     Account, AccountKind, AttachmentMeta, CheckItem, CheckState, DataKind, EmailAddress, Folder,
     FolderRole, LabelCatalog, Message, MessageLabel, MessagePage, MessageQuery, MessageSummary,
-    OutgoingMessage, RemoteContentPolicy, RequestedProtection,
+    OutgoingMessage, ProtectionKind, RemoteContentPolicy, RequestedProtection,
 };
 use crate::protection::{
     self, CHECK_VALID_DAYS, DiagnosticsAccount, DiagnosticsInput, PROTECTED_SENDING_UNSUPPORTED,
     container_refused, detect, has_reason, headers_not_kept, is_blank, kind_noun, own_label,
-    shown_label_name,
 };
 use crate::providers::{HeaderRequest, MessageContent, MessageLocator};
 
@@ -162,16 +161,18 @@ impl CoreService {
             .and_then(|(tenant, raw)| own_label(raw, tenant))
             .and_then(|label| match &catalog {
                 // Only the organization's labels, by its own names: the
-                // header is plain text any sender can write.
+                // header is plain text any sender can write, with any name
+                // and the organization's public tenant id.
                 Some(catalog) => catalog.label(&label.id).map(|listed| MessageLabel {
                     id: label.id.clone(),
                     name: Some(listed.title()),
                     color: listed.color.clone(),
                     from_catalog: true,
                 }),
+                // Without the list, that a label is named, never its name.
                 None => Some(MessageLabel {
-                    name: label.name.as_deref().and_then(shown_label_name),
                     id: label.id,
+                    name: None,
                     color: None,
                     from_catalog: false,
                 }),
@@ -427,22 +428,38 @@ impl CoreService {
         // protection.
         if message.reply_kind.is_some()
             && let Some(original) = &original
-            && original
+            && let Some(protection) = original
                 .protection
                 .as_ref()
-                .is_some_and(|p| p.kind.is_encrypted())
+                .filter(|p| p.kind.is_encrypted())
         {
-            return Err(protected_original(&account, &original.summary.id));
+            return Err(protected_original(
+                &account,
+                &original.summary.id,
+                protection.kind,
+            ));
         }
         let catalog = self.label_list(&account)?;
         let request = self.protection_request(&account, &message, catalog.as_ref())?;
         let mail = self.providers_for(&message.account_id).await?.mail;
         match &request {
             None => mail.send(&message, original.as_ref()).await?,
-            Some(request) => mail
-                .send_requesting(&message, original.as_ref(), request)
-                .await
-                .map_err(|e| reworded(e, &message, request, catalog.as_ref()))?,
+            Some(request) => {
+                if let Err(e) = mail
+                    .send_requesting(&message, original.as_ref(), request)
+                    .await
+                {
+                    // What the copied label's check found decides whether
+                    // choosing it is any help.
+                    let checks = self
+                        .store
+                        .protection_checks(&account.id)
+                        .unwrap_or_default();
+                    let choosable =
+                        |id: &str| offered(&checks.record(&label_item(id)), Utc::now()).is_ok();
+                    return Err(reworded(e, &message, request, catalog.as_ref(), choosable));
+                }
+            }
         }
         self.notify(&[DataKind::Mail], Some(&message.account_id));
         Ok(())
@@ -480,7 +497,11 @@ impl CoreService {
             return Err(Error::unsupported(PROTECTED_SENDING_UNSUPPORTED));
         };
         let email = &account.email;
-        let not_set_up = |name: &str, state: CheckState| match state {
+        let not_set_up = |name: &str, item: &CheckItem, state: CheckState| match state {
+            _ if waiting_for(&checks, item).is_some() => Error::invalid_input(format!(
+                "{name} is being checked for {email}. Wait for the check in Settings → Accounts \
+                 to finish."
+            )),
             CheckState::Expired => Error::invalid_input(format!(
                 "{name} was last checked more than {CHECK_VALID_DAYS} days ago. Check it again in \
                  Settings → Accounts."
@@ -496,8 +517,13 @@ impl CoreService {
                         "That sensitivity label isn't available for {email}."
                     )));
                 };
-                if let Err(state) = offered(&checks.record(&label_item(&label.id)), now) {
-                    return Err(not_set_up(&format!("The label {}", label.title()), state));
+                let item = label_item(&label.id);
+                if let Err(state) = offered(&checks.record(&item), now) {
+                    return Err(not_set_up(
+                        &format!("The label {}", label.title()),
+                        &item,
+                        state,
+                    ));
                 }
                 Some(label)
             }
@@ -511,8 +537,9 @@ impl CoreService {
                     action.name()
                 )));
             }
-            if let Err(state) = offered(&checks.record(&CheckItem::Action { action }), now) {
-                return Err(not_set_up(action.name(), state));
+            let item = CheckItem::Action { action };
+            if let Err(state) = offered(&checks.record(&item), now) {
+                return Err(not_set_up(action.name(), &item, state));
             }
         }
         Ok(Some(HeaderRequest {
@@ -616,8 +643,9 @@ fn catalog_label(catalog: Option<&LabelCatalog>, id: String) -> MessageLabel {
     }
 }
 
-/// The refusal to reply to or forward an encrypted message here.
-fn protected_original(account: &Account, message_id: &str) -> Error {
+/// The refusal to reply to or forward an encrypted message here; the UI
+/// words its hand-off by `kind`.
+fn protected_original(account: &Account, message_id: &str, kind: ProtectionKind) -> Error {
     let message = match account.kind {
         AccountKind::Microsoft => {
             "This message is protected. Reply to it or forward it in Outlook on the web."
@@ -630,16 +658,19 @@ fn protected_original(account: &Account, message_id: &str) -> Error {
     Error::unsupported(message).with_details(json!({
         "reason": "protectedOriginal",
         "messageId": message_id,
+        "protection": kind,
     }))
 }
 
 /// A protected send's failure in the person's words: what the original's
-/// copied label is called, and what kind of message wasn't sent.
+/// copied label is called, whether choosing it would help (`choosable`:
+/// the composer offers it), and what kind of message wasn't sent.
 fn reworded(
     error: Error,
     message: &OutgoingMessage,
     request: &HeaderRequest,
     catalog: Option<&LabelCatalog>,
+    choosable: impl Fn(&str) -> bool,
 ) -> Error {
     let kind = kind_noun(message.reply_kind);
     if has_reason(&error, "headersNotKept") {
@@ -673,10 +704,10 @@ fn reworded(
             .and_then(|id| label_title(catalog, id))
             .unwrap_or_else(|| "the label you chose".to_owned());
         let next = match &copied_title {
-            Some(copied_title) => {
+            Some(copied_title) if choosable(&copied_id) => {
                 format!(" Choose {copied_title}, or send it from Outlook on the web.")
             }
-            None => " Send it from Outlook on the web instead.".to_owned(),
+            _ => " Send it from Outlook on the web instead.".to_owned(),
         };
         format!(
             "This {kind} already carries {copied} from the original, and Cumulas Mail can't make \

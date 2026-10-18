@@ -249,7 +249,9 @@ export function replyDraft(original: Message, kind: ReplyKind, accounts: Account
     protect: null,
     labelId: null,
     labelChosen: false,
-    originalLabel: original.label,
+    // A Sent copy rarely carries its label (it's saved before the
+    // organization's mail server applies it): the one it asked for counts.
+    originalLabel: original.label ?? original.requested?.label ?? null,
     focus: kind === "forward" ? "to" : "body",
   };
 }
