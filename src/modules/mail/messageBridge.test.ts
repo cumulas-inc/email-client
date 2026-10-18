@@ -545,7 +545,15 @@ describe("message bridge", () => {
     tell(frame, app, { source: view });
     tell(frame, app, { source: null });
     view.dispatchEvent(new view.MessageEvent("message", { data: app, source: view.parent }));
-    // Not patterns.
+    tell(frame, "highlight");
+    tell(frame, null);
+    await settle();
+    expect(marked(doc)).toEqual([]);
+    expect(messages).toEqual([]);
+  });
+
+  it("marks nothing for what the app sends that isn't patterns, and says so", async () => {
+    const { frame, doc, messages } = await load("<p>apple</p>");
     for (const patterns of [
       null,
       "apple",
@@ -558,13 +566,16 @@ describe("message bridge", () => {
       Array.from({ length: 33 }, () => words("apple")),
       [null],
     ]) {
+      // What the words before marked goes, and with it their count.
+      tell(frame, highlight([words("apple")]));
+      await settle();
+      expect(marked(doc)).toEqual(["apple"]);
+      messages.length = 0;
       tell(frame, highlight(patterns));
+      await settle();
+      expect(marked(doc), JSON.stringify(patterns)).toEqual([]);
+      expect(messages, JSON.stringify(patterns)).toEqual([hits(0)]);
     }
-    tell(frame, "highlight");
-    tell(frame, null);
-    await settle();
-    expect(marked(doc)).toEqual([]);
-    expect(messages).toEqual([]);
   });
 
   it("keeps the app's messages from every other listener in the frame", async () => {

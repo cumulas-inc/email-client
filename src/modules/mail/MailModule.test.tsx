@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { MockBackend } from "../../api/mock";
-import type { Settings } from "../../api/types";
+import type { Folder, Settings } from "../../api/types";
 import { useAppStore } from "../../app/store";
 import { useAddAccountRequest } from "../settings/addAccountStore";
 import { messageBridgeUrl } from "./bodyHtml";
@@ -913,6 +913,29 @@ describe("Search", () => {
     expect(useAppStore.getState().search).toBe("lunch");
   });
 
+  it.each(["Spam", "★"])(
+    "offers no Current folder that its filter can't name alone (%s)",
+    async (name) => {
+      const user = userEvent.setup();
+      const backend = new MockBackend();
+      // A folder of the user's named as Junk is known ("Spam"), or with no
+      // letters at all.
+      const state = (backend as unknown as { state: { folders: Folder[] } }).state;
+      state.folders.find((f) => f.name === "Atlas")!.name = name;
+      await renderMail({ backend });
+      await user.click(within(treeItem(/^Projects/)).getAllByText(name)[0]!);
+      await setSearch("research");
+      await expectResults(/Atlas naming research summary/);
+      await user.click(within(searchFilters()).getByRole("button", { name: "Folder" }));
+      const menu = screen.getByRole("menu", { name: "Folder" });
+      expect(
+        within(menu)
+          .getAllByRole("menuitemradio")
+          .map((i) => i.textContent),
+      ).toEqual(["All folders", "Inbox", "Drafts", "Sent", "Archive", "Junk", "Trash"]);
+    },
+  );
+
   it("narrows to a folder or an account from their filters, as one choice of several", async () => {
     const user = userEvent.setup();
     await renderMail();
@@ -967,10 +990,13 @@ describe("Search", () => {
         "Folder and account only narrow a search. Type what you're looking for, or choose a sender, a date, Unread or Flagged above.",
       ),
     ).toBeInTheDocument();
+    // Said as it's shown, never as "No results".
+    await waitFor(() => expect(announced()).toBe("Add words or a filter."));
     await setSearch("is:starred");
     expect(
       await screen.findByText("Type what you're looking for, or choose a filter above."),
     ).toBeInTheDocument();
+    await waitFor(() => expect(announced()).toBe("Add words or a filter."));
   });
 
   it("orders by best match or newest, as chosen, and only words have a best match", async () => {
@@ -1001,6 +1027,22 @@ describe("Search", () => {
     await expectResults(/Porto offsite: tickets and hotel/, /Porto itinerary/, /Friday plans/);
   });
 
+  it("reads an order it doesn't know (another version's) as Best match", async () => {
+    const getItem = Storage.prototype.getItem;
+    const stored = vi.spyOn(Storage.prototype, "getItem");
+    stored.mockImplementation(function (this: Storage, key) {
+      return key === "cumulas.mail.searchSort" ? "oldest" : getItem.call(this, key);
+    });
+    try {
+      await renderMail();
+      await setSearch("porto");
+      await expectResults(/Porto offsite: tickets and hotel/, /Porto itinerary/, /Friday plans/);
+      expect(screen.getByRole("radio", { name: "Best match" })).toBeChecked();
+    } finally {
+      stored.mockRestore();
+    }
+  });
+
   it("keeps the best matches in place while the servers' hits join below them", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend();
@@ -1018,6 +1060,51 @@ describe("Search", () => {
     await expectResults(CHECKLIST, /Photos from the hike/, /Brand guidelines, final edition/);
     await user.click(screen.getByRole("radio", { name: "Best match" }));
     await expectResults(CHECKLIST, /Brand guidelines, final edition/, /Photos from the hike/);
+  });
+
+  it("ranks a new search afresh, even for the same text", async () => {
+    const backend = new MockBackend();
+    const { client } = await renderMail({ backend });
+    await setSearch("final");
+    await expectResults(CHECKLIST, /Photos from the hike/, /Brand guidelines, final edition/);
+    await waitFor(() => expect(announced()).toBe("3 results."));
+    await setSearch("");
+    // Meanwhile a better match arrives (as the app hears of new mail).
+    const [account] = await backend.listAccounts();
+    await backend.sendMessage({
+      accountId: account!.id,
+      to: [{ name: "Sam", address: "sam@example.com" }],
+      cc: [],
+      bcc: [],
+      subject: "Final invoice",
+      bodyHtml: "<p>Attached.</p>",
+      attachments: [],
+    });
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["mail"] });
+    });
+    const fresh = await backend.searchMessages("final", undefined, [], { sort: "relevance" });
+    expect(fresh.map((m) => m.subject)).toEqual([
+      "Final invoice",
+      "Atlas launch checklist — final review today",
+      "Brand guidelines, final edition",
+      "Photos from the hike",
+    ]);
+    // The same words again: the order of now, not of the search before.
+    await setSearch("final");
+    await expectResults(
+      /Final invoice/,
+      CHECKLIST,
+      /Brand guidelines, final edition/,
+      /Photos from the hike/,
+    );
+    await waitFor(() => expect(announced()).toBe("4 results."));
+    await expectResults(
+      /Final invoice/,
+      CHECKLIST,
+      /Brand guidelines, final edition/,
+      /Photos from the hike/,
+    );
   });
 
   it("says when the server has more to look through, and finds it there", async () => {
@@ -1110,6 +1197,33 @@ describe("Search", () => {
     expect(current()).toBeUndefined();
   });
 
+  it("shows the only match again on each step, wherever the reader scrolled", async () => {
+    const user = userEvent.setup();
+    // jsdom has no layout: what is scrolled into view is recorded instead.
+    const shown: Element[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      shown.push(this);
+    };
+    try {
+      await renderMail();
+      await setSearch("climbing");
+      await waitFor(() => expect(row(/Climbing on Thursday/)).toBeInTheDocument());
+      await openMessage(user, /Climbing on Thursday/);
+      const bar = await screen.findByRole("group", { name: "Matches in this message" });
+      expect(bar).toHaveTextContent("1 match");
+      const hit = () => document.querySelector(".mail-plaintext mark.search-hit");
+      shown.length = 0;
+      await user.keyboard("{F3}");
+      expect(shown).toEqual([hit()]);
+      // Scrolled away to read on, then back to it.
+      await user.keyboard("{F3}");
+      await user.click(within(bar).getByRole("button", { name: "Next match" }));
+      expect(shown).toEqual([hit(), hit(), hit()]);
+    } finally {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+    }
+  });
+
   it("tells the message's frame what to mark, on its own channel, and shows the count", async () => {
     const user = userEvent.setup();
     await renderMail();
@@ -1142,6 +1256,17 @@ describe("Search", () => {
     // A count from anywhere but the frame's channel counts for nothing.
     post({ type: "hits", count: 9, channel: inbound }, frame.contentWindow);
     expect(bar).toHaveTextContent("Match 1 of 2");
+    // One match: each step shows it again.
+    post({ type: "hits", count: 1, channel }, frame.contentWindow);
+    expect(bar).toHaveTextContent("1 match");
+    sent.mockClear();
+    await user.click(within(bar).getByRole("button", { name: "Next match" }));
+    await user.click(within(bar).getByRole("button", { name: "Next match" }));
+    const reveal = { inbound, type: "reveal", index: 0 };
+    expect(sent.mock.calls).toEqual([
+      [reveal, "*"],
+      [reveal, "*"],
+    ]);
   });
 
   it("keeps an opened best match where it was after it's read", async () => {
@@ -1502,6 +1627,85 @@ describe("Search", () => {
     await waitFor(() =>
       expect(screen.getByRole("combobox", { name: "Search mail" })).toHaveFocus(),
     );
+  });
+
+  it("hands the keyboard on quietly when Try again worked", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    backend.failServerSearch("acct-home", {
+      code: "network",
+      message: "Could not reach imap.morgan-family.example.",
+    });
+    await renderMail({ backend });
+    // A word with people to suggest.
+    await setSearch("priya");
+    await waitFor(() => expect(failureRow()).toBeInTheDocument());
+    act(() => screen.getByRole("button", { name: "Try again" }).focus());
+    backend.failServerSearch("acct-home", null);
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(failureRow()).not.toBeInTheDocument());
+    const box = screen.getByRole("combobox", { name: "Search mail" });
+    await waitFor(() => expect(box).toHaveFocus());
+    // The suggestions don't cover the results it was waiting for (people
+    // to suggest would have come by now).
+    const suggestions = () => screen.queryByRole("listbox", { name: "Search suggestions" });
+    await expect(
+      waitFor(() => expect(suggestions()).not.toBeNull(), { timeout: 1000 }),
+    ).rejects.toThrow();
+    expect(box).toHaveAttribute("aria-expanded", "false");
+    // A key opens them as ever.
+    await user.keyboard("{ArrowDown}");
+    expect(await screen.findByRole("listbox", { name: "Search suggestions" })).toBeInTheDocument();
+  });
+
+  it("keeps the keyboard near when the filter control it was on goes away", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    const text = () => useAppStore.getState().search;
+    const box = screen.getByRole("combobox", { name: "Search mail" });
+    const suggestions = () => screen.queryByRole("listbox", { name: "Search suggestions" });
+
+    // Clear filters goes with the filters: to the first one.
+    await setSearch("lunch is:unread");
+    act(() => chip("Clear filters").focus());
+    await user.keyboard("{Enter}");
+    expect(text()).toBe("lunch");
+    expect(chip("From")).toHaveFocus();
+
+    // A From filter removed: to the From filter in its place.
+    await setSearch("from:priya lunch");
+    act(() => chip("Remove From filter").focus());
+    await user.keyboard("{Enter}");
+    expect(text()).toBe("lunch");
+    expect(chip("From")).toHaveFocus();
+
+    // The search over, and the filters with it: to the box, its
+    // suggestions closed.
+    await setSearch("is:unread");
+    act(() => chip("Unread").focus());
+    await user.keyboard(" ");
+    expect(text()).toBe("");
+    expect(box).toHaveFocus();
+    expect(suggestions()).toBeNull();
+
+    // So too from a menu.
+    await setSearch("received:today");
+    act(() => chip("Today").focus());
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("menuitemradio", { name: "Any time" }));
+    expect(text()).toBe("");
+    expect(box).toHaveFocus();
+    expect(suggestions()).toBeNull();
+
+    // And from Clear filters where nothing was found.
+    await setSearch("zzzz-nothing is:flagged");
+    expect(await screen.findByText("No results")).toBeInTheDocument();
+    const empty = screen.getByText("No results").closest(".mail-search-empty") as HTMLElement;
+    act(() => within(empty).getByRole("button", { name: "Clear filters" }).focus());
+    await user.keyboard("{Enter}");
+    expect(text()).toBe("zzzz-nothing");
+    expect(box).toHaveFocus();
+    expect(suggestions()).toBeNull();
   });
 
   it("shows results with their folder and account", async () => {

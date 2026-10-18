@@ -24,6 +24,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 
 import { useAppStore } from "../../app/store";
 import { useBackend } from "../../api/context";
@@ -59,6 +60,7 @@ import { MessageRow, type RowHandlers } from "./MessageRow";
 import { useFolders, useMessageList, useSearch } from "./queries";
 import { keepOrder } from "./search/keepOrder";
 import { MailSearchField } from "./search/MailSearchField";
+import { focusLost, focusSearch } from "./search/focus";
 import { addRecentSearch } from "./search/recentSearches";
 import { SearchFilters } from "./search/SearchFilters";
 import { useServerSearch, wantsServerSearch } from "./serverSearch";
@@ -73,6 +75,7 @@ const SORTS: { value: SearchSort; label: string }[] = [
   { value: "relevance", label: "Best match" },
   { value: "newest", label: "Newest" },
 ];
+const SORT_VALUES = SORTS.map((s) => s.value);
 
 const NO_IDS: string[] = [];
 
@@ -244,7 +247,11 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
   const { data: folders = [] } = useFolders();
   const { data: accounts = [] } = useAccounts();
   // Best match or newest first: a view of the results, kept per device.
-  const [sort, setSort] = usePersistentString<SearchSort>("cumulas.mail.searchSort", "relevance");
+  const [sort, setSort] = usePersistentString<SearchSort>(
+    "cumulas.mail.searchSort",
+    "relevance",
+    SORT_VALUES,
+  );
   const list = useMessageList(searching ? null : folderId, filter);
   // A text still changing would cancel the server search it started.
   const server = useServerSearch(serverText === query ? query : "");
@@ -284,16 +291,22 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
 
   // Best matches don't move once listed: what comes later for the same text
   // and order (the servers' hits, more pages, a flag changed) joins below.
-  // A new text or order ranks them all afresh. Newest first is by date.
+  // A new text or order ranks them all afresh, and so does a new search for
+  // the same text. The order is taken from answers for this text that have
+  // settled only: what shows while the next one loads (the last answer, or
+  // one cached from an earlier search) is ordered by it, never taken as it.
+  // Newest first is by date.
   const orderKey = `${shown.sort}\n${shownFor}`;
   const [order, setOrder] = useState<{ key: string; ids: string[] } | null>(null);
   const ordered = useMemo(() => {
     const data = results.data ?? [];
     return ranked && order?.key === orderKey ? keepOrder(order.ids, data) : data;
   }, [results.data, ranked, order, orderKey]);
-  if (searching && results.data) {
+  if (searching && answered && !results.isFetching) {
     const ids = ordered.map((m) => m.id);
     if (order?.key !== orderKey || !sameIds(order.ids, ids)) setOrder({ key: orderKey, ids });
+  } else if (!searching && order) {
+    setOrder(null);
   }
 
   const fetched = useMemo(() => {
@@ -637,7 +650,8 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
     if (!where || document.activeElement !== document.body) return;
     focusWas.current = null;
     const next = where === "more" ? endRef.current : null;
-    (next ?? document.getElementById("global-search"))?.focus();
+    if (next) next.focus();
+    else focusSearch(undefined, { quiet: true });
   });
 
   // The button stays while the page loads, so keyboard focus stays on it.
@@ -708,9 +722,12 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
       </div>
     ) : null;
 
-  // Said once things settle, and while the servers are being asked.
+  // Said once things settle, and while the servers are being asked; a
+  // search with nothing to look for says what the list shows.
+  const nothingToLookFor = searching && isEmptySearch(parseSearch(query));
   let announcement = "";
-  if (serverBusy) announcement = "Searching your whole mailbox…";
+  if (nothingToLookFor) announcement = "Add words or a filter.";
+  else if (serverBusy) announcement = "Searching your whole mailbox…";
   else if (settled) {
     const count =
       resultCount === 0
@@ -767,7 +784,11 @@ export function MessageList({ actions, readingPane, onEditDraft }: MessageListPr
       <button
         type="button"
         className="btn btn--subtle"
-        onClick={() => setSearch(clearFilters(search))}
+        onClick={() => {
+          flushSync(() => setSearch(clearFilters(search)));
+          // The button went with the empty state: the keyboard goes to the box.
+          if (focusLost()) focusSearch(undefined, { quiet: true });
+        }}
       >
         Clear filters
       </button>

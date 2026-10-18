@@ -50,6 +50,9 @@ import { visualLength } from "./text";
 
 const ICON = { size: 17, strokeWidth: 1.75, "aria-hidden": true as const };
 
+/** How a dark theme shows an HTML letter: on paper, or dark itself. */
+const DARK_BODIES = ["paper", "dark"] as const;
+
 interface ToolButtonProps {
   icon: ReactNode;
   label: string;
@@ -205,13 +208,25 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
   const query = useMessage(messageId, remoteAllowed);
   const message = query.data;
   const isDark = useIsDark();
-  const [darkBody, setDarkBody] = usePersistentString<"paper" | "dark">("mail.darkBody", "paper");
+  const [darkBody, setDarkBody] = usePersistentString<(typeof DARK_BODIES)[number]>(
+    "mail.darkBody",
+    "paper",
+    DARK_BODIES,
+  );
   const [hoverUrl, setHoverUrl] = useState<string | null>(null);
   // What the search box's words find in the message, and the match shown.
   const highlight = useSearchHighlight();
-  const [found, setFound] = useState({ count: 0, current: null as number | null });
-  const onHits = useCallback((count: number) => setFound({ count, current: null }), []);
-  const showMatch = useCallback((current: number) => setFound((f) => ({ ...f, current })), []);
+  // `step` counts the steps, so that stepping to the match shown (the only
+  // one) shows it again, wherever the reader has scrolled since.
+  const [found, setFound] = useState({ count: 0, current: null as number | null, step: 0 });
+  const onHits = useCallback(
+    (count: number) => setFound((f) => ({ count, current: null, step: f.step })),
+    [],
+  );
+  const showMatch = useCallback(
+    (current: number) => setFound((f) => ({ ...f, current, step: f.step + 1 })),
+    [],
+  );
 
   useAutoMarkRead(message, settings?.markReadAfterSeconds, actions.markRead);
 
@@ -577,6 +592,7 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 onHoverLink={setHoverUrl}
                 highlight={highlight?.body}
                 current={found.current}
+                revealStep={found.step}
                 onHits={onHits}
               />
             ) : (
@@ -585,6 +601,7 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 onLink={onLink}
                 highlight={highlight?.body}
                 current={found.current}
+                revealStep={found.step}
                 onHits={onHits}
               />
             )}

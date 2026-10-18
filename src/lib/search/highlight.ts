@@ -25,6 +25,13 @@ export interface HitPatterns {
 
 /** How much of a text findHits reads by default: long plain-text bodies stop there. */
 export const MAX_SCAN_CHARS = 250_000;
+/**
+ * Most words a pattern has, and UTF-16 units a word: the message bridge
+ * (public/message-bridge.js) takes no more, so the rows, plain text and
+ * HTML mail all mark the same.
+ */
+export const MAX_PATTERN_WORDS = 16;
+export const MAX_WORD_UNITS = 128;
 /** Most hits findHits returns. */
 export const MAX_HITS = 1000;
 /** Characters a term needs to be found inside words, as the index's trigrams do. */
@@ -93,14 +100,19 @@ function tokens(folded: string): Token[] {
   }));
 }
 
-/** A term's pattern, without or with what it's found inside words by; null when it has no words. */
+/**
+ * A term's pattern, without or with what it's found inside words by; null
+ * when it has no words, or a word longer than the bridge takes. Past
+ * MAX_PATTERN_WORDS words, the first ones, each whole.
+ */
 function pattern(term: SearchTerm, inside: boolean): HitPattern | null {
   const folded = fold(term.text).folded;
   const words = tokens(folded).map((t) => t.text);
-  if (words.length === 0) return null;
+  if (words.length === 0 || words.some((w) => w.length > MAX_WORD_UNITS)) return null;
+  const kept = words.slice(0, MAX_PATTERN_WORDS);
   return {
-    words,
-    prefix: !term.phrase,
+    words: kept,
+    prefix: !term.phrase && kept.length === words.length,
     inside: inside && Array.from(term.text).length >= INSIDE_CHARS ? folded : null,
   };
 }

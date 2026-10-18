@@ -33,15 +33,15 @@ import {
   localMidnight,
   parseSearch,
   resolveDates,
-  scopeKey,
 } from "../../../lib/search/query";
 import { useMailStore } from "../mailStore";
 import { useFolders } from "../queries";
 import { DateRangeDialog } from "./DateRangeDialog";
-import { focusSearch } from "./focus";
+import { focusLost, focusSearch } from "./focus";
 import { DATE_LABELS, FOLDER_ROLES } from "./suggestions";
 
 const DATE_CHIP_ID = "mail-search-date";
+const FILTERS_ID = "mail-search-filters";
 
 /** "Oct 1", or "Oct 1, 2025" in another year. */
 function dayLabel(day: PlainDay): string {
@@ -171,6 +171,20 @@ export function SearchFilters() {
   const clauses = useMemo(() => findClauses(search), [search]);
   const [rangeOpen, setRangeOpen] = useState(false);
 
+  /**
+   * Writes `next` into the box, as a filter's control does. When that takes
+   * away the control the keyboard was on (Clear filters, a From filter
+   * removed, a menu's chip), the keyboard goes to the first filter, or to
+   * the box when the search is over and the filters with it.
+   */
+  const write = (next: string) => {
+    flushSync(() => setSearch(next));
+    if (!focusLost()) return;
+    const first = document.getElementById(FILTERS_ID)?.querySelector<HTMLElement>("button");
+    if (first) first.focus();
+    else focusSearch(undefined, { quiet: true });
+  };
+
   // The custom range's dialog gone, the keyboard goes back to the Date filter
   // (a closed Dialog renders nothing, so nothing else would put it there).
   const rangeWasOpen = useRef(false);
@@ -205,13 +219,13 @@ export function SearchFilters() {
       label: "Any time",
       radio: true,
       checked: dates.length === 0,
-      onSelect: () => setSearch(removeClauses(search, isDateClause)),
+      onSelect: () => write(removeClauses(search, isDateClause)),
     },
     ...DATE_KEYWORDS.map((k) => ({
       label: DATE_LABELS[k],
       radio: true,
       checked: keyword === k,
-      onSelect: () => setSearch(setClause(search, isDateClause, `received:${formatValue(k)}`)),
+      onSelect: () => write(setClause(search, isDateClause, `received:${formatValue(k)}`)),
     })),
     {
       label: "Custom range…",
@@ -226,23 +240,31 @@ export function SearchFilters() {
   const inValues = query.folders;
   const onlyIn = inValues.length === 1 ? inValues[0]! : null;
   const current = folders.find((f) => f.id === folderId);
-  const currentFolder = current && current.role === "other" ? current : null;
+  // `in:` names a folder by its name or its role's words, so Current folder
+  // is offered only where what it writes names that folder alone: not for a
+  // folder named for a role ("Spam", "Archive" would take in Junk and the
+  // archive), nor one whose name has no letters or digits (no `in:` at all).
+  const currentClause = current ? `in:${formatValue(current.name)}` : "";
+  const currentKey = parseSearch(currentClause).folders[0];
+  const currentFolder =
+    current?.role === "other" && currentKey !== undefined && folderRoleOf(currentKey) === null
+      ? current
+      : null;
   const roles = FOLDER_ROLES.filter(([role]) => folders.some((f) => f.role === role));
   const folderItems: MenuItem[] = [
     {
       label: "All folders",
       radio: true,
       checked: inValues.length === 0,
-      onSelect: () => setSearch(removeClauses(search, isInClause)),
+      onSelect: () => write(removeClauses(search, isInClause)),
     },
   ];
   if (currentFolder) {
     folderItems.push({
       label: `Current folder (${currentFolder.name})`,
       radio: true,
-      checked: onlyIn !== null && onlyIn === scopeKey(currentFolder.name),
-      onSelect: () =>
-        setSearch(setClause(search, isInClause, `in:${formatValue(currentFolder.name)}`)),
+      checked: onlyIn !== null && onlyIn === currentKey,
+      onSelect: () => write(setClause(search, isInClause, currentClause)),
     });
   }
   for (const [role, label] of roles) {
@@ -250,7 +272,7 @@ export function SearchFilters() {
       label,
       radio: true,
       checked: onlyIn !== null && folderRoleOf(onlyIn) === role,
-      onSelect: () => setSearch(setClause(search, isInClause, `in:${role}`)),
+      onSelect: () => write(setClause(search, isInClause, `in:${role}`)),
     });
   }
   const folderChecked = folderItems.find((item, i) => i > 0 && item.checked);
@@ -274,14 +296,13 @@ export function SearchFilters() {
       label: "All accounts",
       radio: true,
       checked: accountValues.length === 0,
-      onSelect: () => setSearch(removeClauses(search, isAccountClause)),
+      onSelect: () => write(removeClauses(search, isAccountClause)),
     },
     ...accounts.map((a) => ({
       label: accountLabel(a),
       radio: true,
       checked: a === checkedAccount,
-      onSelect: () =>
-        setSearch(setClause(search, isAccountClause, `account:${formatValue(a.email)}`)),
+      onSelect: () => write(setClause(search, isAccountClause, `account:${formatValue(a.email)}`)),
     })),
   ];
   const accountChipLabel =
@@ -304,7 +325,7 @@ export function SearchFilters() {
           className="mail-search-chip__remove"
           aria-label="Remove From filter"
           title="Remove"
-          onClick={() => setSearch(removeClauses(search, isFromClause))}
+          onClick={() => write(removeClauses(search, isFromClause))}
         >
           <X size={13} aria-hidden="true" />
         </button>
@@ -319,7 +340,7 @@ export function SearchFilters() {
   }
 
   return (
-    <div role="group" aria-label="Search filters" className="mail-search-filters">
+    <div id={FILTERS_ID} role="group" aria-label="Search filters" className="mail-search-filters">
       {fromChip}
       <MenuChip
         id={DATE_CHIP_ID}
@@ -332,7 +353,7 @@ export function SearchFilters() {
         label="Has attachment"
         pressed={query.hasAttachment}
         onToggle={(on) =>
-          setSearch(
+          write(
             on
               ? setClause(search, isHasClause, "has:attachment")
               : removeClauses(search, isHasClause),
@@ -343,7 +364,7 @@ export function SearchFilters() {
         label="Unread"
         pressed={query.read === false}
         onToggle={(on) =>
-          setSearch(
+          write(
             on ? setClause(search, isReadClause, "is:unread") : removeClauses(search, isReadClause),
           )
         }
@@ -352,7 +373,7 @@ export function SearchFilters() {
         label="Flagged"
         pressed={query.flagged}
         onToggle={(on) =>
-          setSearch(
+          write(
             on
               ? setClause(search, isFlaggedClause, "is:flagged")
               : removeClauses(search, isFlaggedClause),
@@ -377,7 +398,7 @@ export function SearchFilters() {
         <button
           type="button"
           className="btn btn--subtle btn--sm mail-search-filters__clear"
-          onClick={() => setSearch(clearFilters(search))}
+          onClick={() => write(clearFilters(search))}
         >
           Clear filters
         </button>

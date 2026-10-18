@@ -7,6 +7,7 @@ import type {
   DataChangedEvent,
   PermissionRequest,
   RemindersChangedEvent,
+  SearchOptions,
 } from "../types";
 import { DEMO_UPDATE_COMMIT, MockBackend, mockAdminConsentUrl } from ".";
 
@@ -1053,6 +1054,11 @@ describe("the demo's ranking and filters", () => {
     expect(
       subjects(await backend.searchMessages("porto", undefined, [], { sort: "newest" })),
     ).toEqual(["Friday plans", "Porto offsite: tickets and hotel", "Porto itinerary"]);
+    // An order it doesn't know, as the core's command, it refuses.
+    const unknown = { sort: "oldest" } as unknown as SearchOptions;
+    await expect(backend.searchMessages("porto", undefined, [], unknown)).rejects.toMatchObject({
+      code: "invalidInput",
+    });
     // Addresses alone, or filters alone, have no words to rank by: newest first.
     for (const text of ["from:priya", "is:flagged", "has:attachment"]) {
       const found = await backend.searchMessages(text);

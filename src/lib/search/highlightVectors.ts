@@ -52,4 +52,15 @@ export const HIGHLIGHT_VECTORS: readonly HighlightVector[] = [
   { text: "हिन्दी पाठ्यक्रम", query: "हिन्दी", field: "body", hits: ["हिन्दी"] },
   // To and Cc aren't shown, so not marked.
   { text: "Lunch?", query: "to:lunch", field: "body", hits: [] },
+  // A pasted sentence of 17 words: its first 16, as many as the message's
+  // bridge takes.
+  {
+    text: "Please let me know if you have any questions about the attached invoice for the October work.",
+    query:
+      '"please let me know if you have any questions about the attached invoice for the October work"',
+    field: "body",
+    hits: [
+      "Please let me know if you have any questions about the attached invoice for the October",
+    ],
+  },
 ];

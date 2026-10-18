@@ -1493,7 +1493,8 @@ export class MockBackend implements Backend {
    * Like the core: the messages the index finds (word prefixes, and inside
    * subjects and senders) that pass the filters, plus the ones server
    * searches found that pass them. Best first while the text has words to
-   * rank by (the 200 best, and every server hit), else newest first.
+   * rank by (the 200 best, and every server hit), else newest first. An
+   * order it doesn't know is refused, as the core's command refuses it.
    */
   async searchMessages(
     text: string,
@@ -1502,6 +1503,10 @@ export class MockBackend implements Backend {
     options?: SearchOptions | null,
   ): Promise<SearchHit[]> {
     await this.delay();
+    const sort: unknown = options?.sort;
+    if (sort !== undefined && sort !== "relevance" && sort !== "newest") {
+      fail("invalidInput", `Not an order of search results: ${String(sort)}.`);
+    }
     const now = new Date();
     const query = parseSearch(text);
     const dates = resolveDates(query, now, options?.weekStartsOn ?? 0);

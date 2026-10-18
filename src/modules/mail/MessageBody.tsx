@@ -45,6 +45,8 @@ interface MessageBodyProps {
   highlight?: readonly HitPattern[];
   /** The match to show, of those marked. */
   current?: number | null;
+  /** Changes with each step to a match, even to the one shown: it is shown again. */
+  revealStep?: number;
   /** How many matches were marked. */
   onHits?: (count: number) => void;
 }
@@ -61,6 +63,7 @@ export function MessageBody({
   onHoverLink,
   highlight = NO_PATTERNS,
   current = null,
+  revealStep = 0,
   onHits,
 }: MessageBodyProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -168,7 +171,7 @@ export function MessageBody({
     if (!ready || current === null) return;
     const command: BridgeCommand = { inbound: inbound!, type: "reveal", index: current };
     frameRef.current?.contentWindow?.postMessage(command, "*");
-  }, [ready, inbound, current]);
+  }, [ready, inbound, current, revealStep]);
 
   return (
     <div
@@ -345,12 +348,15 @@ export function PlainTextBody({
   onLink,
   highlight = NO_HITS,
   current = null,
+  revealStep = 0,
   onHits,
 }: {
   text: string;
   onLink: (href: string) => void;
   highlight?: readonly HitPattern[];
   current?: number | null;
+  /** As MessageBody's. */
+  revealStep?: number;
   onHits?: (count: number) => void;
 }): ReactNode {
   const blocks = useMemo(() => plainTextBlocks(text), [text]);
@@ -382,7 +388,7 @@ export function PlainTextBody({
   useEffect(() => {
     if (current === null) return;
     ref.current?.querySelector(`[data-hit="${current}"]`)?.scrollIntoView?.({ block: "center" });
-  }, [current]);
+  }, [current, revealStep]);
 
   let next = 0;
   const linked = () => <Linked parts={marked[next++] ?? []} current={current} onLink={onLink} />;

@@ -269,6 +269,8 @@
   const isArray = Array.isArray;
   const isInteger = Number.isInteger;
 
+  // MAX_WORDS and MAX_WORD_CHARS are highlight.ts's MAX_PATTERN_WORDS and
+  // MAX_WORD_UNITS: the app sends no more.
   const MAX_PATTERNS = 32;
   const MAX_WORDS = 16;
   const MAX_WORD_CHARS = 128;
@@ -505,8 +507,10 @@
       // No other listener in the frame hears the app's words, or its secret.
       stopImmediatePropagation(e);
       if (data.type === "highlight") {
-        const patterns = readPatterns(data.patterns);
-        if (!patterns) return;
+        // What isn't a list of patterns marks nothing: the last marks and
+        // count never outlive the app's words.
+        const read = readPatterns(data.patterns);
+        const patterns = read === null ? [] : read;
         const key = stringify(patterns);
         if (key !== applied) {
           applied = key;

@@ -14,7 +14,7 @@ import { useAccounts } from "../../../api/queries";
 import { Avatar } from "../../../components/Avatar";
 import { useDebounced } from "../hooks";
 import { useFolders, useSuggestions } from "../queries";
-import { SEARCH_INPUT_ID } from "./focus";
+import { SEARCH_INPUT_ID, isQuietFocus } from "./focus";
 import {
   addRecentSearch,
   clearRecentSearches,
@@ -61,8 +61,11 @@ export function MailSearchField() {
   // Closed by Escape, Enter, Tab or a pick, until the next key, input or focus.
   const [dismissed, setDismissed] = useState(false);
   const [caret, setCaret] = useState(0);
-  // The option the arrows reached, for the options it was among: none at first.
-  const [active, setActive] = useState<{ key: string; index: number } | null>(null);
+  // The option the arrows reached (by its id, so options that come late, as
+  // People do, leave it be), or the one under the pointer: none at first.
+  // Enter and Shift+Delete act on the arrows' only: the pointer just passing
+  // over the list never changes what Enter does.
+  const [active, setActive] = useState<{ id: string; by: "keys" | "pointer" } | null>(null);
   const [status, setStatus] = useState("");
   // Where the caret goes once a pick's text is in the box.
   const pendingCaret = useRef<number | null>(null);
@@ -91,8 +94,9 @@ export function MailSearchField() {
     [open, search, at, recent, peopleText, people, folders, accounts],
   );
   const options = useMemo(() => groups.flatMap((g) => g.options), [groups]);
-  const optionsKey = options.map((o) => o.id).join("\n");
-  const activeIndex = active?.key === optionsKey ? active.index : null;
+  const found = active ? options.findIndex((o) => o.id === active.id) : -1;
+  const activeIndex = found >= 0 ? found : null;
+  const chosenIndex = activeIndex !== null && active?.by === "keys" ? activeIndex : null;
   const expanded = open && options.length > 0;
 
   useLayoutEffect(() => {
@@ -146,13 +150,13 @@ export function MailSearchField() {
           return;
         }
         const next = step(activeIndex, e.key === "ArrowDown" ? 1 : -1);
-        setActive(next === null ? null : { key: optionsKey, index: next });
+        setActive(next === null ? null : { id: options[next]!.id, by: "keys" });
         break;
       }
       case "Enter":
-        if (expanded && activeIndex !== null) {
+        if (expanded && chosenIndex !== null) {
           e.preventDefault();
-          pick(options[activeIndex]!);
+          pick(options[chosenIndex]!);
         } else {
           setDismissed(true);
           setActive(null);
@@ -175,7 +179,7 @@ export function MailSearchField() {
         setActive(null);
         break;
       case "Delete": {
-        const option = activeIndex === null ? null : options[activeIndex];
+        const option = chosenIndex === null ? null : options[chosenIndex];
         if (!e.shiftKey || !expanded || option?.kind !== "recent") return;
         e.preventDefault();
         removeRecentSearch(option.label);
@@ -211,11 +215,17 @@ export function MailSearchField() {
           setActive(null);
           setStatus("");
         }}
-        onSelect={readCaret}
+        onSelect={(e) => {
+          // Another word at the caret is another list.
+          if ((e.currentTarget.selectionStart ?? 0) !== caret) setActive(null);
+          readCaret(e);
+        }}
         onKeyDown={onKeyDown}
         onFocus={(e) => {
           setFocused(true);
-          setDismissed(false);
+          // Focus handed on by code (a control that went away) leaves the
+          // suggestions closed, over the results the user was looking at.
+          setDismissed(isQuietFocus());
           readCaret(e);
         }}
         onBlur={() => {
@@ -247,6 +257,7 @@ export function MailSearchField() {
           role="listbox"
           aria-label="Search suggestions"
           className="mail-suggest mail-search-suggest"
+          onMouseLeave={() => setActive((a) => (a?.by === "pointer" ? null : a))}
         >
           {groups.map((group) => {
             const headingId = `mail-search-group-${group.id}`;
@@ -274,7 +285,7 @@ export function MailSearchField() {
                         // The keyboard stays in the box.
                         onMouseDown={(e) => e.preventDefault()}
                         onMouseEnter={() =>
-                          !option.disabled && setActive({ key: optionsKey, index })
+                          !option.disabled && setActive({ id: option.id, by: "pointer" })
                         }
                         onClick={() => pick(option)}
                       >

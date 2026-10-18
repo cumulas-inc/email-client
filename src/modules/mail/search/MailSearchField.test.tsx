@@ -154,6 +154,41 @@ describe("MailSearchField", () => {
     expect(suggestions()).toBeNull();
   });
 
+  it("keeps the option the arrows reached when people to suggest come in after", async () => {
+    act(() => addRecentSearch("priya budget"));
+    const { user, box } = setup();
+    await user.click(box);
+    await user.keyboard("pri{ArrowDown}");
+    const recent = within(suggestions()!).getByRole("option", { name: "priya budget" });
+    expect(box).toHaveAttribute("aria-activedescendant", recent.id);
+    // People come once the typing has paused; the choice stands.
+    await screen.findByRole("group", { name: "People" });
+    expect(box).toHaveAttribute("aria-activedescendant", recent.id);
+    await user.keyboard("{Enter}");
+    expect(text()).toBe("priya budget");
+  });
+
+  it("lets Enter search the text typed whatever the pointer passed over", async () => {
+    act(() => addRecentSearch("lunch with megan"));
+    const { user, box } = setup();
+    await user.click(box);
+    await user.keyboard("lunch");
+    const list = suggestions()!;
+    const option = within(list).getByRole("option", { name: "lunch with megan" });
+    // Over an option, it shows; off the list, it's let go.
+    await user.hover(option);
+    expect(option).toHaveAttribute("aria-selected", "true");
+    await user.unhover(list);
+    expect(option).toHaveAttribute("aria-selected", "false");
+    await user.keyboard("{Enter}");
+    expect(text()).toBe("lunch");
+    // Still over it, Enter searches the text too: the arrows choose, or a click.
+    await user.keyboard("{ArrowDown}");
+    await user.hover(within(suggestions()!).getByRole("option", { name: "lunch with megan" }));
+    await user.keyboard("{Enter}");
+    expect(text()).toBe("lunch");
+  });
+
   it("offers people for from:, and inserts their address", async () => {
     const { user, box } = setup();
     await user.click(box);

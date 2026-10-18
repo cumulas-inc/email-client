@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   type HitPattern,
   MAX_HITS,
+  MAX_PATTERN_WORDS,
+  MAX_WORD_UNITS,
   findHits,
   fold,
   hitPatterns,
@@ -93,6 +95,28 @@ describe("hitPatterns", () => {
         { words: ["x"], prefix: true, inside: null },
       ],
     });
+  });
+
+  it("keeps to what the message's bridge takes, so every view marks the same", () => {
+    // A pasted sentence of 17 words: its first 16, each whole.
+    const sentence =
+      "Please let me know if you have any questions about the attached invoice for the October work";
+    const [phrase] = patternsOf(`"${sentence}"`)!.body;
+    expect(phrase).toEqual({
+      words: sentence.toLowerCase().split(" ").slice(0, MAX_PATTERN_WORDS),
+      prefix: false,
+      inside: null,
+    });
+    expect(findHits(sentence, [phrase!])).toEqual([[0, sentence.indexOf(" work")]]);
+    // Unquoted, the last word kept is whole too.
+    const dotted = Array.from({ length: 17 }, (_, i) => `w${i}`).join(".");
+    expect(patternsOf(dotted)!.body[0]).toMatchObject({ prefix: false });
+    expect(patternsOf(dotted)!.body[0]!.words).toHaveLength(MAX_PATTERN_WORDS);
+    // A word that folds longer than the bridge takes (each syllable is
+    // three letters apart) isn't marked anywhere.
+    const long = "한".repeat(50);
+    expect(fold(long).folded.length).toBeGreaterThan(MAX_WORD_UNITS);
+    expect(patternsOf(long)).toEqual({ subject: [], sender: [], body: [] });
   });
 });
 
