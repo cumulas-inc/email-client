@@ -97,6 +97,20 @@
   </keywords>
 
   <releases>
+    <release version="0.4.0" date="2026-10-18">
+      <description>
+        <p>Search puts the best matches first, and Cumulas Mail now understands sensitivity labels and encrypted mail.</p>
+        <ul>
+          <li>Search shows the best matches first, ranking words in the subject or sender above words in the body; switch to Newest at any time</li>
+          <li>Filters you can click narrow a search by sender, date, attachments, unread, flagged, folder or account, and after:, before:, is:unread, is:flagged, in: and account: can be typed too</li>
+          <li>Suggestions as you type: people, your recent searches and filters</li>
+          <li>Matching words are highlighted in the results and in the open message, with a find bar to step through them</li>
+          <li>Encrypted, rights-protected and S/MIME mail is recognized, with a notice naming the sender; on Microsoft 365, open it, reply to it or forward it in Outlook on the web with one click</li>
+          <li>Messages labeled in your organization show their sensitivity label</li>
+          <li>Send with a sensitivity label, Encrypt or Do Not Forward on Microsoft 365 work accounts, once your IT administrator has set it up and a check in Settings shows that it works</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-10-18">
       <description>
         <p>Microsoft 365 accounts work in more organizations, and Cumulas Mail tells you when an update is ready.</p>
