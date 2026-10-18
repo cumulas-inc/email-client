@@ -99,15 +99,17 @@
   <releases>
     <release version="0.4.0" date="2026-10-18">
       <description>
-        <p>Search puts the best matches first, and Cumulas Mail now understands sensitivity labels and encrypted mail.</p>
+        <p>Search finds the best matches first and is easier to narrow down, and Cumulas Mail now recognizes encrypted mail and sensitivity labels.</p>
         <ul>
-          <li>Search shows the best matches first, ranking words in the subject or sender above words in the body; switch to Newest at any time</li>
-          <li>Filters you can click narrow a search by sender, date, attachments, unread, flagged, folder or account, and after:, before:, is:unread, is:flagged, in: and account: can be typed too</li>
-          <li>Suggestions as you type: people, your recent searches and filters</li>
-          <li>Matching words are highlighted in the results and in the open message, with a find bar to step through them</li>
-          <li>Encrypted, rights-protected and S/MIME mail is recognized, with a notice naming the sender; on Microsoft 365, open it, reply to it or forward it in Outlook on the web with one click</li>
-          <li>Messages labeled in your organization show their sensitivity label</li>
-          <li>Send with a sensitivity label, Encrypt or Do Not Forward on Microsoft 365 work accounts, once your IT administrator has set it up and a check in Settings shows that it works</li>
+          <li>Results are sorted by Best match, which puts mail with your words in the subject or sender first and favors recent mail; choose Newest to see the latest mail first</li>
+          <li>Filters under the search box narrow a search by sender, date, attachments, unread or flagged, folder or account, and each can be typed too, such as is:unread, in:sent or received:today</li>
+          <li>As you type, the search box suggests people, recent searches and filters; Clear recent searches forgets them</li>
+          <li>Results show the words around each match, highlighted, and the open message highlights them too, with arrows or F3 to step through them</li>
+          <li>Mail that Cumulas Mail can't open because it's encrypted or protected now says so; in Microsoft accounts, Open in Outlook on the web takes you there to read, reply or forward it, and More actions offers it for any message</li>
+          <li>Mail that links to Microsoft's encrypted message portal says so in any account, with a button that opens the portal itself rather than the links in the message</li>
+          <li>In Microsoft 365 work and school accounts, labeled messages say so, and show the label's name, such as Confidential, once you turn on sensitivity labels in Settings → Accounts</li>
+          <li>Microsoft 365 work and school accounts can send with Encrypt, Do Not Forward or a sensitivity label once your IT team has set this up and a test from Settings → Accounts arrives encrypted or labeled</li>
+          <li>Attachments you open are readable only by you and are cleared when Cumulas Mail next starts</li>
         </ul>
       </description>
     </release>
