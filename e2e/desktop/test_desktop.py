@@ -692,22 +692,26 @@ def toolbar_button(driver, name: str) -> WebElement:
 
 def search(driver) -> None:
     """The search box finds words by their start, and from:, subject: and
-    the like narrow it (they used to find nothing), and filters say what
-    they hide. A message from before the sync window, on the server only,
-    shows up as the server is searched, labeled with its folder, and opens
-    like any other; more than a page of them shows on request, and one is
-    flagged, replied to, archived and deleted like any other."""
+    the like narrow it (they used to find nothing), as do the filters above
+    the results, which write them. A message from before the sync window,
+    on the server only, shows up as the server is searched, labeled with its
+    folder, and opens like any other; more than a page of them shows on
+    request, and one is flagged, replied to, archived and deleted like any
+    other."""
     box = driver.find_element(By.CSS_SELECTOR, "input[aria-label='Search mail']")
     type_into(box, "quarter")
     wait_for(results_are(driver, ["Quarterly numbers"]), what="a result for a word's start")
     search_settled(driver, "1 result.")
     shot(driver, "search-results")
 
-    # Flagged hides it, and says so, rather than "No results".
+    # The Flagged filter above the results writes is:flagged into the
+    # search: it isn't, so nothing is found; Clear filters finds it again.
+    box.send_keys(Keys.TAB)  # The box's suggestions close.
     button(driver, "Flagged").click()
-    by_text(driver, "No flagged results")
-    by_text(driver, "The only result for “quarter” isn't flagged.")
-    button(driver, "Show all results").click()
+    wait_for(lambda: box.get_attribute("value") == "quarter is:flagged", what="is:flagged written")
+    by_text(driver, "No results")
+    by_text(driver, "Nothing matches “quarter is:flagged”. Try fewer filters or other words.")
+    button(driver, "Clear filters").click()
     wait_for(results_are(driver, ["Quarterly numbers"]), what="the result shown again")
 
     type_into(box, "from:bob contract")
@@ -736,7 +740,10 @@ def search(driver) -> None:
 
     box = driver.find_element(By.CSS_SELECTOR, "input[aria-label='Search mail']")
     box.click()
+    # Escape closes the box's suggestions, if they're open, then clears it.
     box.send_keys(Keys.ESCAPE)
+    if box.get_attribute("value"):
+        box.send_keys(Keys.ESCAPE)
     wait_for(lambda: not search_results(driver), what="the search to clear")
 
 

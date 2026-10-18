@@ -68,7 +68,7 @@ describe("Mail folders", () => {
     const account = treeItem(/^Alex Morgan \(alex\.morgan@acme\.example\)$/);
     expect(within(account).getByRole("treeitem", { name: "Junk Email, 1 unread" })).toBeVisible();
     expect(within(account).getByRole("treeitem", { name: "Drafts, 1 item" })).toBeVisible();
-    const projects = within(account).getByRole("treeitem", { name: "Projects" });
+    const projects = within(account).getByRole("treeitem", { name: "Projects, 1 unread" });
     expect(projects).toHaveAttribute("aria-expanded", "true");
     expect(within(projects).getByRole("treeitem", { name: "Atlas" })).toBeInTheDocument();
 
@@ -181,7 +181,9 @@ describe("Reading pane", () => {
     expect(srcdoc).toContain("default-src 'none'");
     expect(srcdoc).toContain(`script-src ${messageBridgeUrl()};`);
     expect(srcdoc).toMatch(
-      new RegExp(`<script src="${messageBridgeUrl()}" data-channel="[0-9a-f]{32}"></script>`),
+      new RegExp(
+        `<script src="${messageBridgeUrl()}" data-channel="[0-9a-f]{32}" data-inbound="[0-9a-f]{32}"></script>`,
+      ),
     );
     expect(srcdoc).toContain("img-src data: cid:;");
     expect(srcdoc).not.toMatch(/img-src[^;]*https:/);
@@ -729,6 +731,16 @@ function watchFor(text: string): () => boolean {
   };
 }
 
+/** The filters above the search results. */
+function searchFilters() {
+  return screen.getByRole("group", { name: "Search filters" });
+}
+
+/** One of the filters' buttons. */
+function chip(name: string) {
+  return within(searchFilters()).getByRole("button", { name });
+}
+
 /** A search error row's text. */
 function failureRow() {
   return screen.queryByText(/Couldn't search/, { selector: ".mail-search-error p" });
@@ -754,58 +766,438 @@ describe("Search", () => {
     await expectResults(/Your trip to Lisbon/);
   });
 
-  it("says when Unread or Flagged hides results, and shows them all in one click", async () => {
+  it("writes what the filters say into the search, and shows what the search asks for", async () => {
     const user = userEvent.setup();
     const backend = new MockBackend();
     const fromPriya = await backend.searchMessages("from:priya");
     const unread = fromPriya.filter((m) => !m.isRead);
-    const fromJonas = await backend.searchMessages("from:jonas");
     expect(unread.length).toBeGreaterThan(0);
-    expect(fromJonas.every((m) => m.isRead)).toBe(true);
+    expect(unread.length).toBeLessThan(fromPriya.length);
     await renderMail({ backend });
-    await user.click(screen.getByRole("button", { name: "Unread" }));
-    const list = screen.getByRole("region", { name: "Message list" });
 
-    // Some hidden: the title says how many are listed, of how many.
     await setSearch("from:priya");
+    await expectResults(...fromPriya.map(() => /Priya Raman/));
+    const filters = searchFilters();
+    expect(within(filters).getByRole("button", { name: "From: priya" })).toBeInTheDocument();
+    // One Unread: the folder's own filter gives way while searching.
+    expect(screen.getAllByRole("button", { name: "Unread" })).toHaveLength(1);
+    expect(screen.queryByRole("group", { name: "Filter messages" })).not.toBeInTheDocument();
+
+    await user.click(chip("Unread"));
+    expect(useAppStore.getState().search).toBe("from:priya is:unread");
+    expect(chip("Unread")).toHaveAttribute("aria-pressed", "true");
     await expectResults(...unread.map(() => /^Unread/));
     expect(
-      within(list).getByText(new RegExp(`^${unread.length} unread of ${fromPriya.length} results`)),
-    ).toHaveTextContent(`${unread.length} unread of ${fromPriya.length} results for “from:priya”`);
+      within(screen.getByRole("region", { name: "Message list" })).getByText(/^\d+ results? for/),
+    ).toHaveTextContent(
+      `${unread.length} ${unread.length === 1 ? "result" : "results"} for “from:priya is:unread”`,
+    );
 
-    // All hidden: not "No results", but what the filter did.
-    await setSearch("from:jonas");
-    expect(await screen.findByText("No unread results")).toBeInTheDocument();
+    // Typed, a filter shows as set; Unread on and off leaves Flagged be.
+    await setSearch("from:priya is:flagged");
+    expect(chip("Flagged")).toHaveAttribute("aria-pressed", "true");
+    expect(chip("Unread")).toHaveAttribute("aria-pressed", "false");
+    await user.click(chip("Unread"));
+    expect(useAppStore.getState().search).toBe("from:priya is:flagged is:unread");
+    await user.click(chip("Unread"));
+    expect(useAppStore.getState().search).toBe("from:priya is:flagged");
+    await user.click(chip("Flagged"));
+    expect(useAppStore.getState().search).toBe("from:priya");
+
+    // Has attachment, and the From filter's own remove button.
+    await user.click(chip("Has attachment"));
+    expect(useAppStore.getState().search).toBe("from:priya has:attachment");
+    await user.click(within(searchFilters()).getByRole("button", { name: "Remove From filter" }));
+    expect(useAppStore.getState().search).toBe("has:attachment");
+    expect(within(searchFilters()).getByRole("button", { name: "From" })).toBeInTheDocument();
+
+    // Clear filters keeps the words.
+    await setSearch("lunch is:unread has:attachment received:today");
+    await user.click(within(searchFilters()).getByRole("button", { name: "Clear filters" }));
+    expect(useAppStore.getState().search).toBe("lunch");
     expect(
-      screen.getByText(`None of the ${fromJonas.length} results for “from:jonas” are unread.`),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("No results")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Show all results" }));
-    await expectResults(...fromJonas.map(() => /Jonas Becker/));
-    expect(useMailStore.getState().filter).toBe("all");
-    expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
-
-    await user.click(screen.getByRole("button", { name: "Flagged" }));
-    await setSearch("lisbon");
-    expect(await screen.findByText("No flagged results")).toBeInTheDocument();
-    expect(screen.getByText("The only result for “lisbon” isn't flagged.")).toBeInTheDocument();
+      within(searchFilters()).queryByRole("button", { name: "Clear filters" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("says what the filter hides only about the results of the text they are for", async () => {
+  it("shows no filters, and one Unread, while the box is empty, even with the keyboard in it", async () => {
     const user = userEvent.setup();
-    // Slow enough that the next text's results take a moment.
-    const backend = new MockBackend({ latency: 60 });
+    const backend = new MockBackend();
+    const unread = await backend.searchMessages("is:unread");
     await renderMail({ backend });
-    await user.click(screen.getByRole("button", { name: "Unread" }));
-    await setSearch("from:jonas");
-    expect(await screen.findByText("No unread results")).toBeInTheDocument();
-    const claimed = watchFor("for “from:pri” are unread");
+    const box = screen.getByRole("combobox", { name: "Search mail" });
+    await user.click(box);
+    expect(box).toHaveFocus();
+    expect(screen.queryByRole("group", { name: "Search filters" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Unread" })).toHaveLength(1);
 
-    await setSearch("from:pri");
-    await waitFor(() => expect(announced()).toMatch(/^\d+ unread of \d+ results\.$/));
-    // None of Jonas's results being unread was never said of Priya's.
-    expect(claimed()).toBe(false);
-    expect(document.querySelector(".mail-list__count")).toHaveTextContent(/for “from:pri”$/);
+    // The suggestions offer the filters instead; one starts the search.
+    const suggestions = screen.getByRole("listbox", { name: "Search suggestions" });
+    await user.click(within(suggestions).getByRole("option", { name: /^is:unread/ }));
+    expect(useAppStore.getState().search).toBe("is:unread ");
+    expect(box).toHaveFocus();
+    expect(screen.queryByRole("listbox", { name: "Search suggestions" })).not.toBeInTheDocument();
+    expect(chip("Unread")).toHaveAttribute("aria-pressed", "true");
+    await expectResults(...unread.map(() => /^Unread/));
+  });
+
+  it("picks dates from the Date filter, or a range of days, and gives the keyboard back", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    await setSearch("lunch");
+    const date = () => within(searchFilters()).getByRole("button", { name: "Date" });
+    await user.click(date());
+    const menu = screen.getByRole("menu", { name: "Date" });
+    // Over the window, so the row's scrolling can't cut it off.
+    expect(menu).toHaveClass("menu--fixed");
+    expect(within(menu).getByRole("menuitemradio", { name: "Any time" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await user.click(within(menu).getByRole("menuitemradio", { name: "Last month" }));
+    expect(useAppStore.getState().search).toBe('lunch received:"last month"');
+    const dateChip = document.getElementById("mail-search-date")!;
+    expect(dateChip).toHaveTextContent("Last month");
+    expect(dateChip).toHaveFocus();
+    await user.click(dateChip);
+    expect(screen.getByRole("menuitemradio", { name: "Last month" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await user.click(screen.getByRole("menuitemradio", { name: "Today" }));
+    expect(useAppStore.getState().search).toBe("lunch received:today");
+
+    // A range: both days, one of them, never none or backwards.
+    await user.click(dateChip);
+    await user.click(screen.getByRole("menuitemradio", { name: "Custom range…" }));
+    const dialog = screen.getByRole("dialog", { name: "Custom date range" });
+    const from = within(dialog).getByLabelText("From");
+    const to = within(dialog).getByLabelText("To");
+    // From what the search says now: today.
+    expect((from as HTMLInputElement).value).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect((to as HTMLInputElement).value).toBe((from as HTMLInputElement).value);
+    fireEvent.change(from, { target: { value: "" } });
+    fireEvent.change(to, { target: { value: "" } });
+    await user.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "Choose a start date, an end date or both.",
+    );
+    fireEvent.change(from, { target: { value: "2026-10-15" } });
+    fireEvent.change(to, { target: { value: "2026-10-01" } });
+    await user.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "The end date is before the start date.",
+    );
+    fireEvent.change(to, { target: { value: "2026-10-20" } });
+    await user.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(useAppStore.getState().search).toBe("lunch received:2026-10-15..2026-10-20");
+    await waitFor(() => expect(dateChip).toHaveFocus());
+    expect(dateChip).not.toHaveTextContent(/^Date$/);
+
+    // Cancel changes nothing, and gives the keyboard back too.
+    await user.click(dateChip);
+    expect(screen.getByRole("menuitemradio", { name: "Custom range…" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await user.click(screen.getByRole("menuitemradio", { name: "Custom range…" }));
+    const again = screen.getByRole("dialog", { name: "Custom date range" });
+    expect((within(again).getByLabelText("From") as HTMLInputElement).value).toBe("2026-10-15");
+    expect((within(again).getByLabelText("To") as HTMLInputElement).value).toBe("2026-10-20");
+    await user.click(within(again).getByRole("button", { name: "Cancel" }));
+    expect(useAppStore.getState().search).toBe("lunch received:2026-10-15..2026-10-20");
+    await waitFor(() => expect(dateChip).toHaveFocus());
+    await user.click(dateChip);
+    await user.click(screen.getByRole("menuitemradio", { name: "Any time" }));
+    expect(useAppStore.getState().search).toBe("lunch");
+  });
+
+  it("narrows to a folder or an account from their filters, as one choice of several", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    await user.click(within(treeItem(/^Projects/)).getAllByText("Atlas")[0]!);
+    await setSearch("research");
+    await expectResults(/Atlas naming research summary/);
+    const folder = within(searchFilters()).getByRole("button", { name: "Folder" });
+    await user.click(folder);
+    const menu = screen.getByRole("menu", { name: "Folder" });
+    expect(menu).toHaveClass("menu--fixed");
+    expect(
+      within(menu)
+        .getAllByRole("menuitemradio")
+        .map((i) => i.textContent),
+    ).toEqual([
+      "All folders",
+      "Current folder (Atlas)",
+      "Inbox",
+      "Drafts",
+      "Sent",
+      "Archive",
+      "Junk",
+      "Trash",
+    ]);
+    await user.click(within(menu).getByRole("menuitemradio", { name: "Current folder (Atlas)" }));
+    expect(useAppStore.getState().search).toBe("research in:Atlas");
+    expect(folder).toHaveTextContent("Current folder (Atlas)");
+    await expectResults(/Atlas naming research summary/);
+    await user.click(folder);
+    await user.click(screen.getByRole("menuitemradio", { name: "Inbox" }));
+    expect(useAppStore.getState().search).toBe("research in:inbox");
+    expect(folder).toHaveTextContent("Inbox");
+
+    const account = within(searchFilters()).getByRole("button", { name: "Account" });
+    await user.click(account);
+    const accounts = screen.getByRole("menu", { name: "Account" });
+    expect(accounts).toHaveClass("menu--fixed");
+    expect(within(accounts).getByRole("menuitemradio", { name: "All accounts" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await user.click(within(accounts).getByRole("menuitemradio", { name: "Alex (Personal)" }));
+    expect(useAppStore.getState().search).toBe(
+      "research in:inbox account:alex@morgan-family.example",
+    );
+    expect(account).toHaveTextContent("Alex (Personal)");
+    // Folder and account alone are nothing to look for.
+    await setSearch("in:inbox account:alex@morgan-family.example");
+    expect(await screen.findByText("Add words or a filter")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Folder and account only narrow a search. Type what you're looking for, or choose a sender, a date, Unread or Flagged above.",
+      ),
+    ).toBeInTheDocument();
+    await setSearch("is:starred");
+    expect(
+      await screen.findByText("Type what you're looking for, or choose a filter above."),
+    ).toBeInTheDocument();
+  });
+
+  it("orders by best match or newest, as chosen, and only words have a best match", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    await setSearch("porto");
+    await expectResults(/Porto offsite: tickets and hotel/, /Porto itinerary/, /Friday plans/);
+    // Best matches aren't in date order: no dates over them.
+    expect(document.querySelector(".mail-group__header")).toBeNull();
+    const sort = screen.getByRole("radiogroup", { name: "Sort results" });
+    expect(within(sort).getByRole("radio", { name: "Best match" })).toBeChecked();
+    await user.click(within(sort).getByRole("radio", { name: "Newest" }));
+    await expectResults(/Friday plans/, /Porto offsite: tickets and hotel/, /Porto itinerary/);
+    expect(document.querySelector(".mail-group__header")).not.toBeNull();
+    expect(window.localStorage.getItem("cumulas.mail.searchSort")).toBe("newest");
+
+    // Addresses and filters alone have no words to rank by.
+    const count = () => document.querySelector(".mail-list__count");
+    await setSearch("from:priya");
+    await waitFor(() => expect(count()).toHaveTextContent(/for “from:priya”$/));
+    expect(screen.queryByRole("radiogroup", { name: "Sort results" })).not.toBeInTheDocument();
+    await setSearch("is:flagged");
+    await waitFor(() => expect(count()).toHaveTextContent(/for “is:flagged”$/));
+    expect(screen.queryByRole("radiogroup", { name: "Sort results" })).not.toBeInTheDocument();
+    await setSearch("porto");
+    await expectResults(/Friday plans/, /Porto offsite: tickets and hotel/, /Porto itinerary/);
+    await user.click(screen.getByRole("radio", { name: "Best match" }));
+    await expectResults(/Porto offsite: tickets and hotel/, /Porto itinerary/, /Friday plans/);
+  });
+
+  it("keeps the best matches in place while the servers' hits join below them", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const resume = backend.pauseServerSearch();
+    await renderMail({ backend });
+    await setSearch("final");
+    await expectResults(CHECKLIST, /Photos from the hike/);
+
+    resume();
+    // Ranked afresh, last year's guidelines would come second: they come last.
+    await expectResults(CHECKLIST, /Photos from the hike/, /Brand guidelines, final edition/);
+    await waitFor(() => expect(announced()).toBe("3 results."));
+    // Another order ranks them afresh, and so does coming back.
+    await user.click(screen.getByRole("radio", { name: "Newest" }));
+    await expectResults(CHECKLIST, /Photos from the hike/, /Brand guidelines, final edition/);
+    await user.click(screen.getByRole("radio", { name: "Best match" }));
+    await expectResults(CHECKLIST, /Brand guidelines, final edition/, /Photos from the hike/);
+  });
+
+  it("says when the server has more to look through, and finds it there", async () => {
+    const user = userEvent.setup();
+    // A page of one, and two folders, which Graph can't search by: the
+    // server's newest match for "data" is in the Inbox, and only the next
+    // one is in Sent.
+    await renderMail({
+      backend: new MockBackend({ serverSearchPage: 1, serverSearchMaxPages: 1 }),
+    });
+    await setSearch("data in:sent in:drafts");
+    expect(await screen.findByText("No results so far")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Nothing matches “data in:sent in:drafts” yet. Your mailbox on the server has more to look through.",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(announced()).toBe("No results so far."));
+    const empty = document.querySelector<HTMLElement>(".mail-search-empty")!;
+    expect(within(empty).getByRole("button", { name: "Clear filters" })).toBeInTheDocument();
+    await user.click(within(empty).getByRole("button", { name: "Show more results" }));
+    await expectResults(/Re: Vendor shortlist for the data warehouse/);
+  });
+
+  it("marks the words found in the results' subjects, senders, previews and snippets", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    const marks = (row: HTMLElement, selector: string) =>
+      Array.from(row.querySelectorAll(`${selector} mark.search-hit`), (m) => m.textContent);
+
+    await setSearch("porto");
+    await expectResults(/Porto offsite/, /Porto itinerary/, /Friday plans/);
+    expect(marks(row(/Porto offsite/), ".mail-row__subject")).toEqual(["Porto"]);
+    expect(marks(row(/Friday plans/), ".mail-row__preview-text")).toEqual(["porto"]);
+    expect(marks(row(/Friday plans/), ".mail-row__subject")).toEqual([]);
+    // The name stays plain to screen readers.
+    expect(row(/Porto offsite/).getAttribute("aria-label")).toMatch(
+      /Porto offsite: tickets and hotel/,
+    );
+
+    await setSearch("from:priya checklist");
+    await expectResults(CHECKLIST);
+    expect(marks(row(CHECKLIST), ".mail-row__sender")).toEqual(["Priya"]);
+    expect(marks(row(CHECKLIST), ".mail-row__subject")).toEqual(["checklist"]);
+
+    // Once opened, a message's text is searched: the row shows the words around the match.
+    await openMessage(user, CHECKLIST);
+    await setSearch("retention");
+    await waitFor(() =>
+      expect(row(CHECKLIST).querySelector(".mail-row__preview-text")).toHaveTextContent(
+        /data retention change/,
+      ),
+    );
+    expect(marks(row(CHECKLIST), ".mail-row__preview-text")).toEqual(["retention"]);
+  });
+
+  it("steps through the matches in a plain-text message with the find bar, F3 and Shift+F3", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    await setSearch("climbing");
+    await waitFor(() => expect(row(/Climbing on Thursday/)).toBeInTheDocument());
+    await openMessage(user, /Climbing on Thursday/);
+    const bar = await screen.findByRole("group", { name: "Matches in this message" });
+    expect(bar).toHaveTextContent("1 match");
+    await setSearch("sam");
+    await waitFor(() => expect(bar).toHaveTextContent("2 matches"));
+    const body = document.querySelector(".mail-plaintext")!;
+    expect(Array.from(body.querySelectorAll("mark.search-hit"), (m) => m.textContent)).toEqual([
+      "Sam",
+      "sam",
+    ]);
+    const current = () => body.querySelector("mark.is-current")?.getAttribute("data-hit");
+    const next = within(bar).getByRole("button", { name: "Next match" });
+    await user.click(next);
+    expect(within(bar).getByRole("status")).toHaveTextContent("Match 1 of 2");
+    expect(current()).toBe("0");
+    await user.click(next);
+    expect(within(bar).getByRole("status")).toHaveTextContent("Match 2 of 2");
+    await user.click(next);
+    expect(current()).toBe("0");
+    await user.click(within(bar).getByRole("button", { name: "Previous match" }));
+    expect(current()).toBe("1");
+    await user.keyboard("{F3}");
+    expect(current()).toBe("0");
+    await user.keyboard("{Shift>}{F3}{/Shift}");
+    expect(current()).toBe("1");
+    // Other words start over.
+    await setSearch("thursday");
+    await waitFor(() => expect(bar).toHaveTextContent("1 match"));
+    expect(current()).toBeUndefined();
+  });
+
+  it("tells the message's frame what to mark, on its own channel, and shows the count", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    await setSearch("rollback");
+    await waitFor(() => expect(row(CHECKLIST)).toBeInTheDocument());
+    await openMessage(user, CHECKLIST);
+    const { frame, channel } = await messageFrame(/^Message: Atlas launch checklist/);
+    const inbound = /data-inbound="([0-9a-f]{32})"/.exec(frame.getAttribute("srcdoc") ?? "")![1]!;
+    expect(inbound).not.toBe(channel);
+    const sent = vi.spyOn(frame.contentWindow!, "postMessage");
+    post({ type: "ready", channel }, frame.contentWindow);
+    await waitFor(() =>
+      expect(sent).toHaveBeenCalledWith(
+        {
+          inbound,
+          type: "highlight",
+          patterns: [{ words: ["rollback"], prefix: true, inside: null }],
+        },
+        "*",
+      ),
+    );
+    // The frame's channel never goes back to it.
+    expect(JSON.stringify(sent.mock.calls)).not.toContain(channel);
+    expect(screen.queryByRole("group", { name: "Matches in this message" })).toBeNull();
+    post({ type: "hits", count: 2, channel }, frame.contentWindow);
+    const bar = await screen.findByRole("group", { name: "Matches in this message" });
+    expect(bar).toHaveTextContent("2 matches");
+    await user.click(within(bar).getByRole("button", { name: "Next match" }));
+    expect(sent).toHaveBeenLastCalledWith({ inbound, type: "reveal", index: 0 }, "*");
+    // A count from anywhere but the frame's channel counts for nothing.
+    post({ type: "hits", count: 9, channel: inbound }, frame.contentWindow);
+    expect(bar).toHaveTextContent("Match 1 of 2");
+  });
+
+  it("keeps an opened best match where it was after it's read", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const [itinerary] = await backend.searchMessages("subject:itinerary");
+    const [friday] = await backend.searchMessages('subject:"friday plans"');
+    await backend.setRead([itinerary!.id, friday!.id], false);
+    await renderMail({ backend });
+
+    // The older subject match first; once read, the other stays second
+    // (by date it would come first).
+    await setSearch("porto is:unread");
+    await expectResults(/Porto itinerary/, /Friday plans/);
+    await openMessage(user, /Friday plans/);
+    await waitFor(async () => expect((await backend.getMessage(friday!.id)).isRead).toBe(true));
+    await waitFor(async () =>
+      expect(await backend.searchMessages("porto is:unread")).toHaveLength(1),
+    );
+    await expectResults(/Porto itinerary/, /Friday plans/);
+  });
+
+  it("keeps an opened result where it was after it's read, newest first", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    const [itinerary] = await backend.searchMessages("subject:itinerary");
+    const [friday] = await backend.searchMessages('subject:"friday plans"');
+    await backend.setRead([itinerary!.id, friday!.id], false);
+    await renderMail({ backend });
+
+    await setSearch("porto is:unread");
+    await expectResults(/Porto itinerary/, /Friday plans/);
+    await user.click(screen.getByRole("radio", { name: "Newest" }));
+    await expectResults(/Friday plans/, /Porto itinerary/);
+    await openMessage(user, /Porto itinerary/);
+    await waitFor(async () => expect((await backend.getMessage(itinerary!.id)).isRead).toBe(true));
+    await waitFor(async () =>
+      expect(await backend.searchMessages("porto is:unread")).toHaveLength(1),
+    );
+    await expectResults(/Friday plans/, /Porto itinerary/);
+  });
+
+  it("remembers a search when a result is opened, and offers it again", async () => {
+    const user = userEvent.setup();
+    await renderMail();
+    await setSearch("lisbon");
+    await expectResults(/Your trip to Lisbon/);
+    await user.click(row(/Your trip to Lisbon/));
+    expect(JSON.parse(window.localStorage.getItem("cumulas.mail.recentSearches")!)).toEqual([
+      "lisbon",
+    ]);
+    await setSearch("");
+    await user.click(screen.getByRole("combobox", { name: "Search mail" }));
+    const suggestions = screen.getByRole("listbox", { name: "Search suggestions" });
+    await user.click(within(suggestions).getByRole("option", { name: "lisbon" }));
+    expect(useAppStore.getState().search).toBe("lisbon");
   });
 
   it("searches the whole mailbox on the servers, and what it finds acts like any message", async () => {
@@ -1108,7 +1500,7 @@ describe("Search", () => {
     await expectResults(/Safari photos from Etosha/);
     expect(failureRow()).not.toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByRole("searchbox", { name: "Search mail" })).toHaveFocus(),
+      expect(screen.getByRole("combobox", { name: "Search mail" })).toHaveFocus(),
     );
   });
 

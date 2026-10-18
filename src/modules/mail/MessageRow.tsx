@@ -10,11 +10,13 @@ import {
 } from "lucide-react";
 import { type DragEvent, type MouseEvent, memo } from "react";
 
-import type { MessageSummary } from "../../api/types";
+import type { MessageSummary, SearchHit } from "../../api/types";
 import { Avatar } from "../../components/Avatar";
 import { displayName } from "../../lib/format";
+import { type HitPatterns, leadToFirstHit } from "../../lib/search/highlight";
 import { FUTURE_NOTE, isFutureDated, listDate, messageDate } from "./dates";
 import { optionId } from "./dom";
+import { Highlighted, Runs } from "./search/Highlighted";
 
 export interface RowHandlers {
   onClick: (e: MouseEvent, id: string) => void;
@@ -39,7 +41,12 @@ interface RowProps {
   context: string | null;
   contextColor: string | null;
   handlers: RowHandlers;
+  /** What the search the row was found by found: marked in it. */
+  highlight?: HitPatterns | null;
 }
+
+/** Characters a search result's preview keeps before what it found, to show it on one line. */
+const PREVIEW_LEAD = 18;
 
 /** Who the row is about, and whether that's a stand-in ("(no sender)"). */
 function who(message: MessageSummary, showRecipients: boolean): [string, boolean] {
@@ -59,8 +66,11 @@ export const MessageRow = memo(function MessageRow({
   context,
   contextColor,
   handlers,
+  highlight = null,
 }: RowProps) {
   const [sender, noSender] = who(m, showRecipients);
+  // The body's words around a match, from the search, in place of the preview.
+  const snippet = (m as Partial<SearchHit>).snippet ?? null;
   const date = listDate(m.receivedAt);
   const sent = messageDate(m.receivedAt);
   const future = !!sent && isFutureDated(sent);
@@ -135,7 +145,11 @@ export const MessageRow = memo(function MessageRow({
             dir="auto"
             title={sender}
           >
-            {sender}
+            {showRecipients || noSender ? (
+              sender
+            ) : (
+              <Highlighted text={sender} patterns={highlight?.sender} />
+            )}
           </span>
           <span className="mail-row__status">
             {m.importance === "high" && (
@@ -159,7 +173,7 @@ export const MessageRow = memo(function MessageRow({
               dir={noSubject ? undefined : "auto"}
               title={subject}
             >
-              {subject}
+              {noSubject ? subject : <Highlighted text={subject} patterns={highlight?.subject} />}
             </span>
           </span>
           <span className="mail-row__actions" onClick={stop} onDoubleClick={stop}>
@@ -205,8 +219,14 @@ export const MessageRow = memo(function MessageRow({
               <span className="mail-row__context-text">{context}</span>
             </span>
           )}
-          <span className="mail-row__preview-text" dir={m.preview ? "auto" : undefined}>
-            {m.preview || "This message has no content."}
+          <span className="mail-row__preview-text" dir={snippet || m.preview ? "auto" : undefined}>
+            {snippet ? (
+              <Runs runs={leadToFirstHit(snippet, PREVIEW_LEAD)} />
+            ) : m.preview ? (
+              <Highlighted text={m.preview} patterns={highlight?.body} lead={PREVIEW_LEAD} />
+            ) : (
+              "This message has no content."
+            )}
           </span>
         </div>
       </div>

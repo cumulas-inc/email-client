@@ -42,7 +42,8 @@ function demoFeatures(value: string | null): AccountFeature[] {
  * `?reminders` a task reminder 12 minutes overdue besides the events' own.
  * `?signature=addedOnSend|notAllowed|stale|notUsed|unreachable` shows its
  * company signature in that state. `?searchfail` makes searches of the IMAP
- * account's server fail, as when it can't be reached.
+ * account's server fail, as when it can't be reached, and `?slowsearch`
+ * makes the servers take seconds, to show their hits joining the results.
  * `?missing=calendar,contacts,tasks,mailboxSettings` starts the Microsoft
  * account without those features' permissions, `?refused=calendar,contacts,tasks`
  * with Microsoft 365 refusing them, and `?customclient` signs in with an
@@ -62,7 +63,7 @@ export function createBackend(): Backend {
   return new MockBackend({
     latency: 80,
     // About as long as a real server takes to search a mailbox.
-    serverSearchLatency: 900,
+    serverSearchLatency: params.has("slowsearch") ? 2500 : 900,
     empty: params.has("empty"),
     worst: params.has("worst"),
     push: push && DEMO_PUSH.includes(push) ? push : undefined,

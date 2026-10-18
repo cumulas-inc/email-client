@@ -453,12 +453,14 @@ describe("the demo's search", () => {
     const backend = new MockBackend();
     const [lisbon] = await backend.searchMessages("lisbon");
     const [sunday] = await backend.searchMessages("subject:sunday");
-    const found = await backend.searchMessages("lisbon", undefined, [
-      sunday!.id,
-      lisbon!.id,
-      "msg-gone",
-    ]);
+    const ids = [sunday!.id, lisbon!.id, "msg-gone"];
+    const found = await backend.searchMessages("lisbon", undefined, ids, { sort: "newest" });
     expect(subjects(found)).toEqual(["Sunday lunch", "Your trip to Lisbon: booking confirmed"]);
+    // Best first: the text's own match above a server hit it doesn't match.
+    expect(subjects(await backend.searchMessages("lisbon", undefined, ids))).toEqual([
+      "Your trip to Lisbon: booking confirmed",
+      "Sunday lunch",
+    ]);
     // Even when the text finds nothing, but only in the account asked about.
     expect(subjects(await backend.searchMessages("", undefined, [sunday!.id]))).toEqual([
       "Sunday lunch",
@@ -1037,5 +1039,168 @@ describe("the demo's Microsoft sign-in", () => {
     await expect(
       backend.createContact({ accountId: "acct-home", displayName: "Kim", emails: [], phones: [] }),
     ).resolves.toMatchObject({ accountId: "acct-home" });
+  });
+});
+
+describe("the demo's ranking and filters", () => {
+  const subjects = (messages: { subject: string }[]) => messages.map((m) => m.subject);
+  const PORTO = ["Porto offsite: tickets and hotel", "Porto itinerary", "Friday plans"];
+
+  it("lists best matches first, or newest first on request", async () => {
+    const backend = new MockBackend();
+    expect(subjects(await backend.searchMessages("porto"))).toEqual(PORTO);
+    expect(subjects(await backend.searchMessages("porto", undefined, [], null))).toEqual(PORTO);
+    expect(
+      subjects(await backend.searchMessages("porto", undefined, [], { sort: "newest" })),
+    ).toEqual(["Friday plans", "Porto offsite: tickets and hotel", "Porto itinerary"]);
+    // Addresses alone, or filters alone, have no words to rank by: newest first.
+    for (const text of ["from:priya", "is:flagged", "has:attachment"]) {
+      const found = await backend.searchMessages(text);
+      expect(found.length, text).toBeGreaterThan(1);
+      const dates = found.map((m) => m.receivedAt);
+      expect(dates, text).toEqual([...dates].sort((a, b) => b.localeCompare(a)));
+    }
+  });
+
+  it("applies every filter, to the server's hits too, and where to look", async () => {
+    const backend = new MockBackend();
+    const flagged = await backend.searchMessages("porto is:flagged");
+    expect(subjects(flagged)).toEqual(["Porto offsite: tickets and hotel"]);
+    expect(subjects(await backend.searchMessages("porto has:attachment is:read"))).toEqual([
+      "Porto offsite: tickets and hotel",
+    ]);
+    expect(subjects(await backend.searchMessages("porto received:today"))).toEqual([]);
+    expect(subjects(await backend.searchMessages("porto received:yesterday"))).toEqual([
+      "Friday plans",
+    ]);
+    expect(subjects(await backend.searchMessages("porto before:yesterday"))).toEqual([
+      "Porto offsite: tickets and hotel",
+      "Porto itinerary",
+    ]);
+    // A reversed range: nothing, not even the server's hits.
+    const [lisbon] = await backend.searchMessages("lisbon");
+    expect(
+      await backend.searchMessages("received:2026-10-15..2026-10-01", undefined, [lisbon!.id]),
+    ).toEqual([]);
+    // Server hits pass the filters too.
+    expect(
+      subjects(await backend.searchMessages("is:unread", undefined, [lisbon!.id])),
+    ).not.toContain("Your trip to Lisbon: booking confirmed");
+    expect(
+      subjects(await backend.searchMessages("has:attachment", undefined, [lisbon!.id])),
+    ).toContain("Your trip to Lisbon: booking confirmed");
+    // Folders by role or name, accounts by address or name.
+    expect(subjects(await backend.searchMessages("is:unread in:sent"))).toEqual([
+      "Notes for the export endpoint fix",
+    ]);
+    expect(subjects(await backend.searchMessages("is:unread in:projects"))).toEqual([
+      "Projects board: what moves next sprint",
+    ]);
+    expect(subjects(await backend.searchMessages("porto in:inbox"))).toEqual([]);
+    expect(await backend.searchMessages("porto account:alex@morgan-family.example")).toEqual([]);
+    expect(subjects(await backend.searchMessages('porto account:"Alex Morgan"'))).toEqual(PORTO);
+    expect(await backend.searchMessages("porto account:nobody")).toEqual([]);
+    // Where to look alone is nothing to look for.
+    expect(await backend.searchMessages("in:inbox")).toEqual([]);
+  });
+
+  it("shows the words around a match in an opened message's text", async () => {
+    const backend = new MockBackend();
+    const [checklist] = await backend.searchMessages("subject:checklist");
+    // Only its preview is on the device until it's opened.
+    expect(await backend.searchMessages("retention")).toEqual([]);
+    expect((await backend.searchMessages("checklist"))[0]!.snippet).toBeNull();
+    await backend.getMessage(checklist!.id);
+    const [hit] = await backend.searchMessages("retention");
+    expect(hit!.snippet!.filter((r) => r.hit).map((r) => r.text)).toEqual(["retention"]);
+    expect(hit!.snippet!.map((r) => r.text).join("")).toMatch(/data retention change/);
+    // Newest first too; but no words to rank by, no snippet.
+    const [newest] = await backend.searchMessages("retention", undefined, [], { sort: "newest" });
+    expect(newest!.snippet).not.toBeNull();
+    expect((await backend.searchMessages("from:priya"))[0]!.snippet).toBeNull();
+  });
+
+  it("asks the servers only for what narrows a search, and only where it may be", async () => {
+    const backend = new MockBackend();
+    expect(await backend.searchServer("s-1", "is:read", "acct-work")).toMatchObject({
+      status: "done",
+      messageIds: [],
+      hasMore: false,
+    });
+    const flagged = await backend.searchServer("s-2", "is:flagged", "acct-work");
+    expect(flagged.added).toBe(1);
+    // The flagged mail only the server had, among what it found.
+    expect(
+      subjects(await backend.searchMessages("is:flagged", undefined, flagged.messageIds)),
+    ).toContain("Signed partnership agreement with Fabrikam");
+    expect(subjects(await backend.searchMessages("fabrikam"))).toEqual([
+      "Signed partnership agreement with Fabrikam",
+    ]);
+    // Another account's address, or a folder the account hasn't: nothing.
+    expect(
+      await backend.searchServer("s-3", "invoice account:alex@morgan-family.example", "acct-work"),
+    ).toMatchObject({ status: "done", messageIds: [] });
+    expect(await backend.searchServer("s-4", "invoice in:nowhere", "acct-work")).toMatchObject({
+      status: "done",
+      messageIds: [],
+    });
+    expect(await backend.searchMessages("invoice")).toEqual([]);
+    // Last year's mail with attachments, only the server has some.
+    const older = await backend.searchServer(
+      "s-5",
+      'has:attachment received:"last year"',
+      "acct-work",
+    );
+    expect(older.added).toBeGreaterThan(0);
+    expect(
+      subjects(
+        await backend.searchMessages(
+          'has:attachment received:"last year"',
+          undefined,
+          older.messageIds,
+        ),
+      ),
+    ).toContain("Brand guidelines, final edition");
+  });
+
+  it("reads a page and then filters it, as the core does, so a call may find nothing yet", async () => {
+    const backend = new MockBackend({ serverSearchPage: 1, serverSearchMaxPages: 1 });
+    // Graph's $search can't say flagged: its newest match isn't, the next is.
+    const first = await backend.searchServer("s-1", "porto is:flagged", "acct-work");
+    expect(first).toMatchObject({ status: "done", messageIds: [], hasMore: true });
+    const second = await backend.searchServer("s-1", "porto is:flagged", "acct-work", true);
+    expect(second.messageIds).toHaveLength(1);
+    expect(second.hasMore).toBe(true);
+  });
+
+  it("searches the one folder in: names on Graph, and every folder for several", async () => {
+    const backend = new MockBackend({ serverSearchPage: 1, serverSearchMaxPages: 1 });
+    // The Inbox alone: Graph has no porto there, and says so.
+    expect(await backend.searchServer("s-1", "porto in:inbox", "acct-work")).toMatchObject({
+      status: "done",
+      messageIds: [],
+      hasMore: false,
+    });
+    // Two folders: Graph looks everywhere, and what it finds outside them
+    // is left out here, with more to look through.
+    expect(await backend.searchServer("s-2", "porto in:inbox in:sent", "acct-work")).toMatchObject({
+      status: "done",
+      messageIds: [],
+      hasMore: true,
+    });
+    const archived = await backend.searchServer("s-3", "porto in:archive", "acct-work");
+    expect(archived.messageIds).toHaveLength(1);
+  });
+
+  it("suggests the people who wrote most lately for an empty text", async () => {
+    const backend = new MockBackend();
+    const people = await backend.suggestAddresses("");
+    expect(people.length).toBeGreaterThan(0);
+    expect(people.length).toBeLessThanOrEqual(8);
+    const addresses = people.map((p) => p.address);
+    expect(addresses).not.toContain("alex.morgan@acme.example");
+    expect(addresses).not.toContain("alex@morgan-family.example");
+    expect(new Set(addresses).size).toBe(addresses.length);
+    expect(await backend.suggestAddresses("   ")).toEqual(people);
   });
 });

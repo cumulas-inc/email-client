@@ -20,7 +20,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { useBackend } from "../../api/context";
 import { errorMessage } from "../../api/errors";
@@ -43,6 +43,9 @@ import { useMailStore } from "./mailStore";
 import { bodyAppearance, classifyLink, paintsOwnBackground } from "./bodyHtml";
 import { MessageBody, PlainTextBody } from "./MessageBody";
 import { useFolders, useMessage } from "./queries";
+import { FindBar } from "./search/FindBar";
+import { Highlighted } from "./search/Highlighted";
+import { useSearchHighlight } from "./search/useSearchHighlight";
 import { visualLength } from "./text";
 
 const ICON = { size: 17, strokeWidth: 1.75, "aria-hidden": true as const };
@@ -204,6 +207,11 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
   const isDark = useIsDark();
   const [darkBody, setDarkBody] = usePersistentString<"paper" | "dark">("mail.darkBody", "paper");
   const [hoverUrl, setHoverUrl] = useState<string | null>(null);
+  // What the search box's words find in the message, and the match shown.
+  const highlight = useSearchHighlight();
+  const [found, setFound] = useState({ count: 0, current: null as number | null });
+  const onHits = useCallback((count: number) => setFound({ count, current: null }), []);
+  const showMatch = useCallback((current: number) => setFound((f) => ({ ...f, current })), []);
 
   useAutoMarkRead(message, settings?.markReadAfterSeconds, actions.markRead);
 
@@ -425,7 +433,7 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 .join(" ")}
               dir={noSubject ? undefined : "auto"}
             >
-              {subject}
+              {noSubject ? subject : <Highlighted text={subject} patterns={highlight?.subject} />}
             </h1>
             {(message.importance !== "normal" || message.isFlagged || placeTitle) && (
               <div className="mail-reader__tags">
@@ -554,6 +562,10 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
 
           <Attachments messageId={message.id} attachments={message.attachments} />
 
+          {highlight && found.count > 0 && (
+            <FindBar count={found.count} current={found.current} onShow={showMatch} />
+          )}
+
           <div className={`mail-reader__body mail-reader__body--${appearance}`}>
             {message.bodyHtml ? (
               <MessageBody
@@ -563,9 +575,18 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 title={`Message: ${subject}`}
                 onLink={onLink}
                 onHoverLink={setHoverUrl}
+                highlight={highlight?.body}
+                current={found.current}
+                onHits={onHits}
               />
             ) : (
-              <PlainTextBody text={message.bodyText ?? ""} onLink={onLink} />
+              <PlainTextBody
+                text={message.bodyText ?? ""}
+                onLink={onLink}
+                highlight={highlight?.body}
+                current={found.current}
+                onHits={onHits}
+              />
             )}
           </div>
         </div>

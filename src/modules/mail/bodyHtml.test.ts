@@ -12,7 +12,11 @@ import {
   readBridgeMessage,
 } from "./bodyHtml";
 
-const BRIDGE = { url: "tauri://localhost/message-bridge.js", channel: "c0ffee".padEnd(32, "0") };
+const BRIDGE = {
+  url: "tauri://localhost/message-bridge.js",
+  channel: "c0ffee".padEnd(32, "0"),
+  inbound: "1b0d".padEnd(32, "0"),
+};
 
 describe("message frame document", () => {
   it("blocks everything but inline styles and embedded images by default", () => {
@@ -47,7 +51,7 @@ describe("message frame document", () => {
     });
     expect(doc).toContain(`content="${csp}"`);
     // The one script element, after the policy and before any of the mail.
-    const script = `<script src="${BRIDGE.url}" data-channel="${BRIDGE.channel}"></script>`;
+    const script = `<script src="${BRIDGE.url}" data-channel="${BRIDGE.channel}" data-inbound="${BRIDGE.inbound}"></script>`;
     expect(doc.match(/<script/g)).toHaveLength(1);
     expect(doc.indexOf(script)).toBeGreaterThan(doc.indexOf("Content-Security-Policy"));
     expect(doc.indexOf(script)).toBeLessThan(doc.indexOf("<style>"));
@@ -116,6 +120,19 @@ describe("bridge messages", () => {
     const size = { height: 640.5, wide: false, left: false, right: true };
     expect(read({ type: "size", ...size })).toEqual({ type: "size", ...size });
     expect(read({ type: "scroll", top: 120 })).toEqual({ type: "scroll", top: 120 });
+    expect(read({ type: "ready" })).toEqual({ type: "ready" });
+    expect(read({ type: "hits", count: 0 })).toEqual({ type: "hits", count: 0 });
+    expect(read({ type: "hits", count: 12 })).toEqual({ type: "hits", count: 12 });
+    expect(read({ type: "reveal", top: 40, bottom: 58.5 })).toEqual({
+      type: "reveal",
+      top: 40,
+      bottom: 58.5,
+    });
+    expect(read({ type: "reveal", top: 7, bottom: 7 })).toEqual({
+      type: "reveal",
+      top: 7,
+      bottom: 7,
+    });
     // Nothing else comes along.
     expect(read({ type: "link", href: "https://example.org", extra: 1 })).toEqual({
       type: "link",
@@ -141,6 +158,16 @@ describe("bridge messages", () => {
     ).toBeNull();
     expect(read({ type: "size", height: "10", wide: false, left: false, right: false })).toBeNull();
     expect(read({ type: "scroll", top: Number.NaN })).toBeNull();
+    expect(read({ type: "hits" })).toBeNull();
+    expect(read({ type: "hits", count: -1 })).toBeNull();
+    expect(read({ type: "hits", count: 1.5 })).toBeNull();
+    expect(read({ type: "hits", count: "3" })).toBeNull();
+    expect(read({ type: "reveal", top: 10, bottom: 5 })).toBeNull();
+    expect(read({ type: "reveal", top: 0, bottom: Infinity })).toBeNull();
+    expect(read({ type: "reveal", top: "0", bottom: 5 })).toBeNull();
+    // The app's own commands come back as nothing the app reads.
+    expect(read({ type: "highlight", patterns: [] })).toBeNull();
+    expect(readBridgeMessage({ type: "ready", inbound: channel }, channel)).toBeNull();
     expect(read({ type: "eval", code: "1" })).toBeNull();
   });
 });
@@ -170,6 +197,21 @@ describe("dark theme", () => {
     // invert(1) hue-rotate(180deg) turns these into the card #22211e and ink #edebe6.
     expect(doc).toContain("background: #dfdedb");
     expect(doc).toContain("color: #16140f");
+    // And search hits into the dark theme's #5a4512 and #8a6a1a.
+    expect(doc).toContain("mark[data-cumulas-hit] { background: #cdb885 !important;");
+    expect(doc).toContain(
+      "mark[data-cumulas-hit][data-cumulas-current] { background: #b39343 !important;",
+    );
+  });
+
+  it("marks what the search found in the light theme's hit colors", () => {
+    const doc = buildSrcDoc("<p>x</p>", { allowRemote: false, appearance: "plain" });
+    expect(doc).toContain(
+      "mark[data-cumulas-hit] { background: #fde8a8 !important; color: inherit !important;",
+    );
+    expect(doc).toContain(
+      "mark[data-cumulas-hit][data-cumulas-current] { background: #f6c94c !important; outline: 2px solid #f6c94c; }",
+    );
   });
 });
 

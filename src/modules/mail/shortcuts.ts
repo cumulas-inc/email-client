@@ -19,6 +19,7 @@ export const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Insert / Ctrl+Shift+G", action: "Flag or unflag" },
   { keys: "Delete", action: "Delete" },
   { keys: "↑ ↓ / J K", action: "Previous / next message" },
+  { keys: "F3 / Shift+F3", action: "Next / previous search match" },
   { keys: "Ctrl+Enter", action: "Send (in the composer)" },
 ];
 

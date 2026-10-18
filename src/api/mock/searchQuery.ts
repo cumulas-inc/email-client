@@ -1,195 +1,18 @@
-// The search language, as the core parses it (crates/core/src/search), and
-// a matcher that finds what the core's full-text index finds: the demo
-// backend searches with these, so the UI is tested against the app's own
-// semantics. The UI parses with it too, to know when the servers are asked.
-// Keep both in step with the core; searchQuery.test.ts holds the test vectors
-// the core's tests share.
+// A matcher that finds what the core's full-text index finds, and orders it
+// as the core ranks it: the demo backend searches with these, so the UI is
+// tested against the app's own semantics. The search language itself is
+// src/lib/search/query.ts. Keep both in step with the core
+// (crates/core/src/search, crates/core/src/store/mail.rs).
 
-import type { EmailAddress, Message } from "../types";
-
-export type SearchField = "any" | "from" | "to" | "cc" | "subject" | "body";
-
-export interface SearchTerm {
-  field: SearchField;
-  /** Lowercased; never contains `"` or `\`; at least one letter or digit. */
-  text: string;
-  /** Quoted: the words exactly, without matching the last one as a prefix. */
-  phrase: boolean;
-}
-
-export interface SearchQuery {
-  terms: SearchTerm[];
-  hasAttachment: boolean;
-}
-
-export const MAX_TERMS = 16;
-export const MAX_TERM_CHARS = 128;
-export const MAX_INPUT_CHARS = 1024;
-
-const FIELDS: Record<string, SearchField> = {
-  from: "from",
-  to: "to",
-  cc: "cc",
-  subject: "subject",
-  body: "body",
-};
-const HAS = new Set(["has", "hasattachment", "hasattachments"]);
-
-// Rust's char::is_alphanumeric, char::is_whitespace and char::is_control.
-const ALPHANUMERIC = /[\p{Alphabetic}\p{N}]/u;
-const WHITESPACE = /\p{White_Space}/u;
-const CONTROL = /\p{Cc}/u;
-/** Combining marks (viramas, vowel signs, accents typed on their own): part of the word before. */
-const MARK = /\p{M}/u;
-/** Kept inside words (addresses, "o'brien", "2023-118"), trimmed off their ends. */
-const WORD_CHARS = new Set(["@", ".", "_", "-", "'", "+"]);
-const ASCII_LETTER = /^[A-Za-z]$/;
-
-const isSpace = (c: string) => WHITESPACE.test(c);
-const hasAlphanumeric = (s: string) => ALPHANUMERIC.test(s);
-
-/** At most `max` characters (code points, as Rust counts them). */
-function cut(text: string, max: number): string {
-  const chars = Array.from(text);
-  return chars.length > max ? chars.slice(0, max).join("") : text;
-}
-
-/** The words of a bare run: split on anything but letters, digits and WORD_CHARS. */
-function words(run: string): string[] {
-  const out: string[] = [];
-  let piece = "";
-  const flush = () => {
-    let start = 0;
-    const chars = Array.from(piece);
-    let end = chars.length;
-    while (start < end && (WORD_CHARS.has(chars[start]!) || MARK.test(chars[start]!))) start++;
-    while (end > start && WORD_CHARS.has(chars[end - 1]!)) end--;
-    const word = chars.slice(start, end).join("");
-    if (hasAlphanumeric(word)) out.push(word.toLowerCase());
-    piece = "";
-  };
-  for (const c of run) {
-    if (ALPHANUMERIC.test(c) || WORD_CHARS.has(c) || MARK.test(c)) piece += c;
-    else flush();
-  }
-  flush();
-  return out;
-}
-
-/** A quoted phrase's text: no backslashes or control characters, single spaces, lowercased. */
-function phraseText(raw: string): string {
-  // Trimmed by hand: trim() also takes U+FEFF, which isn't whitespace to Rust.
-  return Array.from(raw.replaceAll("\\", ""))
-    .filter((c) => isSpace(c) || !CONTROL.test(c))
-    .map((c) => (isSpace(c) ? " " : c))
-    .join("")
-    .replace(/ {2,}/g, " ")
-    .replace(/^ | $/g, "")
-    .toLowerCase();
-}
-
-/** Parses a search the way the core does; never fails. */
-export function parseSearch(input: string): SearchQuery {
-  // Composed (NFC), as mail is: "é" typed as "e" and an accent is the same word.
-  const head = Array.from(input).slice(0, MAX_INPUT_CHARS).join("").normalize("NFC");
-  const chars = Array.from(head)
-    .slice(0, MAX_INPUT_CHARS)
-    .map((c) => {
-      if ("“”„‟″".includes(c)) return '"';
-      if (c === "’" || c === "‘") return "'";
-      return c;
-    });
-  const query: SearchQuery = { terms: [], hasAttachment: false };
-  const push = (field: SearchField, text: string, phrase: boolean) => {
-    const cutText = cut(text, MAX_TERM_CHARS);
-    if (query.terms.length < MAX_TERMS && hasAlphanumeric(cutText)) {
-      query.terms.push({ field, text: cutText, phrase });
-    }
-  };
-  let i = 0;
-  /** From `i`: to the next `"` (consumed) or the end. */
-  const quoted = () => {
-    const close = chars.indexOf('"', i);
-    const end = close < 0 ? chars.length : close;
-    const text = chars.slice(i, end).join("");
-    i = close < 0 ? chars.length : close + 1;
-    return text;
-  };
-  /** From `i`: a run of anything but whitespace, stopping before `"`. */
-  const bare = () => {
-    const start = i;
-    while (i < chars.length && chars[i] !== '"' && !isSpace(chars[i]!)) i++;
-    return chars.slice(start, i).join("");
-  };
-
-  while (i < chars.length) {
-    const c = chars[i]!;
-    if (isSpace(c)) {
-      i++;
-      continue;
-    }
-    if (c === '"') {
-      i++;
-      push("any", phraseText(quoted()), true);
-      continue;
-    }
-    let letters = i;
-    while (letters < chars.length && ASCII_LETTER.test(chars[letters]!)) letters++;
-    const name = chars.slice(i, letters).join("").toLowerCase();
-    if (letters > i && chars[letters] === ":" && (name in FIELDS || HAS.has(name))) {
-      i = letters + 1;
-      let value: string;
-      let phrase = false;
-      if (chars[i] === '"') {
-        i++;
-        value = quoted();
-        phrase = true;
-      } else {
-        value = bare();
-        // "from:" alone says nothing: what follows is read as usual.
-        if (!value) continue;
-      }
-      if (HAS.has(name)) {
-        const answer = (phrase ? phraseText(value) : value).toLowerCase();
-        const yes =
-          name === "has"
-            ? answer === "attachment" || answer === "attachments"
-            : answer === "true" || answer === "yes";
-        if (yes) query.hasAttachment = true;
-      } else {
-        const field = FIELDS[name]!;
-        if (phrase) push(field, phraseText(value), true);
-        else for (const word of words(value)) push(field, word, false);
-      }
-      continue;
-    }
-    // Plain words, and unknown operators (re:hello) as words.
-    for (const word of words(bare())) push("any", word, false);
-  }
-  return query;
-}
-
-export function isEmptySearch(query: SearchQuery): boolean {
-  return query.terms.length === 0 && !query.hasAttachment;
-}
-
-/** Letters and digits one term at least needs for the servers to be asked. */
-export const MIN_SERVER_TERM_CHARS = 2;
-
-/**
- * Whether the servers are worth asking, as the core decides: some term has two
- * letters or digits, or it asks for attachments. Single letters ("a b",
- * "from:a") match most of a mailbox, and every server would look through every
- * folder for them.
- */
-export function isNarrowEnoughForServers(query: SearchQuery): boolean {
-  return (
-    query.hasAttachment ||
-    query.terms.some(
-      (t) => Array.from(t.text).filter((c) => hasAlphanumeric(c)).length >= MIN_SERVER_TERM_CHARS,
-    )
-  );
-}
+import { type HitPatterns, findHits, toRuns } from "../../lib/search/highlight";
+import {
+  type ResolvedDates,
+  type SearchField,
+  type SearchQuery,
+  type SearchTerm,
+  withinDates,
+} from "../../lib/search/query";
+import type { EmailAddress, Message, MessageSummary, TextRun } from "../types";
 
 // --- Matching -----------------------------------------------------------------
 
@@ -232,35 +55,185 @@ export interface MatchOptions {
   substrings?: boolean;
 }
 
-/** Whether the message matches every part of the query. */
+type FieldTexts = Record<Exclude<SearchField, "any">, string>;
+
+function fieldTexts(message: Message): FieldTexts {
+  return {
+    from: addressText(message.from),
+    to: message.to.map(addressText).join(" "),
+    cc: message.cc.map(addressText).join(" "),
+    subject: message.subject,
+    // The text of an opened message; callers pass others without it, as
+    // the app indexes their preview until then.
+    body: message.bodyText ?? message.preview,
+  };
+}
+
+function fieldsOf(term: SearchTerm) {
+  return term.field === "any"
+    ? (["subject", "from", "to", "cc", "body"] as const)
+    : ([term.field] as const);
+}
+
+/** Whether the term's words are in one of `fields`, as the index finds words. */
+function termInFields(term: SearchTerm, text: FieldTexts, fields: readonly (keyof FieldTexts)[]) {
+  const words = tokens(term.text);
+  return fields.some((f) => tokensMatch(words, tokens(text[f]), term.phrase));
+}
+
+/** Whether the message matches every term of the query (its words; admits checks the rest). */
 export function matchesSearch(
   query: SearchQuery,
   message: Message,
   { infix, substrings = false }: MatchOptions,
 ): boolean {
-  if (query.hasAttachment && !message.hasAttachments) return false;
-  const subject = message.subject;
-  const sender = addressText(message.from);
-  const text: Record<Exclude<SearchField, "any">, string> = {
-    from: sender,
-    to: message.to.map(addressText).join(" "),
-    cc: message.cc.map(addressText).join(" "),
-    subject,
-    // The text of an opened message; callers pass others without it, as
-    // the app indexes their preview until then.
-    body: message.bodyText ?? message.preview,
-  };
+  const text = fieldTexts(message);
   return query.terms.every((term) => {
-    const fields =
-      term.field === "any"
-        ? (["subject", "from", "to", "cc", "body"] as const)
-        : ([term.field] as const);
+    const fields = fieldsOf(term);
     if (substrings) return fields.some((f) => normalize(text[f]).includes(normalize(term.text)));
-    const words = tokens(term.text);
-    if (fields.some((f) => tokensMatch(words, tokens(text[f]), term.phrase))) return true;
+    if (termInFields(term, text, fields)) return true;
     if (!infix || Array.from(term.text).length < 3) return false;
     const inside = normalize(term.text);
     const infixFields = fields.filter((f) => f === "subject" || f === "from");
     return infixFields.some((f) => normalize(text[f]).includes(inside));
   });
+}
+
+/**
+ * Whether the message passes every filter but the words, as the core's
+ * SearchQuery::admits: attachments, read, flagged, the dates and, when
+ * given, the folders (local ids).
+ */
+export function admits(
+  query: SearchQuery,
+  message: MessageSummary,
+  dates: ResolvedDates,
+  folderIds: ReadonlySet<string> | null,
+): boolean {
+  return (
+    (!query.hasAttachment || message.hasAttachments) &&
+    (query.read === null || message.isRead === query.read) &&
+    (!query.flagged || message.isFlagged) &&
+    withinDates(dates, new Date(message.receivedAt)) &&
+    (!folderIds || folderIds.has(message.folderId))
+  );
+}
+
+// --- Ranking (crates/core/src/search/rank.rs) -------------------------------------
+
+/** What a ranked term found only outside the subject and sender counts for. */
+export const OTHER_FIELD_SHARE = 0.3;
+/** Matched only inside words (subjects and senders). */
+export const INFIX_RELEVANCE = 0.6;
+/** A server hit the index doesn't match: it matched in the body beyond the preview. */
+export const SERVER_RELEVANCE = 0.225;
+export const RECENCY_HALF_LIFE_DAYS = 30;
+export const RECENCY_FLOOR = 0.4;
+/** Rows that get a snippet, the first in the final order. */
+export const MAX_SNIPPETS = 100;
+
+const DAY_MS = 86_400_000;
+
+export interface RankedHit {
+  /** As the index has it: the text of an opened message, the preview of others. */
+  message: Message;
+  /** Found by a server search (an included id). */
+  fromServer: boolean;
+}
+
+/**
+ * The share of the query's ranked terms (plain, `subject:`, `body:`) found
+ * in the subject or sender: 1 for a `subject:` term, OTHER_FIELD_SHARE for
+ * a `body:` one, and for a plain term 1 if its words start a word of the
+ * subject or sender (name or address), else OTHER_FIELD_SHARE; the mean.
+ */
+function fieldShare(query: SearchQuery, message: Message): number {
+  const text = fieldTexts(message);
+  const shares = query.terms.flatMap((term) => {
+    switch (term.field) {
+      case "subject":
+        return [1];
+      case "body":
+        return [OTHER_FIELD_SHARE];
+      case "any":
+        return [termInFields(term, text, ["subject", "from"]) ? 1 : OTHER_FIELD_SHARE];
+      default:
+        return [];
+    }
+  });
+  return shares.length ? shares.reduce((a, b) => a + b, 0) / shares.length : 1;
+}
+
+/**
+ * The core's score with bm25 taken as the best for every row (the demo has
+ * no bm25), so a row's relevance is its field share: words in the subject
+ * or sender first, then recent mail.
+ */
+export function score(query: SearchQuery, hit: RankedHit, now: Date): number {
+  let relevance: number;
+  if (matchesSearch(query, hit.message, { infix: false })) {
+    relevance = fieldShare(query, hit.message);
+  } else {
+    relevance = hit.fromServer ? SERVER_RELEVANCE : INFIX_RELEVANCE;
+  }
+  const age = Math.max(0, now.getTime() - Date.parse(hit.message.receivedAt)) / DAY_MS;
+  const recency = 0.5 ** (age / RECENCY_HALF_LIFE_DAYS);
+  return relevance * (RECENCY_FLOOR + (1 - RECENCY_FLOOR) * recency);
+}
+
+/** Best first: score, then newest, then by id. */
+export function rankHits<T extends RankedHit>(hits: T[], query: SearchQuery, now: Date): T[] {
+  const scored = hits.map((hit) => ({ hit, score: score(query, hit, now) }));
+  scored.sort(
+    (a, b) =>
+      b.score - a.score ||
+      b.hit.message.receivedAt.localeCompare(a.hit.message.receivedAt) ||
+      (a.hit.message.id < b.hit.message.id ? -1 : a.hit.message.id > b.hit.message.id ? 1 : 0),
+  );
+  return scored.map((s) => s.hit);
+}
+
+// --- Snippets -----------------------------------------------------------------------
+
+/** Words of context before the first hit, and the most a snippet holds. */
+const SNIPPET_WORDS_BEFORE = 8;
+const SNIPPET_CHARS = 160;
+
+/**
+ * The body's words around its first hit, as runs: about 8 words before it,
+ * at most 160 characters, "…" where cut, whitespace runs as one space. Null
+ * without a body (unopened mail is indexed by its preview, which the row
+ * shows already) or without a hit in it.
+ */
+export function mockSnippet(message: Message, patterns: HitPatterns | null): TextRun[] | null {
+  const body = message.bodyText;
+  if (!body || !patterns || patterns.body.length === 0) return null;
+  const hits = findHits(body, patterns.body);
+  const first = hits[0];
+  if (!first) return null;
+  let start = first[0];
+  for (let words = 0; start > 0 && words < SNIPPET_WORDS_BEFORE; words++) {
+    // Back over the whitespace before, then the word before it.
+    while (start > 0 && /\s/.test(body[start - 1]!)) start--;
+    while (start > 0 && !/\s/.test(body[start - 1]!)) start--;
+  }
+  const end = Math.min(body.length, start + SNIPPET_CHARS);
+  const inside = hits
+    .filter(([s]) => s < end)
+    .map(([s, e]): [number, number] => [s - start, Math.min(e, end) - start]);
+  const runs = toRuns(body.slice(start, end), inside).map((r) => ({
+    ...r,
+    text: r.text.replace(/\s+/g, " "),
+  }));
+  if (start > 0) runs.unshift({ text: "…", hit: false });
+  if (end < body.length) runs.push({ text: "…", hit: false });
+  // Neighbors alike made one; empty ones gone.
+  const merged: TextRun[] = [];
+  for (const run of runs) {
+    const last = merged[merged.length - 1];
+    if (!run.text) continue;
+    if (last && last.hit === run.hit) last.text += run.text;
+    else merged.push({ ...run });
+  }
+  return merged.some((r) => r.hit) ? merged : null;
 }

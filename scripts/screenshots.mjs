@@ -137,7 +137,12 @@ const scenes = [
     themes: ["light"],
     async run(page, shot) {
       await page.locator("#global-search").fill("atlas");
+      // The box's suggestions close with the keyboard elsewhere; the
+      // filters above the results stay, and the rows mark the word.
+      await page.locator("#global-search").blur();
       await page.getByRole("listbox", { name: "Search results" }).waitFor();
+      await page.getByRole("group", { name: "Search filters" }).waitFor();
+      await page.locator(".mail-row mark.search-hit").first().waitFor();
       // Once the servers have answered too: the list announces the count
       // only then.
       await page

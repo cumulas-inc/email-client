@@ -16,6 +16,7 @@ import type {
   Contact,
   DataChangedEvent,
   DataKind,
+  EmailAddress,
   ErrorCode,
   Message,
   MessageSummary,
@@ -26,6 +27,8 @@ import type {
   PushStatus,
   RemindersChangedEvent,
   ReplyKind,
+  SearchHit,
+  SearchOptions,
   ServerSearchResult,
   ServerSearchStatus,
   Settings,
@@ -43,7 +46,18 @@ import {
   isPersonalAccount,
 } from "../../modules/settings/microsoft";
 import { type MockState, createDemoState, recount } from "./data";
-import { isEmptySearch, isNarrowEnoughForServers, matchesSearch, parseSearch } from "./searchQuery";
+import { hitPatterns } from "../../lib/search/highlight";
+import {
+  accountMatches,
+  folderMatches,
+  isEmptySearch,
+  isImpossible,
+  isNarrowEnoughForServers,
+  parseSearch,
+  ranks,
+  resolveDates,
+} from "../../lib/search/query";
+import { MAX_SNIPPETS, admits, matchesSearch, mockSnippet, rankHits } from "./searchQuery";
 import { createWorstState } from "./worst";
 
 const DEFAULT_SETTINGS: Settings = {
@@ -167,6 +181,8 @@ const LOCAL_SEARCH_LIMIT = 200;
 const MAX_INCLUDED_IDS = 1000;
 /** Like the core: a server search's page, per account. */
 const SERVER_SEARCH_PAGE = 50;
+/** Like the core: most pages one server search call reads. */
+const SERVER_SEARCH_MAX_PAGES = 5;
 /** Like the core: how many ended search ids are remembered. */
 const RETIRED_SEARCHES = 32;
 
@@ -396,6 +412,10 @@ export interface MockOptions {
   latency?: number;
   /** How long a server search takes, in ms (default: `latency`). */
   serverSearchLatency?: number;
+  /** Messages a server search page holds, before the filters are applied (default 50). */
+  serverSearchPage?: number;
+  /** Most pages one server search call reads (default 5). */
+  serverSearchMaxPages?: number;
   /** Start without any accounts (shows onboarding). */
   empty?: boolean;
   /** Start with worst-case data (long, empty, huge and non-Latin values). */
@@ -520,6 +540,8 @@ export class MockBackend implements Backend {
   /** Until when each account's organization's service said to wait (ms). */
   private signatureRetries = new Map<string, number>();
   private serverSearchLatency: number;
+  private serverSearchPage: number;
+  private serverSearchMaxPages: number;
   /**
    * The current server search, like the core's: a new id replaces it,
    * canceling the old one. Per account, the matches its next page takes from.
@@ -542,6 +564,11 @@ export class MockBackend implements Backend {
   constructor(options: MockOptions = {}) {
     this.latency = options.latency ?? 0;
     this.serverSearchLatency = options.serverSearchLatency ?? this.latency;
+    this.serverSearchPage = Math.max(1, options.serverSearchPage ?? SERVER_SEARCH_PAGE);
+    this.serverSearchMaxPages = Math.max(
+      1,
+      options.serverSearchMaxPages ?? SERVER_SEARCH_MAX_PAGES,
+    );
     this.state = options.empty
       ? emptyState()
       : options.worst
@@ -1431,47 +1458,121 @@ export class MockBackend implements Backend {
   }
 
   /**
-   * Like the core: the messages the index finds (word prefixes, and inside
-   * subjects and senders), at most 200, plus the ones server searches found.
+   * Where a search looks, like the core: the accounts `account:` names (of
+   * `accountId`'s, when given) and the folders `in:` names in them. Null is
+   * everywhere; an empty set, nowhere.
    */
-  async searchMessages(text: string, accountId?: string, includeIds: string[] = []) {
+  private searchScope(
+    query: ReturnType<typeof parseSearch>,
+    accountId?: string,
+  ): { accounts: Set<string> | null; folders: Set<string> | null } {
+    const accounts =
+      query.accounts.length === 0
+        ? accountId
+          ? new Set([accountId])
+          : null
+        : new Set(
+            this.state.accounts
+              .filter((a) => !accountId || a.id === accountId)
+              .filter((a) => query.accounts.some((v) => accountMatches(v, a)))
+              .map((a) => a.id),
+          );
+    const folders =
+      query.folders.length === 0
+        ? null
+        : new Set(
+            this.state.folders
+              .filter((f) => !accounts || accounts.has(f.accountId))
+              .filter((f) => query.folders.some((v) => folderMatches(v, f)))
+              .map((f) => f.id),
+          );
+    return { accounts, folders };
+  }
+
+  /**
+   * Like the core: the messages the index finds (word prefixes, and inside
+   * subjects and senders) that pass the filters, plus the ones server
+   * searches found that pass them. Best first while the text has words to
+   * rank by (the 200 best, and every server hit), else newest first.
+   */
+  async searchMessages(
+    text: string,
+    accountId?: string,
+    includeIds: string[] = [],
+    options?: SearchOptions | null,
+  ): Promise<SearchHit[]> {
     await this.delay();
+    const now = new Date();
     const query = parseSearch(text);
-    const inAccount = (m: Message) => !accountId || m.accountId === accountId;
+    const dates = resolveDates(query, now, options?.weekStartsOn ?? 0);
+    const scope = this.searchScope(query, accountId);
+    const inScope = (m: Message) =>
+      (!scope.accounts || scope.accounts.has(m.accountId)) &&
+      (!scope.folders || scope.folders.has(m.folderId)) &&
+      !isImpossible(dates) &&
+      admits(query, m, dates, null);
     // As the app's index: a message's text once it was opened, its preview
     // before.
     const indexed = (m: Message) => (this.opened.has(m.id) ? m : { ...m, bodyText: null });
-    const found = isEmptySearch(query)
+    const matches = isEmptySearch(query)
       ? []
-      : this.state.messages
-          .filter((m) => inAccount(m) && matchesSearch(query, indexed(m), { infix: true }))
-          .sort(searchOrder)
-          .slice(0, LOCAL_SEARCH_LIMIT);
-    const ids = new Set(found.map((m) => m.id));
+      : this.state.messages.filter(
+          (m) => inScope(m) && matchesSearch(query, indexed(m), { infix: true }),
+        );
+    const matched = new Set(matches.map((m) => m.id));
     const included = new Set(includeIds.slice(0, MAX_INCLUDED_IDS));
-    for (const m of this.state.messages) {
-      if (included.has(m.id) && !ids.has(m.id) && inAccount(m)) {
-        ids.add(m.id);
-        found.push(m);
-      }
+    const fromServer = this.state.messages.filter((m) => included.has(m.id) && inScope(m));
+    const ranked = (options?.sort ?? "relevance") === "relevance" && ranks(query);
+
+    let found: Message[];
+    if (ranked) {
+      const hits = [
+        ...matches.map((m) => ({ message: indexed(m), fromServer: included.has(m.id) })),
+        ...fromServer
+          .filter((m) => !matched.has(m.id))
+          .map((m) => ({ message: indexed(m), fromServer: true })),
+      ];
+      let kept = 0;
+      found = rankHits(hits, query, now)
+        .filter((h) => h.fromServer || kept++ < LOCAL_SEARCH_LIMIT)
+        .map((h) => this.message(h.message.id));
+    } else {
+      const local = matches.sort(searchOrder).slice(0, LOCAL_SEARCH_LIMIT);
+      found = [...new Set([...local, ...fromServer])].sort(searchOrder);
     }
-    return found.sort(searchOrder).map(summary);
+
+    // The body's words around what matched there, for the first rows, when
+    // the text has words to rank by (either order).
+    const patterns = ranks(query) ? hitPatterns(query) : null;
+    return found.map((m, i) => ({
+      ...summary(m),
+      snippet:
+        patterns && i < MAX_SNIPPETS && matchesSearch(query, indexed(m), { infix: false })
+          ? mockSnippet(indexed(m), patterns)
+          : null,
+    }));
   }
 
   /**
    * Like the core: searches one account's mail on its "server" (what is on
-   * the device and `serverMessages`, matched as Graph does by the start of
-   * words, or as IMAP does anywhere in them), a page at a time, and brings
-   * what it finds onto the device.
+   * the device and `serverMessages`), a page at a time, and brings what it
+   * finds that passes the text's filters onto the device. Graph matches
+   * words by their start and, with words, can't say read or flagged;
+   * without words it filters by all of them; either way it looks in one
+   * folder `in:` names, but not in several. IMAP matches anywhere in words
+   * and says every filter. A call reads
+   * pages until half a page's worth pass, the matches run out, or it read
+   * `serverSearchMaxPages`.
    */
   async searchServer(
     searchId: string,
     text: string,
     accountId: string,
     more = false,
+    options?: SearchOptions | null,
   ): Promise<ServerSearchResult> {
     if (!searchId || searchId.length > 100) fail("invalidInput", "Invalid search.");
-    this.account(accountId);
+    const account = this.account(accountId);
     const answer = (
       status: ServerSearchStatus,
       result: Partial<ServerSearchResult> = {},
@@ -1486,8 +1587,13 @@ export class MockBackend implements Backend {
       ...result,
     });
     const query = parseSearch(text);
+    const dates = resolveDates(query, new Date(), options?.weekStartsOn ?? 0);
     // Like the core, before the search is started: it cancels nothing.
-    if (!isNarrowEnoughForServers(query)) return answer("done");
+    const otherAccount =
+      query.accounts.length > 0 && !query.accounts.some((v) => accountMatches(v, account));
+    if (!isNarrowEnoughForServers(query) || otherAccount || isImpossible(dates)) {
+      return answer("done");
+    }
     if (this.retiredSearches.includes(searchId)) return answer("cancelled");
     if (this.serverSearch?.id !== searchId) {
       this.retireServerSearch();
@@ -1503,40 +1609,72 @@ export class MockBackend implements Backend {
     const failure = this.serverSearchFailures.get(accountId);
     if (failure) return answer("failed", { error: clone(failure) });
 
+    const scope = this.state.folders.filter(
+      (f) => f.accountId === accountId && query.folders.some((v) => folderMatches(v, f)),
+    );
+    if (query.folders.length > 0 && scope.length === 0) return answer("done");
+    const scopeIds = query.folders.length > 0 ? new Set(scope.map((f) => f.id)) : null;
+
+    const server = [...this.state.messages, ...(this.state.serverMessages ?? [])];
     let matches: string[];
     if (more) {
       const rest = search.rest.get(accountId);
       if (!rest) return answer("done");
       matches = rest;
     } else {
-      // Graph matches words by their start; IMAP's SEARCH, anywhere.
-      const options = { infix: false, substrings: this.account(accountId).kind === "imap" };
-      matches = [...this.state.messages, ...(this.state.serverMessages ?? [])]
-        .filter((m) => m.accountId === accountId && matchesSearch(query, m, options))
+      const imap = account.kind === "imap";
+      const words = query.terms.length > 0;
+      // What the server can say: IMAP everything; Graph's $search the words,
+      // attachments and dates, its $filter every filter, and either looks in
+      // one folder when `in:` names exactly one there, else everywhere.
+      const graphFolder = scope.length === 1 ? scopeIds : null;
+      const asked = imap
+        ? (m: Message) => admits(query, m, dates, scopeIds)
+        : words
+          ? (m: Message) => admits({ ...query, read: null, flagged: false }, m, dates, graphFolder)
+          : (m: Message) => admits(query, m, dates, graphFolder);
+      matches = server
+        .filter(
+          (m) =>
+            m.accountId === accountId &&
+            asked(m) &&
+            matchesSearch(query, m, { infix: false, substrings: imap }),
+        )
         .sort(searchOrder)
         .map((m) => m.id);
     }
-    const page = matches.slice(0, SERVER_SEARCH_PAGE);
-    const rest = matches.slice(SERVER_SEARCH_PAGE);
-    if (rest.length > 0) search.rest.set(accountId, rest);
+    // A page at a time, as the server sends them; then the filters.
+    const wanted = Math.ceil(this.serverSearchPage / 2);
+    const passed: Message[] = [];
+    let pages = 0;
+    while (matches.length > 0 && passed.length < wanted && pages < this.serverSearchMaxPages) {
+      const page = matches.slice(0, this.serverSearchPage);
+      matches = matches.slice(this.serverSearchPage);
+      pages += 1;
+      for (const id of page) {
+        const m = server.find((x) => x.id === id);
+        if (m && admits(query, m, dates, scopeIds)) passed.push(m);
+      }
+    }
+    if (matches.length > 0) search.rest.set(accountId, matches);
     else search.rest.delete(accountId);
 
     const messageIds: string[] = [];
     let added = 0;
-    const server = this.state.serverMessages ?? [];
-    for (const id of page) {
-      const index = server.findIndex((m) => m.id === id);
+    const serverOnly = this.state.serverMessages ?? [];
+    for (const m of passed) {
+      const index = serverOnly.indexOf(m);
       if (index >= 0) {
         // Stored now; the folder's count already had it.
-        this.state.messages.push(...server.splice(index, 1));
+        this.state.messages.push(...serverOnly.splice(index, 1));
         added += 1;
-        messageIds.push(id);
-      } else if (this.state.messages.some((m) => m.id === id)) {
-        messageIds.push(id);
+        messageIds.push(m.id);
+      } else if (this.state.messages.includes(m)) {
+        messageIds.push(m.id);
       }
     }
     if (added > 0) this.emit(["mail"], accountId);
-    return answer("done", { messageIds, added, hasMore: rest.length > 0 });
+    return answer("done", { messageIds, added, hasMore: matches.length > 0 });
   }
 
   async cancelServerSearch(searchId: string) {
@@ -1715,7 +1853,7 @@ export class MockBackend implements Backend {
   async suggestAddresses(text: string) {
     await this.delay();
     const q = text.trim().toLowerCase();
-    if (!q) return [];
+    if (!q) return this.recentCorrespondents();
     const seen = new Set<string>();
     const out: { name: string | null; address: string }[] = [];
     const add = (name: string | null, address: string) => {
@@ -1728,6 +1866,34 @@ export class MockBackend implements Backend {
     for (const c of this.state.contacts) for (const e of c.emails) add(c.displayName, e.address);
     for (const m of this.state.messages) if (m.from) add(m.from.name, m.from.address);
     return out.slice(0, 8);
+  }
+
+  /**
+   * Like the core for an empty text: the 8 people who wrote most in the
+   * last 90 days (the most recent first among equals), not the accounts.
+   */
+  private recentCorrespondents(): EmailAddress[] {
+    const since = Date.now() - 90 * 86_400_000;
+    const own = new Set(this.state.accounts.map((a) => a.email.toLowerCase()));
+    const senders = new Map<string, { from: EmailAddress; count: number; last: string }>();
+    for (const m of this.state.messages) {
+      if (!m.from || Date.parse(m.receivedAt) < since) continue;
+      const key = m.from.address.toLowerCase();
+      if (own.has(key)) continue;
+      const seen = senders.get(key);
+      if (!seen) senders.set(key, { from: m.from, count: 1, last: m.receivedAt });
+      else {
+        seen.count += 1;
+        if (m.receivedAt > seen.last) {
+          seen.last = m.receivedAt;
+          seen.from = m.from;
+        }
+      }
+    }
+    return [...senders.values()]
+      .sort((a, b) => b.count - a.count || b.last.localeCompare(a.last))
+      .slice(0, 8)
+      .map(({ from }) => ({ name: from.name, address: from.address }));
   }
 
   async saveAttachment(messageId: string, attachmentId: string) {
