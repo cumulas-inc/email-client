@@ -5,27 +5,32 @@ import {
   ChevronDown,
   ChevronUp,
   CircleAlert,
+  ClipboardList,
   Copy,
   Ellipsis,
+  ExternalLink,
   Flag,
   FolderInput,
   Forward,
   ImageOff,
   Layers,
+  Lock,
   Mail,
   MailOpen,
   Pencil,
   Reply,
   ReplyAll,
+  Signature,
+  Tag,
   Trash2,
   X,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { useBackend } from "../../api/context";
 import { errorMessage } from "../../api/errors";
 import { useAccounts, useSettings } from "../../api/queries";
-import type { EmailAddress, Message } from "../../api/types";
+import type { EmailAddress, Message, MessageLabel } from "../../api/types";
 import { Avatar } from "../../components/Avatar";
 import { EmptyState } from "../../components/EmptyState";
 import { Menu, type MenuItem } from "../../components/Menu";
@@ -42,10 +47,18 @@ import { useIsDark, usePersistentString } from "./hooks";
 import { useMailStore } from "./mailStore";
 import { bodyAppearance, classifyLink, paintsOwnBackground } from "./bodyHtml";
 import { MessageBody, PlainTextBody } from "./MessageBody";
+import { ACTION_NAMES, hasProtectionNotice } from "./protection";
+import { ProtectionNotice } from "./ProtectionNotice";
 import { useFolders, useMessage } from "./queries";
+import { FindBar } from "./search/FindBar";
+import { Highlighted } from "./search/Highlighted";
+import { useSearchHighlight } from "./search/useSearchHighlight";
 import { visualLength } from "./text";
 
 const ICON = { size: 17, strokeWidth: 1.75, "aria-hidden": true as const };
+
+/** How a dark theme shows an HTML letter: on paper, or dark itself. */
+const DARK_BODIES = ["paper", "dark"] as const;
 
 interface ToolButtonProps {
   icon: ReactNode;
@@ -153,6 +166,45 @@ function Recipients({ message }: { message: Message }) {
   );
 }
 
+/** What an unverified label's tag says on hover: what it means and what would show more. */
+const UNVERIFIED_LABEL =
+  "The message says it has one of your organization's sensitivity labels. Without your organization's list of labels, Cumulas Mail can't tell which, or whether it's real: any sender can write this.";
+
+/**
+ * A sensitivity label's tag: its name, said to be one; a dot in its color
+ * when known. A label that isn't one of the account's labels (the account
+ * has no list) is only one the message names, which any sender can write:
+ * its tag says so in its text, and never shows a name.
+ */
+function LabelTag({ label, requested = false }: { label: MessageLabel; requested?: boolean }) {
+  if (!label.fromCatalog && !requested) {
+    return (
+      <span className="mail-tag mail-tag--label mail-tag--unverified" title={UNVERIFIED_LABEL}>
+        <Tag size={14} strokeWidth={2} aria-hidden="true" />
+        <span className="mail-tag__name">Sensitivity label (unverified)</span>
+      </span>
+    );
+  }
+  const name = label.name ?? "Sensitivity label";
+  return (
+    <span
+      className="mail-tag mail-tag--label"
+      title={label.name ? `Sensitivity label: ${label.name}` : undefined}
+    >
+      {label.color ? (
+        <span className="mail-tag__dot" style={{ background: label.color }} aria-hidden="true" />
+      ) : (
+        <Tag size={14} strokeWidth={2} aria-hidden="true" />
+      )}
+      {label.name && <span className="visually-hidden">Sensitivity label: </span>}
+      <span className="mail-tag__name">
+        <bdi>{name}</bdi>
+        {requested && " (requested)"}
+      </span>
+    </span>
+  );
+}
+
 function useAutoMarkRead(
   message: Message | undefined,
   delaySeconds: number | null | undefined,
@@ -202,8 +254,25 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
   const query = useMessage(messageId, remoteAllowed);
   const message = query.data;
   const isDark = useIsDark();
-  const [darkBody, setDarkBody] = usePersistentString<"paper" | "dark">("mail.darkBody", "paper");
+  const [darkBody, setDarkBody] = usePersistentString<(typeof DARK_BODIES)[number]>(
+    "mail.darkBody",
+    "paper",
+    DARK_BODIES,
+  );
   const [hoverUrl, setHoverUrl] = useState<string | null>(null);
+  // What the search box's words find in the message, and the match shown.
+  const highlight = useSearchHighlight();
+  // `step` counts the steps, so that stepping to the match shown (the only
+  // one) shows it again, wherever the reader has scrolled since.
+  const [found, setFound] = useState({ count: 0, current: null as number | null, step: 0 });
+  const onHits = useCallback(
+    (count: number) => setFound((f) => ({ count, current: null, step: f.step })),
+    [],
+  );
+  const showMatch = useCallback(
+    (current: number) => setFound((f) => ({ ...f, current, step: f.step + 1 })),
+    [],
+  );
 
   useAutoMarkRead(message, settings?.markReadAfterSeconds, actions.markRead);
 
@@ -244,6 +313,13 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
   const date = fullDate(message.receivedAt);
   const sent = messageDate(message.receivedAt);
   const future = !!sent && isFutureDated(sent);
+  const microsoft = account?.kind === "microsoft";
+  const protection = message.protection;
+  const containers = new Set(protection?.containerIds ?? []);
+  const attachments = message.attachments.filter((a) => !containers.has(a.id));
+  const requested = message.requested;
+  // Signed mail whose content is all there: a tag says it's signed, unchecked.
+  const signedTag = protection?.kind === "smimeSigned" && !hasProtectionNotice(message);
 
   const more: MenuItem[] = [];
   if (folder?.role === "junk" && inbox) {
@@ -271,6 +347,50 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
       },
     });
   }
+  if (microsoft) {
+    more.push({
+      label: "Open in Outlook on the web",
+      icon: <ExternalLink size={16} aria-hidden="true" />,
+      onSelect: () => {
+        backend.openInOutlook(message.id).catch((e: unknown) => toast.error(e));
+      },
+    });
+  }
+  more.push({
+    label: "Copy diagnostic details",
+    icon: <ClipboardList size={16} aria-hidden="true" />,
+    onSelect: () => {
+      // The write starts here, in the click: WebKit refuses one that starts
+      // only after the core answered, which can take a while. The text
+      // follows as a promise.
+      const text = backend.getMessageDiagnostics(message.id);
+      const copied =
+        typeof ClipboardItem !== "undefined" && navigator.clipboard?.write
+          ? navigator.clipboard.write([
+              new ClipboardItem({
+                "text/plain": text.then((t) => new Blob([t], { type: "text/plain" })),
+              }),
+            ])
+          : text.then((t) => {
+              // Never "Copied" when nothing was.
+              if (!navigator.clipboard) throw new Error("Copying isn't available here.");
+              return navigator.clipboard.writeText(t);
+            });
+      copied
+        .then(() =>
+          toast.success(
+            "Copied diagnostic details. They describe the message's protection, not its content.",
+          ),
+        )
+        // The core's own error says more than the clipboard's.
+        .catch((e: unknown) =>
+          text.then(
+            () => toast.error(e),
+            (reason: unknown) => toast.error(reason),
+          ),
+        );
+    },
+  });
   // Only designed mail (its own backgrounds) offers a choice of sheet.
   if (isDark && message.bodyHtml && paintsOwnBackground(message.bodyHtml)) {
     more.push({
@@ -425,10 +545,31 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 .join(" ")}
               dir={noSubject ? undefined : "auto"}
             >
-              {subject}
+              {noSubject ? subject : <Highlighted text={subject} patterns={highlight?.subject} />}
             </h1>
-            {(message.importance !== "normal" || message.isFlagged || placeTitle) && (
+            {(message.importance !== "normal" ||
+              message.isFlagged ||
+              placeTitle ||
+              message.label ||
+              requested ||
+              signedTag) && (
               <div className="mail-reader__tags">
+                {message.label && <LabelTag label={message.label} />}
+                {requested?.label && <LabelTag label={requested.label} requested />}
+                {requested?.action && (
+                  <span className="mail-tag mail-tag--label">
+                    <Lock size={14} strokeWidth={2} aria-hidden="true" />
+                    {requested.action === "encrypt"
+                      ? "Encryption requested"
+                      : `${ACTION_NAMES[requested.action]} requested`}
+                  </span>
+                )}
+                {signedTag && (
+                  <span className="mail-tag">
+                    <Signature size={14} strokeWidth={2} aria-hidden="true" />
+                    S/MIME signature (not checked)
+                  </span>
+                )}
                 {message.importance === "high" && (
                   <span className="mail-tag mail-tag--danger">
                     <CircleAlert size={14} strokeWidth={2} aria-hidden="true" />
@@ -464,6 +605,12 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                   </span>
                 )}
               </div>
+            )}
+            {requested && (requested.action || requested.label) && (
+              <p className="mail-reader__caveat">
+                Cumulas Mail asked your organization&apos;s mail server for this when the message
+                was sent. This copy doesn&apos;t show whether it did.
+              </p>
             )}
             <div className="mail-reader__sender">
               <Avatar
@@ -552,7 +699,13 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
             </div>
           )}
 
-          <Attachments messageId={message.id} attachments={message.attachments} />
+          <ProtectionNotice message={message} microsoft={microsoft} />
+
+          <Attachments messageId={message.id} attachments={attachments} />
+
+          {highlight && found.count > 0 && (
+            <FindBar count={found.count} current={found.current} onShow={showMatch} />
+          )}
 
           <div className={`mail-reader__body mail-reader__body--${appearance}`}>
             {message.bodyHtml ? (
@@ -563,9 +716,20 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
                 title={`Message: ${subject}`}
                 onLink={onLink}
                 onHoverLink={setHoverUrl}
+                highlight={highlight?.body}
+                current={found.current}
+                revealStep={found.step}
+                onHits={onHits}
               />
             ) : (
-              <PlainTextBody text={message.bodyText ?? ""} onLink={onLink} />
+              <PlainTextBody
+                text={message.bodyText ?? ""}
+                onLink={onLink}
+                highlight={highlight?.body}
+                current={found.current}
+                revealStep={found.step}
+                onHits={onHits}
+              />
             )}
           </div>
         </div>

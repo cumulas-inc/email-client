@@ -1,7 +1,7 @@
 //! HTTP plumbing for Microsoft Graph: bearer tokens, `Prefer` headers,
 //! throttling retries, error mapping, paging and JSON batching.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -209,6 +209,16 @@ impl GraphClient {
         format!("{}{path}", self.base_url)
     }
 
+    /// Absolute URL for a path on Graph's beta endpoint: the version root
+    /// (`/v1.0`) replaced by `/beta`, or `/beta` added to a base without one.
+    pub fn beta_url(&self, path: &str) -> String {
+        let root = self
+            .base_url
+            .strip_suffix("/v1.0")
+            .unwrap_or(&self.base_url);
+        format!("{root}/beta{path}")
+    }
+
     pub fn url_with_query(&self, path: &str, query: &[(&str, &str)]) -> String {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(query)
@@ -334,6 +344,83 @@ impl GraphClient {
         Ok(bytes.to_vec())
     }
 
+    /// The response body, refused once it's larger than `limit` bytes: by its
+    /// `Content-Length` before it's read, else as it's read.
+    pub async fn get_bytes_limited(
+        &self,
+        url: &str,
+        prefer: &[&str],
+        limit: usize,
+    ) -> GraphResult<Vec<u8>> {
+        let too_large = || {
+            Failure::Other(Error::provider(format!(
+                "Microsoft Graph sent more than the {} MB Cumulas Mail reads at once.",
+                limit / (1024 * 1024)
+            )))
+        };
+        let mut response = self
+            .execute(Request {
+                method: Method::GET,
+                url,
+                prefer,
+                body: Body::Empty,
+                authenticated: true,
+            })
+            .await?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit as u64)
+        {
+            return Err(too_large());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = Self::next_chunk(&mut response).await? {
+            let chunk = chunk.as_ref();
+            if bytes.len() + chunk.len() > limit {
+                return Err(too_large());
+            }
+            bytes.extend_from_slice(chunk);
+        }
+        Ok(bytes)
+    }
+
+    /// The first `n` bytes of the response body (fewer when it's shorter);
+    /// the rest is never read.
+    pub async fn get_bytes_prefix(
+        &self,
+        url: &str,
+        prefer: &[&str],
+        n: usize,
+    ) -> GraphResult<Vec<u8>> {
+        let mut response = self
+            .execute(Request {
+                method: Method::GET,
+                url,
+                prefer,
+                body: Body::Empty,
+                authenticated: true,
+            })
+            .await?;
+        let mut bytes = Vec::with_capacity(n);
+        while bytes.len() < n {
+            let Some(chunk) = Self::next_chunk(&mut response).await? else {
+                break;
+            };
+            bytes.extend_from_slice(chunk.as_ref());
+        }
+        bytes.truncate(n);
+        Ok(bytes)
+    }
+
+    async fn next_chunk(response: &mut reqwest::Response) -> GraphResult<Option<impl AsRef<[u8]>>> {
+        response.chunk().await.map_err(|e| {
+            Failure::Other(Error::network(format!(
+                "Could not download from Microsoft Graph: {}",
+                e.without_url()
+            )))
+        })
+    }
+
     /// Sends a JSON body and parses the JSON response.
     pub async fn send_json<T: DeserializeOwned>(
         &self,
@@ -426,7 +513,8 @@ impl GraphClient {
     }
 
     /// Runs requests through JSON batching (20 per round trip). Sub-requests
-    /// that were throttled are retried like single requests. Returns the
+    /// that were throttled are retried like single requests, with those that
+    /// failed only because one they run after was (424). Returns the
     /// responses by request id; callers check each status.
     pub async fn batch(
         &self,
@@ -444,23 +532,54 @@ impl GraphClient {
             let mut pending: Vec<&BatchRequest> = chunk.iter().collect();
             let mut attempt = 0;
             while !pending.is_empty() {
+                let ids: HashSet<&str> = pending.iter().map(|r| r.id.as_str()).collect();
                 let payload = json!({
-                    "requests": pending.iter().map(|r| r.to_json(prefer)).collect::<Vec<_>>(),
+                    "requests": pending.iter().map(|r| r.to_json(prefer, &ids)).collect::<Vec<_>>(),
                 });
                 let envelope: Envelope = self.send_json(Method::POST, &url, &payload, &[]).await?;
-                let mut retry = Vec::new();
+                let mut retried: HashSet<String> = HashSet::new();
                 let mut delay = Duration::ZERO;
-                for response in envelope.responses {
-                    if is_retryable(response.status())
-                        && attempt < MAX_RETRIES
-                        && let Some(request) = pending.iter().find(|r| r.id == response.id)
-                    {
-                        delay =
-                            delay.max(retry_delay(response.header(RETRY_AFTER.as_str()), attempt));
-                        retry.push(*request);
-                        continue;
+                if attempt < MAX_RETRIES {
+                    for response in &envelope.responses {
+                        if is_retryable(response.status()) && ids.contains(response.id.as_str()) {
+                            delay = delay
+                                .max(retry_delay(response.header(RETRY_AFTER.as_str()), attempt));
+                            retried.insert(response.id.clone());
+                        }
                     }
-                    results.insert(response.id.clone(), response);
+                    // Graph fails what runs after a throttled request with
+                    // 424: it goes again with it, still after it.
+                    loop {
+                        let dependents: Vec<String> = envelope
+                            .responses
+                            .iter()
+                            .filter(|response| {
+                                response.status == StatusCode::FAILED_DEPENDENCY.as_u16()
+                                    && !retried.contains(&response.id)
+                                    && pending.iter().any(|r| {
+                                        r.id == response.id
+                                            && r.depends_on
+                                                .as_ref()
+                                                .is_some_and(|id| retried.contains(id))
+                                    })
+                            })
+                            .map(|response| response.id.clone())
+                            .collect();
+                        if dependents.is_empty() {
+                            break;
+                        }
+                        retried.extend(dependents);
+                    }
+                }
+                let retry: Vec<&BatchRequest> = pending
+                    .iter()
+                    .copied()
+                    .filter(|r| retried.contains(&r.id))
+                    .collect();
+                for response in envelope.responses {
+                    if !retried.contains(&response.id) {
+                        results.insert(response.id.clone(), response);
+                    }
                 }
                 if !retry.is_empty() {
                     attempt += 1;
@@ -481,6 +600,10 @@ pub(super) struct BatchRequest {
     pub method: &'static str,
     pub url: String,
     pub body: Option<Value>,
+    /// Runs after this request of the same batch (Graph's `dependsOn`);
+    /// one that failed makes this one fail with 424. A batch's requests
+    /// should all be sequential or none.
+    pub depends_on: Option<String>,
 }
 
 impl BatchRequest {
@@ -490,6 +613,7 @@ impl BatchRequest {
             method,
             url,
             body,
+            depends_on: None,
         }
     }
 
@@ -497,8 +621,21 @@ impl BatchRequest {
         Self::new(id, "GET", url, None)
     }
 
-    fn to_json(&self, prefer: &[&str]) -> Value {
+    /// The same request, run after request `id`.
+    pub fn after(self, id: impl ToString) -> Self {
+        Self {
+            depends_on: Some(id.to_string()),
+            ..self
+        }
+    }
+
+    /// The request as the batch sends it. Its `dependsOn` only names a
+    /// request in the same payload (`ids`): one retried alone has none.
+    fn to_json(&self, prefer: &[&str], ids: &HashSet<&str>) -> Value {
         let mut request = json!({ "id": self.id, "method": self.method, "url": self.url });
+        if let Some(previous) = self.depends_on.as_deref().filter(|id| ids.contains(id)) {
+            request["dependsOn"] = json!([previous]);
+        }
         let mut headers = Map::new();
         if !prefer.is_empty() {
             headers.insert("Prefer".into(), prefer.join(", ").into());

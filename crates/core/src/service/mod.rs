@@ -10,6 +10,7 @@ mod connector;
 mod mail;
 mod permissions;
 mod pim;
+mod protection;
 mod reminders;
 mod search;
 mod signatures;
@@ -22,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use uuid::Uuid;
 
+pub use crate::search::rank::MAX_RANKED_CANDIDATES;
 pub use alerts::{MAX_AGE_HOURS, MailAlert, SUMMARY_THRESHOLD};
 pub use connector::{
     BrowserOpener, Connector, LiveConnector, PUBLISHED_MICROSOFT_CLIENT_ID, ProviderSet,
@@ -30,7 +32,8 @@ pub use connector::{
 pub use mail::Attachment;
 pub use search::{
     LOCAL_SEARCH_LIMIT, MAX_INCLUDED_IDS, MAX_SEARCH_ROWS_PER_ACCOUNT, SEARCH_RESULT_TTL_DAYS,
-    SERVER_SEARCH_PAGE, SERVER_SEARCH_TIMEOUT,
+    SERVER_SEARCH_MAX_PAGES, SERVER_SEARCH_MIN_HITS, SERVER_SEARCH_PAGE, SERVER_SEARCH_PAGE_TIME,
+    SERVER_SEARCH_TIMEOUT,
 };
 pub use targeted::SyncScope;
 
@@ -119,6 +122,8 @@ pub struct CoreService {
     signatures: Arc<signatures::SignatureHub>,
     /// The server search in progress, and those that ended.
     searches: Mutex<search::Registry>,
+    /// Held by an account's protection check and its refreshes.
+    protection_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl CoreService {
@@ -142,6 +147,7 @@ impl CoreService {
             reminders: reminders::ReminderHub::default(),
             signatures: Arc::default(),
             searches: Mutex::default(),
+            protection_locks: Mutex::default(),
         }
     }
 
@@ -354,7 +360,19 @@ impl CoreService {
         request: PermissionRequest,
     ) -> Result<Account> {
         // What the account the login hint names has, if it was added.
-        let recorded = match self.microsoft_account_named(login_hint)? {
+        let named = self.microsoft_account_named(login_hint)?;
+        if let PermissionRequest::Feature { feature } = request
+            && !feature.for_personal_accounts()
+            && named.as_ref().is_some_and(|account| {
+                matches!(&account.settings, AccountSettings::Microsoft(m)
+                    if is_personal_tenant(&m.tenant_id))
+            })
+        {
+            return Err(Error::invalid_input(
+                "Sensitivity labels are only for work and school accounts.",
+            ));
+        }
+        let recorded = match &named {
             Some(account) => Some(self.granted_scopes(&account.id)?),
             None => None,
         };
@@ -452,6 +470,16 @@ impl CoreService {
                 .set(&keys::refresh_token(&account.id), &result.refresh_token)
                 .await?;
             self.store.set_sign_in_grant(&account.id, &granted)?;
+        }
+        // Turned on: the next sync lists the labels at once, whatever an
+        // earlier failure's backoff.
+        if request
+            == (PermissionRequest::Feature {
+                feature: AccountFeature::SensitivityLabels,
+            })
+            && self.store.clear_label_catalog(&account.id)?
+        {
+            self.notify(&[DataKind::Protection], Some(&account.id));
         }
         self.push
             .set_consent_refusal(&account.id, result.consent_refused.clone());
@@ -580,6 +608,7 @@ impl CoreService {
                 DataKind::Contacts,
                 DataKind::Tasks,
                 DataKind::Signatures,
+                DataKind::Protection,
             ],
             None,
         );

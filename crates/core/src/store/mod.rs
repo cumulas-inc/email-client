@@ -5,6 +5,7 @@ mod accounts;
 mod calendar;
 mod contacts;
 mod mail;
+mod protection;
 mod push;
 mod reminders;
 mod schema;
@@ -22,7 +23,8 @@ use serde::de::DeserializeOwned;
 
 use crate::error::Result;
 
-pub use mail::{BatchOutcome, FolderUnreadDelta, SearchPageMark, SearchUpsert};
+pub use mail::{BatchOutcome, FolderUnreadDelta, LocalSearch, SearchPageMark, SearchUpsert};
+pub use protection::{CheckRecord, CheckRun, ControlOutcome, RunItem, StoredCatalog, StoredChecks};
 pub use push::PushSubscription;
 pub use signatures::{StoredOrganizationSignature, StoredSignatures};
 

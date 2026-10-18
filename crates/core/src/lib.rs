@@ -5,6 +5,7 @@ pub mod auth;
 pub mod error;
 pub mod html;
 pub mod model;
+pub mod protection;
 pub mod providers;
 pub mod push;
 pub mod reminders;

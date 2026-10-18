@@ -13,6 +13,7 @@ import { useHeight, usePersistentNumber, usePersistentSize } from "./hooks";
 import { ALL_INBOXES, useMailStore } from "./mailStore";
 import { MessageList } from "./MessageList";
 import { optionId } from "./dom";
+import { ProtectedReplyDialog } from "./ProtectedReplyDialog";
 import { useFolders } from "./queries";
 import { ReadingPane } from "./ReadingPane";
 import { useMailShortcuts } from "./shortcuts";
@@ -248,6 +249,7 @@ export function MailModule() {
         )}
       </div>
       <PendingComposeDialog />
+      <ProtectedReplyDialog />
     </div>
   );
 }

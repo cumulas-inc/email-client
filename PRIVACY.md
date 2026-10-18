@@ -11,7 +11,7 @@ signature when your organization sets one up there.
 Cumulas Mail has no telemetry, no analytics, no crash reporting and no
 advertising, and you don't need a Cumulas account.
 
-_Last updated: October 17, 2026._
+_Last updated: October 18, 2026._
 
 ## What the app keeps on your computer
 
@@ -29,8 +29,15 @@ _Last updated: October 17, 2026._
   signature (the signature itself, that your organization's mail server adds
   it, or that there's none for you), so that it works offline. They're in the
   same database.
+- **For Microsoft 365 work and school accounts**, the sensitivity labels
+  Microsoft 365 lists for you once you turn them on, and what the checks of
+  encryption and labels in Settings found, in the same database.
 - **Attachments you open**, in the app's cache folder,
-  `~/.cache/co.cumulas.Mail/`.
+  `~/.cache/co.cumulas.Mail/`, readable only by you. They're removed when the
+  app next starts, and any older than a day when you open another.
+- **Your recent searches** (the last 8), so the search box can suggest them, in
+  the app's data folder. "Clear recent searches" in the search box's suggestions
+  deletes them.
 - **Passwords and sign-in tokens**, in your desktop's keyring (GNOME Keyring
   or KWallet), never in the app's database.
 - **An installation ID**: a random string made once, which the push service
@@ -51,7 +58,8 @@ it.
 Removing an account in Settings deletes its data from the database, its
 password or sign-in tokens from the keyring, and its subscriptions at
 Microsoft (when the app can't reach Microsoft, those expire within three
-days). Attachments you opened stay in the cache folder.
+days). Attachments you opened stay in the cache folder until the app next
+starts.
 
 To remove everything from your computer, remove your accounts first. Then
 uninstall the app and delete:
@@ -102,9 +110,16 @@ which serves the page, may log the request, as its
 [privacy statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement)
 describes.
 
-When you search your mail, the words you type go to the mail servers of your
-accounts (Microsoft, or your IMAP server), so that each can search your whole
-mailbox, and never to Cumulas.
+When you search your mail, the words you type and the filters you choose (such
+as dates, or unread) go to the mail servers of your accounts (Microsoft, or your
+IMAP server), so that each can search your whole mailbox, and never to Cumulas.
+
+When you check encryption and sensitivity labels in Settings (Microsoft 365
+work and school accounts), the app sends a few test messages from your
+account to yourself through Microsoft 365, to see what your organization's
+mail server does with them. Once it has read them, it moves them to Deleted
+Items. **Copy diagnostic details** copies a description of a message's
+protection to your clipboard; nothing is sent.
 
 Pictures and other content from the internet in messages are blocked unless
 you allow them, because loading them can tell senders when and where you

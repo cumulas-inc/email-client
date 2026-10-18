@@ -89,12 +89,20 @@ export function useHeight(ref: RefObject<HTMLElement | null>, enabled: boolean):
   return height;
 }
 
-/** A string preference persisted in localStorage. */
+/**
+ * A string preference persisted in localStorage. A stored value that isn't
+ * one of `allowed` (written by another version, or by hand) reads as
+ * `fallback`.
+ */
 export function usePersistentString<T extends string>(
   key: string,
   fallback: T,
+  allowed: readonly T[],
 ): [T, (value: T) => void] {
-  const [value, setValue] = useState<T>(() => (readStorage(key) as T | null) ?? fallback);
+  const [value, setValue] = useState<T>(() => {
+    const stored = readStorage(key);
+    return allowed.find((v) => v === stored) ?? fallback;
+  });
   const update = useCallback(
     (v: T) => {
       writeStorage(key, v);

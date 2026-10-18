@@ -7,6 +7,7 @@ import type {
   BackgroundState,
   Calendar,
   CalendarEvent,
+  CheckItem,
   ComposeSignature,
   Contact,
   ContactDraft,
@@ -19,14 +20,16 @@ import type {
   Message,
   MessagePage,
   MessageQuery,
-  MessageSummary,
   Navigate,
   NewImapAccount,
   OutgoingMessage,
   PermissionRequest,
+  ProtectionSetup,
   PushStatus,
   RemindersChangedEvent,
   ReplyKind,
+  SearchHit,
+  SearchOptions,
   ServerSearchResult,
   Settings,
   SnoozeFor,
@@ -134,25 +137,33 @@ export interface Backend {
   listMessages(folderId: string, query: MessageQuery): Promise<MessagePage>;
   /**
    * Local search, instant: messages on this device matching `text` (word
-   * prefixes; from:, to:, cc:, subject:, body:, has:attachment), plus
-   * `includeIds` (ids server searches found). Newest first.
+   * prefixes; from:, to:, cc:, subject:, body:, has:attachment, is:unread,
+   * is:read, is:flagged, in:, account:, received:, after:, before:), plus
+   * `includeIds` (ids server searches found), each if it passes the text's
+   * filters. Best first, unless `options.sort` is "newest" or the text has
+   * no words to rank by (only from:, to:, cc: or filters): then newest
+   * first. A hit whose body matched carries a snippet of it.
    */
   searchMessages(
     text: string,
     accountId?: string,
     includeIds?: string[],
-  ): Promise<MessageSummary[]>;
+    options?: SearchOptions,
+  ): Promise<SearchHit[]>;
   /**
-   * Searches one account's whole mailbox on its server (first page, or the next
-   * with `more`) and stores what it finds. A new `searchId` cancels the previous
-   * search; its pending calls resolve with status "cancelled". Never rejects for
-   * the server: status "failed" carries the error.
+   * Searches one account's whole mailbox on its server (the first pages, or
+   * the next with `more`) and stores what it finds that passes the text's
+   * filters. The server can't say every filter, so a call may read several
+   * pages to find enough messages that pass. A new `searchId` cancels the
+   * previous search; its pending calls resolve with status "cancelled".
+   * Never rejects for the server: status "failed" carries the error.
    */
   searchServer(
     searchId: string,
     text: string,
     accountId: string,
     more?: boolean,
+    options?: SearchOptions,
   ): Promise<ServerSearchResult>;
   /** Cancels the search if it is the current one. */
   cancelServerSearch(searchId: string): Promise<void>;
@@ -164,10 +175,30 @@ export interface Backend {
   /** Moves to Deleted Items, or deletes permanently when already there. */
   deleteMessages(messageIds: string[]): Promise<void>;
   sendMessage(message: OutgoingMessage): Promise<void>;
+  /**
+   * Addresses to offer for `text` (whose name or address contains it); for
+   * empty text, the people who wrote most in the last 90 days (up to 8).
+   */
   suggestAddresses(text: string): Promise<EmailAddress[]>;
   /** Resolves to the saved path, or null if the user canceled. */
   saveAttachment(messageId: string, attachmentId: string): Promise<string | null>;
   openAttachment(messageId: string, attachmentId: string): Promise<void>;
+
+  // Protection and sensitivity labels
+  /** What the account can send protected: its checks and sensitivity labels, from this device. Changes arrive as data-changed "protection". */
+  getProtectionSetup(accountId: string): Promise<ProtectionSetup>;
+  /** Lists the account's sensitivity labels from Microsoft 365 now. Rejects with permissionRequired without the permission, unsupported for IMAP and personal accounts. */
+  refreshSensitivityLabels(accountId: string): Promise<ProtectionSetup>;
+  /** Sends the account a control and a test message for each item (at most 19), and starts waiting for them (setup.checking). Rejects with invalidInput while a check is waiting. */
+  checkProtection(accountId: string, items: CheckItem[]): Promise<ProtectionSetup>;
+  /** Looks for the waiting messages; call every 10 seconds while setup.checking. */
+  refreshProtectionCheck(accountId: string): Promise<ProtectionSetup>;
+  /** Opens the item's arrived test message in Outlook on the web (check.testMessage). */
+  openProtectionCheckMessage(accountId: string, item: CheckItem): Promise<void>;
+  /** Opens the message in Outlook on the web (its link is fetched now). Rejects with unsupported for IMAP accounts. */
+  openInOutlook(messageId: string): Promise<void>;
+  /** What the app knows of a message's protection and label, for a bug report: never its content. */
+  getMessageDiagnostics(messageId: string): Promise<string>;
 
   // Signatures
   /** The account's own signature and what its organization last said about its own. */

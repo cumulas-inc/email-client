@@ -1,5 +1,5 @@
-//! Microsoft Graph provider (mail, calendar, contacts, Microsoft To Do, and
-//! the change subscriptions push relies on).
+//! Microsoft Graph provider (mail, calendar, contacts, Microsoft To Do,
+//! sensitivity labels, and the change subscriptions push relies on).
 //!
 //! All requests go through [`client::GraphClient`], which adds the bearer
 //! token, retries throttled requests, follows paging links and maps Graph
@@ -10,6 +10,7 @@
 mod calendar;
 mod client;
 mod contacts;
+mod labels;
 mod mail;
 mod subscriptions;
 mod tasks;
@@ -20,17 +21,24 @@ mod windows_zones;
 mod tests;
 
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Deserialize;
 use tokio::sync::OnceCell;
 
 use crate::auth::TokenSource;
 use crate::error::Error;
+use crate::model::EmailAddress;
 use client::GraphClient;
 
 /// Microsoft Graph v1.0 endpoint of the public cloud.
 pub const GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";
+
+/// How long reading a message may wait for its named properties (the batch
+/// next to its detail GET) before it's shown without them.
+const PROPERTY_BUDGET: Duration = Duration::from_secs(5);
 
 /// The computer's time zone as a Windows name (`W. Europe Standard Time`),
 /// for when the mailbox's can't be read; `UTC` when it isn't known. `TZ`
@@ -70,8 +78,15 @@ pub struct GraphProvider {
     /// moved message's `parentFolderId` that isn't one of them is looked up
     /// in case it names one of them another way.
     folder_ids: Mutex<HashSet<String>>,
+    /// The mailbox's own address, read once.
+    own_address: OnceCell<Option<EmailAddress>>,
+    /// See [`PROPERTY_BUDGET`] (tests set another).
+    property_budget: Duration,
     /// The computer's time zone (tests set another).
     computer_time_zone: fn() -> String,
+    /// The mailbox refused KQL dates once: from then on they're left to the
+    /// device.
+    kql_dates_refused: AtomicBool,
 }
 
 impl GraphProvider {
@@ -91,7 +106,10 @@ impl GraphProvider {
             client: GraphClient::new(base_url.into(), tokens),
             time_zone: OnceCell::new(),
             folder_ids: Mutex::default(),
+            own_address: OnceCell::new(),
+            property_budget: PROPERTY_BUDGET,
             computer_time_zone,
+            kql_dates_refused: AtomicBool::new(false),
         }
     }
 

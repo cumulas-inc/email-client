@@ -32,18 +32,21 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Utc;
 use cumulas_core::model::{
     Account, DataKind, EmailAddress, Folder, FolderRole, ImapSettings, Importance, MessageSummary,
-    NewImapAccount, OutgoingAttachment, OutgoingMessage, ServerSearchStatus, SyncStatus, TlsMode,
+    NewImapAccount, OutgoingAttachment, OutgoingMessage, SearchOptions, SearchSort,
+    ServerSearchStatus, SyncStatus, TlsMode,
 };
 use cumulas_core::providers::imap::{
     self, IdleConfig, ImapCredentials, ImapIdleWatcher, ImapProvider,
 };
-use cumulas_core::providers::{MailProvider, MessageBatch, MessageLocator, SyncWindow};
+use cumulas_core::providers::{
+    MailProvider, MessageBatch, MessageLocator, SearchPage, ServerQuery, SyncWindow,
+};
 use cumulas_core::push::backoff::Backoff;
 use cumulas_core::push::supervisor::Supervisor;
 use cumulas_core::push::{
     EndReason, MailWatcher, PushEvent, PushHealth, PushMode, PushStatus, WatchSignal, WatchSink,
 };
-use cumulas_core::search::SearchQuery;
+use cumulas_core::search::{SearchQuery, dates};
 use cumulas_core::secrets::MemorySecretStore;
 use cumulas_core::service::{EventSink, LiveConnector, MailAlert};
 use cumulas_core::store::Store;
@@ -244,6 +247,8 @@ async fn imap_provider_end_to_end() {
                 importance: Some(Importance::High),
                 reply_to_message_id: None,
                 reply_kind: None,
+                protect: None,
+                label_id: None,
             },
             None,
         )
@@ -784,7 +789,11 @@ async fn imap_server_search() {
         let text = text.to_owned();
         async move {
             provider
-                .search(&query, folders, cursor.as_deref(), limit)
+                .search(
+                    &ServerQuery::whole_mailbox(&query, folders),
+                    cursor.as_deref(),
+                    limit,
+                )
                 .await
                 .unwrap_or_else(|e| panic!("searching {text:?}: {e}"))
         }
@@ -850,6 +859,119 @@ async fn imap_server_search() {
     assert_eq!(second.next, None);
 }
 
+/// The first page of a search for `text`, its dates in UTC, in `scope` or
+/// the whole mailbox.
+async fn search_filtered(
+    provider: &ImapProvider,
+    folders: &[Folder],
+    text: &str,
+    scope: Option<&[Folder]>,
+) -> SearchPage {
+    let query = SearchQuery::parse(text);
+    let received = dates::resolve(&query.dates, Utc::now(), &Utc, 0);
+    let search = ServerQuery {
+        received,
+        scope,
+        ..ServerQuery::whole_mailbox(&query, folders)
+    };
+    provider
+        .search(&search, None, 50)
+        .await
+        .unwrap_or_else(|e| panic!("searching {text:?}: {e}"))
+}
+
+fn sorted(mut subjects: Vec<&str>) -> Vec<&str> {
+    subjects.sort_unstable();
+    subjects
+}
+
+/// Filters reach the server: flags as `FLAGGED` and `UNSEEN`, dates as
+/// `SINCE` and `BEFORE`, and folders by looking in those alone.
+#[tokio::test]
+async fn imap_server_search_filters() {
+    let Some(config) = Config::from_env() else {
+        return;
+    };
+    let credentials = config.fresh_mailbox().await;
+    let folders = searchable_mailbox(&config, &credentials).await;
+    let archive = folders
+        .iter()
+        .find(|f| f.remote_id == "Archive")
+        .unwrap()
+        .clone();
+    let provider = ImapProvider::new("acct", credentials.clone());
+    let search = |text: &'static str| search_filtered(&provider, &folders, text, None);
+
+    assert!(search("is:flagged").await.messages.is_empty());
+    // Flagged by another client.
+    let old = search("subject:\"old zebracorn\"").await.messages[0].clone();
+    let mut other = config.other_device(&credentials).await;
+    other.select("INBOX").await.expect("select");
+    other
+        .run_command_and_check_ok(format!(
+            "UID STORE {} +FLAGS.SILENT (\\Flagged)",
+            uid_of(&old)
+        ))
+        .await
+        .expect("flag");
+    let _ = other.logout().await;
+    assert_eq!(
+        subjects(&search("is:flagged").await),
+        ["An old zebracorn invoice"]
+    );
+    assert_eq!(
+        subjects(&search("zebracorn is:flagged").await),
+        ["An old zebracorn invoice"]
+    );
+    // The day it arrived on.
+    let day = old.received_at.date_naive().format("%Y-%m-%d").to_string();
+    let page = search_filtered(&provider, &folders, &format!("received:{day}"), None).await;
+    assert_eq!(subjects(&page), ["An old zebracorn invoice"]);
+    let page = search_filtered(
+        &provider,
+        &folders,
+        &format!("zebracorn received:{day}.."),
+        None,
+    )
+    .await;
+    assert_eq!(
+        subjects(&page),
+        ["Archived zebracorn notes", "An old zebracorn invoice"]
+    );
+    // The server's days reach further than the device's, which checks
+    // what it finds.
+    let before = format!("zebracorn before:{day}");
+    let page = search_filtered(&provider, &folders, &before, None).await;
+    let query = SearchQuery::parse(&before);
+    let received = dates::resolve(&query.dates, Utc::now(), &Utc, 0);
+    assert!(
+        page.messages
+            .iter()
+            .all(|m| !query.admits(m, &received, None))
+    );
+    // In one folder only.
+    let scoped = search_filtered(
+        &provider,
+        &folders,
+        "zebracorn in:archive",
+        Some(std::slice::from_ref(&archive)),
+    )
+    .await;
+    assert_eq!(subjects(&scoped), ["Archived zebracorn notes"]);
+    // Unread mail, nothing else: all of it, here.
+    assert_eq!(
+        sorted(subjects(&search("is:unread").await)),
+        [
+            "An old zebracorn invoice",
+            "Archived zebracorn notes",
+            "Budget",
+            "Café über alles",
+            "Welcome"
+        ]
+    );
+    assert!(search("is:read").await.messages.is_empty());
+}
+
 #[tokio::test]
 async fn core_server_search_end_to_end() {
     let Some(config) = Config::from_env() else {
@@ -876,15 +998,28 @@ async fn core_server_search_end_to_end() {
         .expect("add the account");
     service.sync_account(&account.id).await.expect("sync");
     let local = |include: &[String]| -> Vec<MessageSummary> {
+        let newest = SearchOptions {
+            sort: SearchSort::Newest,
+            ..SearchOptions::default()
+        };
         service
-            .search_messages("zebracorn", None, include)
+            .search_messages("zebracorn", None, include, newest)
             .expect("local search")
+            .into_iter()
+            .map(|hit| hit.summary)
+            .collect()
     };
     // Both are older than the sync window.
     assert!(local(&[]).is_empty());
 
     let found = service
-        .search_server("e2e", "zebracorn", &account.id, false)
+        .search_server(
+            "e2e",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .expect("server search");
     assert_eq!(found.status, ServerSearchStatus::Done, "{:?}", found.error);
@@ -979,7 +1114,13 @@ async fn core_server_search_end_to_end() {
         .expect("delete");
     assert!(local(&[]).iter().all(|m| m.folder_id != inbox.id));
     let again = service
-        .search_server("e2e-again", "zebracorn", &account.id, false)
+        .search_server(
+            "e2e-again",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .expect("server search");
     assert_eq!(again.status, ServerSearchStatus::Done);
@@ -1023,7 +1164,13 @@ async fn new_mail_found_by_a_search_before_the_sync() {
     let mut found = None;
     for _ in 0..40 {
         let result = service
-            .search_server("fresh", "zebracorn", &account.id, false)
+            .search_server(
+                "fresh",
+                "zebracorn",
+                &account.id,
+                false,
+                SearchOptions::default(),
+            )
             .await
             .expect("server search");
         if result.message_ids.len() == 2 {

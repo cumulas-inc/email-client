@@ -19,7 +19,8 @@ use crate::model::{
 use crate::providers::graph::GraphProvider;
 use crate::providers::imap::{self, IdleConfig, ImapCredentials, ImapIdleWatcher, ImapProvider};
 use crate::providers::{
-    CalendarProvider, ChangeSubscriptions, ContactsProvider, MailProvider, TasksProvider,
+    CalendarProvider, ChangeSubscriptions, ContactsProvider, LabelsProvider, MailProvider,
+    TasksProvider,
 };
 use crate::push::MailWatcher;
 use crate::push::graph::RelaySource;
@@ -28,7 +29,9 @@ use crate::push::supervisor::{MICROSOFT_POLL, UNSUPPORTED_POLL};
 use crate::secrets::{SecretStore, keys};
 use crate::signatures::client::SignatureClient;
 use crate::signatures::config::{NO_CLIENT_ID, SIGNATURE_CLIENT_ID_VAR, SignatureService, is_guid};
-use crate::signatures::{HttpOrganizationSignatures, OrganizationSignatures};
+use crate::signatures::{
+    HttpOrganizationSignatures, OrganizationSignatures, is_organization_tenant,
+};
 use crate::store::Store;
 
 /// The Application (client) ID of Cumulas Mail's published Microsoft Entra
@@ -93,14 +96,17 @@ pub struct ProviderSet {
     pub tasks: Option<Arc<dyn TasksProvider>>,
     /// Graph change subscriptions, for the push service (Microsoft only).
     pub subscriptions: Option<Arc<dyn ChangeSubscriptions>>,
+    /// Sensitivity labels (Microsoft 365 work and school accounts only).
+    pub labels: Option<Arc<dyn LabelsProvider>>,
 }
 
 impl ProviderSet {
     /// The providers `account` may use now. A Microsoft account's calendar,
-    /// contacts or tasks it lacks the permission for, or that Microsoft 365
-    /// refused, answer every call with `PermissionRequired`: never `None`,
-    /// which would keep them in the local store as for IMAP accounts. The
-    /// refused features in `retrying` are let through, to try them again.
+    /// contacts, tasks or sensitivity labels it lacks the permission for, or
+    /// that Microsoft 365 refused, answer every call with
+    /// `PermissionRequired`: never `None`, which would keep them in the local
+    /// store as for IMAP accounts. The refused features in `retrying` are let
+    /// through, to try them again.
     pub(crate) fn gated(&self, account: &Account, retrying: &[AccountFeature]) -> ProviderSet {
         let mut set = self.clone();
         if account.kind != AccountKind::Microsoft {
@@ -123,6 +129,11 @@ impl ProviderSet {
                 AccountFeature::Calendar => set.calendar = Some(stub()),
                 AccountFeature::Contacts => set.contacts = Some(stub()),
                 AccountFeature::Tasks => set.tasks = Some(stub()),
+                // Only for the accounts that can have them.
+                AccountFeature::SensitivityLabels if set.labels.is_some() => {
+                    set.labels = Some(stub())
+                }
+                AccountFeature::SensitivityLabels => {}
                 // Only the time zone of all-day events and due dates
                 // depends on it, and Graph falls back to the computer's.
                 AccountFeature::MailboxSettings => {}
@@ -309,12 +320,15 @@ impl Connector for LiveConnector {
                     }),
                 ));
                 let graph = Arc::new(GraphProvider::new(account.id.clone(), tokens));
+                let labels: Option<Arc<dyn LabelsProvider>> =
+                    is_organization_tenant(&settings.tenant_id).then(|| graph.clone() as _);
                 Ok(ProviderSet {
                     mail: graph.clone(),
                     calendar: Some(graph.clone()),
                     contacts: Some(graph.clone()),
                     tasks: Some(graph.clone()),
                     subscriptions: Some(graph),
+                    labels,
                 })
             }
             AccountSettings::Imap(settings) => {
@@ -325,6 +339,7 @@ impl Connector for LiveConnector {
                     contacts: None,
                     tasks: None,
                     subscriptions: None,
+                    labels: None,
                 })
             }
         }

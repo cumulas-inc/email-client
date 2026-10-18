@@ -80,9 +80,15 @@ const LAUNCH_CHECKLIST = "Atlas launch checklist — final review today";
 // Each scene runs on a fresh page, once per theme, and calls `shot(name)` for
 // each of its `shots`, in order; the file is `<name>-<theme>.png`.
 
+// The compose scenes write from the work account as most people see it, with
+// sensitivity labels never turned on: the demo's account has them on, and
+// its organization requires a label, which the composer would point out.
+const LABELS_OFF = "?missing=sensitivityLabels";
+
 const scenes = [
   {
     shots: ["mail", "mail-compose"],
+    query: LABELS_OFF,
     async run(page, shot) {
       await openMessage(page, LAUNCH_CHECKLIST);
       await shot("mail");
@@ -108,6 +114,7 @@ const scenes = [
   },
   {
     shots: ["compose-signature"],
+    query: LABELS_OFF,
     async run(page, shot) {
       // A new message from the work account, which Acme signs with Cumulas Signatures.
       await page.getByRole("button", { name: "New message", exact: true }).first().click();
@@ -137,7 +144,12 @@ const scenes = [
     themes: ["light"],
     async run(page, shot) {
       await page.locator("#global-search").fill("atlas");
+      // The box's suggestions close with the keyboard elsewhere; the
+      // filters above the results stay, and the rows mark the word.
+      await page.locator("#global-search").blur();
       await page.getByRole("listbox", { name: "Search results" }).waitFor();
+      await page.getByRole("group", { name: "Search filters" }).waitFor();
+      await page.locator(".mail-row mark.search-hit").first().waitFor();
       // Once the servers have answered too: the list announces the count
       // only then.
       await page

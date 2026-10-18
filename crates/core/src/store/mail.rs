@@ -1,9 +1,11 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
-use rusqlite::{OptionalExtension, Row, Transaction, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use super::{Store, from_json, from_ts, like_pattern, to_json, ts};
@@ -11,10 +13,15 @@ use crate::error::{Error, Result};
 use crate::html::html_to_text;
 use crate::model::{
     AttachmentMeta, EmailAddress, EntityKind, Folder, FolderRole, Importance, MessagePage,
-    MessageQuery, MessageSummary, local_id,
+    MessageQuery, MessageSummary, SearchHit, SearchSort, TextRun, local_id,
 };
-use crate::providers::{MessageBatch, MessageContent};
-use crate::search::{SearchQuery, fts};
+use crate::providers::{MessageBatch, MessageContent, MessageSignals};
+use crate::search::dates::Received;
+use crate::search::fts::{self, FieldShare};
+use crate::search::rank::{
+    self, Candidate, MAX_RANKED_CANDIDATES, MAX_SNIPPETS, OTHER_FIELD_SHARE,
+};
+use crate::search::{SearchQuery, is_mark};
 
 const FOLDER_COLUMNS: &str =
     "id, account_id, remote_id, parent_id, name, role, unread_count, total_count";
@@ -133,15 +140,30 @@ impl BatchOutcome {
     }
 }
 
+/// The version of what a message's cached content holds. Content cached by
+/// an older version lacks something this one reads (the signals of
+/// protected mail, for 1), so it's fetched again when opened.
+const CONTENT_VERSION: u32 = 1;
+/// Fetches in a row that couldn't read a Graph message's named properties
+/// before its content is kept as it is: a tenant that always refuses them
+/// mustn't make every open fetch the message again.
+pub(crate) const MAX_PROPERTY_ATTEMPTS: u8 = 3;
+
 /// Header fields that are only known once the full message has been fetched.
+/// Fields a version added read as their defaults from content an older one
+/// kept.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct StoredContent {
+    /// 0 for content from before versions, or kept to be fetched again.
+    version: u32,
     bcc: Vec<EmailAddress>,
     reply_to: Vec<EmailAddress>,
     attachments: Vec<AttachmentMeta>,
     internet_message_id: Option<String>,
     in_reply_to: Option<String>,
     references: Vec<String>,
+    signals: MessageSignals,
 }
 
 fn row_to_folder(row: &Row<'_>) -> rusqlite::Result<Folder> {
@@ -246,6 +268,13 @@ fn index_message(
             .optional()?,
     };
     let body = body.or(kept.as_deref()).unwrap_or(&m.preview);
+    // The marks snippets are cut with (see `SNIPPET_SQL`) never come from
+    // mail, which could fake a match with them.
+    let body = if body.contains([HIT_START, HIT_END]) {
+        Cow::Owned(body.replace([HIT_START, HIT_END], ""))
+    } else {
+        Cow::Borrowed(body)
+    };
     tx.execute(DELETE_FTS_ROW, [rowid])?;
     tx.execute(DELETE_INFIX_ROW, [rowid])?;
     let sender = m
@@ -482,28 +511,282 @@ fn summary_columns_of_m() -> String {
         .join(", ")
 }
 
-/// The local search: `conditions` from [`fts::plan`] (their parameters
-/// first), then the account (or NULL) and the limit.
-fn search_sql(conditions: &[String]) -> String {
-    let params: usize = conditions.iter().map(|c| c.matches('?').count()).sum();
+/// What [`Store::search`] looks for, and how.
+#[derive(Debug, Clone, Copy)]
+pub struct LocalSearch<'a> {
+    pub query: &'a SearchQuery,
+    pub received: Received,
+    /// Local account ids to look in; None: all. Some(empty) finds nothing.
+    pub accounts: Option<&'a [String]>,
+    /// Local folder ids to look in; None: all. Some(empty) finds nothing.
+    pub folders: Option<&'a [String]>,
+    /// Server hits (filters apply, words don't); never cut by `limit`.
+    pub include_ids: &'a [String],
+    pub limit: u32,
+    pub sort: SearchSort,
+    pub now: DateTime<Utc>,
+}
+
+impl<'a> LocalSearch<'a> {
+    /// Any time, every account and folder, no server hits, at most 200,
+    /// best first, now.
+    pub fn new(query: &'a SearchQuery) -> Self {
+        Self {
+            query,
+            received: Received::default(),
+            accounts: None,
+            folders: None,
+            include_ids: &[],
+            limit: 200,
+            sort: SearchSort::Relevance,
+            now: Utc::now(),
+        }
+    }
+}
+
+/// Where FTS5's `snippet()` starts and ends a match (private-use code
+/// points, which `index_message` keeps out of the index).
+const HIT_START: char = '\u{E000}';
+const HIT_END: char = '\u{E001}';
+
+// Every statement on `messages_fts` that limits rowids writes
+// `+rowid IN (…)`: the unary `+` keeps the set away from FTS5's planner, so
+// the MATCH runs once and the set filters its rows. As `rowid IN (…)`,
+// FTS5 would run the MATCH (prefixes and bm25 statistics included) again
+// for every rowid: 4 s for 200 of 5,000 rows, against 19 ms. A test checks
+// the plans.
+
+/// bm25 of the candidates (`?2`, a JSON array of rowids) that match the
+/// rank expression (`?1`), with the columns weighted by `fts::BM25_WEIGHTS`.
+static SCORE_SQL: LazyLock<String> = LazyLock::new(|| {
+    let weights: Vec<String> = fts::BM25_WEIGHTS
+        .iter()
+        .map(|w| format!("{w:.1}"))
+        .collect();
     format!(
-        "SELECT {} FROM messages m
-         WHERE {} AND (?{account} IS NULL OR m.account_id = ?{account})
-         ORDER BY m.received_at DESC, m.id LIMIT ?{limit}",
-        summary_columns_of_m(),
-        conditions.join(" AND "),
-        account = params + 1,
-        limit = params + 2,
+        "SELECT rowid, bm25(messages_fts, {}) FROM messages_fts \
+         WHERE messages_fts MATCH ?1 AND +rowid IN (SELECT value FROM json_each(?2))",
+        weights.join(", ")
+    )
+});
+/// Which rows (`?2`) a field-share probe (`?1`) matches.
+const FIELD_SQL: &str = "SELECT rowid FROM messages_fts \
+     WHERE messages_fts MATCH ?1 AND +rowid IN (SELECT value FROM json_each(?2))";
+/// The body's words around what the rank expression (`?3`) matched there,
+/// for rows `?4`, matches between `?1` and `?2`.
+const SNIPPET_SQL: &str = "SELECT rowid, snippet(messages_fts, 4, ?1, ?2, '…', 20) \
+     FROM messages_fts WHERE messages_fts MATCH ?3 AND +rowid IN (SELECT value FROM json_each(?4))";
+
+/// `conditions` joined with AND; true without any.
+fn all_of<S: AsRef<str>>(conditions: &[S]) -> String {
+    if conditions.is_empty() {
+        return "1".to_owned();
+    }
+    conditions
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+/// The newest messages that pass `conditions` (their parameters first),
+/// then the limit.
+fn candidates_sql<S: AsRef<str>>(conditions: &[S]) -> String {
+    format!(
+        "SELECT m.id, m.fts_rowid, m.received_at FROM messages m
+         WHERE {} ORDER BY m.received_at DESC, m.id LIMIT ?",
+        all_of(conditions)
     )
 }
 
-/// The messages a JSON array of ids names, of the account (or any, NULL).
-fn include_sql() -> String {
+/// The messages a JSON array of ids names that pass `filters` (their
+/// parameters after the array).
+fn included_sql<S: AsRef<str>>(filters: &[S]) -> String {
+    let mut conditions = vec!["m.id IN (SELECT value FROM json_each(?))".to_owned()];
+    conditions.extend(filters.iter().map(|f| f.as_ref().to_owned()));
     format!(
-        "SELECT {} FROM messages m
-         WHERE m.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR m.account_id = ?2)",
+        "SELECT m.id, m.fts_rowid, m.received_at FROM messages m WHERE {}",
+        all_of(&conditions)
+    )
+}
+
+/// `SUMMARY_COLUMNS` of the messages a JSON array of ids names.
+fn summaries_sql() -> String {
+    format!(
+        "SELECT {} FROM messages m WHERE m.id IN (SELECT value FROM json_each(?1))",
         summary_columns_of_m()
     )
+}
+
+/// A snippet as runs of text: what lies between [`HIT_START`] and
+/// [`HIT_END`] is a hit, and takes the combining marks that follow it (the
+/// index's words end before a trailing vowel sign, as in "[हिन्द]ी").
+/// Stray marks are dropped, whitespace runs become one space, and runs of a
+/// kind are merged. `None` without a hit.
+fn snippet_runs(raw: &str) -> Option<Vec<TextRun>> {
+    let mut runs: Vec<TextRun> = vec![TextRun {
+        text: String::new(),
+        hit: false,
+    }];
+    let mut space = false;
+    for c in raw.chars() {
+        let len = runs.len();
+        let in_hit = runs[len - 1].hit;
+        match c {
+            // One that opens a hit inside one, or closes one outside any,
+            // is stray.
+            HIT_START | HIT_END => {
+                if (c == HIT_START) != in_hit {
+                    runs.push(TextRun {
+                        text: String::new(),
+                        hit: !in_hit,
+                    });
+                }
+            }
+            // Marks right after a hit are part of its word.
+            _ if len > 1 && !in_hit && runs[len - 1].text.is_empty() && is_mark(c) => {
+                runs[len - 2].text.push(c);
+                space = false;
+            }
+            _ if c.is_whitespace() => {
+                if !space {
+                    runs[len - 1].text.push(' ');
+                }
+                space = true;
+            }
+            _ => {
+                runs[len - 1].text.push(c);
+                space = false;
+            }
+        }
+    }
+    let mut merged: Vec<TextRun> = Vec::with_capacity(runs.len());
+    for run in runs.into_iter().filter(|r| !r.text.is_empty()) {
+        match merged.last_mut() {
+            Some(last) if last.hit == run.hit => last.text.push_str(&run.text),
+            _ => merged.push(run),
+        }
+    }
+    merged.iter().any(|r| r.hit).then_some(merged)
+}
+
+/// How long each step of a local search took.
+type Timings = Vec<(&'static str, Duration)>;
+
+/// Notes when each step of a local search ends.
+struct Steps {
+    at: Instant,
+    took: Timings,
+}
+
+impl Steps {
+    fn new() -> Self {
+        Self {
+            at: Instant::now(),
+            took: Vec::new(),
+        }
+    }
+
+    fn done(&mut self, step: &'static str) {
+        let now = Instant::now();
+        self.took.push((step, now - self.at));
+        self.at = now;
+    }
+}
+
+/// Candidates of a local search, by `sql` with `values`.
+fn query_candidates(
+    conn: &Connection,
+    sql: &str,
+    values: Vec<Value>,
+    from_server: bool,
+) -> rusqlite::Result<Vec<Candidate>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params_from_iter(values), |r| {
+        Ok(Candidate {
+            id: r.get(0)?,
+            fts_rowid: r.get(1)?,
+            received_at: r.get(2)?,
+            bm25: None,
+            field: 0.0,
+            from_server,
+            matched_locally: !from_server,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Rows of `messages_fts` that `sql` (with a MATCH expression and a JSON
+/// array of rowids) returns, each with its second column.
+fn query_rows<T: rusqlite::types::FromSql>(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<Vec<(i64, T)>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// Gives the candidates that match the rank expression their bm25 and their
+/// field share (see `search/rank.rs`): one statement for bm25, and one
+/// probe of the subject and sender per plain term.
+fn score_candidates(
+    conn: &Connection,
+    query: &SearchQuery,
+    expression: &str,
+    candidates: &mut [Candidate],
+    steps: &mut Steps,
+) -> rusqlite::Result<()> {
+    let rowids: Vec<i64> = candidates.iter().filter_map(|c| c.fts_rowid).collect();
+    // Each statement runs its MATCH over the whole index before keeping to
+    // the rows asked for: none asked for is none to run.
+    if rowids.is_empty() {
+        return Ok(());
+    }
+    let bm25: HashMap<i64, f64> =
+        query_rows(conn, &SCORE_SQL, params![expression, to_json(&rowids)])?
+            .into_iter()
+            .collect();
+    steps.done("bm25");
+    let scored: Vec<i64> = bm25.keys().copied().collect();
+    let mut shares: Vec<(FieldShare, HashSet<i64>)> = Vec::new();
+    for share in fts::field_shares(query) {
+        let found = match &share {
+            FieldShare::Probe(_) if scored.is_empty() => HashSet::new(),
+            FieldShare::Probe(probe) => conn
+                .prepare(FIELD_SQL)?
+                .query_map(params![probe, to_json(&scored)], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?,
+            FieldShare::Subject | FieldShare::Elsewhere => HashSet::new(),
+        };
+        shares.push((share, found));
+    }
+    for c in candidates {
+        let Some(rowid) = c.fts_rowid else {
+            continue;
+        };
+        let Some(&score) = bm25.get(&rowid) else {
+            continue;
+        };
+        c.bm25 = Some(score);
+        let total: f64 = shares
+            .iter()
+            .map(|(share, found)| match share {
+                FieldShare::Subject => 1.0,
+                FieldShare::Elsewhere => OTHER_FIELD_SHARE,
+                FieldShare::Probe(_) if found.contains(&rowid) => 1.0,
+                FieldShare::Probe(_) => OTHER_FIELD_SHARE,
+            })
+            .sum();
+        c.field = if shares.is_empty() {
+            1.0
+        } else {
+            total / shares.len() as f64
+        };
+    }
+    steps.done("fields");
+    Ok(())
 }
 
 impl Store {
@@ -789,40 +1072,147 @@ impl Store {
         Ok(MessagePage { items, total })
     }
 
-    /// Messages matching `query` (at most `limit`, newest first), and the
-    /// messages `include_ids` names (server search found them; never cut by
-    /// `limit`), each once, newest first. Ids no longer stored drop out.
-    pub fn search_messages(
-        &self,
-        query: &SearchQuery,
-        account_id: Option<&str>,
-        include_ids: &[String],
-        limit: u32,
-    ) -> Result<Vec<MessageSummary>> {
+    /// Messages matching the search's query (at most `limit`), and the
+    /// messages `include_ids` names (server search found them; never cut
+    /// by `limit`), each once, if they pass its filters (attachments, read,
+    /// flagged, dates, folders and accounts). Ids no longer stored drop
+    /// out.
+    ///
+    /// With [`SearchSort::Relevance`] and words to rank by
+    /// ([`fts::ranks`]), best first (see `search/rank.rs`), from the 5,000
+    /// newest matches; otherwise newest first. Rows whose text matched the
+    /// words come with a snippet of it (the first 100).
+    pub fn search(&self, search: &LocalSearch<'_>) -> Result<Vec<SearchHit>> {
+        Ok(self.search_timed(search)?.0)
+    }
+
+    /// [`Store::search`], and how long its steps took.
+    fn search_timed(&self, search: &LocalSearch<'_>) -> Result<(Vec<SearchHit>, Timings)> {
+        let mut steps = Steps::new();
+        let query = search.query;
         let plan = fts::plan(query);
-        let conn = self.conn();
-        let mut found: Vec<MessageSummary> = Vec::new();
-        if !plan.conditions.is_empty() {
-            let mut values: Vec<Value> = plan.params.into_iter().map(Value::from).collect();
-            values.push(account_id.map(str::to_owned).into());
-            values.push(limit.into());
-            let mut stmt = conn.prepare(&search_sql(&plan.conditions))?;
-            let rows = stmt.query_map(params_from_iter(values), row_to_summary)?;
-            found = rows.collect::<rusqlite::Result<_>>()?;
+        let mut filters = plan.filters;
+        let mut filter_values: Vec<Value> = Vec::new();
+        if let Some(since) = search.received.since {
+            filters.push("m.received_at >= ?".to_owned());
+            filter_values.push(ts(&since).into());
         }
-        if !include_ids.is_empty() {
-            let mut stmt = conn.prepare(&include_sql())?;
-            let rows = stmt.query_map(params![to_json(include_ids), account_id], row_to_summary)?;
-            let mut seen: HashSet<String> = found.iter().map(|m| m.id.clone()).collect();
-            for row in rows {
-                let m = row?;
-                if seen.insert(m.id.clone()) {
-                    found.push(m);
+        if let Some(before) = search.received.before {
+            filters.push("m.received_at < ?".to_owned());
+            filter_values.push(ts(&before).into());
+        }
+        for (column, ids) in [
+            ("m.folder_id", search.folders),
+            ("m.account_id", search.accounts),
+        ] {
+            if let Some(ids) = ids {
+                filters.push(format!("{column} IN (SELECT value FROM json_each(?))"));
+                filter_values.push(to_json(ids).into());
+            }
+        }
+        let none_left = search.received.is_impossible()
+            || search.folders.is_some_and(<[String]>::is_empty)
+            || search.accounts.is_some_and(<[String]>::is_empty);
+        if none_left {
+            return Ok((Vec::new(), steps.took));
+        }
+        let rank_expression = fts::rank_expression(query);
+        let ranked = search.sort == SearchSort::Relevance && rank_expression.is_some();
+
+        let conn = self.conn();
+        let mut all: Vec<Candidate> = Vec::new();
+        if !query.is_empty() {
+            let cap = if ranked {
+                MAX_RANKED_CANDIDATES
+            } else {
+                search.limit
+            };
+            let conditions: Vec<&String> = plan.conditions.iter().chain(&filters).collect();
+            let mut values: Vec<Value> = plan.params.into_iter().map(Value::from).collect();
+            values.extend(filter_values.iter().cloned());
+            values.push(cap.into());
+            all = query_candidates(&conn, &candidates_sql(&conditions), values, false)?;
+        }
+        steps.done("candidates");
+        if !search.include_ids.is_empty() {
+            let mut values = vec![Value::from(to_json(search.include_ids))];
+            values.extend(filter_values);
+            let found = query_candidates(&conn, &included_sql(&filters), values, true)?;
+            let at: HashMap<String, usize> = all
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.id.clone(), i))
+                .collect();
+            for c in found {
+                match at.get(&c.id) {
+                    // Kept past the limit; its words matched here all the same.
+                    Some(&i) => all[i].from_server = true,
+                    None => all.push(c),
                 }
             }
-            found.sort_by(|a, b| b.received_at.cmp(&a.received_at).then(a.id.cmp(&b.id)));
         }
-        Ok(found)
+        steps.done("included");
+        if all.is_empty() {
+            return Ok((Vec::new(), steps.took));
+        }
+
+        match rank_expression.as_deref().filter(|_| ranked) {
+            Some(expression) => {
+                score_candidates(&conn, query, expression, &mut all, &mut steps)?;
+                rank::order(&mut all, ts(&search.now));
+            }
+            None => all.sort_by(|a, b| b.received_at.cmp(&a.received_at).then(a.id.cmp(&b.id))),
+        }
+        // Server hits stay, wherever they rank; of the others, `limit`.
+        let mut others: u32 = 0;
+        all.retain(|c| {
+            if c.from_server {
+                return true;
+            }
+            others += 1;
+            others <= search.limit
+        });
+
+        let ids: Vec<&str> = all.iter().map(|c| c.id.as_str()).collect();
+        let mut summaries: HashMap<String, MessageSummary> = {
+            let mut stmt = conn.prepare(&summaries_sql())?;
+            stmt.query_map([to_json(&ids)], row_to_summary)?
+                .map(|m| m.map(|m| (m.id.clone(), m)))
+                .collect::<rusqlite::Result<_>>()?
+        };
+        steps.done("summaries");
+        let mut snippets: HashMap<i64, Vec<TextRun>> = HashMap::new();
+        let first: Vec<i64> = all
+            .iter()
+            .take(MAX_SNIPPETS)
+            .filter_map(|c| c.fts_rowid)
+            .collect();
+        if let Some(expression) = rank_expression.as_ref().filter(|_| !first.is_empty()) {
+            let raw: Vec<(i64, String)> = query_rows(
+                &conn,
+                SNIPPET_SQL,
+                params![
+                    HIT_START.to_string(),
+                    HIT_END.to_string(),
+                    expression,
+                    to_json(&first)
+                ],
+            )?;
+            snippets = raw
+                .into_iter()
+                .filter_map(|(rowid, raw)| Some((rowid, snippet_runs(&raw)?)))
+                .collect();
+        }
+        steps.done("snippets");
+        let hits = all
+            .into_iter()
+            .filter_map(|c| {
+                let summary = summaries.remove(&c.id)?;
+                let snippet = c.fts_rowid.and_then(|r| snippets.remove(&r));
+                Some(SearchHit { summary, snippet })
+            })
+            .collect();
+        Ok((hits, steps.took))
     }
 
     pub fn get_message_summary(&self, id: &str) -> Result<MessageSummary> {
@@ -843,6 +1233,14 @@ impl Store {
     /// Returns the cached content of a message, or `None` if the body has not
     /// been fetched yet.
     pub fn get_message_content(&self, id: &str) -> Result<Option<MessageContent>> {
+        Ok(self.cached_message_content(id)?.map(|(content, _)| content))
+    }
+
+    /// The cached content of a message, and whether it's outdated: kept by
+    /// an older version, or while its named properties couldn't be read
+    /// (see [`MAX_PROPERTY_ATTEMPTS`]), so that it should be fetched again.
+    /// `None` if the body has not been fetched yet.
+    pub fn cached_message_content(&self, id: &str) -> Result<Option<(MessageContent, bool)>> {
         let row: Option<(Option<String>, Option<String>, Option<String>)> = self
             .conn()
             .query_row(
@@ -858,7 +1256,8 @@ impl Store {
             return Ok(None);
         };
         let stored: StoredContent = from_json(&content_json);
-        Ok(Some(MessageContent {
+        let outdated = stored.version < CONTENT_VERSION;
+        let content = MessageContent {
             body_html,
             body_text,
             bcc: stored.bcc,
@@ -867,17 +1266,27 @@ impl Store {
             internet_message_id: stored.internet_message_id,
             in_reply_to: stored.in_reply_to,
             references: stored.references,
-        }))
+            signals: stored.signals,
+        };
+        Ok(Some((content, outdated)))
     }
 
+    /// Caches a message's content. Content whose named properties couldn't
+    /// be read is kept as outdated, to be fetched again, until that failed
+    /// [`MAX_PROPERTY_ATTEMPTS`] times in a row.
     pub fn save_message_content(&self, id: &str, content: &MessageContent) -> Result<()> {
+        let signals = &content.signals;
+        let retry =
+            signals.properties_unavailable && signals.properties_attempts < MAX_PROPERTY_ATTEMPTS;
         let stored = StoredContent {
+            version: if retry { 0 } else { CONTENT_VERSION },
             bcc: content.bcc.clone(),
             reply_to: content.reply_to.clone(),
             attachments: content.attachments.clone(),
             internet_message_id: content.internet_message_id.clone(),
             in_reply_to: content.in_reply_to.clone(),
             references: content.references.clone(),
+            signals: signals.clone(),
         };
         let mut conn = self.conn();
         let tx = conn.transaction()?;
@@ -1179,8 +1588,13 @@ impl Store {
     }
 
     /// Recipient autocomplete: contacts first, then people the user has
-    /// corresponded with, most frequent first.
+    /// corresponded with, most frequent first. Without text, the people
+    /// who wrote most in the last 90 days (the most recent first among
+    /// equals), not the accounts' own addresses.
     pub fn suggest_addresses(&self, text: &str, limit: u32) -> Result<Vec<EmailAddress>> {
+        if text.is_empty() {
+            return self.recent_correspondents(limit);
+        }
         let pattern = like_pattern(&text.to_lowercase());
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -1216,7 +1630,30 @@ impl Store {
         out.truncate(limit as usize);
         Ok(out)
     }
+
+    fn recent_correspondents(&self, limit: u32) -> Result<Vec<EmailAddress>> {
+        let since = Utc::now() - chrono::Duration::days(RECENT_CORRESPONDENT_DAYS);
+        let conn = self.conn();
+        // The name comes from the newest message (the row MAX picks).
+        let mut stmt = conn.prepare(
+            "SELECT from_name, from_address, COUNT(*) AS n, MAX(received_at) AS last
+             FROM messages
+             WHERE from_address IS NOT NULL AND received_at >= ?1
+               AND LOWER(from_address) NOT IN (SELECT LOWER(email) FROM accounts)
+             GROUP BY LOWER(from_address) ORDER BY n DESC, last DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![ts(&since), limit], |r| {
+            Ok(EmailAddress {
+                name: r.get(0)?,
+                address: r.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
 }
+
+/// How far back the people suggested for an empty box wrote.
+const RECENT_CORRESPONDENT_DAYS: i64 = 90;
 
 #[cfg(test)]
 mod tests {
@@ -1260,8 +1697,28 @@ mod tests {
         }
     }
 
+    /// The first 10 messages matching `text`, newest first.
     fn search(store: &Store, text: &str) -> Result<Vec<MessageSummary>> {
-        store.search_messages(&SearchQuery::parse(text), None, &[], 10)
+        let query = SearchQuery::parse(text);
+        newest(
+            store,
+            &LocalSearch {
+                limit: 10,
+                ..LocalSearch::new(&query)
+            },
+        )
+    }
+
+    /// `search`, newest first, as summaries.
+    fn newest(store: &Store, search: &LocalSearch<'_>) -> Result<Vec<MessageSummary>> {
+        Ok(store
+            .search(&LocalSearch {
+                sort: SearchSort::Newest,
+                ..*search
+            })?
+            .into_iter()
+            .map(|hit| hit.summary)
+            .collect())
     }
 
     fn setup() -> (Store, Folder, Folder) {
@@ -2190,6 +2647,81 @@ mod tests {
         assert!(content.body_html.unwrap().contains("Pineapple"));
     }
 
+    #[test]
+    fn content_from_older_versions_reads_intact_and_outdated() {
+        let (store, inbox, _) = setup();
+        let m = message(&inbox, "1", "Quarterly numbers", false);
+        apply(&store, &inbox, upserts(&[&m]));
+        // As the version before content versions kept it.
+        let old = serde_json::json!({
+            "bcc": [{ "name": "Audit", "address": "audit@contoso.com" }],
+            "reply_to": [],
+            "attachments": [{
+                "id": "att-1", "name": "message.rpmsg",
+                "contentType": "application/x-microsoft-rpmsg-message",
+                "size": 48213, "isInline": false, "contentId": null,
+            }],
+            "internet_message_id": "<a@contoso.com>",
+            "in_reply_to": null,
+            "references": ["<r@contoso.com>"],
+        });
+        store.execute_for_tests(&format!(
+            "UPDATE messages SET content_json = '{old}', body_html = '<p>Hi</p>' WHERE id = '{}'",
+            m.id
+        ));
+        let (content, outdated) = store.cached_message_content(&m.id).unwrap().unwrap();
+        assert!(outdated);
+        assert_eq!(content.body_html.as_deref(), Some("<p>Hi</p>"));
+        assert_eq!(content.bcc[0].address, "audit@contoso.com");
+        assert_eq!(content.attachments[0].name, "message.rpmsg");
+        assert_eq!(
+            content.internet_message_id.as_deref(),
+            Some("<a@contoso.com>")
+        );
+        assert_eq!(content.references, ["<r@contoso.com>"]);
+        assert_eq!(content.signals, MessageSignals::default());
+
+        // Kept by this version: current, signals and all.
+        let signals = MessageSignals {
+            content_class: Some("rpmsg.message".into()),
+            msip_labels: Some("MSIP_Label_x_Enabled=true".into()),
+            msip_labels_source: Some("property".into()),
+            ..MessageSignals::default()
+        };
+        let fetched = MessageContent {
+            signals: signals.clone(),
+            ..content
+        };
+        store.save_message_content(&m.id, &fetched).unwrap();
+        let (content, outdated) = store.cached_message_content(&m.id).unwrap().unwrap();
+        assert!(!outdated);
+        assert_eq!(content.signals, signals);
+        assert_eq!(content.attachments.len(), 1);
+        assert!(store.get_message_content(&m.id).unwrap().is_some());
+
+        // Properties that couldn't be read: fetched again, three times.
+        for (attempts, outdated) in [(1, true), (2, true), (3, false), (4, false)] {
+            let unread = MessageContent {
+                signals: MessageSignals {
+                    properties_unavailable: true,
+                    properties_attempts: attempts,
+                    ..MessageSignals::default()
+                },
+                ..fetched.clone()
+            };
+            store.save_message_content(&m.id, &unread).unwrap();
+            let (content, is_outdated) = store.cached_message_content(&m.id).unwrap().unwrap();
+            assert_eq!(is_outdated, outdated, "{attempts} attempts");
+            assert_eq!(content.signals.properties_attempts, attempts);
+        }
+
+        // Never fetched, and unknown.
+        let other = message(&inbox, "2", "Other", false);
+        apply(&store, &inbox, upserts(&[&other]));
+        assert!(store.cached_message_content(&other.id).unwrap().is_none());
+        assert!(store.cached_message_content("gone").is_err());
+    }
+
     /// Words with combining marks are whole words, and accents typed on
     /// their own find the composed letters mail is written in.
     #[test]
@@ -2463,15 +2995,24 @@ mod tests {
     fn include_ids_are_merged_deduplicated_and_never_cut() {
         let (store, inbox, _) = setup();
         let [report, invoice, lunch] = searchable(&store, &inbox);
-        let ids = |found: Vec<MessageSummary>| -> Vec<String> {
-            found.into_iter().map(|m| m.id).collect()
-        };
         let query = SearchQuery::parse("ada");
+        let found = |include: &[String], limit: u32, accounts: Option<&[String]>| -> Vec<String> {
+            newest(
+                &store,
+                &LocalSearch {
+                    include_ids: include,
+                    limit,
+                    accounts,
+                    ..LocalSearch::new(&query)
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
+        };
         // The limit keeps the newest match only.
-        assert_eq!(
-            ids(store.search_messages(&query, None, &[], 1).unwrap()),
-            [report.id.as_str()]
-        );
+        assert_eq!(found(&[], 1, None), [report.id.as_str()]);
         // Server hits join it, once each, newest first, past the limit;
         // ids no longer stored drop out.
         let include = [
@@ -2481,30 +3022,29 @@ mod tests {
             invoice.id.clone(),
         ];
         assert_eq!(
-            ids(store.search_messages(&query, None, &include, 1).unwrap()),
+            found(&include, 1, None),
             [report.id.clone(), invoice.id.clone(), lunch.id.clone()]
         );
         // Without words to match, just them.
+        let nothing = SearchQuery::default();
         assert_eq!(
-            ids(store
-                .search_messages(&SearchQuery::default(), None, &include[..2], 1)
-                .unwrap()),
+            newest(
+                &store,
+                &LocalSearch {
+                    include_ids: &include[..2],
+                    limit: 1,
+                    ..LocalSearch::new(&nothing)
+                }
+            )
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>(),
             [lunch.id.as_str()]
         );
         // Only the account's.
-        assert_eq!(
-            ids(store
-                .search_messages(&query, Some("a"), &include, 5)
-                .unwrap())
-            .len(),
-            3
-        );
-        assert!(
-            store
-                .search_messages(&query, Some("b"), &include, 5)
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(found(&include, 5, Some(&["a".to_owned()])).len(), 3);
+        assert!(found(&include, 5, Some(&["b".to_owned()])).is_empty());
     }
 
     /// Whether a plan reads every message row.
@@ -2518,11 +3058,22 @@ mod tests {
         let (store, ..) = setup();
         for text in ["invoice", "to:al", "from:megan subject:\"q3 plan\" to:al"] {
             let plan = fts::plan(&SearchQuery::parse(text));
-            let steps = query_plan(&store, &search_sql(&plan.conditions));
+            let steps = query_plan(&store, &candidates_sql(&plan.conditions));
             assert!(steps.contains("messages_fts_rowid"), "{text}: {steps}");
             assert!(!scans_messages(&steps), "{text}: {steps}");
         }
-        let steps = query_plan(&store, &include_sql());
+        for filters in [
+            vec![],
+            vec![
+                "m.is_read = 0".to_owned(),
+                "m.folder_id IN (SELECT value FROM json_each(?))".to_owned(),
+            ],
+        ] {
+            let steps = query_plan(&store, &included_sql(&filters));
+            assert!(steps.contains("autoindex_messages"), "{steps}");
+            assert!(!scans_messages(&steps), "{steps}");
+        }
+        let steps = query_plan(&store, &summaries_sql());
         assert!(steps.contains("autoindex_messages"), "{steps}");
         assert!(!scans_messages(&steps), "{steps}");
     }
@@ -2569,6 +3120,674 @@ mod tests {
         assert_eq!(found("tacos"), 1);
         assert_eq!(found("preview"), 0);
         assert_eq!(index_rows(&store), (2, 2));
+    }
+
+    // --- ranking, filters and snippets ---------------------------------------
+
+    /// A message received `days` ago (and a second earlier per character of
+    /// `remote`, so that none arrive at once), with `preview` as its text.
+    fn aged(
+        folder: &Folder,
+        remote: &str,
+        subject: &str,
+        preview: &str,
+        days: i64,
+    ) -> MessageSummary {
+        MessageSummary {
+            preview: preview.into(),
+            received_at: Utc::now() - Duration::days(days) - Duration::seconds(remote.len() as i64),
+            ..message(folder, remote, subject, false)
+        }
+    }
+
+    /// Hits for `search`, as given (best first unless it says otherwise).
+    fn hits(store: &Store, search: &LocalSearch<'_>) -> Vec<SearchHit> {
+        store.search(search).unwrap()
+    }
+
+    fn subjects(hits: &[SearchHit]) -> Vec<&str> {
+        hits.iter().map(|h| h.summary.subject.as_str()).collect()
+    }
+
+    /// Subjects found for `text`, best first and newest first.
+    fn both_orders(store: &Store, text: &str) -> (Vec<String>, Vec<String>) {
+        let query = SearchQuery::parse(text);
+        let order = |sort| -> Vec<String> {
+            hits(
+                store,
+                &LocalSearch {
+                    sort,
+                    ..LocalSearch::new(&query)
+                },
+            )
+            .into_iter()
+            .map(|h| h.summary.subject)
+            .collect()
+        };
+        (order(SearchSort::Relevance), order(SearchSort::Newest))
+    }
+
+    /// The demo's "porto" trio, through the paths sync and opening take:
+    /// an offsite in the subject (2 days old, unopened), an itinerary in
+    /// the subject (200 days old, opened, with a long text that doesn't say
+    /// it), and plans whose preview mentions it (1 day old).
+    #[test]
+    fn subject_and_sender_matches_rank_first_then_recent_ones() {
+        let (store, inbox, _) = setup();
+        let mut offsite = aged(
+            &inbox,
+            "1",
+            "Porto offsite: tickets and hotel",
+            "Tickets attached; the hotel is booked.",
+            2,
+        );
+        offsite.is_flagged = true;
+        offsite.has_attachments = true;
+        let itinerary = aged(&inbox, "2", "Porto itinerary", "Day one: arrival", 200);
+        let plans = aged(
+            &inbox,
+            "3",
+            "Friday plans",
+            "Hi all, we fly to porto on Friday",
+            1,
+        );
+        apply(&store, &inbox, upserts(&[&offsite, &itinerary, &plans]));
+        let long = (0..60)
+            .map(|i| format!("Day {i}: breakfast, museum, lunch, river walk, dinner."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        fetch_body(&store, &itinerary, &long);
+
+        let (best, newest) = both_orders(&store, "porto");
+        assert_eq!(
+            best,
+            [
+                "Porto offsite: tickets and hotel",
+                "Porto itinerary",
+                "Friday plans"
+            ]
+        );
+        assert_eq!(
+            newest,
+            [
+                "Friday plans",
+                "Porto offsite: tickets and hotel",
+                "Porto itinerary"
+            ]
+        );
+        // Only the text that matched gets a snippet.
+        let query = SearchQuery::parse("porto");
+        let found = hits(&store, &LocalSearch::new(&query));
+        let snippets: Vec<Option<Vec<TextRun>>> = found.iter().map(|h| h.snippet.clone()).collect();
+        let run = |text: &str, hit| TextRun {
+            text: text.into(),
+            hit,
+        };
+        assert_eq!(
+            snippets,
+            [
+                None,
+                None,
+                Some(vec![
+                    run("Hi all, we fly to ", false),
+                    run("porto", true),
+                    run(" on Friday", false)
+                ])
+            ]
+        );
+    }
+
+    #[test]
+    fn an_old_subject_match_ranks_above_a_new_text_match() {
+        let (store, inbox, _) = setup();
+        let old = aged(&inbox, "1", "Pineapple order", "Shipped", 200);
+        let new = aged(&inbox, "2", "Lunch", "Pineapple pizza on Friday?", 1);
+        apply(&store, &inbox, upserts(&[&old, &new]));
+        let (best, newest) = both_orders(&store, "pineapple");
+        assert_eq!(best, ["Pineapple order", "Lunch"]);
+        assert_eq!(newest, ["Lunch", "Pineapple order"]);
+        // A sender counts as much as a subject.
+        let mut from = aged(&inbox, "3", "Hello", "Nothing to see", 300);
+        from.from = Some(EmailAddress::new(
+            Some("Pineapple Inc"),
+            "news@fruit.example",
+        ));
+        apply(&store, &inbox, upserts(&[&from]));
+        let (best, _) = both_orders(&store, "pineapple");
+        assert_eq!(best, ["Pineapple order", "Hello", "Lunch"]);
+    }
+
+    /// An opened message has its whole text indexed, which weakens its
+    /// bm25; among subject matches, recency still decides.
+    #[test]
+    fn opened_and_unopened_subject_matches_go_by_recency() {
+        for (opened_days, unopened_days) in [(1, 30), (30, 1)] {
+            let (store, inbox, _) = setup();
+            let opened = aged(&inbox, "1", "Budget review", "Numbers", opened_days);
+            let unopened = aged(&inbox, "2", "Budget for March", "Numbers", unopened_days);
+            apply(&store, &inbox, upserts(&[&opened, &unopened]));
+            let text = (0..200)
+                .map(|i| format!("Line {i} of the spreadsheet notes."))
+                .collect::<Vec<_>>()
+                .join(" ");
+            fetch_body(&store, &opened, &text);
+            let (best, newest) = both_orders(&store, "budget");
+            assert_eq!(best, newest, "opened {opened_days} days ago");
+        }
+    }
+
+    #[test]
+    fn ranking_looks_beyond_the_limit() {
+        let (store, inbox, _) = setup();
+        let mut messages: Vec<MessageSummary> = (0..249)
+            .map(|i| MessageSummary {
+                received_at: Utc::now() - Duration::hours(i),
+                ..aged(
+                    &inbox,
+                    &format!("n{i}"),
+                    &format!("Note {i}"),
+                    "About the zebra",
+                    0,
+                )
+            })
+            .collect();
+        messages.push(aged(&inbox, "oldest", "Zebra", "Nothing else", 300));
+        apply(
+            &store,
+            &inbox,
+            upserts(&messages.iter().collect::<Vec<_>>()),
+        );
+        let query = SearchQuery::parse("zebra");
+        let best = hits(&store, &LocalSearch::new(&query));
+        assert_eq!(best.len(), 200);
+        assert_eq!(best[0].summary.subject, "Zebra");
+        assert_eq!(best[1].summary.subject, "Note 0");
+        // Newest first, it is too old to be among the 200.
+        let newest = hits(
+            &store,
+            &LocalSearch {
+                sort: SearchSort::Newest,
+                ..LocalSearch::new(&query)
+            },
+        );
+        assert_eq!(newest.len(), 200);
+        assert!(newest.iter().all(|h| h.summary.subject != "Zebra"));
+    }
+
+    #[test]
+    fn addresses_alone_and_filters_alone_list_newest_first() {
+        let (store, inbox, _) = setup();
+        let megan = Some(EmailAddress::new(Some("Megan Bowen"), "megan@contoso.com"));
+        let old = MessageSummary {
+            from: megan.clone(),
+            ..aged(&inbox, "1", "Invoice for March", "Please pay", 20)
+        };
+        let new = MessageSummary {
+            from: megan,
+            is_read: true,
+            ..aged(&inbox, "2", "Lunch", "Bring the invoice", 1)
+        };
+        let other = aged(&inbox, "3", "Invoice from Ada", "Due soon", 2);
+        apply(&store, &inbox, upserts(&[&old, &new, &other]));
+        // Nothing to rank by: newest first, best match or not.
+        let (best, newest) = both_orders(&store, "from:megan");
+        assert_eq!(best, ["Lunch", "Invoice for March"]);
+        assert_eq!(best, newest);
+        let query = SearchQuery::parse("from:megan");
+        assert!(
+            hits(&store, &LocalSearch::new(&query))
+                .iter()
+                .all(|h| h.snippet.is_none())
+        );
+        // With a word: the subject match first.
+        let (best, newest) = both_orders(&store, "from:megan invoice");
+        assert_eq!(best, ["Invoice for March", "Lunch"]);
+        assert_eq!(newest, ["Lunch", "Invoice for March"]);
+        // Filters alone.
+        let (best, newest) = both_orders(&store, "is:unread");
+        assert_eq!(best, ["Invoice from Ada", "Invoice for March"]);
+        assert_eq!(best, newest);
+        let (best, _) = both_orders(&store, "is:read");
+        assert_eq!(best, ["Lunch"]);
+    }
+
+    #[test]
+    fn filters_apply_to_server_hits_too() {
+        let (store, inbox, archive) = setup();
+        store.insert_account(&imap_account("b")).unwrap();
+        let elsewhere = folder("b", "INBOX", FolderRole::Inbox);
+        store
+            .replace_folders("b", std::slice::from_ref(&elsewhere))
+            .unwrap();
+        let plain = aged(&inbox, "1", "Plain", "x", 3);
+        let flagged = MessageSummary {
+            is_flagged: true,
+            ..aged(&inbox, "2", "Flagged", "x", 5)
+        };
+        let read = MessageSummary {
+            is_read: true,
+            has_attachments: true,
+            ..aged(&archive, "3", "Read with a file", "x", 40)
+        };
+        let other = aged(&elsewhere, "4", "Other account", "x", 1);
+        apply(&store, &inbox, upserts(&[&plain, &flagged]));
+        apply(&store, &archive, upserts(&[&read]));
+        apply(&store, &elsewhere, upserts(&[&other]));
+        let include = [
+            plain.id.clone(),
+            flagged.id.clone(),
+            read.id.clone(),
+            other.id.clone(),
+        ];
+        let found = |text: &str,
+                     received: Received,
+                     folders: Option<&[String]>,
+                     accounts: Option<&[String]>|
+         -> Vec<String> {
+            let query = SearchQuery::parse(text);
+            let search = LocalSearch {
+                received,
+                folders,
+                accounts,
+                include_ids: &include,
+                ..LocalSearch::new(&query)
+            };
+            subjects(&hits(&store, &search))
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        let any = Received::default();
+        // Words don't apply to them; filters do.
+        assert_eq!(
+            found("zzz", any, None, None),
+            ["Other account", "Plain", "Flagged", "Read with a file"]
+        );
+        assert_eq!(found("zzz is:flagged", any, None, None), ["Flagged"]);
+        assert_eq!(found("zzz is:read", any, None, None), ["Read with a file"]);
+        assert_eq!(
+            found("zzz is:unread", any, None, None),
+            ["Other account", "Plain", "Flagged"]
+        );
+        assert_eq!(
+            found("zzz has:attachment", any, None, None),
+            ["Read with a file"]
+        );
+        let ten_days = Received {
+            since: Some(Utc::now() - Duration::days(10)),
+            before: None,
+        };
+        assert_eq!(
+            found("zzz", ten_days, None, None),
+            ["Other account", "Plain", "Flagged"]
+        );
+        assert_eq!(
+            found("zzz", any, Some(std::slice::from_ref(&archive.id)), None),
+            ["Read with a file"]
+        );
+        assert_eq!(
+            found("zzz", any, None, Some(&["b".to_owned()])),
+            ["Other account"]
+        );
+        // Nowhere to look, or no time: nothing at all.
+        assert!(found("x", any, Some(&[]), None).is_empty());
+        assert!(found("x", any, None, Some(&[])).is_empty());
+        let never = Received {
+            since: Some(Utc::now()),
+            before: Some(Utc::now() - Duration::days(1)),
+        };
+        assert!(found("x", never, None, None).is_empty());
+        // The local matches are filtered alike.
+        let (best, _) = both_orders(&store, "x is:flagged");
+        assert_eq!(best, ["Flagged"]);
+    }
+
+    /// A server hit the index doesn't match (it matched in text the device
+    /// hasn't seen) ranks below what the index matched, even in the text.
+    #[test]
+    fn server_hits_the_index_doesnt_match_rank_last() {
+        let (store, inbox, _) = setup();
+        let infix = aged(&inbox, "1", "Invoice 42", "Due Friday", 0);
+        let text = aged(&inbox, "2", "Call notes", "Your voice mail", 0);
+        let server = aged(&inbox, "3", "Old report", "Quarterly numbers", 0);
+        apply(&store, &inbox, upserts(&[&infix, &text, &server]));
+        let query = SearchQuery::parse("voice");
+        let include = [server.id.clone()];
+        let found = hits(
+            &store,
+            &LocalSearch {
+                include_ids: &include,
+                ..LocalSearch::new(&query)
+            },
+        );
+        // Inside a subject 0.6, in the text at most 0.3, the server's 0.225.
+        assert_eq!(subjects(&found), ["Invoice 42", "Call notes", "Old report"]);
+        let snippets: Vec<bool> = found.iter().map(|h| h.snippet.is_some()).collect();
+        assert_eq!(snippets, [false, true, false]);
+
+        // A server that finds what the words matched here too (IMAP matches
+        // inside words) changes nothing of where it ranks.
+        let include = [infix.id.clone(), server.id.clone()];
+        let again = hits(
+            &store,
+            &LocalSearch {
+                include_ids: &include,
+                ..LocalSearch::new(&query)
+            },
+        );
+        assert_eq!(subjects(&again), ["Invoice 42", "Call notes", "Old report"]);
+    }
+
+    /// Words found nowhere that the filters leave: no statement on the
+    /// index runs (each would run its MATCH over every row first).
+    #[test]
+    fn nothing_left_to_rank_asks_the_index_nothing() {
+        let (store, inbox, _) = setup();
+        let lunch = aged(&inbox, "1", "Re: lunch", "See you there", 1);
+        apply(&store, &inbox, upserts(&[&lunch]));
+        let query = SearchQuery::parse("re is:flagged");
+        let (found, steps) = store.search_timed(&LocalSearch::new(&query)).unwrap();
+        assert!(found.is_empty());
+        let names: Vec<&str> = steps.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["candidates", "included"]);
+        // With something left, all of them.
+        let query = SearchQuery::parse("re is:unread");
+        let (found, steps) = store.search_timed(&LocalSearch::new(&query)).unwrap();
+        assert_eq!(subjects(&found), ["Re: lunch"]);
+        let names: Vec<&str> = steps.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "candidates",
+                "included",
+                "bm25",
+                "fields",
+                "summaries",
+                "snippets"
+            ]
+        );
+    }
+
+    #[test]
+    fn snippets_for_the_first_rows_only() {
+        let (store, inbox, _) = setup();
+        let messages: Vec<MessageSummary> = (0..120)
+            .map(|i| {
+                aged(
+                    &inbox,
+                    &format!("m{i}"),
+                    &format!("Note {i}"),
+                    "the kiwi harvest",
+                    i,
+                )
+            })
+            .collect();
+        apply(
+            &store,
+            &inbox,
+            upserts(&messages.iter().collect::<Vec<_>>()),
+        );
+        let query = SearchQuery::parse("kiwi");
+        for sort in [SearchSort::Relevance, SearchSort::Newest] {
+            let found = hits(
+                &store,
+                &LocalSearch {
+                    sort,
+                    ..LocalSearch::new(&query)
+                },
+            );
+            assert_eq!(found.len(), 120);
+            assert!(found[..MAX_SNIPPETS].iter().all(|h| h.snippet.is_some()));
+            assert!(found[MAX_SNIPPETS..].iter().all(|h| h.snippet.is_none()));
+        }
+    }
+
+    #[test]
+    fn mail_cant_fake_a_snippet_hit() {
+        let (store, inbox, _) = setup();
+        let m = aged(&inbox, "1", "Hello", "x", 0);
+        apply(&store, &inbox, upserts(&[&m]));
+        fetch_body(&store, &m, "\u{E000}fake\u{E001} hit, then pineapple");
+        let indexed: String = store
+            .conn()
+            .query_row("SELECT body FROM messages_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(indexed, "fake hit, then pineapple");
+        let query = SearchQuery::parse("pineapple");
+        let found = hits(&store, &LocalSearch::new(&query));
+        let run = |text: &str, hit| TextRun {
+            text: text.into(),
+            hit,
+        };
+        assert_eq!(
+            found[0].snippet,
+            Some(vec![run("fake hit, then ", false), run("pineapple", true)])
+        );
+    }
+
+    /// The shared snippet vectors (`[` and `]` stand for the marks).
+    #[test]
+    fn snippets_become_runs() {
+        let marked = |text: &str| text.replace('[', "\u{E000}").replace(']', "\u{E001}");
+        let run = |text: &str, hit| TextRun {
+            text: text.into(),
+            hit,
+        };
+        for (raw, runs) in [
+            (
+                "…we could get [pineapple] pizza…",
+                Some(vec![
+                    run("…we could get ", false),
+                    run("pineapple", true),
+                    run(" pizza…", false),
+                ]),
+            ),
+            (
+                "[हिन्द]ी पाठ्यक्रम",
+                Some(vec![run("हिन्दी", true), run(" पाठ्यक्रम", false)]),
+            ),
+            ("a]b [c]", Some(vec![run("ab ", false), run("c", true)])),
+            ("x  \n y", None),
+            (
+                "[a] [b]",
+                Some(vec![run("a", true), run(" ", false), run("b", true)]),
+            ),
+            // Phrases keep their space; open marks inside a hit are stray.
+            (
+                "[quarterly\n report] [[x]",
+                Some(vec![
+                    run("quarterly report", true),
+                    run(" ", false),
+                    run("x", true),
+                ]),
+            ),
+            ("[]", None),
+            ("", None),
+        ] {
+            assert_eq!(snippet_runs(&marked(raw)), runs, "{raw:?}");
+        }
+    }
+
+    /// The plans of the statements that rank and cut snippets: FTS5 runs
+    /// the MATCH once (`INDEX 0:M…`), never once per rowid (`INDEX 0:=`).
+    #[test]
+    fn ranking_statements_run_each_match_once() {
+        let (store, inbox, _) = setup();
+        let [report, ..] = searchable(&store, &inbox);
+        let conn = store.conn();
+        let text = |s: &str| Value::from(s.to_owned());
+        let rowids = text("[1, 2, 3]");
+        let plans: [(&str, Vec<Value>); 3] = [
+            (
+                SCORE_SQL.as_str(),
+                vec![text("\"report\"*"), rowids.clone()],
+            ),
+            (
+                FIELD_SQL,
+                vec![text("{subject sender} : (\"report\"*)"), rowids.clone()],
+            ),
+            (
+                SNIPPET_SQL,
+                vec![
+                    text("\u{E000}"),
+                    text("\u{E001}"),
+                    text("\"report\"*"),
+                    rowids,
+                ],
+            ),
+        ];
+        for (sql, values) in plans {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let steps: Vec<String> = stmt
+                .query_map(params_from_iter(values), |r| r.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(
+                steps.iter().any(|s| s.contains("VIRTUAL TABLE INDEX 0:M")),
+                "{sql}: {steps:?}"
+            );
+            assert!(
+                !steps.iter().any(|s| s.contains("INDEX 0:=")),
+                "{sql}: {steps:?}"
+            );
+        }
+        drop(conn);
+        // And they work.
+        let query = SearchQuery::parse("report");
+        assert_eq!(
+            hits(&store, &LocalSearch::new(&query))[0].summary.id,
+            report.id
+        );
+        assert!(SCORE_SQL.contains("bm25(messages_fts, 10.0, 8.0, 3.0, 2.0, 1.0)"));
+    }
+
+    #[test]
+    fn an_empty_box_suggests_who_wrote_most_lately() {
+        let (store, inbox, _) = setup();
+        let from = |remote: &str, name: &str, address: &str, days: i64| MessageSummary {
+            from: Some(EmailAddress::new(Some(name), address)),
+            ..aged(&inbox, remote, "Hi", "x", days)
+        };
+        apply(
+            &store,
+            &inbox,
+            upserts(&[
+                &from("1", "Ada", "ada@example.com", 5),
+                &from("2", "Grace", "grace@example.com", 1),
+                &from("3", "Grace H.", "Grace@Example.com", 2),
+                &from("4", "Linus", "linus@example.com", 3),
+                &from("5", "Ada", "ada@example.com", 6),
+                &from("6", "Ken", "ken@example.com", 9),
+                // The account's own address, and someone long quiet.
+                &from("7", "Me", "A@example.com", 0),
+                &from("8", "Me", "a@example.com", 0),
+                &from("9", "Dennis", "dennis@example.com", 120),
+            ]),
+        );
+        let suggested: Vec<(Option<String>, String)> = store
+            .suggest_addresses("", 8)
+            .unwrap()
+            .into_iter()
+            .map(|a| (a.name, a.address))
+            .collect();
+        let person = |name: &str, address: &str| (Some(name.to_owned()), address.to_owned());
+        assert_eq!(
+            suggested,
+            [
+                // Two each: Grace wrote last.
+                person("Grace", "grace@example.com"),
+                person("Ada", "ada@example.com"),
+                person("Linus", "linus@example.com"),
+                person("Ken", "ken@example.com"),
+            ]
+        );
+        assert_eq!(store.suggest_addresses("", 2).unwrap().len(), 2);
+    }
+
+    /// Ranks on a big store: 50,000 messages with 120-word texts from a
+    /// 2,000-word vocabulary, from 300 senders, 30% replies ("Re: "). `re`
+    /// matches nearly every message, as two letters do in real mail. If
+    /// `re` takes more than 300 ms on a typical laptop, a prefix index
+    /// (`prefix='2 3'` on `messages_fts`) is next.
+    #[test]
+    #[ignore = "timing; run with --release --ignored search_perf"]
+    fn search_perf_on_a_big_store() {
+        let (store, inbox, _) = setup();
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // One word in 20 starts with "re".
+        let syllables = [
+            "ka", "lo", "mi", "ne", "su", "ta", "re", "po", "de", "fa", "gu", "he", "jo", "ve",
+            "zi", "bo", "ru", "se", "ti", "wa",
+        ];
+        let mut vocabulary: Vec<String> = [
+            "invoice", "report", "review", "regards", "request", "receipt", "meeting", "budget",
+        ]
+        .iter()
+        .map(|w| w.to_string())
+        .collect();
+        while vocabulary.len() < 2000 {
+            let n = vocabulary.len();
+            let word: String = (0..3)
+                .map(|k| syllables[(n / 20usize.pow(k) + k as usize) % syllables.len()])
+                .collect::<String>()
+                + &n.to_string();
+            vocabulary.push(word);
+        }
+        let mut words = |n: usize| -> String {
+            (0..n)
+                .map(|_| vocabulary[(next() % 2000) as usize].as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let mut senders: Vec<EmailAddress> = (0..299)
+            .map(|i| EmailAddress::new(Some(&format!("Person {i}")), &format!("p{i}@example.com")))
+            .collect();
+        senders.push(EmailAddress::new(Some("Megan Bowen"), "megan@contoso.com"));
+        let started = std::time::Instant::now();
+        for batch in 0..50 {
+            let upserts: Vec<MessageSummary> = (0..1000)
+                .map(|i| {
+                    let n = batch * 1000 + i;
+                    let subject = words(4);
+                    MessageSummary {
+                        subject: if n % 10 < 3 {
+                            format!("Re: {subject}")
+                        } else {
+                            subject
+                        },
+                        preview: words(120),
+                        from: Some(senders[n % 300].clone()),
+                        received_at: Utc::now() - Duration::minutes(n as i64 * 7),
+                        ..message(&inbox, &format!("m{n}"), "", n % 2 == 0)
+                    }
+                })
+                .collect();
+            store
+                .apply_message_batch(
+                    &inbox,
+                    &MessageBatch {
+                        upserts,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        println!("indexed 50,000 in {:?}", started.elapsed());
+        for (text, bound) in [("re", 750), ("invoice from:megan", 150)] {
+            let query = SearchQuery::parse(text);
+            let started = std::time::Instant::now();
+            let (hits, steps) = store.search_timed(&LocalSearch::new(&query)).unwrap();
+            let took = started.elapsed();
+            println!("{text:?}: {} hits in {took:?}; {steps:?}", hits.len());
+            assert!(took.as_millis() < bound, "{text:?} took {took:?}");
+        }
     }
 
     /// Indexes 10,000 messages in batches of 500, as a first sync of a big

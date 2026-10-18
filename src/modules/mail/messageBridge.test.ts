@@ -9,8 +9,12 @@ import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
 
 import bridge from "../../../public/message-bridge.js?raw";
+import { type HitPattern, hitPatterns } from "../../lib/search/highlight";
+import { HIGHLIGHT_VECTORS } from "../../lib/search/highlightVectors";
+import { parseSearch } from "../../lib/search/query";
 
 const CHANNEL = "5ec2e7".padEnd(32, "0");
+const INBOUND = "1b0d".padEnd(32, "0");
 
 interface Impl {
   isTrusted: boolean;
@@ -48,10 +52,17 @@ afterEach(() => {
   cleanup = null;
 });
 
-/** A frame running the bridge before `body`, as a message's frame does. */
-async function load(body: string): Promise<Loaded> {
+/**
+ * A frame running the bridge before `body`, as a message's frame does;
+ * `before` sets up the frame's window before the bridge runs.
+ */
+async function load(
+  body: string,
+  before?: (view: Window & typeof globalThis) => void,
+): Promise<Loaded> {
   const frame = document.createElement("iframe");
   document.body.append(frame);
+  before?.(frame.contentWindow! as Window & typeof globalThis);
   // Everything posted to this window: only the frame posts here. (jsdom's
   // events don't carry the frame's window as their source, as a browser's do.)
   const messages: unknown[] = [];
@@ -64,7 +75,7 @@ async function load(body: string): Promise<Loaded> {
   const doc = frame.contentDocument!;
   doc.open();
   doc.write(
-    `<!doctype html><html><head><script data-channel="${CHANNEL}">${bridge}</script></head>` +
+    `<!doctype html><html><head><script data-channel="${CHANNEL}" data-inbound="${INBOUND}">${bridge}</script></head>` +
       `<body>${body}</body></html>`,
   );
   doc.close();
@@ -79,10 +90,12 @@ describe("message bridge", () => {
   it("reports the document's size on its channel, and keeps the channel to itself", async () => {
     const { doc, messages } = await load("<p>Hello</p>");
     expect(messages).toEqual([
+      { type: "ready", channel: CHANNEL },
       { type: "size", height: 0, wide: false, left: false, right: false, channel: CHANNEL },
     ]);
-    // Nothing in the document can read the channel afterwards.
+    // Nothing in the document can read either secret afterwards.
     expect(doc.querySelector("script")!.hasAttribute("data-channel")).toBe(false);
+    expect(doc.querySelector("script")!.hasAttribute("data-inbound")).toBe(false);
     expect(doc.documentElement.hasAttribute("data-bridge")).toBe(true);
   });
 
@@ -122,6 +135,7 @@ describe("message bridge", () => {
         '<a id="parent" href="https://example.org/p">Parent</a><a id="JSON">JSON</a>',
     );
     expect(messages).toEqual([
+      { type: "ready", channel: CHANNEL },
       { type: "size", height: 0, wide: false, left: false, right: false, channel: CHANNEL },
     ]);
     const view = frame.contentWindow! as Window & typeof globalThis;
@@ -420,4 +434,230 @@ describe("message bridge", () => {
       },
     ]);
   });
+
+  /**
+   * The app telling the frame something, as the app does: trusted, from the
+   * window around it (as the frame sees it: jsdom's parent isn't the test's
+   * window object, as a browser's is).
+   */
+  function tell(frame: HTMLIFrameElement, data: unknown, init: MessageEventInit = {}) {
+    const view = frame.contentWindow! as Window & typeof globalThis;
+    return give(view, new view.MessageEvent("message", { data, source: view.parent, ...init }));
+  }
+
+  const words = (...list: string[]): HitPattern => ({ words: list, prefix: true, inside: null });
+  const highlight = (patterns: unknown) => ({ inbound: INBOUND, type: "highlight", patterns });
+  const hits = (count: number) => ({ type: "hits", count, channel: CHANNEL });
+  const marked = (doc: Document) =>
+    Array.from(doc.querySelectorAll("mark[data-cumulas-hit]"), (m) => m.textContent);
+
+  it("marks what the app asks for, on the frame's other channel, by splitting text", async () => {
+    const { frame, doc, messages } = await load(
+      "<p>Pineapple pizza, and <b>pine</b>apple juice</p><p>Apple pie</p>",
+    );
+    messages.length = 0;
+    tell(frame, highlight([words("pine")]));
+    await settle();
+    expect(marked(doc)).toEqual(["Pine", "pine"]);
+    expect(messages).toEqual([hits(2)]);
+    // Text, split around the marks: nothing parsed, nothing else changed.
+    const p = doc.querySelector("p")!;
+    expect(p.innerHTML).toBe(
+      '<mark data-cumulas-hit="">Pine</mark>apple pizza, and <b><mark data-cumulas-hit="">pine</mark></b>apple juice',
+    );
+
+    // New words: the old marks go first; an empty list clears them.
+    tell(frame, highlight([words("apple"), words("juice")]));
+    await settle();
+    // After the bold "pine", "apple" starts a word of its own text.
+    expect(marked(doc)).toEqual(["apple", "juice", "Apple"]);
+    expect(p.innerHTML).toBe(
+      'Pineapple pizza, and <b>pine</b><mark data-cumulas-hit="">apple</mark> <mark data-cumulas-hit="">juice</mark>',
+    );
+    tell(frame, highlight([]));
+    await settle();
+    expect(marked(doc)).toEqual([]);
+    expect(doc.body.innerHTML).toBe(
+      "<p>Pineapple pizza, and <b>pine</b>apple juice</p><p>Apple pie</p>",
+    );
+    // The text nodes are whole again.
+    expect(p.childNodes).toHaveLength(3);
+    expect(messages.slice(1)).toEqual([hits(3), hits(0)]);
+  });
+
+  it("leaves the marks as they are for the same words, and says how many again", async () => {
+    const { frame, doc, messages } = await load("<p>One apple, two apples</p>");
+    tell(frame, highlight([words("apple")]));
+    await settle();
+    const [first] = doc.querySelectorAll("mark");
+    messages.length = 0;
+    tell(frame, highlight([words("apple")]));
+    await settle();
+    expect(doc.querySelectorAll("mark")[0]).toBe(first);
+    expect(messages).toEqual([hits(2)]);
+  });
+
+  it("shows the match asked for, and says where it is", async () => {
+    const shown: [Element, unknown][] = [];
+    const { frame, doc, messages } = await load(
+      "<p>apple</p><p>pear</p><p>apple</p>",
+      // jsdom has no layout: the bridge's scrolling is recorded instead.
+      (view) => {
+        view.Element.prototype.scrollIntoView = function (this: Element, options?: unknown) {
+          shown.push([this, options]);
+        };
+      },
+    );
+    tell(frame, highlight([words("apple")]));
+    await settle();
+    messages.length = 0;
+    tell(frame, { inbound: INBOUND, type: "reveal", index: 1 });
+    await settle();
+    const marks = doc.querySelectorAll("mark");
+    expect(marks[1]!.hasAttribute("data-cumulas-current")).toBe(true);
+    expect(marks[0]!.hasAttribute("data-cumulas-current")).toBe(false);
+    expect(messages).toEqual([{ type: "reveal", top: 0, bottom: 0, channel: CHANNEL }]);
+    // Sideways in the frame itself; up and down, the app scrolls the reader.
+    expect(shown).toEqual([[marks[1], { block: "nearest", inline: "nearest" }]]);
+    // Past the end: the last; the one before isn't current any more.
+    tell(frame, { inbound: INBOUND, type: "reveal", index: 7 });
+    tell(frame, { inbound: INBOUND, type: "reveal", index: 0 });
+    await settle();
+    expect(Array.from(marks, (m) => m.hasAttribute("data-cumulas-current"))).toEqual([true, false]);
+    // Not a whole number: nothing.
+    messages.length = 0;
+    tell(frame, { inbound: INBOUND, type: "reveal", index: 0.5 });
+    tell(frame, { inbound: INBOUND, type: "reveal", index: "1" });
+    await settle();
+    expect(messages).toEqual([]);
+  });
+
+  it("listens only to the app: trusted, from the window around it, with the other secret", async () => {
+    const { frame, doc, messages } = await load("<p>apple</p>");
+    messages.length = 0;
+    const view = frame.contentWindow! as Window & typeof globalThis;
+    const app = highlight([words("apple")]);
+    // The frame's own channel, which a script reading its messages could learn.
+    tell(frame, { channel: CHANNEL, type: "highlight", patterns: [words("apple")] });
+    tell(frame, { ...app, inbound: "f".repeat(32) });
+    tell(frame, { ...app, inbound: undefined });
+    // Not from the app's window, or not given by a person's browser.
+    tell(frame, app, { source: view });
+    tell(frame, app, { source: null });
+    view.dispatchEvent(new view.MessageEvent("message", { data: app, source: view.parent }));
+    tell(frame, "highlight");
+    tell(frame, null);
+    await settle();
+    expect(marked(doc)).toEqual([]);
+    expect(messages).toEqual([]);
+  });
+
+  it("marks nothing for what the app sends that isn't patterns, and says so", async () => {
+    const { frame, doc, messages } = await load("<p>apple</p>");
+    for (const patterns of [
+      null,
+      "apple",
+      [{ words: "apple", prefix: true }],
+      [{ words: [], prefix: true }],
+      [{ words: ["apple"], prefix: "yes" }],
+      [{ words: [""], prefix: true }],
+      [{ words: ["x".repeat(129)], prefix: true }],
+      [{ words: Array.from({ length: 17 }, () => "a"), prefix: true }],
+      Array.from({ length: 33 }, () => words("apple")),
+      [null],
+    ]) {
+      // What the words before marked goes, and with it their count.
+      tell(frame, highlight([words("apple")]));
+      await settle();
+      expect(marked(doc)).toEqual(["apple"]);
+      messages.length = 0;
+      tell(frame, highlight(patterns));
+      await settle();
+      expect(marked(doc), JSON.stringify(patterns)).toEqual([]);
+      expect(messages, JSON.stringify(patterns)).toEqual([hits(0)]);
+    }
+  });
+
+  it("keeps the app's messages from every other listener in the frame", async () => {
+    const { frame, doc } = await load("<p>apple</p>", (view) => {
+      view.Element.prototype.scrollIntoView = () => {};
+    });
+    const view = frame.contentWindow! as Window & typeof globalThis;
+    // A script in the frame, had one run, listening for what the app says.
+    const heard: unknown[] = [];
+    view.addEventListener("message", (e) => heard.push(e.data), true);
+    view.addEventListener("message", (e) => heard.push(e.data));
+    tell(frame, highlight([words("apple")]));
+    tell(frame, { inbound: INBOUND, type: "reveal", index: 0 });
+    await settle();
+    expect(marked(doc)).toEqual(["apple"]);
+    expect(heard).toEqual([]);
+    // What isn't the app's, they hear as before.
+    tell(frame, { hello: true });
+    expect(heard).toEqual([{ hello: true }, { hello: true }]);
+  });
+
+  it("marks only text a reader sees, never in scripts or styles, nor the mail's own marks", async () => {
+    const { frame, doc } = await load(
+      '<style>.apple { color: red }</style><p class="shown">apple</p>' +
+        '<p class="hidden">apple, hidden</p><textarea>apple</textarea><select><option>apple</option></select>' +
+        '<mark data-cumulas-hit="">apple</mark>',
+      (view) => {
+        view.Element.prototype.checkVisibility = function (this: Element) {
+          return !this.classList.contains("hidden");
+        };
+      },
+    );
+    tell(frame, highlight([words("apple")]));
+    await settle();
+    expect(marked(doc)).toEqual(["apple", "apple", "apple"]);
+    // The mail's own mark, found by the search, is kept apart from the bridge's.
+    expect(doc.querySelectorAll('mark[data-cumulas-hit=""] > mark')).toHaveLength(1);
+    expect(doc.querySelector("style")!.textContent).toBe(".apple { color: red }");
+    expect(doc.querySelector(".hidden")!.innerHTML).toBe("apple, hidden");
+    // Cleared, the mail's own mark stays.
+    tell(frame, highlight([]));
+    await settle();
+    expect(doc.querySelectorAll("mark")).toHaveLength(1);
+    expect(doc.body.lastElementChild!.outerHTML).toBe('<mark data-cumulas-hit="">apple</mark>');
+  });
+
+  it("counts all text as shown where it can't tell", async () => {
+    const { frame, doc } = await load('<p class="hidden">apple</p>');
+    const view = frame.contentWindow! as Window & typeof globalThis;
+    expect("checkVisibility" in view.Element.prototype).toBe(false);
+    tell(frame, highlight([words("apple")]));
+    await settle();
+    expect(marked(doc)).toEqual(["apple"]);
+  });
+
+  it("stops at 1,000 matches, and after 250,000 characters, and says how many it marked", async () => {
+    const { frame, doc, messages } = await load(`<p>${"ab ".repeat(1200)}</p>`);
+    messages.length = 0;
+    tell(frame, highlight([words("ab")]));
+    await settle();
+    expect(doc.querySelectorAll("mark")).toHaveLength(1000);
+    expect(messages).toEqual([hits(1000)]);
+
+    const long = await load(`<p>${"x".repeat(250_000)}</p><p>needle</p>`);
+    long.messages.length = 0;
+    tell(long.frame, highlight([words("needle")]));
+    await settle();
+    expect(marked(long.doc)).toEqual([]);
+    expect(long.messages).toEqual([hits(0)]);
+  });
+
+  const escape = (text: string) =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  it.each(HIGHLIGHT_VECTORS.filter((v) => v.field === "body"))(
+    "marks $query in “$text” as the app finds it",
+    async ({ text, query, hits: expected }) => {
+      const { frame, doc } = await load(`<p>${escape(text)}</p>`);
+      tell(frame, highlight(hitPatterns(parseSearch(query))?.body ?? []));
+      await settle();
+      expect(marked(doc)).toEqual(expected);
+      expect(doc.querySelector("p")!.textContent).toBe(text);
+    },
+  );
 });

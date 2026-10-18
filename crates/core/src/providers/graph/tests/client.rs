@@ -12,6 +12,7 @@ use crate::auth::microsoft::{MicrosoftAuthConfig, MicrosoftTokenSource};
 use crate::auth::{NoGrantRecord, StaticToken};
 use crate::error::ErrorCode;
 use crate::providers::graph::GraphProvider;
+use crate::providers::graph::client::{BatchRequest, GraphClient};
 use crate::providers::{MailProvider, MessageLocator, TasksProvider};
 use crate::secrets::{MemorySecretStore, SecretStore, keys};
 
@@ -287,4 +288,191 @@ async fn batch_part_failures_are_reported() {
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Provider);
     assert_eq!(error.message, "Access is denied.");
+}
+
+#[tokio::test]
+async fn beta_urls_replace_the_version_root() {
+    let (server, provider) = setup().await;
+    assert_eq!(
+        provider.client.beta_url("/me/x"),
+        format!("{}/beta/me/x", server.uri())
+    );
+    let client = GraphClient::new(
+        crate::providers::graph::GRAPH_BASE_URL.into(),
+        Arc::new(StaticToken("t".into())),
+    );
+    assert_eq!(
+        client.beta_url("/me/security/informationProtection/sensitivityLabels"),
+        "https://graph.microsoft.com/beta/me/security/informationProtection/sensitivityLabels"
+    );
+    assert!(client.is_own_link("https://graph.microsoft.com/beta/me?$skiptoken=1"));
+}
+
+/// A server that answers one request with `body` in chunks of `chunk`
+/// bytes, without a Content-Length.
+async fn chunked_server(body: Vec<u8>, chunk: usize) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = socket.read(&mut buf).await.unwrap();
+            if n == 0 {
+                return;
+            }
+            request.extend_from_slice(&buf[..n]);
+        }
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        for part in body.chunks(chunk) {
+            response.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+            response.extend_from_slice(part);
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(b"0\r\n\r\n");
+        // The reader may hang up early.
+        let _ = socket.write_all(&response).await;
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn limited_downloads_are_refused_by_length_or_as_read() {
+    let (server, provider) = setup().await;
+    Mock::given(path("/big"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7u8; 3000]))
+        .mount(&server)
+        .await;
+    let url = format!("{}/big", server.uri());
+    let client = &provider.client;
+    assert_eq!(
+        client
+            .get_bytes_limited(&url, &[], 3000)
+            .await
+            .unwrap()
+            .len(),
+        3000
+    );
+    let error = crate::Error::from(client.get_bytes_limited(&url, &[], 2999).await.unwrap_err());
+    assert_eq!(error.code, ErrorCode::Provider);
+
+    // Without a length: refused once more than the limit has come.
+    let base = chunked_server(vec![7u8; 3000], 500).await;
+    let chunked = GraphClient::new(base.clone(), Arc::new(StaticToken("t".into())));
+    let error = crate::Error::from(
+        chunked
+            .get_bytes_limited(&format!("{base}/big"), &[], 1200)
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(error.code, ErrorCode::Provider);
+    let base = chunked_server(vec![7u8; 3000], 500).await;
+    let chunked = GraphClient::new(base.clone(), Arc::new(StaticToken("t".into())));
+    let read = chunked
+        .get_bytes_limited(&format!("{base}/big"), &[], 3000)
+        .await
+        .unwrap();
+    assert_eq!(read.len(), 3000);
+}
+
+#[tokio::test]
+async fn prefixes_stop_at_their_length() {
+    let body: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+    let base = chunked_server(body.clone(), 300).await;
+    let client = GraphClient::new(base.clone(), Arc::new(StaticToken("t".into())));
+    let prefix = client
+        .get_bytes_prefix(&format!("{base}/p7m"), &[], 512)
+        .await
+        .unwrap();
+    assert_eq!(prefix, body[..512]);
+    // Shorter than asked: all of it.
+    let (server, provider) = setup().await;
+    Mock::given(path("/short"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1u8; 100]))
+        .mount(&server)
+        .await;
+    let short = provider
+        .client
+        .get_bytes_prefix(&format!("{}/short", server.uri()), &[], 512)
+        .await
+        .unwrap();
+    assert_eq!(short.len(), 100);
+}
+
+#[tokio::test]
+async fn sequential_batches_retry_what_failed_after_a_throttled_request() {
+    let (server, provider) = setup().await;
+    // b is throttled once; c, after it, fails as Graph fails a dependent,
+    // and goes again with b, still after it.
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(batch_responder(|r| match r["id"].as_str().unwrap() {
+            "a" => (200, json!({ "id": "a" })),
+            "b" => (
+                429,
+                json!({ "error": { "code": "TooManyRequests", "message": "slow down" } }),
+            ),
+            _ => (
+                424,
+                json!({ "error": { "code": "FailedDependency", "message": "b failed" } }),
+            ),
+        }))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(batch_responder(|_| (200, json!({ "id": "b" }))))
+        .mount(&server)
+        .await;
+    let requests = [
+        BatchRequest::get("a", "/me/messages/a".into()),
+        BatchRequest::get("b", "/me/messages/b".into()).after("a"),
+        BatchRequest::get("c", "/me/messages/c".into()).after("b"),
+    ];
+    let responses = provider.client.batch(&requests, &[]).await.unwrap();
+    assert!(responses["a"].is_success() && responses["b"].is_success());
+    assert!(responses["c"].is_success());
+    let sent = batched_requests(&server).await;
+    assert_eq!(sent.len(), 5);
+    assert_eq!(sent[0].get("dependsOn"), None);
+    assert_eq!(sent[1]["dependsOn"], json!(["a"]));
+    assert_eq!(sent[2]["dependsOn"], json!(["b"]));
+    // Retried: b after nothing (a isn't sent again), c still after b.
+    assert_eq!(sent[3]["id"], "b");
+    assert_eq!(sent[3].get("dependsOn"), None);
+    assert_eq!(sent[4]["id"], "c");
+    assert_eq!(sent[4]["dependsOn"], json!(["b"]));
+}
+
+#[tokio::test]
+async fn a_dependent_that_failed_on_its_own_is_not_retried() {
+    let (server, provider) = setup().await;
+    // b failed for good (403), so c's 424 stands; nothing is sent again.
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(batch_responder(|r| match r["id"].as_str().unwrap() {
+            "a" => (200, json!({ "id": "a" })),
+            "b" => (
+                403,
+                json!({ "error": { "code": "ErrorAccessDenied", "message": "Access is denied." } }),
+            ),
+            _ => (
+                424,
+                json!({ "error": { "code": "FailedDependency", "message": "b failed" } }),
+            ),
+        }))
+        .mount(&server)
+        .await;
+    let requests = [
+        BatchRequest::get("a", "/me/messages/a".into()),
+        BatchRequest::get("b", "/me/messages/b".into()).after("a"),
+        BatchRequest::get("c", "/me/messages/c".into()).after("b"),
+    ];
+    let responses = provider.client.batch(&requests, &[]).await.unwrap();
+    assert_eq!(responses["b"].status, 403);
+    assert_eq!(responses["c"].status, 424);
+    assert_eq!(batched_requests(&server).await.len(), 3);
 }

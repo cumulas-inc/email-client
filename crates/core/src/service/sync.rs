@@ -169,6 +169,7 @@ impl CoreService {
             tracing::warn!("tasks sync for account {} failed: {e}", account.id);
             first_error.get_or_insert(e);
         }
+        self.sync_protection(account, &providers, &retrying).await;
         self.prune_reminders();
         mail.and(first_error.map_or(Ok(()), Err))
     }

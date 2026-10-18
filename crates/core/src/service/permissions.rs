@@ -1,5 +1,6 @@
 //! The optional features of Microsoft accounts (calendar, contacts, tasks,
-//! the mailbox's time zone), each with a Graph permission of its own. One
+//! the mailbox's time zone, sensitivity labels), each with a Graph
+//! permission of its own. One
 //! the account lacks the permission for, or that Microsoft 365 refused,
 //! answers every call with `PermissionRequired` and keeps nothing cached;
 //! an administrator's approval, signing in again or checking again brings
@@ -14,9 +15,10 @@ use crate::auth::microsoft::{is_consumer_domain, is_personal_tenant};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
     Account, AccountFeature, AccountKind, AccountSettings, AdminConsentLink, Calendar, Contact,
-    ContactDraft, DataKind, Event, EventDraft, EventResponse, Task, TaskDraft, TaskList, TaskPatch,
+    ContactDraft, DataKind, Event, EventDraft, EventResponse, LabelCatalog, Task, TaskDraft,
+    TaskList, TaskPatch,
 };
-use crate::providers::{CalendarProvider, ContactsProvider, TasksProvider};
+use crate::providers::{CalendarProvider, ContactsProvider, LabelsProvider, TasksProvider};
 
 /// Stands in for the provider of a feature the account can't use: every
 /// call fails with `PermissionRequired`, except reading the server's
@@ -32,7 +34,7 @@ pub(crate) struct NeedsPermission {
 }
 
 impl NeedsPermission {
-    fn error(&self) -> Error {
+    pub(super) fn error(&self) -> Error {
         let (noun, email) = (self.feature.noun(), &self.email);
         let (message, reason) = if self.refused {
             (
@@ -147,6 +149,13 @@ impl TasksProvider for NeedsPermission {
     }
 }
 
+#[async_trait]
+impl LabelsProvider for NeedsPermission {
+    async fn label_catalog(&self) -> Result<LabelCatalog> {
+        Err(self.error())
+    }
+}
+
 /// Whether Graph refused to list a feature's items (HTTP 403): its
 /// permission is granted, but Microsoft 365 doesn't let the account use it
 /// (no license, or a mailbox without it).
@@ -189,6 +198,12 @@ impl CoreService {
                 self.store.replace_task_lists(id, &[])?;
                 had.then_some(DataKind::Tasks)
             }
+            // Checks of labels are kept, but never offered without the
+            // list: offers come from it.
+            AccountFeature::SensitivityLabels => self
+                .store
+                .clear_label_catalog(id)?
+                .then_some(DataKind::Protection),
             // Nothing is kept of it.
             AccountFeature::MailboxSettings => None,
         };

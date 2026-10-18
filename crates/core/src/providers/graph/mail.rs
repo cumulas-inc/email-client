@@ -1,7 +1,11 @@
 //! Mail on Microsoft Graph: folders, delta sync, message bodies, flags,
-//! moves and sending.
+//! moves and sending, and what protected mail needs: the signals detection
+//! reads, S/MIME content, sending through a draft that carries the
+//! x-cumulas-* properties, and the setup check's lookups.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -18,17 +22,24 @@ use super::client::{
     PREFER_IMMUTABLE_ID, PREFER_PAGE_SIZE, Page, segment, take_response,
 };
 use super::types::{ItemBody, Recipient, addresses, null_default, recipients_json};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::html::make_preview;
 use crate::model::{
-    AttachmentMeta, EntityKind, Folder, FolderRole, Importance, Message, MessageSummary,
-    OutgoingMessage, ReplyKind, local_id,
+    AttachmentMeta, EmailAddress, EntityKind, Folder, FolderRole, Importance, Message,
+    MessageSummary, OutgoingMessage, ReplyKind, local_id,
 };
+use crate::protection::{
+    CONTENT_CLASS_PROPERTY, LABEL_HEADER, LABEL_PROPERTY, MESSAGE_CLASS_PROPERTY,
+    MIME_ATTACHMENT_PREFIX, MSIP_LABELS_PROPERTY, PROTECT_HEADER, PROTECT_PROPERTY,
+    headers_not_kept, is_blank, label_copied, own_label, smime_content_of, wants_attachments,
+};
+use crate::providers::imap::mime;
 use crate::providers::{
-    FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SearchPage,
-    SyncWindow,
+    FolderCounts, HeaderRequest, MailProvider, MessageBatch, MessageContent, MessageLocator,
+    MessageSignals, SearchPage, ServerQuery, SyncWindow,
 };
-use crate::search::{SearchQuery, kql};
+use crate::search::dates::Received;
+use crate::search::kql;
 
 const FOLDER_FIELDS: &str =
     "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount";
@@ -38,6 +49,51 @@ const SUMMARY_FIELDS: &str = "id,conversationId,subject,from,sender,toRecipients
 const DETAIL_FIELDS: &str =
     "body,bccRecipients,replyTo,internetMessageId,internetMessageHeaders,hasAttachments";
 const ATTACHMENT_FIELDS: &str = "id,name,contentType,size,isInline";
+const INBOX_LOOKUP_FIELDS: &str = "id,subject,receivedDateTime";
+
+/// The named properties read next to a message's detail GET, by batch
+/// request id: one at a time, as an `or` in an extended-property filter
+/// isn't documented.
+const NAMED_PROPERTIES: [(&str, &str); 4] = [
+    ("contentClass", CONTENT_CLASS_PROPERTY),
+    ("msipLabels", MSIP_LABELS_PROPERTY),
+    ("requestedProtect", PROTECT_PROPERTY),
+    ("requestedLabel", LABEL_PROPERTY),
+];
+/// How long reading a draft's properties back may take before nothing is
+/// sent.
+const READ_BACK_BUDGET: Duration = Duration::from_secs(30);
+/// Bytes of a `.p7m` read to tell signed from encrypted.
+const SMIME_PREFIX_BYTES: usize = 512;
+/// Largest message whose MIME is read to show a clear-signed message's
+/// content.
+const MAX_MIME_BYTES: usize = 25 * 1024 * 1024;
+/// Pages of Inbox messages a check's lookup reads.
+const MAX_INBOX_LOOKUP_PAGES: usize = 3;
+
+/// Whether Graph's answer to setting or reading back a draft's property
+/// refuses it, rather than failing to answer: the sign-in, a timeout,
+/// throttling, a request that failed only because the one before it did
+/// (424), or a server error say nothing of whether the draft keeps it.
+fn is_refusal(status: StatusCode) -> bool {
+    status.is_client_error()
+        && !matches!(
+            status,
+            StatusCode::UNAUTHORIZED
+                | StatusCode::REQUEST_TIMEOUT
+                | StatusCode::FAILED_DEPENDENCY
+                | StatusCode::TOO_MANY_REQUESTS
+        )
+}
+
+/// Microsoft 365 didn't answer while a draft's request was read back:
+/// nothing was sent, and nothing was learned of what it keeps.
+fn unanswered() -> Error {
+    Error::provider(
+        "Microsoft 365 didn't answer while Cumulas Mail checked the message before sending it, \
+         so it wasn't sent. Try again.",
+    )
+}
 
 /// Well-known folder names (Graph `mailFolder` docs) and the role they give.
 const WELL_KNOWN_FOLDERS: &[(&str, FolderRole)] = &[
@@ -174,6 +230,45 @@ struct GraphMessageDetail {
     #[serde(default, deserialize_with = "null_default")]
     internet_message_headers: Vec<MessageHeader>,
     has_attachments: Option<bool>,
+    /// The one expanded: the message class.
+    #[serde(default, deserialize_with = "null_default")]
+    single_value_extended_properties: Vec<ExtendedProperty>,
+}
+
+/// A single-value extended property. Its `id` isn't matched on: Graph may
+/// spell it otherwise than it was asked for.
+#[derive(Debug, Deserialize)]
+struct ExtendedProperty {
+    value: Option<String>,
+}
+
+/// A message with only the extended properties asked for.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WithProperties {
+    #[serde(default, deserialize_with = "null_default")]
+    single_value_extended_properties: Vec<ExtendedProperty>,
+}
+
+impl WithProperties {
+    /// The first property's value, trimmed; `None` when the message has
+    /// none (Graph then leaves the array out).
+    fn value(self) -> Option<String> {
+        self.single_value_extended_properties
+            .into_iter()
+            .next()
+            .and_then(|p| p.value)
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    }
+}
+
+/// What the named-property batch read: each property's value, and whether
+/// every one could be read.
+#[derive(Debug, Default)]
+struct NamedValues {
+    values: HashMap<&'static str, String>,
+    complete: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,6 +433,40 @@ fn decode_attachments(message: &OutgoingMessage) -> Result<Vec<Upload>> {
             })
         })
         .collect()
+}
+
+/// `$expand` of one single-value extended property.
+fn expand_property(id: &str) -> String {
+    format!("singleValueExtendedProperties($filter=id eq '{id}')")
+}
+
+/// A message's named property `id`, by itself, for a batch (whose URLs
+/// Graph documents unencoded).
+fn property_url(message_id: &str, id: &str) -> String {
+    format!(
+        "/me/messages/{}?$select=id&$expand={}",
+        segment(message_id),
+        expand_property(id)
+    )
+}
+
+/// Requests reading `properties` of a message one after the other.
+fn sequential_property_reads(message_id: &str, properties: &[(&str, &str)]) -> Vec<BatchRequest> {
+    let mut requests: Vec<BatchRequest> = Vec::with_capacity(properties.len());
+    for (request_id, property) in properties {
+        let request = BatchRequest::get(request_id, property_url(message_id, property));
+        let request = match requests.last() {
+            Some(previous) => request.after(&previous.id),
+            None => request,
+        };
+        requests.push(request);
+    }
+    requests
+}
+
+/// A link that's https, else nothing.
+fn https_only(link: Option<String>) -> Option<String> {
+    link.filter(|l| url::Url::parse(l).is_ok_and(|u| u.scheme() == "https"))
 }
 
 fn message_json(message: &OutgoingMessage) -> Value {
@@ -555,35 +684,29 @@ impl GraphProvider {
         changes.removed = removed;
     }
 
-    /// One page of a search of the whole mailbox; see
-    /// [`MailProvider::search`]. `cursor` is Graph's `@odata.nextLink`.
+    /// One page of a search of the mailbox, or of the one folder it is
+    /// scoped to; see [`MailProvider::search`]. `cursor` is Graph's
+    /// `@odata.nextLink`.
+    ///
+    /// Words go to `$search` (KQL), which takes no `$filter` or `$orderby`
+    /// (Graph sorts its matches by date sent itself), with the dates when
+    /// the mailbox takes them. Filters alone go to `$filter`, newest first:
+    /// exact, and so it finds old unread or flagged mail `$search` can't
+    /// say. Graph can't say several folders: those, read and flagged with
+    /// words, and the exact dates are the caller's to check.
     async fn search_page(
         &self,
-        query: &SearchQuery,
-        folders: &[Folder],
+        search: &ServerQuery<'_>,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<SearchPage> {
-        let url = match cursor {
-            Some(link) => link.to_owned(),
-            None => {
-                let Some(kql) = kql::kql(query) else {
-                    return Ok(SearchPage::default());
-                };
-                // Graph refuses `$orderby` and `$filter` with `$search`; it
-                // sorts by date sent itself.
-                self.client.url_with_query(
-                    "/me/messages",
-                    &[
-                        ("$search", &kql::search_param(&kql)),
-                        ("$select", &format!("{SUMMARY_FIELDS},parentFolderId")),
-                        ("$top", &limit.to_string()),
-                    ],
-                )
-            }
+        let page: Page<GraphMessage> = match cursor {
+            // Refuses a cursor that isn't a link to Graph, so the token stays.
+            Some(link) => self.client.get_page(link, &[PREFER_IMMUTABLE_ID]).await?,
+            None if search.query.is_empty() => return Ok(SearchPage::default()),
+            None => self.first_search_page(search, limit).await?,
         };
-        // Refuses a cursor that isn't a link to Graph, so the token stays.
-        let page: Page<GraphMessage> = self.client.get_page(&url, &[PREFER_IMMUTABLE_ID]).await?;
+        let folders = search.folders;
         let stored: HashSet<&str> = folders.iter().map(|f| f.remote_id.as_str()).collect();
         let mut unknown: Vec<&str> = page
             .value
@@ -608,6 +731,70 @@ impl GraphProvider {
             messages,
             next: page.next_link,
         })
+    }
+
+    /// The first page of a search; see [`Self::search_page`]. A mailbox that
+    /// answers a search with dates with 400 is asked again without them,
+    /// and, if that works, never sent them from then on.
+    async fn first_search_page(
+        &self,
+        search: &ServerQuery<'_>,
+        limit: u32,
+    ) -> Result<Page<GraphMessage>> {
+        let base = match search.scope {
+            Some([folder]) => format!("/me/mailFolders/{}/messages", segment(&folder.remote_id)),
+            _ => "/me/messages".to_owned(),
+        };
+        let select = format!("{SUMMARY_FIELDS},parentFolderId");
+        let top = limit.to_string();
+        let search_url = |kql: &str| {
+            self.client.url_with_query(
+                &base,
+                &[
+                    ("$search", &kql::search_param(kql)),
+                    ("$select", &select),
+                    ("$top", &top),
+                ],
+            )
+        };
+        let dates = if self.kql_dates_refused.load(Ordering::Relaxed) {
+            Received::default()
+        } else {
+            search.received
+        };
+        let Some(kql) = kql::kql(search.query, dates) else {
+            let url = self.client.url_with_query(
+                &base,
+                &[
+                    ("$filter", &kql::graph_filter(search.query, search.received)),
+                    ("$orderby", "receivedDateTime desc"),
+                    ("$select", &select),
+                    ("$top", &top),
+                ],
+            );
+            return Ok(self.client.get_page(&url, &[PREFER_IMMUTABLE_ID]).await?);
+        };
+        let error = match self
+            .client
+            .get_page(&search_url(&kql), &[PREFER_IMMUTABLE_ID])
+            .await
+        {
+            Ok(page) => return Ok(page),
+            Err(failure) => Error::from(failure),
+        };
+        let undated = kql::kql(search.query, Received::default()).unwrap_or_default();
+        if error.code != ErrorCode::Provider || error.http_status() != Some(400) || undated == kql {
+            return Err(error);
+        }
+        // Refused again: the dates weren't why, and later searches keep them.
+        let page = self
+            .client
+            .get_page(&search_url(&undated), &[PREFER_IMMUTABLE_ID])
+            .await?;
+        self.kql_dates_refused.store(true, Ordering::Relaxed);
+        // Never the query: it is the user's words.
+        tracing::debug!("the mailbox refused dates in a search; leaving them to the device");
+        Ok(page)
     }
 
     /// Of folder ids that aren't the stored folders' own, those that name a
@@ -910,6 +1097,140 @@ impl GraphProvider {
         Ok(())
     }
 
+    /// The message's named properties ([`NAMED_PROPERTIES`]) in one
+    /// sequential batch, so that reading a message takes two of the
+    /// mailbox's four concurrent requests at most. A sub-request that fails
+    /// leaves its value out, and the read incomplete.
+    async fn named_properties(&self, message_id: &str) -> Result<NamedValues> {
+        let requests = sequential_property_reads(message_id, &NAMED_PROPERTIES);
+        let mut responses = self.client.batch(&requests, &[PREFER_IMMUTABLE_ID]).await?;
+        let mut read = NamedValues {
+            complete: true,
+            ..NamedValues::default()
+        };
+        for (request_id, _) in NAMED_PROPERTIES {
+            match responses.remove(request_id) {
+                Some(response) if response.is_success() => {
+                    if let Some(value) = response
+                        .json::<WithProperties>()
+                        .ok()
+                        .and_then(WithProperties::value)
+                    {
+                        read.values.insert(request_id, value);
+                    }
+                }
+                other => {
+                    tracing::debug!(
+                        "reading a message property ({request_id}) returned {:?}",
+                        other.map(|r| r.status())
+                    );
+                    read.complete = false;
+                }
+            }
+        }
+        Ok(read)
+    }
+
+    /// What the `.p7m` attachment holds, from its first bytes.
+    async fn smime_prefix(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Option<crate::providers::SmimeContent> {
+        let url = self.message_url(
+            message_id,
+            &format!("/attachments/{}/$value", segment(attachment_id)),
+        );
+        match self
+            .client
+            .get_bytes_prefix(&url, &[PREFER_IMMUTABLE_ID], SMIME_PREFIX_BYTES)
+            .await
+        {
+            Ok(prefix) => smime_content_of(&prefix),
+            Err(e) => {
+                tracing::debug!("reading an S/MIME file's start failed: {}", Error::from(e));
+                None
+            }
+        }
+    }
+
+    /// The message's MIME, up to [`MAX_MIME_BYTES`].
+    async fn mime(&self, message_id: &str) -> Result<Vec<u8>> {
+        Ok(self
+            .client
+            .get_bytes_limited(
+                &self.message_url(message_id, "/$value"),
+                &[PREFER_IMMUTABLE_ID],
+                MAX_MIME_BYTES,
+            )
+            .await?)
+    }
+
+    /// Reads back what a draft must carry before it's sent: each requested
+    /// property exactly, and, for a reply or forward asking for a label, no
+    /// other label of the organization copied from the original (nor any,
+    /// when the requested one encrypts). Errors: `headersNotKept` when
+    /// Microsoft 365 answered without the value or refused to read it,
+    /// `labelCopied`, and [`unanswered`] (or the network's error) when it
+    /// didn't answer: nothing was learned of the draft then.
+    async fn read_back(&self, draft_id: &str, reply: bool, request: &HeaderRequest) -> Result<()> {
+        let not_kept = || headers_not_kept(None);
+        let mut properties: Vec<(&str, &str)> = Vec::new();
+        if request.protect.is_some() {
+            properties.push(("protect", PROTECT_PROPERTY));
+        }
+        if request.label_id.is_some() {
+            properties.push(("label", LABEL_PROPERTY));
+            if reply {
+                properties.push(("msipLabels", MSIP_LABELS_PROPERTY));
+            }
+        }
+        let requests = sequential_property_reads(draft_id, &properties);
+        let mut responses = tokio::time::timeout(
+            READ_BACK_BUDGET,
+            self.client.batch(&requests, &[PREFER_IMMUTABLE_ID]),
+        )
+        .await
+        .map_err(|_| unanswered())??;
+        let mut value = |id: &str| -> Result<Option<String>> {
+            let response = responses.remove(id).ok_or_else(unanswered)?;
+            let status = response.status();
+            if !response.is_success() {
+                tracing::debug!("reading back a draft's {id} returned {status}");
+                return Err(if is_refusal(status) {
+                    not_kept()
+                } else {
+                    unanswered()
+                });
+            }
+            // An answer that doesn't read is no answer about the value.
+            Ok(response
+                .json::<WithProperties>()
+                .map_err(|_| unanswered())?
+                .value())
+        };
+        if let Some(action) = request.protect
+            && value("protect")?.as_deref() != Some(action.header_value())
+        {
+            tracing::debug!("the draft didn't keep {PROTECT_HEADER}");
+            return Err(not_kept());
+        }
+        if let Some(label) = &request.label_id {
+            if value("label")?.as_deref() != Some(label.as_str()) {
+                tracing::debug!("the draft didn't keep {LABEL_HEADER}");
+                return Err(not_kept());
+            }
+            if reply
+                && let Some(copied) =
+                    value("msipLabels")?.and_then(|raw| own_label(&raw, &request.tenant_id))
+                && (request.label_encrypts || copied.id != *label)
+            {
+                return Err(label_copied(&copied.id));
+            }
+        }
+        Ok(())
+    }
+
     /// Best-effort removal of a draft that could not be completed.
     async fn discard_draft(&self, draft_id: &str) {
         if let Err(e) = self
@@ -1047,30 +1368,39 @@ impl MailProvider for GraphProvider {
     }
 
     async fn fetch_message(&self, message: &MessageLocator) -> Result<MessageContent> {
+        let message_id = message.remote_id.as_str();
         let url = self.client.url_with_query(
-            &format!("/me/messages/{}", segment(&message.remote_id)),
-            &[("$select", DETAIL_FIELDS)],
+            &format!("/me/messages/{}", segment(message_id)),
+            &[
+                ("$select", DETAIL_FIELDS),
+                ("$expand", &expand_property(MESSAGE_CLASS_PROPERTY)),
+            ],
         );
-        let detail: GraphMessageDetail = self
-            .client
-            .get_json(&url, &[PREFER_IMMUTABLE_ID, PREFER_HTML_BODY])
-            .await?;
-        let (mut body_html, body_text) = match detail.body {
+        let prefer = [PREFER_IMMUTABLE_ID, PREFER_HTML_BODY];
+        // The properties are optional: a slow or failed batch never holds
+        // up reading, and the message is read again later (see
+        // `MessageSignals::properties_unavailable`).
+        let (detail, properties) = tokio::join!(
+            self.client.get_json::<GraphMessageDetail>(&url, &prefer),
+            tokio::time::timeout(self.property_budget, self.named_properties(message_id)),
+        );
+        let detail = detail?;
+        let properties = match properties {
+            Ok(Ok(properties)) => properties,
+            Ok(Err(e)) => {
+                tracing::debug!("reading a message's properties failed: {e}");
+                NamedValues::default()
+            }
+            Err(_) => {
+                tracing::debug!("reading a message's properties took too long");
+                NamedValues::default()
+            }
+        };
+        let (mut body_html, mut body_text) = match detail.body {
             Some(body) if body.is_html() => (body.content, None),
             Some(body) => (None, body.content),
             None => (None, None),
         };
-        let has_cid = body_html.as_deref().is_some_and(|h| h.contains("cid:"));
-        // `hasAttachments` ignores inline attachments, hence the `cid:` check.
-        let mut attachments = if detail.has_attachments.unwrap_or(false) || has_cid {
-            self.list_attachments(&message.remote_id).await?
-        } else {
-            Vec::new()
-        };
-        if has_cid && let Some(html) = body_html.as_mut() {
-            self.embed_inline_images(&message.remote_id, html, &mut attachments)
-                .await;
-        }
         let header = |name: &str| {
             detail
                 .internet_message_headers
@@ -1079,6 +1409,109 @@ impl MailProvider for GraphProvider {
                 .map(|h| h.value.trim().to_owned())
                 .filter(|v| !v.is_empty())
         };
+        let property = |id: &str| properties.values.get(id).cloned();
+        let (msip_labels, msip_labels_source) =
+            match (header("msip_labels"), property("msipLabels")) {
+                (Some(value), _) => (Some(value), Some("header".to_owned())),
+                (None, Some(value)) => (Some(value), Some("property".to_owned())),
+                (None, None) => (None, None),
+            };
+        let mut signals = MessageSignals {
+            content_class: property("contentClass").or_else(|| header("Content-Class")),
+            message_class: detail
+                .single_value_extended_properties
+                .into_iter()
+                .find_map(|p| p.value)
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty()),
+            msip_labels,
+            msip_labels_source,
+            has_attachments_flag: detail.has_attachments,
+            requested_action: property("requestedProtect").or_else(|| header(PROTECT_HEADER)),
+            requested_label: property("requestedLabel").or_else(|| header(LABEL_HEADER)),
+            properties_unavailable: !properties.complete,
+            ..MessageSignals::default()
+        };
+
+        let has_cid = body_html.as_deref().is_some_and(|h| h.contains("cid:"));
+        // `hasAttachments` ignores inline attachments, hence the `cid:` check;
+        // protected mail and blank bodies are listed whatever it says.
+        let blank = is_blank(body_html.as_deref(), body_text.as_deref());
+        let mut attachments = if detail.has_attachments.unwrap_or(false)
+            || has_cid
+            || wants_attachments(&signals)
+            || blank
+        {
+            self.list_attachments(message_id).await?
+        } else {
+            Vec::new()
+        };
+
+        let class = signals
+            .message_class
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let named = |a: &&AttachmentMeta, name: &str| a.name.trim().eq_ignore_ascii_case(name);
+        // Opaque-signed and encrypted S/MIME share this class: the .p7m's
+        // first bytes tell them apart.
+        if class == "ipm.note.smime" {
+            let p7m = attachments
+                .iter()
+                .find(|a| named(a, "smime.p7m"))
+                .or_else(|| {
+                    attachments.iter().find(|a| {
+                        let t = a.content_type.to_ascii_lowercase();
+                        t.contains("pkcs7-mime") || t.contains("pkcs7-signature")
+                    })
+                })
+                .map(|a| a.id.clone());
+            if let Some(id) = p7m {
+                signals.smime_content = self.smime_prefix(message_id, &id).await;
+            }
+        }
+        // Exchange keeps a clear-signed message's attachments inside the
+        // smime.p7m holding the whole multipart/signed entity: read them
+        // from the message's MIME.
+        let clear_signed = class.starts_with("ipm.note.smime.multipartsigned")
+            || attachments.iter().any(|a| {
+                named(&a, "smime.p7m")
+                    && a.content_type
+                        .to_ascii_lowercase()
+                        .starts_with("multipart/signed")
+            });
+        let mut from_mime = false;
+        if clear_signed {
+            match self.mime(message_id).await {
+                Ok(raw) => {
+                    let parsed = mime::parse_message(&raw);
+                    attachments = parsed
+                        .attachments
+                        .into_iter()
+                        .map(|a| AttachmentMeta {
+                            id: format!("{MIME_ATTACHMENT_PREFIX}{}", a.id),
+                            ..a
+                        })
+                        .collect();
+                    signals.mime_type = parsed.signals.mime_type;
+                    if !is_blank(parsed.body_html.as_deref(), parsed.body_text.as_deref()) {
+                        body_html = parsed.body_html;
+                        body_text = parsed.body_text;
+                    }
+                    signals.body_from_mime = true;
+                    from_mime = true;
+                }
+                Err(e) => tracing::debug!("reading a signed message's MIME failed: {e}"),
+            }
+        }
+        // The MIME's images are inlined already.
+        if has_cid
+            && !from_mime
+            && let Some(html) = body_html.as_mut()
+        {
+            self.embed_inline_images(message_id, html, &mut attachments)
+                .await;
+        }
         Ok(MessageContent {
             in_reply_to: header("In-Reply-To"),
             references: header("References")
@@ -1090,6 +1523,7 @@ impl MailProvider for GraphProvider {
             reply_to: addresses(&detail.reply_to),
             attachments,
             internet_message_id: detail.internet_message_id,
+            signals,
         })
     }
 
@@ -1098,6 +1532,17 @@ impl MailProvider for GraphProvider {
         message: &MessageLocator,
         attachment_id: &str,
     ) -> Result<Vec<u8>> {
+        // A part of a clear-signed message's MIME.
+        if let Some(section) = attachment_id.strip_prefix(MIME_ATTACHMENT_PREFIX) {
+            let valid =
+                !section.is_empty() && section.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+            if !valid {
+                return Err(Error::not_found("attachment"));
+            }
+            let raw = self.mime(&message.remote_id).await?;
+            return mime::attachment_content(&raw, section)
+                .ok_or_else(|| Error::not_found("attachment"));
+        }
         let url = self.message_url(
             &message.remote_id,
             &format!("/attachments/{}/$value", segment(attachment_id)),
@@ -1155,15 +1600,20 @@ impl MailProvider for GraphProvider {
 
     async fn search(
         &self,
-        query: &SearchQuery,
-        folders: &[Folder],
+        search: &ServerQuery<'_>,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<SearchPage> {
-        self.search_page(query, folders, cursor, limit).await
+        self.search_page(search, cursor, limit).await
     }
 
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {
+        // What it asks for would be dropped here.
+        if message.protect.is_some() || message.label_id.is_some() {
+            return Err(Error::internal(
+                "protected mail goes through send_requesting",
+            ));
+        }
         let uploads = decode_attachments(message)?;
         let reply = message.reply_kind.zip(original);
         let inline_bytes =
@@ -1200,5 +1650,157 @@ impl MailProvider for GraphProvider {
             )
             .await?;
         Ok(())
+    }
+
+    async fn send_requesting(
+        &self,
+        message: &OutgoingMessage,
+        original: Option<&Message>,
+        request: &HeaderRequest,
+    ) -> Result<()> {
+        let uploads = decode_attachments(message)?;
+        let reply = message.reply_kind.zip(original);
+        let kind = message.reply_kind;
+        let draft_id = self.create_draft(message, reply).await?;
+        // The x-cumulas-* properties, as Exchange keeps Internet headers;
+        // `internetMessageHeaders` can only be set on a new message, and a
+        // reply's draft doesn't keep them.
+        let mut properties = Vec::new();
+        if let Some(action) = request.protect {
+            properties.push(json!({ "id": PROTECT_PROPERTY, "value": action.header_value() }));
+        }
+        if let Some(label) = &request.label_id {
+            properties.push(json!({ "id": LABEL_PROPERTY, "value": label }));
+        }
+        let patched = self
+            .client
+            .send_no_content(
+                Method::PATCH,
+                &self.message_url(&draft_id, ""),
+                Some(&json!({ "singleValueExtendedProperties": properties })),
+                &[PREFER_IMMUTABLE_ID],
+            )
+            .await;
+        let checked = match patched {
+            Ok(()) => self.read_back(&draft_id, reply.is_some(), request).await,
+            Err(Failure::Graph { status, .. }) if is_refusal(status) => {
+                tracing::debug!("setting a draft's properties was refused ({status})");
+                Err(headers_not_kept(kind))
+            }
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = checked {
+            self.discard_draft(&draft_id).await;
+            if crate::protection::has_reason(&e, "headersNotKept") {
+                tracing::debug!("a draft didn't keep what it asks for: {e}");
+                return Err(headers_not_kept(kind));
+            }
+            // labelCopied, or Microsoft 365 didn't answer: said as it is.
+            return Err(e);
+        }
+        if let Err(e) = self.add_attachments(&draft_id, &uploads).await {
+            self.discard_draft(&draft_id).await;
+            return Err(e);
+        }
+        // As in `send`: never discarded after this point.
+        self.client
+            .send_no_content(
+                Method::POST,
+                &self.message_url(&draft_id, "/send"),
+                None,
+                &[PREFER_IMMUTABLE_ID],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn web_link(&self, message: &MessageLocator) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WebLink {
+            web_link: Option<String>,
+        }
+        let url = self.client.url_with_query(
+            &format!("/me/messages/{}", segment(&message.remote_id)),
+            &[("$select", "webLink")],
+        );
+        let link: WebLink = self.client.get_json(&url, &[PREFER_IMMUTABLE_ID]).await?;
+        Ok(https_only(link.web_link))
+    }
+
+    async fn find_in_inbox(
+        &self,
+        tokens: &[String],
+        since: DateTime<Utc>,
+    ) -> Result<HashMap<String, MessageLocator>> {
+        let since = since.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let mut next = Some(self.client.url_with_query(
+            "/me/mailFolders/inbox/messages",
+            &[
+                ("$filter", &format!("receivedDateTime ge {since}")),
+                ("$orderby", "receivedDateTime desc"),
+                ("$select", INBOX_LOOKUP_FIELDS),
+                ("$top", "50"),
+            ],
+        ));
+        let wanted: Vec<(&String, String)> = tokens
+            .iter()
+            .map(|t| (t, format!("[{}]", t.to_ascii_lowercase())))
+            .collect();
+        let mut found = HashMap::new();
+        for _ in 0..MAX_INBOX_LOOKUP_PAGES {
+            let Some(url) = next.take() else {
+                break;
+            };
+            let page: Page<GraphMessage> =
+                self.client.get_page(&url, &[PREFER_IMMUTABLE_ID]).await?;
+            // Newest first: the first match of a token is its newest.
+            for message in page.value {
+                let subject = message.subject.unwrap_or_default().to_ascii_lowercase();
+                for (token, marker) in &wanted {
+                    if !found.contains_key(*token) && subject.contains(marker.as_str()) {
+                        found.insert(
+                            (*token).clone(),
+                            MessageLocator {
+                                folder_remote_id: "inbox".into(),
+                                remote_id: message.id.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+            if found.len() == wanted.len() {
+                break;
+            }
+            next = page.next_link;
+        }
+        Ok(found)
+    }
+
+    async fn own_address(&self) -> Result<Option<EmailAddress>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Me {
+            mail: Option<String>,
+            user_principal_name: Option<String>,
+        }
+        let address = self
+            .own_address
+            .get_or_try_init(|| async {
+                let url = self
+                    .client
+                    .url_with_query("/me", &[("$select", "mail,userPrincipalName")]);
+                let me: Me = self.client.get_json(&url, &[]).await?;
+                Ok::<_, Error>(
+                    [me.mail, me.user_principal_name]
+                        .into_iter()
+                        .flatten()
+                        .map(|a| a.trim().to_owned())
+                        .find(|a| a.contains('@'))
+                        .map(|a| EmailAddress::new(None, &a)),
+                )
+            })
+            .await?;
+        Ok(address.clone())
     }
 }

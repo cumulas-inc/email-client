@@ -1,7 +1,7 @@
 import { Check } from "lucide-react";
 import { useId } from "react";
 
-import { MICROSOFT_PERMISSIONS, type Permission } from "./microsoft";
+import { MICROSOFT_PERMISSIONS, ON_REQUEST_FEATURES, type Permission } from "./microsoft";
 
 interface PermissionListProps {
   showScopes?: boolean;
@@ -9,6 +9,11 @@ interface PermissionListProps {
   only?: "core";
   /** The push service's permission too (the approval link covers it). */
   push?: boolean;
+  /**
+   * The permissions asked for only when turned on (sensitivity labels), as a
+   * group of their own: the approval link covers them, a sign-in doesn't.
+   */
+  onRequest?: boolean;
 }
 
 /** The push service's permission, as the app describes it. */
@@ -31,7 +36,12 @@ function Items({ permissions, showScopes }: { permissions: Permission[]; showSco
 }
 
 /** The Microsoft permissions Cumulas Mail requests, in plain language. */
-export function PermissionList({ showScopes = false, only, push = false }: PermissionListProps) {
+export function PermissionList({
+  showScopes = false,
+  only,
+  push = false,
+  onRequest = false,
+}: PermissionListProps) {
   const id = useId();
   const core = [...MICROSOFT_PERMISSIONS.filter((p) => !p.feature), ...(push ? [PUSH] : [])];
   if (only === "core") {
@@ -41,7 +51,9 @@ export function PermissionList({ showScopes = false, only, push = false }: Permi
       </ul>
     );
   }
-  const optional = MICROSOFT_PERMISSIONS.filter((p) => p.feature);
+  const asked = (p: Permission) => p.feature && ON_REQUEST_FEATURES.includes(p.feature);
+  const optional = MICROSOFT_PERMISSIONS.filter((p) => p.feature && !asked(p));
+  const later = MICROSOFT_PERMISSIONS.filter(asked);
   return (
     <div className="permission-groups">
       <p id={`${id}-core`} className="permission-groups__heading">
@@ -56,6 +68,16 @@ export function PermissionList({ showScopes = false, only, push = false }: Permi
       <ul className="permission-list" aria-labelledby={`${id}-optional`}>
         <Items permissions={optional} showScopes={showScopes} />
       </ul>
+      {onRequest && (
+        <>
+          <p id={`${id}-on-request`} className="permission-groups__heading">
+            For sensitivity labels (optional, work and school accounts)
+          </p>
+          <ul className="permission-list" aria-labelledby={`${id}-on-request`}>
+            <Items permissions={later} showScopes={showScopes} />
+          </ul>
+        </>
+      )}
     </div>
   );
 }

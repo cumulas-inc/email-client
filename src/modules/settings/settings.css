@@ -2182,6 +2182,162 @@
   display: none;
 }
 
+/* Settings → Accounts: sensitivity labels and encryption, each option with
+   the check that shows whether the organization's mail server applies it. */
+/* A live region, there from the start, so what it comes to say is read out. */
+.protection-field__progress {
+  font-size: var(--text-sm);
+  color: var(--fg-primary);
+}
+
+.protection-field__progress:not(:empty) {
+  margin-top: var(--space-2);
+}
+
+.protection-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.protection-group__head,
+.protection-group__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+}
+
+.protection-group__line > .account-field__hint {
+  flex: 1 1 220px;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.protection-group__title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+}
+
+.protection-group__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.protection-group__problem {
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  color: var(--warning);
+}
+
+.protection-group__problem-text {
+  color: var(--warning);
+}
+
+.protection-group__loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.protection-rows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.protection-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+  padding: 10px var(--space-3);
+}
+
+.protection-row + .protection-row {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.protection-row__text {
+  display: flex;
+  flex: 1 1 240px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.protection-row__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.protection-row__dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 2.5px;
+}
+
+.protection-row__lock {
+  flex-shrink: 0;
+  color: var(--fg-tertiary);
+}
+
+.protection-row__note {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  text-wrap: pretty;
+}
+
+.protection-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.protection-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.protection-status__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+  background: var(--fg-disabled);
+}
+
+.protection-status--ok .protection-status__dot {
+  background: var(--success);
+}
+
+.protection-status--attention {
+  color: var(--fg-primary);
+}
+
+.protection-status--attention .protection-status__dot {
+  background: var(--warning);
+}
+
 /* Settings → Accounts: how new mail reaches the account. */
 .push-field__head {
   display: flex;

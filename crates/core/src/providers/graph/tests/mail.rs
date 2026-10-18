@@ -674,6 +674,10 @@ async fn fetch_message_reads_body_headers_and_embeds_inline_images() {
             "$select",
             "body,bccRecipients,replyTo,internetMessageId,internetMessageHeaders,hasAttachments",
         ))
+        .and(query_param(
+            "$expand",
+            "singleValueExtendedProperties($filter=id eq 'String 0x001A')",
+        ))
         .and(prefers(PREFER_IMMUTABLE_ID))
         .and(prefers(PREFER_HTML_BODY))
         .respond_with(ok_json(fixture("message_detail.json", &server)))
@@ -691,6 +695,9 @@ async fn fetch_message_reads_body_headers_and_embeds_inline_images() {
         .and(path("/$batch"))
         .respond_with(batch_responder(|r| {
             let url = r["url"].as_str().unwrap();
+            if let Some(answer) = no_properties(r) {
+                return answer;
+            }
             let (cid, bytes) = if url.ends_with("AAMkAtt-image") {
                 ("image001.png@01DA1F2B.3C4D5E60", "iVBORw0KGgo=")
             } else if url.ends_with("AAMkAtt-logo") {
@@ -708,7 +715,8 @@ async fn fetch_message_reads_body_headers_and_embeds_inline_images() {
                 }),
             )
         }))
-        .expect(1)
+        // The named properties, then the images.
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -772,6 +780,7 @@ async fn fetch_message_reads_body_headers_and_embeds_inline_images() {
         .await
         .iter()
         .map(|r| r["url"].as_str().unwrap().to_owned())
+        .filter(|url| !url.contains("$expand="))
         .collect();
     assert_eq!(
         fetched,
@@ -783,7 +792,7 @@ async fn fetch_message_reads_body_headers_and_embeds_inline_images() {
 }
 
 #[tokio::test]
-async fn plain_messages_without_attachments_need_one_request() {
+async fn plain_messages_without_attachments_need_two_requests() {
     let (server, provider) = setup().await;
     Mock::given(method("GET"))
         .and(path("/me/messages/msg-1"))
@@ -798,12 +807,29 @@ async fn plain_messages_without_attachments_need_one_request() {
         .expect(1)
         .mount(&server)
         .await;
+    // The detail, and the named properties in one batch.
+    Mock::given(method("POST"))
+        .and(path("/$batch"))
+        .respond_with(batch_responder(|r| no_properties(r).unwrap()))
+        .expect(1)
+        .mount(&server)
+        .await;
     let content = provider.fetch_message(&locator("msg-1")).await.unwrap();
     assert_eq!(content.body_text.as_deref(), Some("Hello"));
     assert_eq!(content.body_html, None);
     assert!(content.attachments.is_empty());
     assert!(content.references.is_empty());
     assert_eq!(content.in_reply_to, None);
+    assert_eq!(content.signals.message_class, None);
+    assert!(!content.signals.properties_unavailable);
+}
+
+/// Graph's answer to a request for a named property the message doesn't
+/// have: the message without the array.
+fn no_properties(request: &Value) -> Option<(u16, Value)> {
+    let url = request["url"].as_str()?;
+    url.contains("$expand=singleValueExtendedProperties")
+        .then(|| (200, json!({ "id": "msg" })))
 }
 
 #[tokio::test]
@@ -934,6 +960,8 @@ fn outgoing() -> OutgoingMessage {
         importance: Some(Importance::High),
         reply_to_message_id: None,
         reply_kind: None,
+        protect: None,
+        label_id: None,
     }
 }
 
@@ -1004,6 +1032,9 @@ fn original() -> Message {
         internet_message_id: None,
         in_reply_to: None,
         references: vec![],
+        protection: None,
+        label: None,
+        requested: None,
     }
 }
 

@@ -1,6 +1,6 @@
 //! Service tests against an in-memory fake server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -14,12 +14,13 @@ use crate::auth::microsoft::{CORE_SCOPES, SignInResult, legacy_graph_scopes};
 use crate::error::ErrorCode;
 use crate::model::{
     AccountSettings, AdminConsentLink, AttachmentMeta, EmailAddress, EventDraft, Folder,
-    FolderRole, ImapAccountUpdate, ImapSettings, Importance, Message, MessageQuery, MessageSummary,
-    OutgoingMessage, ServerSearchStatus, ShowAs, TaskDraft, TaskPatch, TaskStatus,
+    FolderRole, ImapAccountUpdate, ImapSettings, Importance, LabelCatalog, Message, MessageQuery,
+    MessageSummary, OutgoingMessage, ProtectAction, SearchOptions, SearchSort, ServerSearchStatus,
+    ShowAs, TaskDraft, TaskPatch, TaskStatus,
 };
 use crate::providers::{
-    ChangeSubscriptions, FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator,
-    SyncWindow,
+    ChangeSubscriptions, FolderCounts, HeaderRequest, LabelsProvider, MailProvider, MessageBatch,
+    MessageContent, MessageLocator, MessageSignals, ServerQuery, SyncWindow,
 };
 use crate::push::graph::{CONSENT_HINT, EVENTS_RESOURCE, INBOX_RESOURCE, RelaySource};
 use crate::push::relay::RelayEvent;
@@ -62,9 +63,189 @@ pub(crate) struct FakeServer {
     pub search_hold: Option<Arc<tokio::sync::Notify>>,
     /// Server searches of these accounts fail so.
     pub search_failures: HashMap<String, Error>,
+    /// How often servers were searched (pages asked for).
+    pub search_calls: usize,
+    /// When set, server searches answer these pages, in turn, whatever
+    /// the query (the cursor is a page's index).
+    pub search_pages: Option<Vec<Vec<MessageSummary>>>,
+    /// The scripted page at this index fails so.
+    pub search_page_failure: Option<(usize, Error)>,
+    /// Each page of a server search takes this long.
+    pub search_delay: Option<std::time::Duration>,
+    /// The dates each server search was asked with.
+    pub searched_dates: Vec<crate::search::dates::Received>,
     /// Runs when the folders are listed, as a mail sync starts.
     pub on_list_folders: Option<Box<dyn Fn() + Send>>,
+    /// The mailbox's own address; mail sent to it arrives in the Inbox as
+    /// `organization` treats it (see `delivered`).
+    pub own_address: Option<EmailAddress>,
+    pub organization: FakeOrganization,
+    /// Messages sent asking for protection or a label, with what they
+    /// asked for.
+    pub requested: Vec<(OutgoingMessage, HeaderRequest)>,
+    /// What the next requesting sends do: fail so, or go out (`None`).
+    pub requesting_failures: VecDeque<Option<Error>>,
+    /// Mail that arrived from the account itself, oldest first.
+    pub delivered: Vec<Delivered>,
+    /// Mail held back on its way: subjects containing one of these.
+    pub hold: Vec<String>,
+    pub held: Vec<Delivered>,
+    /// The next fetches of arrived mail come without their properties.
+    pub properties_missing: usize,
+    /// Inbox lookups, and their failure.
+    pub lookups: usize,
+    pub lookup_failure: Option<Error>,
+    /// The content of these messages (by remote id), rather than the
+    /// usual one.
+    pub contents: HashMap<String, MessageContent>,
+    /// Messages fetched, and the failure every fetch meets.
+    pub fetches: usize,
+    pub fetch_failure: Option<Error>,
     next_uid: u32,
+}
+
+/// What a fake organization's mail server does to the mail an account
+/// sends itself: its mail flow rules and auto-labeling policies.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FakeOrganization {
+    /// Its tenant: the SiteId of the labels it applies.
+    pub tenant: String,
+    /// Rules that encrypt mail asking for these, removing the header unless
+    /// `keeps_header`.
+    pub encrypts: Vec<ProtectAction>,
+    pub keeps_header: bool,
+    /// Another rule encrypts everything (the control too).
+    pub encrypts_everything: bool,
+    /// Policies that label mail asking for these labels.
+    pub labels: Vec<String>,
+    /// A label applied to all mail.
+    pub default_label: Option<String>,
+    /// Drafts asking for these labels lose the property.
+    pub drops_labels: Vec<String>,
+}
+
+/// A message that arrived from the account itself.
+#[derive(Debug, Clone)]
+pub(crate) struct Delivered {
+    pub remote_id: String,
+    pub folder: String,
+    pub subject: String,
+    pub content: MessageContent,
+}
+
+impl FakeServer {
+    /// Mail the account sent: what arrives of it when it's to itself.
+    fn deliver(&mut self, message: &OutgoingMessage, request: Option<&HeaderRequest>) {
+        let Some(own) = &self.own_address else {
+            return;
+        };
+        if !message
+            .to
+            .iter()
+            .any(|a| a.address.eq_ignore_ascii_case(&own.address))
+        {
+            return;
+        }
+        let org = &self.organization;
+        let action = request.and_then(|r| r.protect);
+        let label = request.and_then(|r| r.label_id.clone());
+        let ruled = action.is_some_and(|a| org.encrypts.contains(&a));
+        let encrypted = ruled || org.encrypts_everything;
+        let applied = label
+            .clone()
+            .filter(|l| org.labels.contains(l))
+            .or_else(|| org.default_label.clone());
+        let content = MessageContent {
+            body_html: Some(if encrypted {
+                "<p>You've received an encrypted message.</p>".into()
+            } else {
+                message.body_html.clone()
+            }),
+            attachments: if encrypted {
+                vec![AttachmentMeta {
+                    id: "att-rpmsg".into(),
+                    name: "message.rpmsg".into(),
+                    content_type: "application/x-microsoft-rpmsg-message".into(),
+                    size: 48_213,
+                    is_inline: false,
+                    content_id: None,
+                }]
+            } else {
+                vec![]
+            },
+            signals: MessageSignals {
+                content_class: encrypted.then(|| "rpmsg.message".into()),
+                msip_labels: applied.map(|l| {
+                    format!(
+                        "MSIP_Label_{l}_Enabled=true; MSIP_Label_{l}_SiteId={}; \
+                         MSIP_Label_{l}_Method=Privileged",
+                        org.tenant
+                    )
+                }),
+                msip_labels_source: None,
+                requested_action: action
+                    .filter(|_| !ruled || org.keeps_header)
+                    .map(|a| a.header_value().into()),
+                requested_label: label,
+                ..MessageSignals::default()
+            },
+            ..MessageContent::default()
+        };
+        self.next_uid += 1;
+        let delivered = Delivered {
+            remote_id: format!("AAMk-arrived-{}", self.next_uid),
+            folder: "INBOX".into(),
+            subject: message.subject.clone(),
+            content,
+        };
+        if self
+            .hold
+            .iter()
+            .any(|h| message.subject.contains(h.as_str()))
+        {
+            self.held.push(delivered);
+        } else {
+            self.delivered.push(delivered);
+        }
+    }
+
+    /// Lets the mail held back arrive.
+    pub fn release(&mut self) {
+        self.hold.clear();
+        let held = std::mem::take(&mut self.held);
+        self.delivered.extend(held);
+    }
+}
+
+/// Sensitivity labels whose answer the test sets.
+pub(crate) struct FakeLabels {
+    pub answer: Mutex<Result<LabelCatalog>>,
+    pub calls: AtomicUsize,
+}
+
+impl FakeLabels {
+    pub fn new(catalog: LabelCatalog) -> Arc<Self> {
+        Arc::new(Self {
+            answer: Mutex::new(Ok(catalog)),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    pub fn answer(&self, answer: Result<LabelCatalog>) {
+        *self.answer.lock().unwrap() = answer;
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LabelsProvider for FakeLabels {
+    async fn label_catalog(&self) -> Result<LabelCatalog> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.answer.lock().unwrap().clone()
+    }
 }
 
 /// What an IMAP server at its connection limit says (see
@@ -225,7 +406,24 @@ impl MailProvider for FakeMail {
 
     async fn fetch_message(&self, m: &MessageLocator) -> Result<MessageContent> {
         {
-            let server = self.server.lock().unwrap();
+            let mut server = self.server.lock().unwrap();
+            let arrived = server
+                .delivered
+                .iter()
+                .find(|d| d.remote_id == m.remote_id)
+                .map(|d| d.content.clone());
+            server.fetches += 1;
+            if let Some(e) = &server.fetch_failure {
+                return Err(e.clone());
+            }
+            let arrived = arrived.or_else(|| server.contents.get(&m.remote_id).cloned());
+            if let Some(mut content) = arrived {
+                if server.properties_missing > 0 {
+                    server.properties_missing -= 1;
+                    content.signals.properties_unavailable = true;
+                }
+                return Ok(content);
+            }
             if !server.messages.contains_key(&m.remote_id)
                 && !server.server_only.contains_key(&m.remote_id)
             {
@@ -250,8 +448,10 @@ impl MailProvider for FakeMail {
     }
 
     async fn fetch_attachment(&self, _: &MessageLocator, id: &str) -> Result<Vec<u8>> {
-        assert_eq!(id, "att1");
-        Ok(b"pdf".to_vec())
+        Ok(match id {
+            "att1" => b"pdf".to_vec(),
+            other => format!("the bytes of {other}").into_bytes(),
+        })
     }
 
     async fn set_read(&self, ms: &[MessageLocator], read: bool) -> Result<()> {
@@ -278,6 +478,16 @@ impl MailProvider for FakeMail {
         let mut server = self.server.lock().unwrap();
         let mut out = Vec::new();
         for m in ms {
+            // Arrived mail keeps its id, as Graph's immutable ids do.
+            if let Some(arrived) = server
+                .delivered
+                .iter_mut()
+                .find(|d| d.remote_id == m.remote_id)
+            {
+                arrived.folder = dest.to_owned();
+                out.push(Some(m.remote_id.clone()));
+                continue;
+            }
             let (_, mut summary) = server.messages.remove(&m.remote_id).unwrap();
             server.next_uid += 1;
             let new_remote = format!("{dest}:{}", server.next_uid);
@@ -301,22 +511,31 @@ impl MailProvider for FakeMail {
     }
 
     /// Every term somewhere in the subject, preview or sender, newest
-    /// first; the cursor is where the next page starts.
+    /// first; the cursor is where the next page starts. As a server that
+    /// can't say them, it leaves out read, flagged, dates and folders: the
+    /// service checks those.
     async fn search(
         &self,
-        query: &crate::search::SearchQuery,
-        _folders: &[Folder],
+        search: &ServerQuery<'_>,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<crate::providers::SearchPage> {
-        let gate = self.server.lock().unwrap().search_gate.clone();
+        let (gate, delay) = {
+            let mut server = self.server.lock().unwrap();
+            server.searched_dates.push(search.received);
+            (server.search_gate.clone(), server.search_delay)
+        };
         if let Some(gate) = gate {
             gate.notified().await;
         }
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let (page, answered, hold) = {
-            let server = self.server.lock().unwrap();
+            let mut server = self.server.lock().unwrap();
+            server.search_calls += 1;
             (
-                self.search_page(&server, query, cursor, limit),
+                self.search_page(&server, search.query, cursor, limit),
                 server.search_answered.clone(),
                 server.search_hold.clone(),
             )
@@ -334,8 +553,81 @@ impl MailProvider for FakeMail {
         if message.reply_to_message_id.is_some() {
             assert!(original.is_some());
         }
-        self.server.lock().unwrap().sent.push(message.clone());
+        // As the Graph and IMAP providers do.
+        assert!(message.protect.is_none() && message.label_id.is_none());
+        let mut server = self.server.lock().unwrap();
+        server.sent.push(message.clone());
+        server.deliver(message, None);
         Ok(())
+    }
+
+    async fn send_requesting(
+        &self,
+        message: &OutgoingMessage,
+        original: Option<&Message>,
+        request: &HeaderRequest,
+    ) -> Result<()> {
+        if message.reply_to_message_id.is_some() {
+            assert!(original.is_some());
+        }
+        let mut server = self.server.lock().unwrap();
+        server.requested.push((message.clone(), request.clone()));
+        if let Some(failure) = server.requesting_failures.pop_front().flatten() {
+            return Err(failure);
+        }
+        if request
+            .label_id
+            .as_ref()
+            .is_some_and(|l| server.organization.drops_labels.contains(l))
+        {
+            return Err(crate::protection::headers_not_kept(message.reply_kind));
+        }
+        server.deliver(message, Some(request));
+        Ok(())
+    }
+
+    async fn web_link(&self, m: &MessageLocator) -> Result<Option<String>> {
+        let server = self.server.lock().unwrap();
+        let known = server.delivered.iter().any(|d| d.remote_id == m.remote_id)
+            || server.messages.contains_key(&m.remote_id);
+        Ok(known.then(|| format!("https://outlook.office365.com/owa/?ItemID={}", m.remote_id)))
+    }
+
+    async fn find_in_inbox(
+        &self,
+        tokens: &[String],
+        _since: DateTime<Utc>,
+    ) -> Result<HashMap<String, MessageLocator>> {
+        let mut server = self.server.lock().unwrap();
+        server.lookups += 1;
+        if let Some(e) = &server.lookup_failure {
+            return Err(e.clone());
+        }
+        let mut found = HashMap::new();
+        // Newest first.
+        for arrived in server
+            .delivered
+            .iter()
+            .rev()
+            .filter(|d| d.folder == "INBOX")
+        {
+            for token in tokens {
+                if !found.contains_key(token) && arrived.subject.contains(&format!("[{token}]")) {
+                    found.insert(
+                        token.clone(),
+                        MessageLocator {
+                            folder_remote_id: "INBOX".into(),
+                            remote_id: arrived.remote_id.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    async fn own_address(&self) -> Result<Option<EmailAddress>> {
+        Ok(self.server.lock().unwrap().own_address.clone())
     }
 }
 
@@ -350,6 +642,18 @@ impl FakeMail {
     ) -> Result<crate::providers::SearchPage> {
         if let Some(e) = server.search_failures.get(&self.account_id) {
             return Err(e.clone());
+        }
+        if let Some(pages) = &server.search_pages {
+            let at: usize = cursor.map_or(0, |c| c.parse().unwrap());
+            if let Some((failing, e)) = &server.search_page_failure
+                && *failing == at
+            {
+                return Err(e.clone());
+            }
+            return Ok(crate::providers::SearchPage {
+                messages: pages[at].clone(),
+                next: (at + 1 < pages.len()).then(|| (at + 1).to_string()),
+            });
         }
         let matches = |m: &MessageSummary| {
             let from = m
@@ -409,6 +713,9 @@ pub(crate) struct FakeConnector {
     pub organization_signatures: Mutex<Option<Arc<dyn crate::signatures::OrganizationSignatures>>>,
     /// How often it was asked for.
     pub organization_requests: AtomicUsize,
+    /// The sensitivity labels of Microsoft work and school accounts, when
+    /// set.
+    pub labels: Mutex<Option<Arc<dyn LabelsProvider>>>,
 }
 
 impl FakeConnector {
@@ -429,6 +736,7 @@ impl FakeConnector {
             provider_sets: AtomicUsize::new(0),
             organization_signatures: Mutex::default(),
             organization_requests: AtomicUsize::new(0),
+            labels: Mutex::default(),
         }
     }
 }
@@ -447,6 +755,10 @@ impl Connector for FakeConnector {
             contacts: self.contacts.lock().unwrap().clone().filter(|_| microsoft),
             tasks: self.tasks.lock().unwrap().clone().filter(|_| microsoft),
             subscriptions: self.subscriptions.lock().unwrap().clone(),
+            labels: self.labels.lock().unwrap().clone().filter(|_| {
+                matches!(&account.settings, AccountSettings::Microsoft(m)
+                    if crate::signatures::is_organization_tenant(&m.tenant_id))
+            }),
         })
     }
 
@@ -868,7 +1180,11 @@ async fn sync_failure_is_recorded_on_the_account() {
 async fn reading_a_message_fetches_sanitises_and_caches_it() {
     let h = harness();
     let account = account_with_mail(&h).await;
-    let id = h.service.search_messages("welcome", None, &[]).unwrap()[0]
+    let id = h
+        .service
+        .search_messages("welcome", None, &[], SearchOptions::default())
+        .unwrap()[0]
+        .summary
         .id
         .clone();
 
@@ -975,7 +1291,11 @@ async fn flags_moves_and_deletes_go_to_server_then_store() {
 async fn sending_validates_recipients_and_links_replies() {
     let h = harness();
     let account = account_with_mail(&h).await;
-    let original = h.service.search_messages("invoice", None, &[]).unwrap()[0]
+    let original = h
+        .service
+        .search_messages("invoice", None, &[], SearchOptions::default())
+        .unwrap()[0]
+        .summary
         .id
         .clone();
     let mut message = OutgoingMessage {
@@ -989,6 +1309,8 @@ async fn sending_validates_recipients_and_links_replies() {
         importance: None,
         reply_to_message_id: Some(original),
         reply_kind: Some(crate::model::ReplyKind::Reply),
+        protect: None,
+        label_id: None,
     };
     assert_eq!(
         h.service
@@ -1526,10 +1848,10 @@ fn on_server_only(
 
 fn local_ids(h: &Harness, text: &str, include: &[String]) -> Vec<String> {
     h.service
-        .search_messages(text, None, include)
+        .search_messages(text, None, include, SearchOptions::default())
         .unwrap()
         .into_iter()
-        .map(|m| m.id)
+        .map(|m| m.summary.id)
         .collect()
 }
 
@@ -1549,7 +1871,13 @@ async fn server_search_stores_results_outside_the_window_and_local_search_includ
 
     let found = h
         .service
-        .search_server("s-1", "zebracorn", &account.id, false)
+        .search_server(
+            "s-1",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(found.status, ServerSearchStatus::Done);
@@ -1582,7 +1910,13 @@ async fn server_search_stores_results_outside_the_window_and_local_search_includ
     // Found again: nothing new.
     let again = h
         .service
-        .search_server("s-1", "zebracorn", &account.id, false)
+        .search_server(
+            "s-1",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!((again.message_ids.len(), again.added), (1, 0));
@@ -1618,16 +1952,26 @@ async fn a_new_search_cancels_the_previous_one() {
         400,
     );
     h.server.lock().unwrap().search_gate = Some(Arc::new(tokio::sync::Notify::new()));
-    let first = h
-        .service
-        .search_server("a", "zebracorn", &account.id, false);
+    let first = h.service.search_server(
+        "a",
+        "zebracorn",
+        &account.id,
+        false,
+        SearchOptions::default(),
+    );
     let second = async {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
         h.server.lock().unwrap().search_gate = None;
         h.service
-            .search_server("b", "zebracorn", &account.id, false)
+            .search_server(
+                "b",
+                "zebracorn",
+                &account.id,
+                false,
+                SearchOptions::default(),
+            )
             .await
     };
     let (first, second) = tokio::join!(first, second);
@@ -1641,13 +1985,25 @@ async fn a_new_search_cancels_the_previous_one() {
     // A call for the first arriving late doesn't replace the second.
     let late = h
         .service
-        .search_server("a", "zebracorn", &account.id, false)
+        .search_server(
+            "a",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(late.status, ServerSearchStatus::Cancelled);
     let more = h
         .service
-        .search_server("b", "zebracorn", &account.id, true)
+        .search_server(
+            "b",
+            "zebracorn",
+            &account.id,
+            true,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1670,9 +2026,13 @@ async fn cancel_server_search_cancels_pending_calls() {
     );
     let gate = Arc::new(tokio::sync::Notify::new());
     h.server.lock().unwrap().search_gate = Some(gate.clone());
-    let pending = h
-        .service
-        .search_server("a", "zebracorn", &account.id, false);
+    let pending = h.service.search_server(
+        "a",
+        "zebracorn",
+        &account.id,
+        false,
+        SearchOptions::default(),
+    );
     let cancel = async {
         for _ in 0..10 {
             tokio::task::yield_now().await;
@@ -1687,7 +2047,13 @@ async fn cancel_server_search_cancels_pending_calls() {
     h.server.lock().unwrap().search_gate = None;
     let again = h
         .service
-        .search_server("a", "zebracorn", &account.id, false)
+        .search_server(
+            "a",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(again.status, ServerSearchStatus::Cancelled);
@@ -1695,7 +2061,13 @@ async fn cancel_server_search_cancels_pending_calls() {
     h.service.cancel_server_search("c");
     let early = h
         .service
-        .search_server("c", "zebracorn", &account.id, false)
+        .search_server(
+            "c",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(early.status, ServerSearchStatus::Cancelled);
@@ -1716,8 +2088,10 @@ async fn server_search_errors_are_per_account() {
         Error::network("Could not reach imap.example.com."),
     );
     let (work_result, home_result) = tokio::join!(
-        h.service.search_server("s", "invoice", &work.id, false),
-        h.service.search_server("s", "invoice", &home.id, false),
+        h.service
+            .search_server("s", "invoice", &work.id, false, SearchOptions::default()),
+        h.service
+            .search_server("s", "invoice", &home.id, false, SearchOptions::default()),
     );
     let work_result = work_result.unwrap();
     assert_eq!(work_result.status, ServerSearchStatus::Done);
@@ -1743,7 +2117,7 @@ async fn server_search_times_out() {
     let started = tokio::time::Instant::now();
     let result = h
         .service
-        .search_server("s", "invoice", &account.id, false)
+        .search_server("s", "invoice", &account.id, false, SearchOptions::default())
         .await
         .unwrap();
     assert_eq!(result.status, ServerSearchStatus::Failed);
@@ -1772,7 +2146,10 @@ async fn show_more_continues_from_the_cursor_and_stops() {
             100 + i,
         );
     }
-    let search = |more| h.service.search_server("s", "purchase", &account.id, more);
+    let search = |more| {
+        h.service
+            .search_server("s", "purchase", &account.id, more, SearchOptions::default())
+    };
     let first = search(false).await.unwrap();
     assert_eq!(
         (first.message_ids.len(), first.added, first.has_more),
@@ -1809,7 +2186,7 @@ async fn an_empty_or_too_broad_query_is_done_with_nothing() {
     for text in ["", "  ", "to:", "has:pdf", "a b", "from:a"] {
         let result = h
             .service
-            .search_server("s", text, &account.id, false)
+            .search_server("s", text, &account.id, false, SearchOptions::default())
             .await
             .unwrap();
         assert_eq!(result.status, ServerSearchStatus::Done, "{text:?}");
@@ -1823,14 +2200,14 @@ async fn unknown_account_rejects() {
     let account = account_with_mail(&h).await;
     let error = h
         .service
-        .search_server("s", "invoice", "nobody", false)
+        .search_server("s", "invoice", "nobody", false, SearchOptions::default())
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotFound);
     for id in [String::new(), "x".repeat(101)] {
         let error = h
             .service
-            .search_server(&id, "invoice", &account.id, false)
+            .search_server(&id, "invoice", &account.id, false, SearchOptions::default())
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidInput);
@@ -1838,7 +2215,13 @@ async fn unknown_account_rejects() {
     let longest = "x".repeat(100);
     assert!(
         h.service
-            .search_server(&longest, "invoice", &account.id, false)
+            .search_server(
+                &longest,
+                "invoice",
+                &account.id,
+                false,
+                SearchOptions::default()
+            )
             .await
             .is_ok()
     );
@@ -1859,7 +2242,13 @@ async fn opening_a_search_result_touches_it_and_a_gone_one_is_removed() {
     );
     let found = h
         .service
-        .search_server("s", "zebracorn", &account.id, false)
+        .search_server(
+            "s",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(found.message_ids, [kept.clone(), gone.clone()]);
@@ -1902,7 +2291,13 @@ async fn stale_search_results_are_pruned_after_sync() {
     let stale = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
     let fresh = on_server_only(&h, &account, "INBOX", "INBOX:70", "Zebracorn invoice", 300);
     h.service
-        .search_server("s", "zebracorn", &account.id, false)
+        .search_server(
+            "s",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     let fifteen_days_ago = (Utc::now() - Duration::days(SEARCH_RESULT_TTL_DAYS + 1)).timestamp();
@@ -1931,7 +2326,9 @@ async fn a_search_answered_before_a_deletion_doesnt_bring_it_back() {
         server.search_hold = Some(hold.clone());
     }
     let invoice = local_id(&account.id, EntityKind::Message, "INBOX:2");
-    let search = h.service.search_server("s", "invoice", &account.id, false);
+    let search =
+        h.service
+            .search_server("s", "invoice", &account.id, false, SearchOptions::default());
     let delete = async {
         answered.notified().await;
         h.service
@@ -1953,9 +2350,12 @@ async fn a_search_answered_before_a_deletion_doesnt_bring_it_back() {
         .unwrap();
     for _ in 0..2 {
         assert!(h.service.store().get_message_summary(&invoice).is_err());
-        let hits = h.service.search_messages("invoice", None, &[]).unwrap();
+        let hits = h
+            .service
+            .search_messages("invoice", None, &[], SearchOptions::default())
+            .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
-        assert_eq!(hits[0].folder_id, trash.id);
+        assert_eq!(hits[0].summary.folder_id, trash.id);
         h.service.sync_account(&account.id).await.unwrap();
     }
 }
@@ -1970,7 +2370,13 @@ async fn new_mail_found_by_a_search_first_still_alerts() {
     on_server_only(&h, &account, "INBOX", "INBOX:4", "Old zebracorn", 400);
     let found = h
         .service
-        .search_server("s", "zebracorn", &account.id, false)
+        .search_server(
+            "s",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(found.added, 2);
@@ -1990,7 +2396,13 @@ async fn search_results_are_pruned_even_when_the_sync_fails() {
     let account = account_with_mail(&h).await;
     let stale = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
     h.service
-        .search_server("s", "zebracorn", &account.id, false)
+        .search_server(
+            "s",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     h.service
@@ -2003,7 +2415,13 @@ async fn search_results_are_pruned_even_when_the_sync_fails() {
 
     // Nor does a sign-in that expired keep them.
     h.service
-        .search_server("t", "zebracorn", &account.id, false)
+        .search_server(
+            "t",
+            "zebracorn",
+            &account.id,
+            false,
+            SearchOptions::default(),
+        )
         .await
         .unwrap();
     h.service
@@ -2013,6 +2431,294 @@ async fn search_results_are_pruned_even_when_the_sync_fails() {
     let error = h.service.sync_account(&account.id).await.unwrap_err();
     assert_eq!(error.code, ErrorCode::AuthRequired);
     assert!(h.service.store().get_message_summary(&stale).is_err());
+}
+
+/// Changes a message only on the server.
+fn on_server(h: &Harness, remote: &str, change: impl FnOnce(&mut MessageSummary)) {
+    let mut server = h.server.lock().unwrap();
+    change(&mut server.server_only.get_mut(remote).unwrap().1);
+}
+
+fn server_search_calls(h: &Harness) -> usize {
+    h.server.lock().unwrap().search_calls
+}
+
+/// A scripted page of a server search: `n` old messages in Archive, none
+/// flagged but the one at `flagged`.
+fn scripted_page(
+    account: &Account,
+    page: usize,
+    n: usize,
+    flagged: Option<usize>,
+) -> Vec<MessageSummary> {
+    (0..n)
+        .map(|i| {
+            let remote = format!("Archive:{page}-{i}");
+            let mut m = summary(&account.id, "Archive", &remote, &format!("Old {page}-{i}"));
+            m.received_at =
+                Utc::now() - Duration::days(400) - Duration::minutes((page * n + i) as i64);
+            m.is_flagged = flagged == Some(i);
+            m
+        })
+        .collect()
+}
+
+async fn search_with(
+    h: &Harness,
+    text: &str,
+    account: &Account,
+    more: bool,
+) -> crate::model::ServerSearchResult {
+    h.service
+        .search_server("s", text, &account.id, more, SearchOptions::default())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn server_hits_that_fail_the_filters_are_not_stored() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let flagged = on_server_only(
+        &h,
+        &account,
+        "Archive",
+        "Archive:7",
+        "Zebracorn flagged",
+        400,
+    );
+    let plain = on_server_only(&h, &account, "Archive", "Archive:8", "Zebracorn plain", 401);
+    on_server(&h, "Archive:7", |m| m.is_flagged = true);
+    let found = search_with(&h, "zebracorn is:flagged", &account, false).await;
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert_eq!(found.message_ids, [flagged.as_str()]);
+    assert_eq!((found.added, found.has_more), (1, false));
+    assert!(h.service.store().get_message_summary(&plain).is_err());
+    // Filters alone are asked for too.
+    let calls = server_search_calls(&h);
+    let found = search_with(&h, "is:flagged", &account, false).await;
+    assert_eq!(found.message_ids, [flagged.as_str()]);
+    assert_eq!(server_search_calls(&h), calls + 1);
+}
+
+#[tokio::test]
+async fn a_call_reads_pages_until_enough_pass_the_filters() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    h.server.lock().unwrap().search_pages = Some(vec![
+        scripted_page(&account, 0, 50, None),
+        scripted_page(&account, 1, 50, Some(3)),
+    ]);
+    let found = search_with(&h, "x is:flagged", &account, false).await;
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert_eq!(
+        (found.message_ids.len(), found.added, found.has_more),
+        (1, 1, false)
+    );
+    assert_eq!(
+        h.service
+            .store()
+            .get_message_summary(&found.message_ids[0])
+            .unwrap()
+            .subject,
+        "Old 1-3"
+    );
+    assert_eq!(server_search_calls(&h), 2);
+}
+
+#[tokio::test]
+async fn a_call_reads_five_pages_at_most_and_more_goes_on() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let mut pages: Vec<Vec<MessageSummary>> = (0..5)
+        .map(|p| scripted_page(&account, p, 50, None))
+        .collect();
+    pages.push(scripted_page(&account, 5, 50, Some(0)));
+    h.server.lock().unwrap().search_pages = Some(pages);
+    let first = search_with(&h, "is:flagged", &account, false).await;
+    assert_eq!(first.status, ServerSearchStatus::Done);
+    assert!(first.message_ids.is_empty());
+    assert!(first.has_more);
+    assert_eq!(server_search_calls(&h), SERVER_SEARCH_MAX_PAGES as usize);
+    // Nothing that failed the filters was stored.
+    assert!(local_ids(&h, "old", &[]).is_empty());
+    let more = search_with(&h, "is:flagged", &account, true).await;
+    assert_eq!(
+        (more.message_ids.len(), more.added, more.has_more),
+        (1, 1, false)
+    );
+    assert_eq!(server_search_calls(&h), 6);
+}
+
+#[tokio::test]
+async fn a_later_page_that_fails_keeps_what_passed_and_asks_again() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    {
+        let mut server = h.server.lock().unwrap();
+        server.search_pages = Some(vec![
+            scripted_page(&account, 0, 50, Some(1)),
+            scripted_page(&account, 1, 50, Some(2)),
+        ]);
+        server.search_page_failure = Some((1, Error::network("Connection reset.")));
+    }
+    let found = search_with(&h, "is:flagged", &account, false).await;
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert!(found.error.is_none());
+    assert_eq!((found.message_ids.len(), found.has_more), (1, true));
+    // "Show more results" asks for the page that failed again.
+    let failed = search_with(&h, "is:flagged", &account, true).await;
+    assert_eq!(failed.status, ServerSearchStatus::Failed);
+    assert_eq!(failed.error.unwrap().code, ErrorCode::Network);
+    h.server.lock().unwrap().search_page_failure = None;
+    let more = search_with(&h, "is:flagged", &account, true).await;
+    assert_eq!(more.status, ServerSearchStatus::Done);
+    assert_eq!((more.message_ids.len(), more.has_more), (1, false));
+    assert_ne!(more.message_ids, found.message_ids);
+}
+
+/// A slow server (IMAP looking through many folders) that found little:
+/// what it found comes when it does, with no page started that the call
+/// has no time left for.
+#[tokio::test(start_paused = true)]
+async fn a_call_starts_no_page_it_has_no_time_for() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    {
+        let mut server = h.server.lock().unwrap();
+        let mut first = scripted_page(&account, 0, 50, None);
+        for m in &mut first[..3] {
+            m.is_flagged = true;
+        }
+        server.search_pages = Some(vec![first, scripted_page(&account, 1, 50, Some(0))]);
+        server.search_delay = Some(std::time::Duration::from_secs(25));
+    }
+    let started = tokio::time::Instant::now();
+    let found = search_with(&h, "is:flagged", &account, false).await;
+    assert_eq!(found.status, ServerSearchStatus::Done);
+    assert_eq!((found.message_ids.len(), found.has_more), (3, true));
+    assert_eq!(server_search_calls(&h), 1);
+    // The first page's 25 seconds, not the whole call's 45.
+    assert!(SERVER_SEARCH_TIMEOUT - std::time::Duration::from_secs(25) < SERVER_SEARCH_PAGE_TIME);
+    assert!(started.elapsed() < std::time::Duration::from_secs(26));
+    // "Show more results" asks for the page that wasn't started.
+    let more = search_with(&h, "is:flagged", &account, true).await;
+    assert_eq!(more.status, ServerSearchStatus::Done);
+    assert_eq!((more.message_ids.len(), more.has_more), (1, false));
+    assert_eq!(server_search_calls(&h), 2);
+}
+
+/// Servers are told the dates they can say: a mistyped year (0201 for
+/// 2021) isn't one.
+#[tokio::test]
+async fn servers_are_asked_for_dates_they_can_say() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    for text in ["zebracorn after:0201-10-01", "zebracorn before:9999-12-31"] {
+        search_with(&h, text, &account, false).await;
+    }
+    search_with(&h, "zebracorn received:2026-10-01", &account, false).await;
+    let dates = std::mem::take(&mut h.server.lock().unwrap().searched_dates);
+    let [typo, far, october] = &dates[..] else {
+        panic!("{dates:?}");
+    };
+    assert!(typo.is_open() && far.is_open());
+    assert!(october.since.is_some() && october.before.is_some());
+}
+
+#[tokio::test]
+async fn searches_for_another_account_or_folder_or_no_time_ask_nothing() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    let archived = on_server_only(&h, &account, "Archive", "Archive:7", "Zebracorn notes", 400);
+    on_server_only(&h, &account, "INBOX", "INBOX:70", "Zebracorn invoice", 300);
+    for text in [
+        "zebracorn account:someone@else.example",
+        "zebracorn in:nowhere",
+        "zebracorn received:2026-10-15..2026-10-01",
+        "zebracorn received:today received:yesterday",
+    ] {
+        let found = search_with(&h, text, &account, false).await;
+        assert_eq!(found.status, ServerSearchStatus::Done, "{text}");
+        assert!(found.message_ids.is_empty() && !found.has_more, "{text}");
+        assert_eq!(server_search_calls(&h), 0, "{text}");
+        assert!(local_ids(&h, text, &[]).is_empty(), "{text}");
+    }
+    // The account by its address or name; a folder by its role or name.
+    let found = search_with(&h, "zebracorn account:me@example.com", &account, false).await;
+    assert_eq!(found.message_ids.len(), 2);
+    let found = search_with(&h, "zebracorn account:Me in:archive", &account, false).await;
+    assert_eq!(found.message_ids, [archived.as_str()]);
+    // Locally alike.
+    assert_eq!(
+        local_ids(&h, "zebracorn in:archive", &[]),
+        [archived.as_str()]
+    );
+    assert_eq!(local_ids(&h, "zebracorn account:me", &[]).len(), 2);
+    assert!(local_ids(&h, "zebracorn account:else", &[]).is_empty());
+    let other_account = h
+        .service
+        .search_messages("zebracorn", Some("nobody"), &[], SearchOptions::default())
+        .unwrap();
+    assert!(other_account.is_empty());
+}
+
+#[tokio::test]
+async fn local_search_is_best_first_or_newest_on_request() {
+    let h = harness();
+    let account = account_with_mail(&h).await;
+    on_server_only(
+        &h,
+        &account,
+        "Archive",
+        "Archive:7",
+        "Zebracorn report",
+        300,
+    );
+    on_server_only(&h, &account, "INBOX", "INBOX:70", "Notes", 10);
+    on_server(&h, "INBOX:70", |m| {
+        m.preview = "A zebracorn sighting".into()
+    });
+    let found = search_with(&h, "zebracorn", &account, false).await;
+    assert_eq!(found.message_ids.len(), 2);
+    let subjects = |sort| -> Vec<String> {
+        h.service
+            .search_messages(
+                "zebracorn",
+                None,
+                &found.message_ids,
+                SearchOptions {
+                    sort,
+                    week_starts_on: 1,
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|m| m.summary.subject)
+            .collect()
+    };
+    assert_eq!(
+        subjects(SearchSort::Relevance),
+        ["Zebracorn report", "Notes"]
+    );
+    assert_eq!(subjects(SearchSort::Newest), ["Notes", "Zebracorn report"]);
+    let hits = h
+        .service
+        .search_messages("zebracorn", None, &[], SearchOptions::default())
+        .unwrap();
+    assert!(hits[0].snippet.is_none());
+    assert!(hits[1].snippet.is_some());
+}
+
+#[tokio::test]
+async fn an_empty_box_suggests_recent_correspondents() {
+    let h = harness();
+    account_with_mail(&h).await;
+    for text in ["", "  "] {
+        let suggested = h.service.suggest_addresses(text).unwrap();
+        assert_eq!(suggested.len(), 1, "{text:?}");
+        assert_eq!(suggested[0].address, "grace@navy.example");
+    }
 }
 
 /// A service with background work and a scripted push watcher.
@@ -4546,12 +5252,18 @@ async fn a_mail_only_sign_in_records_the_grant_and_lists_missing_features() {
         if tenant == WORK_TENANT {
             // A work account: what was asked for and what Microsoft said.
             assert_eq!(granted.scopes, response);
-            assert_eq!(account.needs_permission, [Contacts, Tasks, MailboxSettings]);
+            assert_eq!(
+                account.needs_permission,
+                [Contacts, Tasks, MailboxSettings, SensitivityLabels]
+            );
         } else {
             // A personal account: only what was asked for, which its
-            // refreshes may name again.
+            // refreshes may name again; never sensitivity labels.
             assert_eq!(granted.scopes, core_graph());
-            assert_eq!(account.needs_permission, AccountFeature::ALL);
+            assert_eq!(
+                account.needs_permission,
+                [Calendar, Contacts, Tasks, MailboxSettings]
+            );
         }
         assert!(account.refused_features.is_empty());
         // The account comes back as stored, and the UI hears of it.
@@ -4567,7 +5279,16 @@ async fn turning_on_a_feature_asks_for_what_the_account_has_plus_it() {
         let h = harness();
         let with_contacts = [core_graph(), scopes(&["Contacts.ReadWrite"])].concat();
         let (account, _) = pim_account(&h, "adele@contoso.com", tenant, Some(&with_contacts));
-        assert_eq!(account.needs_permission, [Calendar, Tasks, MailboxSettings]);
+        // Personal accounts can't have sensitivity labels.
+        let labels: &[AccountFeature] = if tenant == WORK_TENANT {
+            &[SensitivityLabels]
+        } else {
+            &[]
+        };
+        assert_eq!(
+            account.needs_permission,
+            [&[Calendar, Tasks, MailboxSettings][..], labels].concat()
+        );
         let signed_in = sign_in_with(
             &h,
             signed_in_as(&account, &[]),
@@ -4584,7 +5305,10 @@ async fn turning_on_a_feature_asks_for_what_the_account_has_plus_it() {
         // Never with the push service's consent.
         assert_eq!(*h.connector.push_consent.lock().unwrap(), [false]);
         // The feature is on, whatever Microsoft's answer said.
-        assert_eq!(signed_in.needs_permission, [Tasks, MailboxSettings]);
+        assert_eq!(
+            signed_in.needs_permission,
+            [&[Tasks, MailboxSettings][..], labels].concat()
+        );
         assert!(signed_in.refused_features.is_empty());
         assert_eq!(
             grant_of(&h, &account).unwrap().scopes,
@@ -4645,11 +5369,16 @@ async fn signing_in_again_asks_for_what_the_account_has() {
         });
         assert_eq!(result.unwrap_err().code, ErrorCode::SignInCancelled);
     }
+    // "All" is everything but what's asked for on request.
+    let all: Vec<&str> = crate::auth::microsoft::all_scopes()
+        .into_iter()
+        .filter(|s| *s != "InformationProtectionPolicy.Read")
+        .collect();
     assert_eq!(
         *r.b.h.connector.sign_in_scopes.lock().unwrap(),
         [
             asked(&["Contacts.ReadWrite"]),
-            scopes(&crate::auth::microsoft::all_scopes()),
+            scopes(&all),
             asked(&[]),
             asked(&["Calendars.ReadWrite", "Contacts.ReadWrite"]),
         ]
@@ -4661,7 +5390,8 @@ async fn signing_in_again_asks_for_what_the_account_has() {
         [true, false, false, false]
     );
 
-    // An account added before grants were recorded has everything.
+    // An account added before grants were recorded has everything it was
+    // asked for then.
     r.b.h
         .service
         .store()
@@ -4679,7 +5409,7 @@ async fn signing_in_again_asks_for_what_the_account_has() {
     assert_eq!(result.unwrap_err().code, ErrorCode::SignInCancelled);
     assert_eq!(
         r.b.h.connector.sign_in_scopes.lock().unwrap().last(),
-        Some(&scopes(&crate::auth::microsoft::all_scopes()))
+        Some(&scopes(&all))
     );
     r.b.service.shutdown().await;
 }
@@ -4702,7 +5432,11 @@ async fn a_sign_in_as_another_account_keeps_grants_apart() {
         .unwrap();
         assert_eq!(signed_in.id, b.id);
         assert_eq!(grant_of(&h, &b).unwrap().scopes, core_graph(), "{b_tenant}");
-        assert_eq!(signed_in.needs_permission, AccountFeature::ALL);
+        let every: Vec<AccountFeature> = AccountFeature::ALL
+            .into_iter()
+            .filter(|f| b_tenant == WORK_TENANT || f.for_personal_accounts())
+            .collect();
+        assert_eq!(signed_in.needs_permission, every);
         assert_eq!(grant_of(&h, &a).unwrap().scopes, a_grant);
     }
 }
@@ -4719,12 +5453,15 @@ async fn a_legacy_account_signing_in_mail_only_keeps_its_features() {
     )
     .await
     .unwrap();
-    // It has had every permission all along.
+    // It has had every permission it was asked for all along.
     assert_eq!(
         grant_of(&h, &account).unwrap().scopes,
         legacy_graph_scopes()
     );
-    assert!(signed_in.needs_permission.is_empty());
+    assert_eq!(
+        signed_in.needs_permission,
+        [AccountFeature::SensitivityLabels]
+    );
 }
 
 #[tokio::test]
@@ -4732,10 +5469,18 @@ async fn legacy_accounts_count_as_fully_granted() {
     let h = harness();
     let (account, pim) = pim_account(&h, "adele@contoso.com", WORK_TENANT, None);
     assert_eq!(grant_of(&h, &account), None);
-    assert!(account.needs_permission.is_empty());
+    // Everything but sensitivity labels, which no earlier sign-in asked
+    // for.
+    assert_eq!(
+        account.needs_permission,
+        [AccountFeature::SensitivityLabels]
+    );
     assert!(account.refused_features.is_empty());
     let json = serde_json::to_value(&account).unwrap();
-    assert_eq!(json["needsPermission"], serde_json::json!([]));
+    assert_eq!(
+        json["needsPermission"],
+        serde_json::json!(["sensitivityLabels"])
+    );
     assert_eq!(json["refusedFeatures"], serde_json::json!([]));
     h.service.sync_account(&account.id).await.unwrap();
     assert_eq!(cached(&h, &account), (2, 1, 2));
@@ -4858,7 +5603,10 @@ async fn a_403_listing_calendars_marks_it_refused_not_the_account() {
     let refused = account_of(&h, &account);
     assert_eq!(refused.sync_error, None);
     assert_eq!(refused.refused_features, [AccountFeature::Calendar]);
-    assert!(refused.needs_permission.is_empty());
+    assert_eq!(
+        refused.needs_permission,
+        [AccountFeature::SensitivityLabels]
+    );
     assert_eq!(cached(&h, &account), (0, 1, 2));
     // Once when refused, once at the end of the sync.
     assert_eq!(accounts_notified(&h, &account), notified + 2);
@@ -4955,7 +5703,8 @@ async fn a_refused_feature_returns_after_sign_in_retry_new_grant_or_a_day() {
         [
             AccountFeature::Calendar,
             AccountFeature::Tasks,
-            AccountFeature::MailboxSettings
+            AccountFeature::MailboxSettings,
+            AccountFeature::SensitivityLabels
         ]
     );
     assert!(account_of(&h, &account).refused_features.is_empty());
@@ -4965,7 +5714,10 @@ async fn a_refused_feature_returns_after_sign_in_retry_new_grant_or_a_day() {
             .unwrap()
     );
     let account = account_of(&h, &account);
-    assert!(account.needs_permission.is_empty());
+    assert_eq!(
+        account.needs_permission,
+        [AccountFeature::SensitivityLabels]
+    );
     assert!(account.refused_features.is_empty());
     h.service.sync_account(&account.id).await.unwrap();
     assert_eq!(cached(&h, &account).0, 2);
@@ -5138,7 +5890,10 @@ async fn a_grant_recorded_during_the_mail_sync_turns_the_feature_on_in_the_same_
     h.service.sync_account(&account.id).await.unwrap();
     assert_eq!(cached(&h, &account), (2, 1, 2));
     assert_eq!(pim.listings.load(Ordering::SeqCst), 3);
-    assert!(account_of(&h, &account).needs_permission.is_empty());
+    assert_eq!(
+        account_of(&h, &account).needs_permission,
+        [AccountFeature::SensitivityLabels]
+    );
     // The end of the sync tells the UI.
     assert!(accounts_notified(&h, &account) > notified);
 }

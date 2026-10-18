@@ -47,12 +47,17 @@ pub const CORE_SCOPES: &[&str] = &[
     "Mail.Send",
 ];
 
-/// Optional Graph permissions, one per feature.
+/// Optional Graph permissions, one per feature. A new one goes last, so the
+/// approval link adds it at the end.
 pub const OPTIONAL_SCOPES: &[(AccountFeature, &str)] = &[
     (AccountFeature::MailboxSettings, "MailboxSettings.Read"),
     (AccountFeature::Calendar, "Calendars.ReadWrite"),
     (AccountFeature::Contacts, "Contacts.ReadWrite"),
     (AccountFeature::Tasks, "Tasks.ReadWrite"),
+    (
+        AccountFeature::SensitivityLabels,
+        "InformationProtectionPolicy.Read",
+    ),
 ];
 
 /// What every account added before grants were recorded consented to (each
@@ -99,6 +104,7 @@ pub fn feature_scope(feature: AccountFeature) -> &'static str {
         AccountFeature::Contacts => "Contacts.ReadWrite",
         AccountFeature::Tasks => "Tasks.ReadWrite",
         AccountFeature::MailboxSettings => "MailboxSettings.Read",
+        AccountFeature::SensitivityLabels => "InformationProtectionPolicy.Read",
     }
 }
 
@@ -149,28 +155,37 @@ fn has_scope(scopes: &[String], scope: &str) -> bool {
     scopes.iter().any(|s| s.eq_ignore_ascii_case(scope))
 }
 
-/// The optional features whose permission a recorded grant lacks, in enum
-/// order; none when nothing was recorded yet (an account from before grants
-/// were recorded has every permission).
-pub fn needs_permission(grant: Option<&MicrosoftGrant>) -> Vec<AccountFeature> {
-    let Some(grant) = grant else {
-        return Vec::new();
-    };
+/// The optional features an account can have: every one, but for those
+/// personal accounts can't have when it's `personal`.
+fn account_features(personal: bool) -> impl Iterator<Item = AccountFeature> {
     AccountFeature::ALL
         .into_iter()
-        .filter(|f| !has_scope(&grant.scopes, feature_scope(*f)))
-        .collect()
+        .filter(move |f| !personal || f.for_personal_accounts())
+}
+
+/// The optional features whose permission a recorded grant lacks, in enum
+/// order. Without a record (an account from before grants were recorded,
+/// which has every permission it was asked for then), only the features
+/// asked for on request, which no earlier sign-in asked for; none for a
+/// `personal` account, which can't have them.
+pub fn needs_permission(grant: Option<&MicrosoftGrant>, personal: bool) -> Vec<AccountFeature> {
+    let features = account_features(personal);
+    match grant {
+        Some(grant) => features
+            .filter(|f| !has_scope(&grant.scopes, feature_scope(*f)))
+            .collect(),
+        None => features.filter(|f| f.on_request_only()).collect(),
+    }
 }
 
 /// The features Microsoft 365 refused although their permission is
 /// granted, in enum order; never `mailboxSettings`.
-pub fn refused_features(grant: Option<&MicrosoftGrant>) -> Vec<AccountFeature> {
+pub fn refused_features(grant: Option<&MicrosoftGrant>, personal: bool) -> Vec<AccountFeature> {
     let Some(grant) = grant else {
         return Vec::new();
     };
-    let missing = needs_permission(Some(grant));
-    AccountFeature::ALL
-        .into_iter()
+    let missing = needs_permission(Some(grant), personal);
+    account_features(personal)
         .filter(|f| {
             *f != AccountFeature::MailboxSettings
                 && grant.refused.contains(f)
@@ -184,11 +199,18 @@ pub fn refused_features(grant: Option<&MicrosoftGrant>) -> Vec<AccountFeature> {
 /// is what the account signing in has (`None` when no account matches the
 /// login hint). Asking again for what an account has shows no prompt, and
 /// keeps the newest authorization covering what its refreshes ask for.
+/// Features asked for on request ([`AccountFeature::on_request_only`]) are
+/// only in `Feature` requests for them and in what an account has: never
+/// in "all" or in "current" without a record, so organizations that
+/// approved the app before they existed needn't approve it again.
 pub fn sign_in_scopes(request: PermissionRequest, recorded: Option<&[String]>) -> Vec<String> {
     let recorded_has = |scope: &str| recorded.is_none_or(|r| has_scope(r, scope));
     let wanted = |feature: AccountFeature, scope: &str| match request {
-        PermissionRequest::All => true,
+        PermissionRequest::All => !feature.on_request_only(),
         PermissionRequest::MailOnly => false,
+        PermissionRequest::Current if feature.on_request_only() => {
+            recorded.is_some_and(|r| has_scope(r, scope))
+        }
         PermissionRequest::Current => recorded_has(scope),
         PermissionRequest::Feature { feature: asked } => {
             feature == asked || recorded.is_some_and(|r| has_scope(r, scope))
@@ -2097,8 +2119,8 @@ mod tests {
 
     /// The link the landing page publishes (`packaging/flatpak/repo`), with
     /// the push service's scope and without.
-    const PUBLISHED_LINK_WITH_PUSH: &str = "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F";
-    const PUBLISHED_LINK_WITHOUT_PUSH: &str = "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F";
+    const PUBLISHED_LINK_WITH_PUSH: &str = "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FInformationProtectionPolicy.Read+api%3A%2F%2F10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad%2FSync.Receive&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F";
+    const PUBLISHED_LINK_WITHOUT_PUSH: &str = "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad&scope=openid+profile+email+offline_access+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read+https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FMail.Send+https%3A%2F%2Fgraph.microsoft.com%2FMailboxSettings.Read+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FContacts.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FTasks.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FInformationProtectionPolicy.Read&redirect_uri=https%3A%2F%2Fflatpak.cumulas.co%2Fadmin-consent%2F";
 
     fn published() -> MicrosoftAuthConfig {
         MicrosoftAuthConfig {
@@ -2181,7 +2203,11 @@ mod tests {
                 "Tasks.ReadWrite",
             ]
         );
-        assert_eq!(all_scopes(), LEGACY_SCOPES);
+        // Every permission is the legacy ones plus those added since, last.
+        assert_eq!(
+            all_scopes(),
+            [LEGACY_SCOPES, &["InformationProtectionPolicy.Read"]].concat()
+        );
         assert_eq!(legacy_graph_scopes(), LEGACY_SCOPES[4..]);
         // One permission per feature, the same both ways.
         assert_eq!(OPTIONAL_SCOPES.len(), AccountFeature::ALL.len());
@@ -2224,6 +2250,35 @@ mod tests {
         assert_eq!(
             sign_in_scopes(calendar, Some(&contacts)),
             with(&["Calendars.ReadWrite", "Contacts.ReadWrite"])
+        );
+
+        // Sensitivity labels: only when turned on, and then kept.
+        let labels = PermissionRequest::Feature {
+            feature: AccountFeature::SensitivityLabels,
+        };
+        assert_eq!(
+            sign_in_scopes(labels, Some(&contacts)),
+            with(&["Contacts.ReadWrite", "InformationProtectionPolicy.Read"])
+        );
+        assert_eq!(
+            sign_in_scopes(labels, None),
+            with(&["InformationProtectionPolicy.Read"])
+        );
+        let with_labels = [
+            legacy.clone(),
+            strings(&["InformationProtectionPolicy.Read"]),
+        ]
+        .concat();
+        let everything = [LEGACY_SCOPES, &["InformationProtectionPolicy.Read"]].concat();
+        assert_eq!(sign_in_scopes(current, Some(&with_labels)), everything);
+        assert_eq!(
+            sign_in_scopes(PermissionRequest::All, Some(&with_labels)),
+            LEGACY_SCOPES
+        );
+        assert_eq!(sign_in_scopes(calendar, Some(&with_labels)), everything);
+        assert_eq!(
+            sign_in_scopes(PermissionRequest::MailOnly, Some(&with_labels)),
+            core
         );
         assert_eq!(
             sign_in_scopes(calendar, None),
@@ -2316,11 +2371,18 @@ mod tests {
             refused: refused.to_vec(),
             refused_at: None,
         };
-        // Not recorded yet: everything, as every account had before.
-        assert!(needs_permission(None).is_empty());
-        assert!(refused_features(None).is_empty());
+        // Not recorded yet: everything every account had before, which
+        // didn't include sensitivity labels.
+        assert_eq!(
+            needs_permission(None, false),
+            [AccountFeature::SensitivityLabels]
+        );
+        assert!(refused_features(None, false).is_empty());
         let mail_only = grant(&["User.Read", "Mail.ReadWrite", "Mail.Send"], &[]);
-        assert_eq!(needs_permission(Some(&mail_only)), AccountFeature::ALL);
+        assert_eq!(
+            needs_permission(Some(&mail_only), false),
+            AccountFeature::ALL
+        );
         let some = grant(
             &["User.Read", "mailboxsettings.read", "Tasks.ReadWrite"],
             &[
@@ -2330,11 +2392,68 @@ mod tests {
             ],
         );
         assert_eq!(
-            needs_permission(Some(&some)),
-            [AccountFeature::Calendar, AccountFeature::Contacts]
+            needs_permission(Some(&some), false),
+            [
+                AccountFeature::Calendar,
+                AccountFeature::Contacts,
+                AccountFeature::SensitivityLabels
+            ]
         );
         // Never a feature lacking its permission, nor the time zone.
-        assert_eq!(refused_features(Some(&some)), [AccountFeature::Tasks]);
+        assert_eq!(
+            refused_features(Some(&some), false),
+            [AccountFeature::Tasks]
+        );
+    }
+
+    #[test]
+    fn needs_permission_by_account_type() {
+        use AccountFeature::*;
+        let grant = |scopes: &[&str], refused: &[AccountFeature]| MicrosoftGrant {
+            scopes: strings(scopes),
+            refused: refused.to_vec(),
+            refused_at: None,
+        };
+        // Personal accounts never have sensitivity labels, so never lack
+        // their permission.
+        assert!(needs_permission(None, true).is_empty());
+        let mail_only = grant(&["User.Read", "Mail.ReadWrite", "Mail.Send"], &[]);
+        assert_eq!(
+            needs_permission(Some(&mail_only), true),
+            [Calendar, Contacts, Tasks, MailboxSettings]
+        );
+        let legacy = MicrosoftGrant {
+            scopes: legacy_graph_scopes(),
+            ..MicrosoftGrant::default()
+        };
+        assert!(needs_permission(Some(&legacy), true).is_empty());
+        let refused = MicrosoftGrant {
+            refused: vec![SensitivityLabels, Tasks],
+            ..legacy.clone()
+        };
+        assert_eq!(refused_features(Some(&refused), true), [Tasks]);
+
+        // Work accounts: unrecorded, or recorded without it.
+        assert_eq!(needs_permission(None, false), [SensitivityLabels]);
+        assert_eq!(needs_permission(Some(&legacy), false), [SensitivityLabels]);
+        assert_eq!(refused_features(Some(&refused), false), [Tasks]);
+        let with_labels = grant(
+            &[
+                "User.Read",
+                "Mail.ReadWrite",
+                "Mail.Send",
+                "informationprotectionpolicy.read",
+            ],
+            &[SensitivityLabels],
+        );
+        assert_eq!(
+            needs_permission(Some(&with_labels), false),
+            [Calendar, Contacts, Tasks, MailboxSettings]
+        );
+        assert_eq!(
+            refused_features(Some(&with_labels), false),
+            [SensitivityLabels]
+        );
     }
 
     #[test]

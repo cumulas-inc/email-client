@@ -8,6 +8,7 @@ import charis700Italic from "@fontsource/charis-sil/files/charis-sil-latin-700-i
 import charis700 from "@fontsource/charis-sil/files/charis-sil-latin-700-normal.woff2?inline";
 
 import { cssString, SERIF_STACK } from "../../lib/fonts";
+import type { HitPattern } from "../../lib/search/highlight";
 
 /**
  * How the message is painted. Emails are authored for light backgrounds:
@@ -88,6 +89,9 @@ interface Palette {
   rule: string;
   selection: string;
   background: string;
+  /** What a search found, and the match shown. */
+  hit: string;
+  hitCurrent: string;
 }
 
 // Mail is written for light backgrounds, so in "plain" and "paper" the frame
@@ -99,13 +103,16 @@ const PAPER: Palette = {
   rule: "#e1ddd5",
   selection: "#c9e5e0",
   background: "transparent",
+  hit: "#fde8a8",
+  hitCurrent: "#f6c94c",
 };
 
 // In "dark" the whole frame goes through invert(1) hue-rotate(180deg), which
 // is its own inverse. Each value here is the dark token run through that
 // filter, so it comes out as the token itself: the card (#22211e), ink
-// (#edebe6), secondary text (#bbb6ac), teal text (#5cc6bb), border (#3a3732)
-// and selection (#1a3532). The mail's own colors invert the same way.
+// (#edebe6), secondary text (#bbb6ac), teal text (#5cc6bb), border (#3a3732),
+// selection (#1a3532) and search hits (#5a4512, the one shown #8a6a1a). The
+// mail's own colors invert the same way.
 const INVERTED: Palette = {
   text: "#16140f",
   muted: "#4d483e",
@@ -113,6 +120,8 @@ const INVERTED: Palette = {
   rule: "#cac7c2",
   selection: "#bbd6d3",
   background: "#dfdedb",
+  hit: "#cdb885",
+  hitCurrent: "#b39343",
 };
 
 /** Mail laid out with tables sets its own width; anything else gets a measure. */
@@ -206,16 +215,24 @@ function baseCss(
     }
     hr { border: none; border-top: 1px solid ${colors.rule}; margin: 16px 0; }
     ::selection { background: ${colors.selection}; }
+    /* What the search found (the bridge marks it), and the match shown. */
+    mark[data-cumulas-hit] { background: ${colors.hit} !important; color: inherit !important; border-radius: 2px; }
+    mark[data-cumulas-hit][data-cumulas-current] { background: ${colors.hitCurrent} !important; outline: 2px solid ${colors.hitCurrent}; }
     ${invertMedia}
   `;
 }
 
-/** The script that reports from a message's frame, and its channel there. */
+/** The script that reports from a message's frame, and its channels there. */
 export interface FrameBridge {
   /** Its absolute URL, the only script the frame's policy allows. */
   url: string;
   /** A secret the frame's messages carry (see newChannel). */
   channel: string;
+  /**
+   * Another secret, the app's messages to the frame carry: the frame never
+   * sends it, so reading the frame's messages can't forge the app's.
+   */
+  inbound: string;
 }
 
 export interface SrcDocOptions {
@@ -243,7 +260,7 @@ export function buildSrcDoc(html: string, options: SrcDocOptions): string {
     `<meta http-equiv="Content-Security-Policy" content="${csp}">` +
     // The bridge runs before any of the mail is parsed, under the policy above.
     (bridge
-      ? `<script src="${attribute(bridge.url)}" data-channel="${attribute(bridge.channel)}"></script>`
+      ? `<script src="${attribute(bridge.url)}" data-channel="${attribute(bridge.channel)}" data-inbound="${attribute(bridge.inbound)}"></script>`
       : "") +
     '<meta name="color-scheme" content="light">' +
     '<meta name="referrer" content="no-referrer">' +
@@ -291,7 +308,20 @@ export type BridgeMessage =
    */
   | { type: "size"; height: number; wide: boolean; left: boolean; right: boolean }
   /** A link within the message: show the document from `top` down. */
-  | { type: "scroll"; top: number };
+  | { type: "scroll"; top: number }
+  /** The bridge is listening: the app sends what to mark. */
+  | { type: "ready" }
+  /** How many matches the bridge marked. */
+  | { type: "hits"; count: number }
+  /** Where the match shown is, in the document (as `scroll`'s top). */
+  | { type: "reveal"; top: number; bottom: number };
+
+/** What the app tells the bridge, on the frame's inbound channel. */
+export type BridgeCommand =
+  /** Mark these (an empty list clears the marks). */
+  | { inbound: string; type: "highlight"; patterns: HitPattern[] }
+  /** Make match `index` the one shown, and show it. */
+  | { inbound: string; type: "reveal"; index: number };
 
 /**
  * The message, if `data` is one the bridge sends on `channel`; otherwise
@@ -323,6 +353,18 @@ export function readBridgeMessage(data: unknown, channel: string): BridgeMessage
     }
     case "scroll":
       return isNumber(m.top) ? { type: "scroll", top: m.top } : null;
+    case "ready":
+      return { type: "ready" };
+    case "hits":
+      return Number.isInteger(m.count) && (m.count as number) >= 0
+        ? { type: "hits", count: m.count as number }
+        : null;
+    case "reveal": {
+      const { top, bottom } = m;
+      return isNumber(top) && isNumber(bottom) && top <= bottom
+        ? { type: "reveal", top, bottom }
+        : null;
+    }
     default:
       return null;
   }
@@ -364,7 +406,7 @@ export function signatureAppearance(html: string, isDark: boolean): BodyAppearan
   return setsOwnColors(html) ? "paper" : "dark";
 }
 
-// The dark theme's ink, tertiary text, teal and selection.
+// The dark theme's ink, tertiary text, teal, selection and search hits.
 const DARK_INK: Palette = {
   text: "#edebe6",
   muted: "#9a948a",
@@ -372,6 +414,8 @@ const DARK_INK: Palette = {
   rule: "#3a3732",
   selection: "#1a3532",
   background: "transparent",
+  hit: "#5a4512",
+  hitCurrent: "#8a6a1a",
 };
 
 /** Whether HTML shows nothing: no text and no picture. */

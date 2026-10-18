@@ -1,13 +1,14 @@
-// Says when a Microsoft account's calendar, contacts, tasks or mailbox time
-// zone stops working, or comes back: Microsoft's answer can change at any
-// sync (an administrator approved the app, a license changed).
+// Says when a Microsoft account's calendar, contacts, tasks, mailbox time
+// zone or sensitivity labels stop working, or come back: Microsoft's answer
+// can change at any sync (an administrator approved the app, a license
+// changed).
 
 import { useEffect, useRef } from "react";
 
 import { useAccounts } from "../../api/queries";
 import type { Account, AccountFeature } from "../../api/types";
 import { toast } from "../../components/toast";
-import { FEATURE_COPY } from "./microsoft";
+import { FEATURE_COPY, ON_REQUEST_FEATURES, moduleFeatures } from "./microsoft";
 
 /** A feature turned on from the app has its own toast for this long. */
 const OWN_TOAST_MS = 60_000;
@@ -25,9 +26,13 @@ function turnedOnLately(accountId: string, feature: AccountFeature): boolean {
   return at !== undefined && Date.now() - at < OWN_TOAST_MS;
 }
 
-/** The features an account can't use now, for whatever reason. */
+/**
+ * The features an account can't use now, for whatever reason. A feature
+ * turned on by itself (sensitivity labels) counts only when refused: until
+ * it's turned on it lacks permission, which isn't news.
+ */
 function unavailable(account: Account): Set<AccountFeature> {
-  return new Set([...account.needsPermission, ...account.refusedFeatures]);
+  return new Set([...moduleFeatures(account.needsPermission), ...account.refusedFeatures]);
 }
 
 /**
@@ -50,12 +55,17 @@ export function useFeatureChangeToasts(): void {
       const now = known.current.get(account.id)!;
       for (const feature of now) {
         if (before.has(feature)) continue;
+        const noun = FEATURE_COPY[feature].noun;
         toast.info(
-          `Cumulas Mail can no longer open the ${FEATURE_COPY[feature].noun} of ${account.email}. See Settings → Accounts.`,
+          ON_REQUEST_FEATURES.includes(feature)
+            ? `Microsoft 365 refused access to the ${noun} of ${account.email}. See Settings → Accounts.`
+            : `Cumulas Mail can no longer open the ${noun} of ${account.email}. See Settings → Accounts.`,
         );
       }
       for (const feature of before) {
-        if (now.has(feature) || turnedOnLately(account.id, feature)) continue;
+        // Refused, then without permission: not back either.
+        const off = now.has(feature) || account.needsPermission.includes(feature);
+        if (off || turnedOnLately(account.id, feature)) continue;
         toast.success(`${FEATURE_COPY[feature].isOn} for ${account.email}.`);
       }
     }

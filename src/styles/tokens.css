@@ -111,6 +111,9 @@
   --star-border: #ecdcae;
   --unread: #0b7a75;
   --now: #d8463a;
+  /* What a search found (marked in results and messages), and the match shown. */
+  --search-hit: #fde8a8;
+  --search-hit-current: #f6c94c;
 
   /* Logo */
   --logo-front-top: #149189;
@@ -198,6 +201,8 @@
     --star-border: #54452a;
     --unread: #3fb3a8;
     --now: #f06a5d;
+    --search-hit: #5a4512;
+    --search-hit-current: #8a6a1a;
 
     --logo-front-top: #33b3a8;
     --logo-front-bottom: #178a82;
@@ -283,6 +288,8 @@
   --star-border: #54452a;
   --unread: #3fb3a8;
   --now: #f06a5d;
+  --search-hit: #5a4512;
+  --search-hit-current: #8a6a1a;
 
   --logo-front-top: #33b3a8;
   --logo-front-bottom: #178a82;

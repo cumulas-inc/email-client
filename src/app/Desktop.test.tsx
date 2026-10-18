@@ -284,6 +284,10 @@ describe("quitting", () => {
         importance: "normal",
         replyToMessageId: null,
         replyKind: null,
+        protect: null,
+        labelId: null,
+        labelChosen: false,
+        originalLabel: null,
         focus: "body",
       });
       useMailStore.getState().updateCompose({ subject: "Half written, edited" });

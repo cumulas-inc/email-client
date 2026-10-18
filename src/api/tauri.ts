@@ -83,14 +83,21 @@ export const tauriBackend: Backend = {
 
   listFolders: (accountId) => invoke("list_folders", { accountId: accountId ?? null }),
   listMessages: (folderId, query) => invoke("list_messages", { folderId, query }),
-  searchMessages: (text, accountId, includeIds) =>
+  searchMessages: (text, accountId, includeIds, options) =>
     invoke("search_messages", {
       text,
       accountId: accountId ?? null,
       includeIds: includeIds ?? [],
+      options: options ?? null,
     }),
-  searchServer: (searchId, text, accountId, more) =>
-    invoke("search_server", { searchId, text, accountId, more: more ?? false }),
+  searchServer: (searchId, text, accountId, more, options) =>
+    invoke("search_server", {
+      searchId,
+      text,
+      accountId,
+      more: more ?? false,
+      options: options ?? null,
+    }),
   cancelServerSearch: (searchId) => invoke("cancel_server_search", { searchId }),
   getMessage: (messageId, allowRemote) =>
     invoke("get_message", { messageId, allowRemote: allowRemote ?? false }),
@@ -105,6 +112,15 @@ export const tauriBackend: Backend = {
     invoke("save_attachment", { messageId, attachmentId }),
   openAttachment: (messageId, attachmentId) =>
     invoke("open_attachment", { messageId, attachmentId }),
+
+  getProtectionSetup: (accountId) => invoke("get_protection_setup", { accountId }),
+  refreshSensitivityLabels: (accountId) => invoke("refresh_sensitivity_labels", { accountId }),
+  checkProtection: (accountId, items) => invoke("check_protection", { accountId, items }),
+  refreshProtectionCheck: (accountId) => invoke("refresh_protection_check", { accountId }),
+  openProtectionCheckMessage: (accountId, item) =>
+    invoke("open_protection_check_message", { accountId, item }),
+  openInOutlook: (messageId) => invoke("open_in_outlook", { messageId }),
+  getMessageDiagnostics: (messageId) => invoke("get_message_diagnostics", { messageId }),
 
   getAccountSignature: (accountId) => invoke("get_account_signature", { accountId }),
   updateOwnSignature: (accountId, html, onReplies) =>

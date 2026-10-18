@@ -10,7 +10,9 @@ import type {
   ActiveReminder,
   BackgroundState,
   DataKind,
+  ProtectionSetup,
   ReplyKind,
+  SearchSort,
   Settings,
   SnoozeFor,
 } from "./types";
@@ -32,7 +34,8 @@ export const qk = {
   message: (messageId: string, allowRemote: boolean) =>
     ["mail", "message", messageId, allowRemote] as const,
   /** `revision` names the server hits included (see useSearch). */
-  search: (text: string, revision: string) => ["mail", "search", text, revision] as const,
+  search: (text: string, revision: string, sort: SearchSort) =>
+    ["mail", "search", text, revision, sort] as const,
   suggestions: (text: string) => ["contacts", "suggest", text] as const,
 
   calendars: () => ["calendar", "calendars"] as const,
@@ -49,6 +52,8 @@ export const qk = {
   accountSignature: (accountId: string) => ["signatures", "account", accountId] as const,
   composeSignature: (accountId: string, replyKind: ReplyKind | null) =>
     ["signatures", "compose", accountId, replyKind ?? "new"] as const,
+
+  protectionSetup: (accountId: string) => ["protection", "setup", accountId] as const,
 
   taskLists: () => ["tasks", "lists"] as const,
   tasks: (listId: string | null, includeCompleted: boolean) =>
@@ -253,4 +258,21 @@ export function useCheckOrganizationSignature() {
     mutationFn: (accountId: string) => backend.checkOrganizationSignature(accountId),
     onSuccess: (signature) => storeSignature(client, signature),
   });
+}
+
+// --- Protection -------------------------------------------------------------------
+
+/** What the account can send protected: its checks and sensitivity labels. */
+export function useProtectionSetup(accountId: string, enabled = true) {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: qk.protectionSetup(accountId),
+    queryFn: () => backend.getProtectionSetup(accountId),
+    enabled,
+  });
+}
+
+/** Puts a setup the backend answered with in the cache. */
+export function storeProtectionSetup(client: QueryClient, setup: ProtectionSetup): void {
+  client.setQueryData(qk.protectionSetup(setup.accountId), setup);
 }

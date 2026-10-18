@@ -12,7 +12,7 @@
 mod connection;
 mod folders;
 mod idle;
-mod mime;
+pub(crate) mod mime;
 mod smtp;
 mod sync;
 mod utf7;
@@ -30,11 +30,10 @@ pub use self::idle::{IdleConfig, ImapIdleWatcher};
 use self::connection::{ImapSession, MailboxInfo, quote};
 use super::{
     FolderCounts, MailProvider, MessageBatch, MessageContent, MessageLocator, SearchPage,
-    SyncWindow,
+    ServerQuery, SyncWindow,
 };
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Folder, ImapSettings, Message, OutgoingMessage};
-use crate::search::SearchQuery;
 
 /// UIDs per `UID STORE`/`MOVE`/`COPY`/`EXPUNGE` command, keeping command
 /// lines well below server limits.
@@ -525,15 +524,21 @@ impl MailProvider for ImapProvider {
 
     async fn search(
         &self,
-        query: &SearchQuery,
-        folders: &[Folder],
+        search: &ServerQuery<'_>,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<SearchPage> {
-        self.search_mailbox(query, folders, cursor, limit).await
+        self.search_mailbox(search, cursor, limit).await
     }
 
     async fn send(&self, message: &OutgoingMessage, original: Option<&Message>) -> Result<()> {
+        // The rules that act on these rely on Microsoft 365: never sent
+        // without them.
+        if message.protect.is_some() || message.label_id.is_some() {
+            return Err(Error::unsupported(
+                crate::protection::PROTECTED_SENDING_UNSUPPORTED,
+            ));
+        }
         let built = smtp::build_message(&self.credentials, message, original)?;
         let raw = built.formatted();
         smtp::send(&self.credentials, &built, &raw).await?;
@@ -578,6 +583,58 @@ mod tests {
         assert!(!from_5.contains(&remote_id("INBOX/Sub", 7, 9)));
         assert!(!from_5.contains(&format!("{}+9", remote_id_prefix("INBOX", 7))));
         assert!(!from_5.contains(&remote_id_prefix("INBOX", 7)));
+    }
+
+    #[tokio::test]
+    async fn protected_mail_is_refused_before_anything_is_sent() {
+        use crate::model::{EmailAddress, ProtectAction, TlsMode};
+        let provider = ImapProvider::new(
+            "acct",
+            ImapCredentials {
+                settings: ImapSettings {
+                    // Nothing listens there: the refusal comes first.
+                    imap_host: "127.0.0.1".into(),
+                    imap_port: 1,
+                    imap_tls: TlsMode::None,
+                    smtp_host: "127.0.0.1".into(),
+                    smtp_port: 1,
+                    smtp_tls: TlsMode::None,
+                    username: "me".into(),
+                },
+                password: "secret".into(),
+                display_name: "Me".into(),
+                email: "me@example.com".into(),
+            },
+        );
+        let message = OutgoingMessage {
+            account_id: "acct".into(),
+            to: vec![EmailAddress::new(None, "pat@example.com")],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Hi".into(),
+            body_html: "<p>Hi</p>".into(),
+            attachments: vec![],
+            importance: None,
+            reply_to_message_id: None,
+            reply_kind: None,
+            protect: Some(ProtectAction::Encrypt),
+            label_id: None,
+        };
+        for message in [
+            message.clone(),
+            OutgoingMessage {
+                protect: None,
+                label_id: Some("6c1b3b5e-0d4f-4b1e-9d3a-2f0e6a7b8c9d".into()),
+                ..message
+            },
+        ] {
+            let error = provider.send(&message, None).await.unwrap_err();
+            assert_eq!(error.code, ErrorCode::Unsupported);
+            assert_eq!(
+                error.message,
+                "Only Microsoft 365 work and school accounts can send protected mail."
+            );
+        }
     }
 
     #[test]

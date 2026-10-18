@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import type { Account } from "../../api/types";
 import {
+  ACCOUNT_FEATURES,
+  FEATURE_COPY,
   MICROSOFT_PERMISSIONS,
+  ON_REQUEST_FEATURES,
   adminConsentEmail,
   blockedSignInEmail,
   classifyAadsts,
@@ -11,6 +14,7 @@ import {
   isConsumerDomain,
   isPersonalAccount,
   linkIncludesPush,
+  moduleFeatures,
   refusedFeatureEmail,
   refusedFeatureMailto,
 } from "./microsoft";
@@ -52,7 +56,36 @@ describe("Microsoft's permissions", () => {
       ["Calendars.ReadWrite", "calendar"],
       ["Contacts.ReadWrite", "contacts"],
       ["Tasks.ReadWrite", "tasks"],
+      ["InformationProtectionPolicy.Read", "sensitivityLabels"],
     ]);
+  });
+
+  it("have copy for every feature, sensitivity labels last and asked for on their own", () => {
+    expect(ACCOUNT_FEATURES).toEqual([
+      "calendar",
+      "contacts",
+      "tasks",
+      "mailboxSettings",
+      "sensitivityLabels",
+    ]);
+    for (const feature of ACCOUNT_FEATURES) {
+      expect(Object.values(FEATURE_COPY[feature]).every((text) => text.length > 0)).toBe(true);
+    }
+    expect(FEATURE_COPY.sensitivityLabels).toEqual({
+      name: "Sensitivity labels",
+      noun: "sensitivity labels",
+      object: "your sensitivity labels",
+      title: "Sensitivity labels need permission",
+      notOn: "Sensitivity labels weren't turned on",
+      isOn: "Sensitivity labels are on",
+      refusedTitle: "Microsoft 365 refused access to your sensitivity labels",
+    });
+    expect(ON_REQUEST_FEATURES).toEqual(["sensitivityLabels"]);
+    expect(moduleFeatures(["calendar", "sensitivityLabels", "mailboxSettings"])).toEqual([
+      "calendar",
+      "mailboxSettings",
+    ]);
+    expect(moduleFeatures(["sensitivityLabels"])).toEqual([]);
   });
 });
 
@@ -168,6 +201,10 @@ describe("adminConsentEmail", () => {
     expect(body).toContain(PORTAL);
     expect(body).toContain("- Read and write my mail (Mail.ReadWrite)");
     expect(body).toContain("- Read and write my tasks (Tasks.ReadWrite)");
+    // The approval link covers the sensitivity labels people may turn on later.
+    expect(body).toContain(
+      "- Read the sensitivity labels I can use (InformationProtectionPolicy.Read)",
+    );
     expect(body).not.toContain("Sync.Receive");
     expect(lines.at(-1)).toBe("Thank you!");
   });

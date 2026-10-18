@@ -547,6 +547,242 @@
   outline-offset: 0;
 }
 
+/* Best match or newest, in the folder filter's place while searching, as
+   compact as it. */
+.mail-sort {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.mail-sort .segmented {
+  flex-wrap: nowrap;
+  padding: 2px;
+  border-radius: 9px;
+}
+
+.mail-sort .segmented__option {
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 7px;
+  font-size: var(--text-sm);
+}
+
+.mail-sort .segmented__label {
+  font-weight: var(--weight-medium);
+}
+
+.mail-sort .segmented__option--selected .segmented__label {
+  font-weight: var(--weight-semibold);
+}
+
+/* --- Search: the box's suggestions and the filters above the results ------- */
+
+/* The suggestions open under the box, as wide as it. */
+.mail-search-field {
+  position: relative;
+}
+
+.mail-search-field .mail-search-suggest {
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  min-width: 0;
+  max-width: none;
+  max-height: min(460px, 70vh);
+  overflow-y: auto;
+  color: var(--fg-primary);
+}
+
+.mail-search-suggest__group,
+.mail-search-suggest__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mail-search-suggest__group + .mail-search-suggest__group {
+  margin-top: var(--space-1);
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.mail-suggest__heading {
+  padding: 6px var(--space-2) 3px;
+  color: var(--fg-tertiary);
+  font-size: 11.5px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.01em;
+}
+
+.mail-search-suggest .mail-suggest__item {
+  min-height: 36px;
+  padding: 4px var(--space-2);
+}
+
+.mail-search-suggest__icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  color: var(--fg-tertiary);
+}
+
+.mail-search-suggest .mail-suggest__text {
+  flex: 1;
+  flex-direction: row;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+/* A name keeps its room; the address beside it gives way. */
+.mail-search-suggest .mail-suggest__name {
+  flex: none;
+  max-width: 70%;
+}
+
+.mail-search-suggest .mail-suggest__name:only-child {
+  max-width: 100%;
+}
+
+.mail-search-suggest .mail-suggest__address {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.mail-suggest__item.is-disabled {
+  color: var(--fg-tertiary);
+  cursor: default;
+}
+
+.mail-suggest__item.is-disabled .mail-suggest__name {
+  font-weight: var(--weight-regular);
+}
+
+.mail-search-suggest__clear {
+  color: var(--fg-secondary);
+}
+
+/* The filters above the results: one row, which scrolls sideways when the
+   list is narrow (their menus open over the window, so it can't cut them
+   off). */
+.mail-search-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: var(--space-2) calc(-1 * var(--space-3)) 0;
+  padding: 2px var(--space-3);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.mail-search-filters::-webkit-scrollbar {
+  display: none;
+}
+
+.mail-search-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  max-width: 220px;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-round);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.mail-search-chip:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.mail-search-chip.is-set {
+  background: var(--brand-subtle);
+  box-shadow: inset 0 0 0 1px var(--brand);
+  color: var(--brand-text);
+}
+
+.mail-search-chip.is-set:hover {
+  background: var(--brand-subtle-hover);
+}
+
+.mail-search-chip__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mail-search-chip__caret {
+  flex: none;
+  margin-right: -3px;
+}
+
+/* From, with a sender: the name, and a button that takes it off. */
+.mail-search-chip--split {
+  gap: 0;
+  padding: 0;
+  cursor: default;
+}
+
+.mail-search-chip__main,
+.mail-search-chip__remove {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.mail-search-chip__main {
+  min-width: 0;
+  padding: 0 3px 0 10px;
+  border-radius: var(--radius-round) 0 0 var(--radius-round);
+}
+
+.mail-search-chip__remove {
+  flex: none;
+  justify-content: center;
+  width: 26px;
+  padding-right: 2px;
+  border-radius: 0 var(--radius-round) var(--radius-round) 0;
+}
+
+.mail-search-chip__remove:hover {
+  background: var(--brand-subtle-hover);
+}
+
+.mail-search-filters__clear {
+  flex: none;
+}
+
+/* What a search found, in rows (and the plain-text reader); the frame marks
+   its own (bodyHtml.ts). The text keeps its color. */
+mark.search-hit {
+  border-radius: 2px;
+  background: var(--search-hit);
+  color: inherit;
+}
+
+mark.search-hit.is-current {
+  background: var(--search-hit-current);
+  outline: 2px solid var(--search-hit-current);
+}
+
 /* Several messages selected: their actions, on a tinted tile, lined up with
    the rows below. */
 .mail-selection {
@@ -657,22 +893,7 @@
 
 /* --- Search: the servers' progress and failures ------------------------------------ */
 
-/* "Searching your whole mailbox…" above an empty state. */
-.mail-search-status {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 4px 12px 6px;
-  color: var(--fg-tertiary);
-  font-size: var(--text-sm);
-}
-
-.mail-search-status > svg {
-  flex: none;
-  color: var(--brand-text);
-}
-
-/* An empty state under that line: it fills what is left, so nothing scrolls. */
+/* An empty state of the search: it fills what is left, so nothing scrolls. */
 .mail-search-empty {
   display: flex;
   flex-direction: column;
@@ -1202,6 +1423,35 @@
   outline: none;
 }
 
+/* A match scrolled to lands below the find bar, not under it. */
+.mail-reader__scroll:has(.mail-findbar) {
+  scroll-padding-top: calc(40px + 48px);
+}
+
+/* The search's matches in the message: stays at the top of the reader as
+   the message scrolls under it. */
+.mail-findbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 40px;
+  margin: 0 -8px var(--space-2);
+  padding: 0 4px 0 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.mail-findbar__count {
+  flex: 1;
+  min-width: 0;
+}
+
 /* The letter: a column with generous margins, centered when the pane is
    wide (reading pane off or at the bottom). */
 .mail-reader__page {
@@ -1317,6 +1567,28 @@
   height: 7px;
   flex-shrink: 0;
   border-radius: 2.5px;
+}
+
+/* A sensitivity label: its name can be long; the tooltip has it in full. */
+.mail-tag--label {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* A label only the message names: told apart from the organization's own,
+   in its words and by its dashed outline. */
+.mail-tag--unverified {
+  background: transparent;
+  box-shadow: none;
+  outline: 1px dashed var(--border-control);
+  outline-offset: -1px;
+  color: var(--fg-secondary);
+}
+
+.mail-tag__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Who it's from, to whom, when; and the ways to answer, right beside it. */
@@ -1513,6 +1785,90 @@
 
 .mail-banner__text {
   flex: 1;
+}
+
+/* What the app can't open of a protected or signed message, and where to
+   open it. A note, not an alarm: quiet unless it asks for care (a link to
+   Microsoft's portal, which a phishing message could imitate). */
+.mail-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding: 14px var(--space-4) 14px 14px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-field);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-primary);
+}
+
+.mail-notice--caution {
+  background: var(--warning-subtle);
+  box-shadow: none;
+}
+
+.mail-notice__icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--fg-secondary);
+}
+
+.mail-notice--caution .mail-notice__icon {
+  color: var(--warning);
+}
+
+.mail-notice__content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mail-notice__title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.mail-notice__text {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+.mail-notice__address,
+.mail-notice__file {
+  overflow-wrap: anywhere;
+}
+
+.mail-notice__file {
+  font-weight: var(--weight-medium);
+}
+
+.mail-notice__files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
+.mail-notice__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: 4px;
+}
+
+/* A sent message's request: what the organization's mail server was asked for. */
+.mail-reader__caveat {
+  margin: 8px 0 0;
+  color: var(--fg-tertiary);
+  font-size: var(--text-sm);
+  text-wrap: pretty;
 }
 
 /* Attachments: small cards, a page tinted by file type on each. */
@@ -2243,7 +2599,8 @@
   color: var(--fg-primary);
 }
 
-/* Contact suggestions. They follow typing, so they appear without motion. */
+/* Contact suggestions (and the search box's). They follow typing, so they
+   appear without motion. */
 .mail-suggest {
   position: absolute;
   top: calc(100% + 2px);
@@ -2336,6 +2693,90 @@
   color: var(--fg-tertiary);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+}
+
+/* Encrypt and Sensitivity: on when they ask for something. */
+.mail-compose__protect.is-on,
+.mail-compose__sensitivity.is-on {
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+}
+
+.mail-compose__protect.is-on:hover:not(:disabled),
+.mail-compose__sensitivity.is-on:hover:not(:disabled) {
+  background: var(--brand-subtle-hover);
+  color: var(--brand-text);
+}
+
+/* The label's color, beside its name (never its text color). */
+.mail-label-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 3px;
+}
+
+.mail-compose__sensitivity .mail-tool__label {
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Their names go first when the toolbar gets crowded: the subject row's
+   tags say what they ask for. */
+@container compose (max-width: 860px) {
+  .mail-compose__protect .mail-tool__label,
+  .mail-compose__sensitivity .mail-tool__label {
+    display: none;
+  }
+
+  .mail-compose__protect,
+  .mail-compose__sensitivity {
+    padding: 0 6px 0 8px;
+  }
+}
+
+/* What the composer asks the organization's mail server for, and why Send
+   stopped over it. */
+.mail-compose__protection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: var(--space-2);
+  padding: 0 var(--space-1);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
+.mail-compose__hint {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+.mail-compose__hint + .mail-compose__hint {
+  margin-top: 4px;
+}
+
+.mail-compose__protection-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--danger);
+  font-weight: var(--weight-medium);
+}
+
+.mail-compose__protection-error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.mail-compose__protection-problem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
 }
 
 .mail-compose__warning {
@@ -2489,7 +2930,8 @@
   pointer-events: none;
 }
 
-.mail-link-form {
+.mail-link-form,
+.mail-date-range {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);

@@ -374,6 +374,30 @@ describe("Microsoft sign-in", () => {
     expect(signIn).toHaveBeenCalledWith("alex.morgan@acme.example", { kind: "current" });
     expect(toastMessages()).toContain("You're signed in again as alex.morgan@acme.example.");
   });
+
+  it("doesn't say a new work account needs permission for sensitivity labels", async () => {
+    const user = userEvent.setup();
+    const { client } = openFlow({ step: "microsoft" });
+
+    await user.type(screen.getByLabelText("Email address (optional)"), "sam@contoso.example");
+    await user.click(screen.getByRole("button", { name: "Sign in with Microsoft" }));
+    await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
+    expect(
+      client.getQueryData<Account[]>(qk.accounts())?.find((a) => a.email === "sam@contoso.example")
+        ?.needsPermission,
+    ).toEqual(["sensitivityLabels"]);
+    expect(toastMessages()).toEqual([
+      "sam@contoso.example is ready. Your mail, calendar and contacts will appear in a moment.",
+    ]);
+  });
+
+  it("doesn't say it after signing in again either", async () => {
+    const backend = new MockBackend({ missing: ["sensitivityLabels"] });
+    openFlow({ step: "microsoft", email: "alex.morgan@acme.example", autoStart: true }, backend);
+
+    await waitFor(() => expect(useAppStore.getState().addAccountOpen).toBe(false));
+    expect(toastMessages()).toEqual(["You're signed in again as alex.morgan@acme.example."]);
+  });
 });
 
 describe("Microsoft sign-in with or without admin approval", () => {
@@ -409,10 +433,12 @@ describe("Microsoft sign-in with or without admin approval", () => {
     expect(toastMessages()).toContain(
       "partial@contoso.example is ready. Your mail will appear in a moment. Cumulas Mail needs permission for your calendar, contacts, tasks and mailbox time zone (Settings → Accounts).",
     );
+    // Sensitivity labels lack permission too, but they're turned on by
+    // themselves, so the toast leaves them out.
     expect(client.getQueryData<Account[]>(qk.accounts())).toContainEqual(
       expect.objectContaining({
         email: "partial@contoso.example",
-        needsPermission: ["calendar", "contacts", "tasks", "mailboxSettings"],
+        needsPermission: ["calendar", "contacts", "tasks", "mailboxSettings", "sensitivityLabels"],
       }),
     );
   });

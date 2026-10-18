@@ -246,6 +246,12 @@ export function replyDraft(original: Message, kind: ReplyKind, accounts: Account
     importance: "normal",
     replyToMessageId: original.id,
     replyKind: kind,
+    protect: null,
+    labelId: null,
+    labelChosen: false,
+    // A Sent copy rarely carries its label (it's saved before the
+    // organization's mail server applies it): the one it asked for counts.
+    originalLabel: original.label ?? original.requested?.label ?? null,
     focus: kind === "forward" ? "to" : "body",
   };
 }
@@ -263,6 +269,10 @@ export function newDraft(accountId: string, init: Partial<DraftInput> = {}): Dra
     importance: "normal",
     replyToMessageId: null,
     replyKind: null,
+    protect: null,
+    labelId: null,
+    labelChosen: false,
+    originalLabel: null,
     focus: "to",
     ...init,
     accountId,

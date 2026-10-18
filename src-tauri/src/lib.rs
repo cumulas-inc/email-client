@@ -186,6 +186,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            // Attachments opened in an earlier run go: moved aside before any
+            // command can open one, then removed in the background.
+            if let Ok(cache_dir) = app.path().app_cache_dir() {
+                commands::retire_attachment_cache(&cache_dir);
+                tauri::async_runtime::spawn_blocking(move || {
+                    commands::sweep_retired_caches(&cache_dir)
+                });
+            }
             let data_dir = app.path().app_data_dir()?;
             let store = Arc::new(Store::open(&data_dir.join("mail.db"))?);
             let (secrets, persistent_secrets) = tauri::async_runtime::block_on(open_secret_store());
@@ -252,6 +260,14 @@ pub fn run() {
             commands::update_own_signature,
             commands::check_organization_signature,
             commands::get_compose_signature,
+            // protection and sensitivity labels
+            commands::get_protection_setup,
+            commands::refresh_sensitivity_labels,
+            commands::check_protection,
+            commands::refresh_protection_check,
+            commands::open_protection_check_message,
+            commands::open_in_outlook,
+            commands::get_message_diagnostics,
             // mail
             commands::list_folders,
             commands::list_messages,

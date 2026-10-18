@@ -12,20 +12,28 @@ import type {
   BackendError,
   BackgroundState,
   CalendarEvent,
+  CheckItem,
+  CheckResult,
   ComposeSignature,
   Contact,
   DataChangedEvent,
   DataKind,
+  EmailAddress,
   ErrorCode,
+  LabelPolicy,
   Message,
+  MessageLabel,
   MessageSummary,
   Navigate,
   OrganizationSignature,
   PermissionRequest,
   PermissionRequiredReason,
+  ProtectionSetup,
   PushStatus,
   RemindersChangedEvent,
   ReplyKind,
+  SearchHit,
+  SearchOptions,
   ServerSearchResult,
   ServerSearchStatus,
   Settings,
@@ -37,13 +45,40 @@ import type {
 } from "../types";
 import { cleanFamily } from "../../lib/fonts";
 import {
+  ACTION_NAMES,
+  CHECK_VALID_DAYS,
+  MAX_CHECK_ITEMS,
+  isEncrypted,
+  labelTitle,
+} from "../../modules/mail/protection";
+import {
   FEATURE_COPY,
+  ON_REQUEST_FEATURES,
   emailDomain,
   isConsumerDomain,
   isPersonalAccount,
 } from "../../modules/settings/microsoft";
-import { type MockState, createDemoState, recount } from "./data";
-import { isEmptySearch, isNarrowEnoughForServers, matchesSearch, parseSearch } from "./searchQuery";
+import {
+  type CatalogLabel,
+  type MockState,
+  DEMO_LABEL_IDS,
+  createDemoState,
+  demoLabelCatalog,
+  protectedMessages,
+  recount,
+} from "./data";
+import { hitPatterns } from "../../lib/search/highlight";
+import {
+  accountMatches,
+  folderMatches,
+  isEmptySearch,
+  isImpossible,
+  isNarrowEnoughForServers,
+  parseSearch,
+  ranks,
+  resolveDates,
+} from "../../lib/search/query";
+import { MAX_SNIPPETS, admits, matchesSearch, mockSnippet, rankHits } from "./searchQuery";
 import { createWorstState } from "./worst";
 
 const DEFAULT_SETTINGS: Settings = {
@@ -167,6 +202,8 @@ const LOCAL_SEARCH_LIMIT = 200;
 const MAX_INCLUDED_IDS = 1000;
 /** Like the core: a server search's page, per account. */
 const SERVER_SEARCH_PAGE = 50;
+/** Like the core: most pages one server search call reads. */
+const SERVER_SEARCH_MAX_PAGES = 5;
 /** Like the core: how many ended search ids are remembered. */
 const RETIRED_SEARCHES = 32;
 
@@ -306,7 +343,13 @@ export const DEMO_UPDATE_COMMIT = "demo-commit-2";
 const RESTART_FAILED = "Couldn't restart. Try again, or quit Cumulas Mail and open it again.";
 
 /** The optional features of a Microsoft account, in the order the core lists them. */
-const FEATURES: readonly AccountFeature[] = ["calendar", "contacts", "tasks", "mailboxSettings"];
+const FEATURES: readonly AccountFeature[] = [
+  "calendar",
+  "contacts",
+  "tasks",
+  "mailboxSettings",
+  "sensitivityLabels",
+];
 
 function inOrder(features: readonly AccountFeature[]): AccountFeature[] {
   return FEATURES.filter((f) => features.includes(f));
@@ -327,6 +370,7 @@ const GRAPH_SCOPES = [
   "Calendars.ReadWrite",
   "Contacts.ReadWrite",
   "Tasks.ReadWrite",
+  "InformationProtectionPolicy.Read",
 ];
 
 /**
@@ -391,11 +435,95 @@ const BLOCKED_HINTS: [string, SignInBlockedReason, number][] = [
 
 const NO_ADMIN_NEEDED = "Personal Microsoft accounts don't need an administrator's approval.";
 
+/**
+ * The demo work account's protection checks (`?protection=` in the URL):
+ * Encrypt, Do Not Forward and most labels passed ("setup"); the same with
+ * Encrypt's check too old ("expired"); or a check of Encrypt waiting for
+ * its test message ("checking").
+ */
+export type DemoProtection = "setup" | "checking" | "expired";
+
+// The core's messages about sending protected mail and its checks.
+const WORK_ACCOUNTS_ONLY = "Only Microsoft 365 work and school accounts can send protected mail.";
+const OUTLOOK_ONLY = "Only Microsoft 365 messages open in Outlook on the web.";
+const PROTECTED_ORIGINAL =
+  "This message is protected. Reply to it or forward it in Outlook on the web.";
+const ENCRYPTED_ORIGINAL =
+  "This message is encrypted. Cumulas Mail can't reply to it or forward it without removing the encryption.";
+const OPEN_CONTAINER =
+  "This file holds a protected message's content, which Cumulas Mail can't open. Open the message in Outlook on the web.";
+const NO_TEST_MESSAGE = "There's no test message to open. Check again.";
+
+/** What a check decided, as the core keeps it: never "expired" or "waiting". */
+type CheckRecord = Omit<CheckResult, "passedAt">;
+
+const NOT_CHECKED: CheckRecord = { state: "notChecked", at: null, note: null, testMessage: false };
+const NO_POLICY: LabelPolicy = {
+  required: false,
+  defaultLabelId: null,
+  justifyDowngrade: false,
+  moreInfoUrl: null,
+};
+const DAY_MS = 86_400_000;
+
+/** A work account's checks and labels, as the core keeps them. */
+interface MockProtection {
+  /** What the last check decided, which stands while a new one waits. */
+  encrypt: CheckRecord;
+  doNotForward: CheckRecord;
+  labels: Map<string, CheckRecord>;
+  /** What Microsoft 365 last listed; null until then, or without the permission. */
+  catalog: { labels: CatalogLabel[]; policy: LabelPolicy } | null;
+  listedAt: string | null;
+  error: string | null;
+  /** The check waiting for its messages, when it sent them, and how often they were looked for. */
+  run: { items: CheckItem[]; sentAt: string; looks: number } | null;
+}
+
+/** How each check of the demo's "setup" turned out: most arrived protected. */
+function demoOutcome(item: CheckItem, at: string): CheckRecord {
+  const result = (state: CheckResult["state"], note: CheckResult["note"] = null): CheckRecord => ({
+    state,
+    at,
+    note,
+    testMessage: true,
+  });
+  if (item.kind === "action") return result("applied");
+  if (item.labelId === DEMO_LABEL_IDS.atlas) return result("notApplied");
+  // Acme labels all mail Public by default: the control arrives labeled too.
+  if (item.labelId === DEMO_LABEL_IDS.public) return result("unknown", "otherRule");
+  return result("applied");
+}
+
+function checkKey(item: CheckItem): string {
+  return item.kind === "action" ? item.action : item.labelId;
+}
+
+/** Like the core: what a check decided as of now; a pass older than CHECK_VALID_DAYS is expired. */
+function decidedState(record: CheckRecord): CheckResult["state"] {
+  return record.state === "applied" &&
+    record.at &&
+    Date.now() - Date.parse(record.at) > CHECK_VALID_DAYS * DAY_MS
+    ? "expired"
+    : record.state;
+}
+
+/** Sizes as the core's diagnostics give them. */
+function diagnosticSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export interface MockOptions {
   /** Artificial latency in ms for every call (default 0). */
   latency?: number;
   /** How long a server search takes, in ms (default: `latency`). */
   serverSearchLatency?: number;
+  /** Messages a server search page holds, before the filters are applied (default 50). */
+  serverSearchPage?: number;
+  /** Most pages one server search call reads (default 5). */
+  serverSearchMaxPages?: number;
   /** Start without any accounts (shows onboarding). */
   empty?: boolean;
   /** Start with worst-case data (long, empty, huge and non-Latin values). */
@@ -418,6 +546,10 @@ export interface MockOptions {
   refused?: AccountFeature[];
   /** Microsoft sign-in uses an organization's own app registration: approval links return to localhost and there's no page for administrators (`?customclient`). */
   customClient?: boolean;
+  /** Adds protected and labeled demo mail (`?protected`). */
+  protectedMail?: boolean;
+  /** The demo work account's protection checks (`?protection=setup|checking|expired`); default: labels listed, nothing checked. */
+  protection?: DemoProtection;
   /** An update of the Flatpak is installed (`?update=installed|restartfails`). */
   update?: DemoUpdate;
   /** Started by a restart into an update (`?updated`). */
@@ -499,7 +631,14 @@ export class MockBackend implements Backend {
   >;
   private pendingNavigation: Navigate | null = null;
   /** Calls the desktop app would have acted on, for tests. */
-  readonly calls = { quit: 0, quitCanceled: 0, restart: 0, testNotifications: 0 };
+  readonly calls = {
+    quit: 0,
+    quitCanceled: 0,
+    restart: 0,
+    testNotifications: 0,
+    /** What was opened in Outlook on the web: message ids, or `check:<account>:<item>`. */
+    openedInOutlook: [] as string[],
+  };
   private seq = 1000;
   private latency: number;
   private pendingSignIn: (() => void) | null = null;
@@ -520,6 +659,8 @@ export class MockBackend implements Backend {
   /** Until when each account's organization's service said to wait (ms). */
   private signatureRetries = new Map<string, number>();
   private serverSearchLatency: number;
+  private serverSearchPage: number;
+  private serverSearchMaxPages: number;
   /**
    * The current server search, like the core's: a new id replaces it,
    * canceling the old one. Per account, the matches its next page takes from.
@@ -538,10 +679,19 @@ export class MockBackend implements Backend {
   private goneFromServer = new Set<string>();
   /** How each account's server search fails, when it does (failServerSearch). */
   private serverSearchFailures = new Map<string, BackendError>();
+  /** Each work account's protection checks and labels, once looked at. */
+  private protection = new Map<string, MockProtection>();
+  /** The checks the demo's work account starts with (`?protection=`). */
+  private demoProtection: { accountId: string; kind: DemoProtection } | null = null;
 
   constructor(options: MockOptions = {}) {
     this.latency = options.latency ?? 0;
     this.serverSearchLatency = options.serverSearchLatency ?? this.latency;
+    this.serverSearchPage = Math.max(1, options.serverSearchPage ?? SERVER_SEARCH_PAGE);
+    this.serverSearchMaxPages = Math.max(
+      1,
+      options.serverSearchMaxPages ?? SERVER_SEARCH_MAX_PAGES,
+    );
     this.state = options.empty
       ? emptyState()
       : options.worst
@@ -561,7 +711,14 @@ export class MockBackend implements Backend {
     this.failRestart = options.update === "restartfails";
     this.restartedToUpdate = options.restartedToUpdate ?? false;
     this.onRestart = options.onRestart;
+    if (options.protectedMail && !options.empty && !options.worst) {
+      this.state.messages.push(...protectedMessages());
+      recount(this.state);
+    }
     const microsoft = this.state.accounts.find((a) => a.kind === "microsoft");
+    if (options.protection && microsoft) {
+      this.demoProtection = { accountId: microsoft.id, kind: options.protection };
+    }
     if (options.push && microsoft) {
       this.pushOverrides.set(microsoft.id, demoPush(options.push, this.customClient));
     }
@@ -744,12 +901,26 @@ export class MockBackend implements Backend {
     const existing = this.state.accounts.find(
       (a) => a.kind === "microsoft" && a.email.toLowerCase() === email.toLowerCase(),
     );
+    const personal = existing
+      ? isPersonalAccount(existing)
+      : isConsumerDomain(emailDomain(email) ?? "");
+    if (
+      personal &&
+      permissions.kind === "feature" &&
+      ON_REQUEST_FEATURES.includes(permissions.feature)
+    ) {
+      fail("invalidInput", "Sensitivity labels are only for work and school accounts.");
+    }
     if (existing) {
       const before = [...existing.needsPermission, ...existing.refusedFeatures];
       // Every sign-in checks refused features again.
       existing.refusedFeatures = [];
-      if (permissions.kind === "all") existing.needsPermission = [];
-      else if (permissions.kind === "feature") {
+      // "All" never asks for what's turned on by itself; it keeps what it had.
+      if (permissions.kind === "all") {
+        existing.needsPermission = existing.needsPermission.filter((f) =>
+          ON_REQUEST_FEATURES.includes(f),
+        );
+      } else if (permissions.kind === "feature") {
         existing.needsPermission = existing.needsPermission.filter(
           (f) => f !== permissions.feature,
         );
@@ -763,22 +934,29 @@ export class MockBackend implements Backend {
       );
       return clone(existing);
     }
+    // Like the core: personal accounts can't have sensitivity labels, and
+    // they're asked for only when turned on by themselves.
+    const features = FEATURES.filter((f) => !personal || !ON_REQUEST_FEATURES.includes(f));
     const account: Account = {
       id: this.id("acct"),
       kind: "microsoft",
       displayName: email.split("@")[0] ?? email,
       email,
       color: "#2b7aa8",
-      settings: { kind: "microsoft", tenantId: "demo", userId: this.id("user") },
+      settings: {
+        kind: "microsoft",
+        tenantId: personal ? CONSUMER_TENANT : "demo",
+        userId: this.id("user"),
+      },
       createdAt: new Date().toISOString(),
       lastSyncedAt: null,
       syncError: null,
       needsPermission:
         permissions.kind === "mailOnly"
-          ? [...FEATURES]
+          ? features
           : permissions.kind === "feature"
-            ? FEATURES.filter((f) => f !== permissions.feature)
-            : [],
+            ? features.filter((f) => f !== permissions.feature)
+            : features.filter((f) => ON_REQUEST_FEATURES.includes(f)),
       refusedFeatures: [],
     };
     this.state.accounts.push(account);
@@ -930,6 +1108,14 @@ export class MockBackend implements Backend {
         return "tasks";
       case "mailboxSettings":
         return null;
+      case "sensitivityLabels": {
+        const protection = this.protection.get(accountId);
+        if (!protection?.catalog) return null;
+        protection.catalog = null;
+        protection.listedAt = null;
+        protection.error = null;
+        return "protection";
+      }
     }
   }
 
@@ -966,6 +1152,15 @@ export class MockBackend implements Backend {
         return "tasks";
       case "mailboxSettings":
         return null;
+      case "sensitivityLabels": {
+        // The sync lists them at once.
+        const protection = this.protectionOf(account);
+        if (!protection) return null;
+        protection.catalog = demoLabelCatalog();
+        protection.listedAt = new Date().toISOString();
+        protection.error = null;
+        return "protection";
+      }
     }
   }
 
@@ -1039,7 +1234,8 @@ export class MockBackend implements Backend {
     this.organizationAnswers.delete(accountId);
     this.signatureChecks.delete(accountId);
     this.signatureRetries.delete(accountId);
-    this.emit(["accounts", "mail", "calendar", "contacts", "tasks", "signatures"]);
+    this.protection.delete(accountId);
+    this.emit(["accounts", "mail", "calendar", "contacts", "tasks", "signatures", "protection"]);
   }
 
   async getSettings() {
@@ -1431,47 +1627,126 @@ export class MockBackend implements Backend {
   }
 
   /**
-   * Like the core: the messages the index finds (word prefixes, and inside
-   * subjects and senders), at most 200, plus the ones server searches found.
+   * Where a search looks, like the core: the accounts `account:` names (of
+   * `accountId`'s, when given) and the folders `in:` names in them. Null is
+   * everywhere; an empty set, nowhere.
    */
-  async searchMessages(text: string, accountId?: string, includeIds: string[] = []) {
+  private searchScope(
+    query: ReturnType<typeof parseSearch>,
+    accountId?: string,
+  ): { accounts: Set<string> | null; folders: Set<string> | null } {
+    const accounts =
+      query.accounts.length === 0
+        ? accountId
+          ? new Set([accountId])
+          : null
+        : new Set(
+            this.state.accounts
+              .filter((a) => !accountId || a.id === accountId)
+              .filter((a) => query.accounts.some((v) => accountMatches(v, a)))
+              .map((a) => a.id),
+          );
+    const folders =
+      query.folders.length === 0
+        ? null
+        : new Set(
+            this.state.folders
+              .filter((f) => !accounts || accounts.has(f.accountId))
+              .filter((f) => query.folders.some((v) => folderMatches(v, f)))
+              .map((f) => f.id),
+          );
+    return { accounts, folders };
+  }
+
+  /**
+   * Like the core: the messages the index finds (word prefixes, and inside
+   * subjects and senders) that pass the filters, plus the ones server
+   * searches found that pass them. Best first while the text has words to
+   * rank by (the 200 best, and every server hit), else newest first. An
+   * order it doesn't know is refused, as the core's command refuses it.
+   */
+  async searchMessages(
+    text: string,
+    accountId?: string,
+    includeIds: string[] = [],
+    options?: SearchOptions | null,
+  ): Promise<SearchHit[]> {
     await this.delay();
+    const sort: unknown = options?.sort;
+    if (sort !== undefined && sort !== "relevance" && sort !== "newest") {
+      fail("invalidInput", `Not an order of search results: ${String(sort)}.`);
+    }
+    const now = new Date();
     const query = parseSearch(text);
-    const inAccount = (m: Message) => !accountId || m.accountId === accountId;
+    const dates = resolveDates(query, now, options?.weekStartsOn ?? 0);
+    const scope = this.searchScope(query, accountId);
+    const inScope = (m: Message) =>
+      (!scope.accounts || scope.accounts.has(m.accountId)) &&
+      (!scope.folders || scope.folders.has(m.folderId)) &&
+      !isImpossible(dates) &&
+      admits(query, m, dates, null);
     // As the app's index: a message's text once it was opened, its preview
     // before.
     const indexed = (m: Message) => (this.opened.has(m.id) ? m : { ...m, bodyText: null });
-    const found = isEmptySearch(query)
+    const matches = isEmptySearch(query)
       ? []
-      : this.state.messages
-          .filter((m) => inAccount(m) && matchesSearch(query, indexed(m), { infix: true }))
-          .sort(searchOrder)
-          .slice(0, LOCAL_SEARCH_LIMIT);
-    const ids = new Set(found.map((m) => m.id));
+      : this.state.messages.filter(
+          (m) => inScope(m) && matchesSearch(query, indexed(m), { infix: true }),
+        );
+    const matched = new Set(matches.map((m) => m.id));
     const included = new Set(includeIds.slice(0, MAX_INCLUDED_IDS));
-    for (const m of this.state.messages) {
-      if (included.has(m.id) && !ids.has(m.id) && inAccount(m)) {
-        ids.add(m.id);
-        found.push(m);
-      }
+    const fromServer = this.state.messages.filter((m) => included.has(m.id) && inScope(m));
+    const ranked = (options?.sort ?? "relevance") === "relevance" && ranks(query);
+
+    let found: Message[];
+    if (ranked) {
+      const hits = [
+        ...matches.map((m) => ({ message: indexed(m), fromServer: included.has(m.id) })),
+        ...fromServer
+          .filter((m) => !matched.has(m.id))
+          .map((m) => ({ message: indexed(m), fromServer: true })),
+      ];
+      let kept = 0;
+      found = rankHits(hits, query, now)
+        .filter((h) => h.fromServer || kept++ < LOCAL_SEARCH_LIMIT)
+        .map((h) => this.message(h.message.id));
+    } else {
+      const local = matches.sort(searchOrder).slice(0, LOCAL_SEARCH_LIMIT);
+      found = [...new Set([...local, ...fromServer])].sort(searchOrder);
     }
-    return found.sort(searchOrder).map(summary);
+
+    // The body's words around what matched there, for the first rows, when
+    // the text has words to rank by (either order).
+    const patterns = ranks(query) ? hitPatterns(query) : null;
+    return found.map((m, i) => ({
+      ...summary(m),
+      snippet:
+        patterns && i < MAX_SNIPPETS && matchesSearch(query, indexed(m), { infix: false })
+          ? mockSnippet(indexed(m), patterns)
+          : null,
+    }));
   }
 
   /**
    * Like the core: searches one account's mail on its "server" (what is on
-   * the device and `serverMessages`, matched as Graph does by the start of
-   * words, or as IMAP does anywhere in them), a page at a time, and brings
-   * what it finds onto the device.
+   * the device and `serverMessages`), a page at a time, and brings what it
+   * finds that passes the text's filters onto the device. Graph matches
+   * words by their start and, with words, can't say read or flagged;
+   * without words it filters by all of them; either way it looks in one
+   * folder `in:` names, but not in several. IMAP matches anywhere in words
+   * and says every filter. A call reads
+   * pages until half a page's worth pass, the matches run out, or it read
+   * `serverSearchMaxPages`.
    */
   async searchServer(
     searchId: string,
     text: string,
     accountId: string,
     more = false,
+    options?: SearchOptions | null,
   ): Promise<ServerSearchResult> {
     if (!searchId || searchId.length > 100) fail("invalidInput", "Invalid search.");
-    this.account(accountId);
+    const account = this.account(accountId);
     const answer = (
       status: ServerSearchStatus,
       result: Partial<ServerSearchResult> = {},
@@ -1486,8 +1761,13 @@ export class MockBackend implements Backend {
       ...result,
     });
     const query = parseSearch(text);
+    const dates = resolveDates(query, new Date(), options?.weekStartsOn ?? 0);
     // Like the core, before the search is started: it cancels nothing.
-    if (!isNarrowEnoughForServers(query)) return answer("done");
+    const otherAccount =
+      query.accounts.length > 0 && !query.accounts.some((v) => accountMatches(v, account));
+    if (!isNarrowEnoughForServers(query) || otherAccount || isImpossible(dates)) {
+      return answer("done");
+    }
     if (this.retiredSearches.includes(searchId)) return answer("cancelled");
     if (this.serverSearch?.id !== searchId) {
       this.retireServerSearch();
@@ -1503,40 +1783,72 @@ export class MockBackend implements Backend {
     const failure = this.serverSearchFailures.get(accountId);
     if (failure) return answer("failed", { error: clone(failure) });
 
+    const scope = this.state.folders.filter(
+      (f) => f.accountId === accountId && query.folders.some((v) => folderMatches(v, f)),
+    );
+    if (query.folders.length > 0 && scope.length === 0) return answer("done");
+    const scopeIds = query.folders.length > 0 ? new Set(scope.map((f) => f.id)) : null;
+
+    const server = [...this.state.messages, ...(this.state.serverMessages ?? [])];
     let matches: string[];
     if (more) {
       const rest = search.rest.get(accountId);
       if (!rest) return answer("done");
       matches = rest;
     } else {
-      // Graph matches words by their start; IMAP's SEARCH, anywhere.
-      const options = { infix: false, substrings: this.account(accountId).kind === "imap" };
-      matches = [...this.state.messages, ...(this.state.serverMessages ?? [])]
-        .filter((m) => m.accountId === accountId && matchesSearch(query, m, options))
+      const imap = account.kind === "imap";
+      const words = query.terms.length > 0;
+      // What the server can say: IMAP everything; Graph's $search the words,
+      // attachments and dates, its $filter every filter, and either looks in
+      // one folder when `in:` names exactly one there, else everywhere.
+      const graphFolder = scope.length === 1 ? scopeIds : null;
+      const asked = imap
+        ? (m: Message) => admits(query, m, dates, scopeIds)
+        : words
+          ? (m: Message) => admits({ ...query, read: null, flagged: false }, m, dates, graphFolder)
+          : (m: Message) => admits(query, m, dates, graphFolder);
+      matches = server
+        .filter(
+          (m) =>
+            m.accountId === accountId &&
+            asked(m) &&
+            matchesSearch(query, m, { infix: false, substrings: imap }),
+        )
         .sort(searchOrder)
         .map((m) => m.id);
     }
-    const page = matches.slice(0, SERVER_SEARCH_PAGE);
-    const rest = matches.slice(SERVER_SEARCH_PAGE);
-    if (rest.length > 0) search.rest.set(accountId, rest);
+    // A page at a time, as the server sends them; then the filters.
+    const wanted = Math.ceil(this.serverSearchPage / 2);
+    const passed: Message[] = [];
+    let pages = 0;
+    while (matches.length > 0 && passed.length < wanted && pages < this.serverSearchMaxPages) {
+      const page = matches.slice(0, this.serverSearchPage);
+      matches = matches.slice(this.serverSearchPage);
+      pages += 1;
+      for (const id of page) {
+        const m = server.find((x) => x.id === id);
+        if (m && admits(query, m, dates, scopeIds)) passed.push(m);
+      }
+    }
+    if (matches.length > 0) search.rest.set(accountId, matches);
     else search.rest.delete(accountId);
 
     const messageIds: string[] = [];
     let added = 0;
-    const server = this.state.serverMessages ?? [];
-    for (const id of page) {
-      const index = server.findIndex((m) => m.id === id);
+    const serverOnly = this.state.serverMessages ?? [];
+    for (const m of passed) {
+      const index = serverOnly.indexOf(m);
       if (index >= 0) {
         // Stored now; the folder's count already had it.
-        this.state.messages.push(...server.splice(index, 1));
+        this.state.messages.push(...serverOnly.splice(index, 1));
         added += 1;
-        messageIds.push(id);
-      } else if (this.state.messages.some((m) => m.id === id)) {
-        messageIds.push(id);
+        messageIds.push(m.id);
+      } else if (this.state.messages.includes(m)) {
+        messageIds.push(m.id);
       }
     }
     if (added > 0) this.emit(["mail"], accountId);
-    return answer("done", { messageIds, added, hasMore: rest.length > 0 });
+    return answer("done", { messageIds, added, hasMore: matches.length > 0 });
   }
 
   async cancelServerSearch(searchId: string) {
@@ -1592,6 +1904,19 @@ export class MockBackend implements Backend {
     }
     const m = clone(this.message(messageId));
     this.opened.add(messageId);
+    // Like the core: without the account's labels, only that the message
+    // names one of its organization's, never by the name it gives.
+    const protection = this.protectionOf(this.account(m.accountId));
+    if (protection && !protection.catalog) {
+      const unlisted = (l: MessageLabel): MessageLabel => ({
+        id: l.id,
+        name: null,
+        color: null,
+        fromCatalog: false,
+      });
+      if (m.label) m.label = unlisted(m.label);
+      if (m.requested?.label) m.requested.label = unlisted(m.requested.label);
+    }
     const allow = allowRemote || this.settings.remoteContent === "allow";
     if (m.bodyHtml && !allow && REMOTE_IMG.test(m.bodyHtml)) {
       m.bodyHtml = m.bodyHtml.replace(REMOTE_IMG, "");
@@ -1663,6 +1988,7 @@ export class MockBackend implements Backend {
       fail("invalidInput", "Add at least one recipient.");
     }
     const account = this.account(message.accountId);
+    const requested = this.checkProtectedSend(account, message);
     this.sent.push(clone(message));
     const sentFolder = this.state.folders.find(
       (f) => f.accountId === account.id && f.role === "sent",
@@ -1706,16 +2032,99 @@ export class MockBackend implements Backend {
         internetMessageId: `<${id}@demo.example>`,
         inReplyTo: null,
         references: [],
+        protection: null,
+        label: null,
+        requested,
       });
       recount(this.state);
     }
     this.emit(["mail"], account.id);
   }
 
+  /**
+   * Like the core's send_message: refuses replies to encrypted mail, a
+   * missing label the organization requires, and encryption or labels that
+   * aren't set up (or were checked too long ago). Returns what the Sent
+   * copy says was asked for.
+   */
+  private checkProtectedSend(
+    account: Account,
+    message: Parameters<Backend["sendMessage"]>[0],
+  ): Message["requested"] {
+    const original = message.replyToMessageId
+      ? this.state.messages.find((m) => m.id === message.replyToMessageId)
+      : undefined;
+    if (message.replyKind && original && isEncrypted(original.protection)) {
+      fail("unsupported", account.kind === "imap" ? ENCRYPTED_ORIGINAL : PROTECTED_ORIGINAL, {
+        reason: "protectedOriginal",
+        messageId: original.id,
+        protection: original.protection!.kind,
+      });
+    }
+    const setup = this.protectionSetup(account);
+    const protect = message.protect ?? null;
+    const labelId = message.labelId?.trim().toLowerCase() || null;
+    // Offered by the last decided check, while a new one waits too.
+    const applied = setup.labels.some((l) => l.check.passedAt !== null);
+    if (!labelId && setup.policy.required && applied) {
+      fail("invalidInput", "Choose a sensitivity label. Your organization requires one.", {
+        reason: "labelRequired",
+      });
+    }
+    if (!protect && !labelId) return null;
+    if (!setup.supported) fail("unsupported", WORK_ACCOUNTS_ONLY);
+    const label = labelId ? setup.labels.find((l) => l.id === labelId) : undefined;
+    if (labelId && !label) {
+      fail("invalidInput", `That sensitivity label isn't available for ${account.email}.`);
+    }
+    const tooOld = (what: string) =>
+      fail(
+        "invalidInput",
+        `${what} was last checked more than ${CHECK_VALID_DAYS} days ago. Check it again in Settings → Accounts.`,
+      );
+    const notSetUp = (what: string) =>
+      fail(
+        "invalidInput",
+        `${what} isn't set up for ${account.email}. Check it in Settings → Accounts.`,
+      );
+    const protection = this.protectionOf(account);
+    /** Refuses `item` unless its last decided check passed less than CHECK_VALID_DAYS ago. */
+    const offered = (item: CheckItem, what: string) => {
+      if (!protection) return;
+      const state = decidedState(this.checkRecord(protection, item));
+      if (state === "applied") return;
+      if (this.isWaiting(protection, item)) {
+        fail(
+          "invalidInput",
+          `${what} is being checked for ${account.email}. Wait for the check in Settings → Accounts to finish.`,
+        );
+      }
+      if (state === "expired") tooOld(what);
+      notSetUp(what);
+    };
+    // In the core's order: the label, then the encryption.
+    let requestedLabel: MessageLabel | null = null;
+    if (label) {
+      const title = labelTitle(label);
+      offered({ kind: "label", labelId: label.id }, `The label ${title}`);
+      requestedLabel = { id: label.id, name: title, color: label.color, fromCatalog: true };
+    }
+    if (protect) {
+      if (label?.hasProtection) {
+        fail(
+          "invalidInput",
+          `The label ${labelTitle(label)} already encrypts this message. Choose either the label or ${ACTION_NAMES[protect]}.`,
+        );
+      }
+      offered({ kind: "action", action: protect }, ACTION_NAMES[protect]);
+    }
+    return { action: protect, label: requestedLabel };
+  }
+
   async suggestAddresses(text: string) {
     await this.delay();
     const q = text.trim().toLowerCase();
-    if (!q) return [];
+    if (!q) return this.recentCorrespondents();
     const seen = new Set<string>();
     const out: { name: string | null; address: string }[] = [];
     const add = (name: string | null, address: string) => {
@@ -1730,6 +2139,34 @@ export class MockBackend implements Backend {
     return out.slice(0, 8);
   }
 
+  /**
+   * Like the core for an empty text: the 8 people who wrote most in the
+   * last 90 days (the most recent first among equals), not the accounts.
+   */
+  private recentCorrespondents(): EmailAddress[] {
+    const since = Date.now() - 90 * 86_400_000;
+    const own = new Set(this.state.accounts.map((a) => a.email.toLowerCase()));
+    const senders = new Map<string, { from: EmailAddress; count: number; last: string }>();
+    for (const m of this.state.messages) {
+      if (!m.from || Date.parse(m.receivedAt) < since) continue;
+      const key = m.from.address.toLowerCase();
+      if (own.has(key)) continue;
+      const seen = senders.get(key);
+      if (!seen) senders.set(key, { from: m.from, count: 1, last: m.receivedAt });
+      else {
+        seen.count += 1;
+        if (m.receivedAt > seen.last) {
+          seen.last = m.receivedAt;
+          seen.from = m.from;
+        }
+      }
+    }
+    return [...senders.values()]
+      .sort((a, b) => b.count - a.count || b.last.localeCompare(a.last))
+      .slice(0, 8)
+      .map(({ from }) => ({ name: from.name, address: from.address }));
+  }
+
   async saveAttachment(messageId: string, attachmentId: string) {
     await this.delay();
     const att =
@@ -1740,9 +2177,378 @@ export class MockBackend implements Backend {
 
   async openAttachment(messageId: string, attachmentId: string) {
     await this.delay();
-    if (!this.message(messageId).attachments.some((a) => a.id === attachmentId)) {
+    const message = this.message(messageId);
+    if (!message.attachments.some((a) => a.id === attachmentId)) {
       fail("notFound", "attachment not found");
     }
+    // Like the core: a protection's own files never open.
+    if (message.protection?.containerIds.includes(attachmentId)) {
+      fail("unsupported", OPEN_CONTAINER);
+    }
+  }
+
+  /** Like the core: opens the message's webLink; IMAP messages have none. */
+  async openInOutlook(messageId: string) {
+    await this.delay();
+    const message = this.message(messageId);
+    if (this.account(message.accountId).kind !== "microsoft") fail("unsupported", OUTLOOK_ONLY);
+    this.calls.openedInOutlook.push(messageId);
+  }
+
+  /** A text in the shape of the core's, from what the demo message says of itself. */
+  async getMessageDiagnostics(messageId: string) {
+    await this.delay();
+    const m = this.message(messageId);
+    const account = this.account(m.accountId);
+    const microsoft = account.kind === "microsoft";
+    const folder = this.state.folders.find((f) => f.id === m.folderId);
+    const p = m.protection;
+    const kind = p?.kind ?? null;
+    const detected = {
+      rightsManaged: "Microsoft Purview encryption",
+      smimeEncrypted: "S/MIME encryption",
+      smimeSigned: "S/MIME signature",
+      portalLink: "encrypted message portal link",
+    };
+    const messageClass = {
+      rightsManaged: "IPM.Note.rpmsg.Microsoft.Voting.Restricted",
+      smimeEncrypted: "IPM.Note.SMIME",
+      smimeSigned: "IPM.Note.SMIME.MultipartSigned",
+      portalLink: "IPM.Note",
+    };
+    const body = m.bodyHtml?.trim()
+      ? `HTML, ${m.bodyHtml.length} characters`
+      : m.bodyText?.trim()
+        ? `text, ${m.bodyText.length} characters`
+        : "empty";
+    const requested = m.requested;
+    const lines = [
+      `Cumulas Mail ${(await this.getAppInfo()).version}: protection details of one message`,
+      "These details don't include the message's subject, addresses, text, links, or the names of its files other than the protection's own.",
+      "",
+      `Account: ${microsoft ? (isPersonalAccount(account) ? "Microsoft 365 (personal)" : "Microsoft 365 (work or school)") : "IMAP"}`,
+      `Folder: ${folder?.role ?? "other"}`,
+      `Detected: ${kind ? detected[kind] : "nothing"}`,
+      `Content hidden in a container: ${p?.contentHidden ? "yes" : "no"}`,
+      `Portal link: ${p?.portalUrl ? `yes (${new URL(p.portalUrl).host})` : "no"}`,
+      `Content-Class: ${kind === "rightsManaged" ? "rpmsg.message" : "none"}`,
+      `Message class: ${microsoft ? (kind ? messageClass[kind] : "IPM.Note") : "none"}`,
+      `S/MIME content: ${kind === "smimeEncrypted" ? "enveloped" : kind === "smimeSigned" ? "signed" : "not applicable"}`,
+      `MIME type: ${microsoft ? "none" : kind === "smimeEncrypted" ? "application/pkcs7-mime; smime-type=enveloped-data" : "multipart/alternative"}`,
+      `Server says it has attachments: ${microsoft ? (m.hasAttachments ? "yes" : "no") : "not said"}`,
+      `Body: ${body}`,
+      "Body read from the message's MIME: no",
+      "Properties read: yes",
+      `Attachments: ${m.attachments.length}`,
+      ...m.attachments.map((a) => {
+        const container = p?.containerIds.includes(a.id) ?? false;
+        const name = container ? a.name : "(name left out)";
+        return `  - ${name} · ${a.contentType} · ${diagnosticSize(a.size)}${container ? " · protection file" : ""}`;
+      }),
+      `Label header: ${m.label ? "from the header" : "none"}`,
+      ...(m.label
+        ? [
+            `  - ${m.label.id} · this organization: yes · enabled: yes · method: Privileged · in your labels: ${m.label.fromCatalog ? "yes" : "no list"}`,
+          ]
+        : []),
+      `Requested by Cumulas Mail: ${requested?.action === "doNotForward" ? "do-not-forward" : (requested?.action ?? "none")} · label: ${requested?.label?.id ?? "none"}`,
+    ];
+    return lines.join("\n");
+  }
+
+  // --- protection -------------------------------------------------------------------
+
+  /** A Microsoft 365 work or school account: the only kind that can send protected mail. */
+  private isWorkAccount(account: Account): boolean {
+    return account.kind === "microsoft" && !isPersonalAccount(account);
+  }
+
+  /**
+   * The account's checks and labels, as the core keeps them: labels listed
+   * when it has the permission, every option unchecked unless the demo
+   * starts otherwise (`?protection=`). Null for IMAP and personal accounts.
+   */
+  private protectionOf(account: Account): MockProtection | null {
+    if (!this.isWorkAccount(account)) return null;
+    let protection = this.protection.get(account.id);
+    if (protection) return protection;
+    const permitted =
+      !account.needsPermission.includes("sensitivityLabels") &&
+      !account.refusedFeatures.includes("sensitivityLabels");
+    const catalog = permitted ? demoLabelCatalog() : null;
+    protection = {
+      encrypt: { ...NOT_CHECKED },
+      doNotForward: { ...NOT_CHECKED },
+      labels: new Map(),
+      catalog,
+      listedAt: catalog ? new Date().toISOString() : null,
+      error: null,
+      run: null,
+    };
+    const demo = this.demoProtection?.accountId === account.id ? this.demoProtection.kind : null;
+    if (demo === "setup" || demo === "expired") {
+      const twoDaysAgo = new Date(Date.now() - 2 * DAY_MS).toISOString();
+      protection.encrypt = demoOutcome({ kind: "action", action: "encrypt" }, twoDaysAgo);
+      protection.doNotForward = demoOutcome({ kind: "action", action: "doNotForward" }, twoDaysAgo);
+      for (const label of demoLabelCatalog().labels) {
+        protection.labels.set(
+          label.id,
+          demoOutcome({ kind: "label", labelId: label.id }, twoDaysAgo),
+        );
+      }
+      if (demo === "expired") {
+        // Passed, but longer ago than a check lasts.
+        protection.encrypt.at = new Date(
+          Date.now() - (CHECK_VALID_DAYS + 10) * DAY_MS,
+        ).toISOString();
+      }
+    } else if (demo === "checking") {
+      protection.run = {
+        items: [{ kind: "action", action: "encrypt" }],
+        sentAt: new Date().toISOString(),
+        looks: 0,
+      };
+    }
+    this.protection.set(account.id, protection);
+    return protection;
+  }
+
+  private checkRecord(protection: MockProtection, item: CheckItem): CheckRecord {
+    if (item.kind === "label") return protection.labels.get(item.labelId) ?? { ...NOT_CHECKED };
+    return item.action === "encrypt" ? protection.encrypt : protection.doNotForward;
+  }
+
+  /** Whether the waiting check sent a test message for `item`. */
+  private isWaiting(protection: MockProtection, item: CheckItem): boolean {
+    return !!protection.run?.items.some((i) => checkKey(i) === checkKey(item));
+  }
+
+  private setCheckRecord(protection: MockProtection, item: CheckItem, result: CheckRecord): void {
+    if (item.kind === "label") protection.labels.set(item.labelId, result);
+    else if (item.action === "encrypt") protection.encrypt = result;
+    else protection.doNotForward = result;
+  }
+
+  /**
+   * Like the core's protection_setup: a passed check older than
+   * CHECK_VALID_DAYS shows as expired; an item a check is waiting for shows
+   * as waiting, while the pass before it still counts (passedAt).
+   */
+  private protectionSetup(account: Account): ProtectionSetup {
+    const protection = this.protectionOf(account);
+    if (!protection) {
+      return {
+        accountId: account.id,
+        supported: false,
+        encrypt: { ...NOT_CHECKED, passedAt: null },
+        doNotForward: { ...NOT_CHECKED, passedAt: null },
+        labels: [],
+        policy: { ...NO_POLICY },
+        labelsListedAt: null,
+        labelsError: null,
+        checking: false,
+      };
+    }
+    const run = protection.run;
+    const shown = (item: CheckItem): CheckResult => {
+      const record = this.checkRecord(protection, item);
+      const state = decidedState(record);
+      const passedAt = state === "applied" ? record.at : null;
+      return run && this.isWaiting(protection, item)
+        ? { state: "waiting", at: run.sentAt, note: null, testMessage: false, passedAt }
+        : { ...record, state, passedAt };
+    };
+    const catalog = protection.catalog;
+    return {
+      accountId: account.id,
+      supported: true,
+      encrypt: shown({ kind: "action", action: "encrypt" }),
+      doNotForward: shown({ kind: "action", action: "doNotForward" }),
+      labels: (catalog?.labels ?? []).map((l) => ({
+        ...l,
+        check: shown({ kind: "label", labelId: l.id }),
+      })),
+      policy: { ...(catalog?.policy ?? NO_POLICY) },
+      labelsListedAt: catalog ? protection.listedAt : null,
+      labelsError: protection.error,
+      checking: protection.run !== null,
+    };
+  }
+
+  async getProtectionSetup(accountId: string) {
+    await this.delay();
+    return this.protectionSetup(this.account(accountId));
+  }
+
+  async refreshSensitivityLabels(accountId: string) {
+    await this.delay();
+    const account = this.account(accountId);
+    const protection = this.protectionOf(account);
+    if (!protection) {
+      fail("unsupported", "Only Microsoft 365 work and school accounts have sensitivity labels.");
+    }
+    this.checkFeature(accountId, "sensitivityLabels");
+    protection.catalog = demoLabelCatalog();
+    protection.listedAt = new Date().toISOString();
+    protection.error = null;
+    this.emit(["protection"], accountId);
+    return this.protectionSetup(account);
+  }
+
+  /** Changes the account's label policy, as Microsoft 365 would list it next (tests, demos). */
+  setLabelPolicy(accountId: string, policy: Partial<LabelPolicy>): void {
+    const protection = this.protectionOf(this.account(accountId));
+    if (!protection?.catalog) return;
+    protection.catalog.policy = { ...protection.catalog.policy, ...policy };
+    this.emit(["protection"], accountId);
+  }
+
+  /** Makes the account's label listing fail, as Microsoft 365's beta API can (tests, demos). */
+  failLabelListing(accountId: string, error: string): void {
+    const protection = this.protectionOf(this.account(accountId));
+    if (!protection) return;
+    protection.error = error;
+    this.emit(["protection"], accountId);
+  }
+
+  async checkProtection(accountId: string, items: CheckItem[]) {
+    await this.delay();
+    const account = this.account(accountId);
+    const protection = this.protectionOf(account);
+    if (!protection) fail("unsupported", WORK_ACCOUNTS_ONLY);
+    // In the core's order: each label listed, then how many.
+    for (const item of items) {
+      if (item.kind === "label" && !protection.catalog?.labels.some((l) => l.id === item.labelId)) {
+        fail("invalidInput", `That sensitivity label isn't available for ${account.email}.`);
+      }
+    }
+    if (items.length === 0) fail("invalidInput", "Choose what to check.");
+    if (items.length > MAX_CHECK_ITEMS) {
+      fail("invalidInput", `Cumulas Mail checks at most ${MAX_CHECK_ITEMS} at a time.`);
+    }
+    if (protection.run) fail("invalidInput", "Wait for the check that's running to finish.");
+    // What each item's last check decided stands until its test message is judged.
+    protection.run = { items: clone(items), sentAt: new Date().toISOString(), looks: 0 };
+    this.emit(["protection"], accountId);
+    return this.protectionSetup(account);
+  }
+
+  /**
+   * Like the core: looks for the check's test messages. In the demo they
+   * arrive by the second look, as in `?protection=setup`, and are moved to
+   * Deleted Items once read.
+   */
+  async refreshProtectionCheck(accountId: string) {
+    await this.delay();
+    const account = this.account(accountId);
+    const protection = this.protectionOf(account);
+    const run = protection?.run;
+    if (!protection || !run) return this.protectionSetup(account);
+    run.looks += 1;
+    if (run.looks >= 2) {
+      const now = new Date().toISOString();
+      for (const item of run.items) this.setCheckRecord(protection, item, demoOutcome(item, now));
+      protection.run = null;
+      this.deliverTestMessages(account, run.items);
+      this.emit(["protection", "mail"], accountId);
+    }
+    return this.protectionSetup(account);
+  }
+
+  /** The check's control and test messages, as they arrived, in Deleted Items (where the core moves them). */
+  private deliverTestMessages(account: Account, items: CheckItem[]): void {
+    const trash = this.state.folders.find((f) => f.accountId === account.id && f.role === "trash");
+    if (!trash) return;
+    const me = { name: account.displayName, address: account.email };
+    const catalog = demoLabelCatalog().labels;
+    const token = Math.random().toString(32).slice(2, 10).padEnd(8, "a");
+    const arrived = (label: MessageLabel | null, encrypted: boolean) => {
+      const id = this.id("msg");
+      const attachments = encrypted
+        ? [
+            {
+              id: `${id}-att-0`,
+              name: "message.rpmsg",
+              contentType: "application/x-microsoft-rpmsg-message",
+              size: 21_504,
+              isInline: false,
+              contentId: null,
+            },
+          ]
+        : [];
+      const text = "Automated setup check from Cumulas Mail. You can delete it.";
+      this.state.messages.push({
+        id,
+        accountId: account.id,
+        folderId: trash.id,
+        remoteId: id,
+        conversationId: null,
+        subject: `Cumulas Mail setup check [${token}]`,
+        from: me,
+        to: [me],
+        cc: [],
+        preview: encrypted ? "" : text,
+        receivedAt: new Date().toISOString(),
+        isRead: true,
+        isFlagged: false,
+        isDraft: false,
+        hasAttachments: encrypted,
+        importance: "normal",
+        bcc: [],
+        replyTo: [],
+        bodyHtml: encrypted ? "" : `<p>${text}</p>`,
+        bodyText: encrypted ? "" : text,
+        hasBlockedContent: false,
+        attachments,
+        internetMessageId: `<${id}@demo.example>`,
+        inReplyTo: null,
+        references: [],
+        protection: encrypted
+          ? {
+              kind: "rightsManaged",
+              containerIds: [`${id}-att-0`],
+              portalUrl: null,
+              contentHidden: false,
+            }
+          : null,
+        label,
+        requested: null,
+      });
+    };
+    const labelOf = (id: string): MessageLabel | null => {
+      const label = catalog.find((l) => l.id === id);
+      return label ? { id, name: labelTitle(label), color: label.color, fromCatalog: true } : null;
+    };
+    // The control: Acme's default label is on all mail.
+    arrived(
+      items.some((i) => i.kind === "label" && i.labelId === DEMO_LABEL_IDS.public)
+        ? labelOf(DEMO_LABEL_IDS.public)
+        : null,
+      false,
+    );
+    for (const item of items) {
+      const outcome = demoOutcome(item, "");
+      const applied = outcome.state !== "notApplied";
+      if (item.kind === "action") arrived(null, applied);
+      else {
+        const label = applied ? labelOf(item.labelId) : null;
+        const encrypts = catalog.find((l) => l.id === item.labelId)?.hasProtection ?? false;
+        arrived(label, applied && encrypts);
+      }
+    }
+    recount(this.state);
+  }
+
+  async openProtectionCheckMessage(accountId: string, item: CheckItem) {
+    await this.delay();
+    const account = this.account(accountId);
+    // Like the core: only work and school accounts have checks.
+    const protection = this.protectionOf(account);
+    if (!protection) fail("unsupported", WORK_ACCOUNTS_ONLY);
+    if (!this.checkRecord(protection, item).testMessage) {
+      fail("notFound", NO_TEST_MESSAGE);
+    }
+    this.calls.openedInOutlook.push(`check:${accountId}:${checkKey(item)}`);
   }
 
   // --- signatures -----------------------------------------------------------------

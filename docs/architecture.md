@@ -21,14 +21,15 @@ system webview (WebKitGTK on Linux).
 │  reminders/ which reminders are due (a pure planner)               │
 │  signatures/ company signatures (Cumulas Signatures client)        │
 │  store/     SQLite cache (+ FTS5 full-text indexes)                │
-│  search/    the search language, for FTS5, Graph KQL, IMAP SEARCH  │
+│  search/    the search language and ranking, for FTS5, Graph, IMAP │
 │  providers/ MailProvider · CalendarProvider · ContactsProvider ·   │
-│             TasksProvider                                          │
+│             TasksProvider · LabelsProvider                         │
 │     ├─ graph/  Microsoft 365 & Outlook.com (Microsoft Graph)       │
 │     └─ imap/   IMAP + SMTP                                         │
 │  auth/      Microsoft OAuth (PKCE, loopback redirect)              │
 │  secrets.rs Secret Service / Flatpak secret portal (oo7)           │
 │  html.rs    sanitizing email HTML and signatures                   │
+│  protection.rs protected mail: detection, labels, diagnostics      │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -273,8 +274,22 @@ and offline, and each account's whole mailbox on its server, whose finds come
 in after.
 
 **The query** (`crates/core/src/search`): one parser for words, `"phrases"`,
-`from:`, `to:`, `cc:`, `subject:`, `body:` and `has:attachment`. Anything else
-is a word, and no input is an error (at most 16 terms). It becomes:
+`from:`, `to:`, `cc:`, `subject:`, `body:` and `has:attachment`, and the
+filters `is:unread`, `is:read`, `is:flagged`, `in:<folder>`,
+`account:<account>`, `received:`, `after:` and `before:`. Anything else is a
+word, a filter with a value it doesn't know is left out, and no input is an
+error (at most 16 terms, and 8 dates, folders and accounts). Dates
+(`dates.rs`) are a day (`2026-10-01`), a range for `received:`
+(`2026-10-01..2026-10-15`, open at either end) or one of KQL's words
+(`today`, `"this week"`, `"last month"`…), as days in the computer's time zone,
+with weeks starting on the day the UI's locale says; `after:` includes its
+day, `before:` doesn't, and clauses intersect. `in:` and `account:` values are
+kept as scope keys (`scope.rs`: composed, without quotes, backslashes or
+control characters, whitespace runs as one space, lowercased), and folder and
+account names are keyed alike before they're compared, so what the filters
+write always names its folder again; `in:` also takes a role (`inbox`, `sent`,
+`spam`…). Where to look alone, or `is:read`, is too little to ask the servers
+for. It becomes:
 
 - for the device (`fts.rs`), FTS5 matches on two indexes keyed by
   `messages.fts_rowid`, a rowid each message row keeps, so indexing or
@@ -283,32 +298,86 @@ is a word, and no input is an error (at most 16 terms). It becomes:
   subject, sender, To, Cc and body (a message's text once it's been opened, its
   preview before) and matches words by their start; `messages_infix`, a
   trigram index of subjects and senders, matches inside words from 3
-  characters ("voice" finds "Invoice");
-- for Microsoft Graph (`kql.rs`), KQL for `$search`: words as prefixes
-  (`invoi*`), matched in the sender, subject and body;
+  characters ("voice" finds "Invoice"). The filters are conditions on the
+  message rows;
+- for Microsoft Graph (`kql.rs`), KQL for `$search` when there are words:
+  words as prefixes (`invoi*`), matched in the sender, subject and body, and
+  the dates as `received>=MM/DD/YYYY` and `received<=MM/DD/YYYY`, a day wider
+  on each side (KQL compares dates in UTC). Without words, a `$filter` on
+  `receivedDateTime`, `isRead`, `flag/flagStatus` and `hasAttachments`;
 - for IMAP (`imap.rs`), `UID SEARCH` keys (`FROM`, `SUBJECT`…, which match
   substrings; a plain word is `OR`ed over sender, To, Cc, subject and body,
   where the device looks, not `TEXT`, which looks in every header too), with
   `CHARSET UTF-8` and literals only when a word isn't ASCII, in the case it
-  was typed in.
+  was typed in; `FLAGGED`, `SEEN` and `UNSEEN`; and `SINCE` and `BEFORE`,
+  which compare the day of `INTERNALDATE` in its own zone (anywhere from
+  UTC−12 to UTC+14), so they are widened to hold for any.
 
-The browser demo's backend (`src/api/mock/searchQuery.ts`) ports the parser
-and the local matching, tested on the same cases, so the UI's tests search the
-way the app does.
+The UI ports the parser to `src/lib/search/query.ts`, tested on the same
+cases, and the browser demo's backend (`src/api/mock/searchQuery.ts`) adds
+the local matching, so the UI's tests search the way the app does.
+
+**On this device** (`Store::search`), under one hold of the store: the
+messages that match and pass the filters, newest first, 5,000 at most, plus
+the server hits the UI passes back (`includeIds`), which the filters apply to
+too. A query with a plain, `subject:` or `body:` word is then ranked best
+first (`rank.rs`; `from:`, `to:` and `cc:` alone only pick by address, and
+list newest first, as "Newest" does):
+
+- a term found in the subject or sender (one FTS5 probe per word,
+  `{subject sender} : …`) counts 1, one found only elsewhere 0.3; a message's
+  field share is the mean over its ranked terms;
+- bm25 (columns weighted 10, 8, 3, 2 and 1) decides the last quarter of that,
+  relative to the best match: relevance is `field × (0.75 + 0.25 × bm25/best)`;
+  a match only inside words gets 0.6 (whether or not a server found it
+  too), a server hit the words don't match here (it matched text the device
+  hasn't seen) 0.225;
+- recency decides all but 0.4 of the score, halving every 30 days.
+
+So a match in the subject or sender (at least `0.75 × 0.4 = 0.3`) ranks above
+one only in the text (at most 0.3) at any age, and within each, recent strong
+matches lead. The first 200 come back, with the server hits, and the first 100
+with a snippet of the text where it matched (FTS5's `snippet()`, cut with
+private-use marks that indexing keeps out of mail, returned as runs of text
+the UI never parses). Every statement that matches `messages_fts` and limits
+rowids writes `+rowid IN (…)`: as `rowid IN (…)`, FTS5 would run the match
+again for every rowid (4 s for 200 of 5,000 rows, against 19 ms), and a test
+checks the plans. Since the match runs over every row first, none runs
+without rows to keep. At 50,000 messages, two letters that match nearly every one
+rank in about 0.3 s (an ignored test measures it; a prefix index is the next
+step if that grows).
 
 **On the server** (`MailProvider::search`, `service/search.rs`):
-`search_server` asks one account for one page (50 messages) at a time. Graph
-searches every folder with `GET /me/messages?$search=` (which takes no
-`$filter` or `$orderby`) and pages by its own next links. IMAP asks about 25
-folders per round trip, pipelined (`EXAMINE` and `UID SEARCH` for each, then
-the arrival dates of their newest 200 matches), and pages through what it
-found by date; a page spends 20 seconds at most looking, and the cursor
-keeps the folders it didn't get to, and the older matches of busier
-folders (`UID 1:n`), for the pages after. A search id names the search over every account:
-a new one cancels the one before, whose pending calls come back `cancelled`
-and store nothing. A page may take 45 seconds. An account's failure comes back
-in its result, never as an error, so it doesn't hide the others' results or
-the device's.
+`search_server` asks one account for pages of 50. Graph searches every folder
+with `GET /me/messages?$search=` (which takes no `$filter` or `$orderby`), or
+one folder's messages when `in:` names exactly one there, and pages by its
+own next links; filters alone go to `$filter` with
+`$orderby=receivedDateTime desc` (`receivedDateTime` first, as Graph needs),
+which finds old unread or flagged mail `$search` can't say. A mailbox that
+answers a search with dates with 400 is asked again without them, and when
+that works, the provider leaves dates to the device from then on (until the
+app restarts). Servers are told dates from 1970 through 9998 only (IMAP's
+must have four-digit years), a bound beyond dropped or moved out, so they
+find more, never less.
+IMAP asks about 25 folders per round trip (or the ones `in:` names),
+pipelined (`EXAMINE` and `UID SEARCH` for each, then the arrival dates of
+their newest 200 matches), and pages through what it found by date; a page
+spends 20 seconds at most looking (less when the call has less left, keeping
+10 for its summaries), and the cursor keeps the folders it
+didn't get to, and the older matches of busier folders (`UID 1:n`), for the
+pages after. Servers can't say every filter (Graph has no read or flagged
+with words, nor several folders; IMAP's dates are in each server's zones), so
+each message they find is checked against the query's filters, exactly,
+before it is stored; since that can empty a page, one call reads pages until
+25 messages pass, the server has no more, it read 5, or less than 30 seconds
+are left (a page cut off would be lost, and an IMAP session with it). A search for another
+account (`account:`), for no folder there or for no time asks nothing. A
+search id names the search over every account: a new one cancels the one
+before, whose pending calls come back `cancelled` and store nothing. A call
+may take 45 seconds, all its pages included; a page that fails after others
+were read keeps what they found and is asked for again by "Show more
+results". An account's failure comes back in its result, never as an error,
+so it doesn't hide the others' results or the device's.
 
 **What it finds is stored**, as rows marked `search_only`, and returned as
 local ids. The UI passes them to the local search (`includeIds`), so every
@@ -324,16 +393,32 @@ search last found them or they were last opened, and beyond 2,000 per account
 (after each sync of the account, even one that fails). Read and flag changes made elsewhere reach them when a
 search next finds them.
 
-**In the UI** (`modules/mail/serverSearch.ts`, `MessageList.tsx`): the local
-search runs 150 ms after typing stops, the servers are asked after 600 ms.
-The server search's state is kept out of React Query, so the `data-changed`
-of every sync doesn't ask the servers again; the local search's key carries
-how many server hits it includes. Single letters are left to the device.
-"Searching your whole mailbox…" shows beside the count while servers answer
-(never "No results"), a failed account gets a row above the results with Try
-again (Sign in again when its sign-in failed), and "Show more results" asks
-for the next pages, up to the 1,000 hits a local search includes. The Unread
-and Flagged filters apply to results too, and say so when they hide some.
+**In the UI** (`modules/mail/search/`, `modules/mail/serverSearch.ts`,
+`MessageList.tsx`): the search text is the only state. The filters above the
+results (From, Date, Has attachment, Unread, Flagged, Folder, Account) are a
+view of the parsed text and edit it, so typed and clicked filters never
+disagree, and they show only while there is text; with an empty box, the
+suggestions offer the same filters. While searching, the folder's
+All/Unread/Flagged control is gone. Results are best first or newest first
+("Sort results", kept per device); best first keeps the rows already shown in
+their places while servers answer, and new ones join below them, best first,
+until the text or the sort changes. The search box is a combobox: suggestions
+offer recent searches, people (`suggestAddresses`, which without text gives
+the people who wrote most lately), filters, folders, accounts and dates for
+the operator being typed. Recent searches (the last 8) are kept in
+localStorage, on this device only. The local search runs 150 ms after typing
+stops, the servers are asked after 600 ms. The server search's state is kept
+out of React Query, so the `data-changed` of every sync doesn't ask the
+servers again; the local search's key carries how many server hits it
+includes. "Searching your whole mailbox…" shows beside the count while servers
+answer (never "No results"; "No results so far" while a server has more to
+look through), a failed account gets a row above the results with Try again
+(Sign in again when its sign-in failed), and "Show more results" asks for the
+next pages, up to the 1,000 hits a local search includes. The words found are
+highlighted in the rows (from the parsed text, for server hits too, and in
+the snippet) and in the open message: in plain text by the app, in HTML by
+the frame's bridge, which marks visible text by splitting text nodes; F3 and
+Shift+F3 step through them.
 
 ## Security
 
@@ -355,7 +440,11 @@ and Flagged filters apply to results too, and say so when they hide some.
   run anyway, the bridge limits what it can change: its listeners are called
   first, it reads events and links through getters taken before the mail is
   parsed, and a link clicked with the pointer opens only if it still leads
-  where it did when the pointer went down on it.
+  where it did when the pointer went down on it. To highlight search words,
+  the bridge accepts only `highlight` and `reveal` from the app, trusted, from
+  the parent, carrying a second token the frame never sends (so reading the
+  frame's messages can't forge the app's), keeps them from other listeners in
+  the frame, and marks text by splitting text nodes, never parsing markup.
 - Signatures, which go into messages the person sends, are sanitized more
   strictly: pictures and CSS backgrounds only over HTTPS or as `data:` images,
   links only to `http`, `https`, `mailto` and `tel`, and no CSS that imports,
@@ -399,7 +488,9 @@ fails with `permissionRequired`, and its cached data is dropped. See
 1. Implement the relevant traits from `crates/core/src/providers/mod.rs`,
    deriving local ids with `model::local_id`. `MailProvider::search` is
    optional: without it, an account's server search fails with a message,
-   and its local search still works.
+   and its local search still works. It may return more than the query's
+   filters let through (filters the server can't say): the service checks
+   each message before storing it.
 2. Return a `ProviderSet` for the new account kind from
    `service/connector.rs`.
 3. Add the account kind to `model::AccountSettings` and to `src/api/types.ts`.
