@@ -324,7 +324,7 @@ const GRAPH_RESOURCE: &str = "https://graph.microsoft.com";
 const OIDC_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
 
 /// Access tokens are refreshed when less than this much lifetime remains.
-const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
+pub(super) const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 
 /// AADSTS codes meaning the user may not consent and an administrator must:
 /// 65001 DelegationDoesNotExist, 90093 (user may not grant the permissions),
@@ -333,11 +333,11 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// AdminConsentRequestRiskyAppWarning. See
 /// <https://learn.microsoft.com/entra/identity-platform/reference-error-codes> and
 /// <https://learn.microsoft.com/entra/identity/enterprise-apps/application-sign-in-unexpected-user-consent-error>.
-const ADMIN_CONSENT_CODES: &[u32] = &[65001, 90093, 90094, 90095, 900941, 900981];
+pub(super) const ADMIN_CONSENT_CODES: &[u32] = &[65001, 90093, 90094, 90095, 900941, 900981];
 
 /// AADSTS90095 AdminConsentRequiredRequestAccess: the tenant has the admin
 /// consent workflow enabled, so the user can request approval.
-const ADMIN_CONSENT_WORKFLOW_CODE: u32 = 90095;
+pub(super) const ADMIN_CONSENT_WORKFLOW_CODE: u32 = 90095;
 
 /// AADSTS codes meaning the app registration doesn't offer the scope asked
 /// for: 70011 InvalidScope, 500011 InvalidResourceServicePrincipalNotFound
@@ -347,7 +347,7 @@ const SCOPE_NOT_OFFERED_CODES: &[u32] = &[70011, 500011, 650053, 650057];
 
 /// AADSTS65004 UserDeclinedConsent. Also sent when the user picks "Back to
 /// app" after submitting an approval request in the admin consent workflow.
-const USER_DECLINED_CODE: u32 = 65004;
+pub(super) const USER_DECLINED_CODE: u32 = 65004;
 
 /// AADSTS codes meaning an organization's API (or the app registration it
 /// belongs to) isn't in the account's tenant: 500011
@@ -459,6 +459,10 @@ pub async fn sign_in(
     let (scope, graph) = (authorize_scope(config), config.graph_scopes.join(" "));
     let continues_if_refused = !config.consent_scopes.is_empty();
     let listener = LoopbackListener::bind().await?;
+    let mail_error = |e| match e {
+        AuthorizeFailure::OAuth(e) => sign_in_error(config, login_hint, &e),
+        AuthorizeFailure::Other(e) => e,
+    };
     let first = authorize(
         config,
         &scope,
@@ -468,7 +472,8 @@ pub async fn sign_in(
         login_hint,
         timeout,
     )
-    .await;
+    .await
+    .map_err(mail_error);
     let (authorization, consent_refused) = match first {
         Err(e) if continues_if_refused && is_consent_refusal(e.code) => {
             // Asked again on a listener of its own, on another port. The
@@ -488,7 +493,8 @@ pub async fn sign_in(
                 login_hint,
                 timeout,
             )
-            .await?;
+            .await
+            .map_err(mail_error)?;
             (authorization, Some(push_consent_refused(e)))
         }
         first => (first?, None),
@@ -562,18 +568,26 @@ pub async fn sign_in(
 }
 
 /// An authorization code and what redeeming it takes.
-struct Authorization {
-    code: String,
+pub(super) struct Authorization {
+    pub(super) code: String,
     /// The PKCE verifier of the request the code was issued for.
-    code_verifier: String,
+    pub(super) code_verifier: String,
     /// The redirect URI of that request, which the redemption repeats.
-    redirect_uri: String,
+    pub(super) redirect_uri: String,
+}
+
+/// Why an authorization request brought no code: what Microsoft said, as it
+/// said it (each app words it for itself), or anything else (the browser,
+/// the time running out).
+pub(super) enum AuthorizeFailure {
+    OAuth(OAuthError),
+    Other(Error),
 }
 
 /// Opens the authorization request for `scope` in the browser and waits for
 /// its code on `listener`. `continues_if_refused` tells the browser page
 /// that the sign-in goes on if consent is refused.
-async fn authorize(
+pub(super) async fn authorize(
     config: &MicrosoftAuthConfig,
     scope: &str,
     listener: &LoopbackListener,
@@ -581,7 +595,7 @@ async fn authorize(
     open_browser: &(dyn Fn(&str) -> Result<()> + Send + Sync),
     login_hint: Option<&str>,
     timeout: Duration,
-) -> Result<Authorization> {
+) -> std::result::Result<Authorization, AuthorizeFailure> {
     let redirect_uri = listener.redirect_uri();
     let pkce = Pkce::generate();
     let state = random_token(16);
@@ -592,16 +606,19 @@ async fn authorize(
         &state,
         &pkce.challenge,
         login_hint,
-    )?;
-    open_browser(&url)?;
+    )
+    .map_err(AuthorizeFailure::Other)?;
+    open_browser(&url).map_err(AuthorizeFailure::Other)?;
 
     let response = listener.wait_for_response(&state, continues_if_refused);
     let response = tokio::time::timeout(timeout, response).await.map_err(|_| {
-        Error::new(
-            ErrorCode::SignInCancelled,
-            "Sign-in was not completed in time. Try again.",
+        AuthorizeFailure::Other(
+            Error::new(
+                ErrorCode::SignInCancelled,
+                "Sign-in was not completed in time. Try again.",
+            )
+            .with_details(json!({ "reason": "timeout" })),
         )
-        .with_details(json!({ "reason": "timeout" }))
     })?;
     match response.outcome() {
         Ok(code) => Ok(Authorization {
@@ -609,7 +626,7 @@ async fn authorize(
             code_verifier: pkce.verifier,
             redirect_uri,
         }),
-        Err(error) => Err(sign_in_error(config, login_hint, &error)),
+        Err(error) => Err(AuthorizeFailure::OAuth(error)),
     }
 }
 
@@ -726,7 +743,7 @@ enum RefreshScope {
 
 /// Reads the wall clock, which (unlike `Instant`) counts the time the
 /// computer spends suspended. Tests move it.
-type WallClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
+pub(crate) type WallClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
 /// An access token and when it expires by each clock. `Instant` stops while
 /// the computer is suspended, so after a resume only the wall clock knows a
@@ -780,7 +797,7 @@ impl MicrosoftTokenSource {
         )
     }
 
-    fn with_scope(
+    pub(super) fn with_scope(
         config: MicrosoftAuthConfig,
         account_id: impl Into<String>,
         secrets: Arc<dyn SecretStore>,
@@ -806,6 +823,15 @@ impl MicrosoftTokenSource {
         }
     }
 
+    /// The same, reading the wall clock with `clock` (an organization setup
+    /// session's, which tests move).
+    pub(super) fn clocked(self, clock: WallClock) -> Self {
+        Self {
+            wall_clock: clock,
+            ..self
+        }
+    }
+
     /// Seeds the in-memory cache right after sign-in.
     pub async fn prime(&self, access_token: &str, expires_in: Duration) {
         let token = CachedToken::new(access_token, expires_in, (self.wall_clock)());
@@ -814,7 +840,7 @@ impl MicrosoftTokenSource {
 
     /// The cached token if it has more than `margin` left (and `fresh`
     /// isn't asked for), else a new one from the refresh token.
-    async fn token(
+    pub(super) async fn token(
         &self,
         margin: Duration,
         fresh: bool,
@@ -1212,14 +1238,14 @@ enum Incoming {
     Response(AuthorizationResponse),
 }
 
-struct LoopbackListener {
+pub(super) struct LoopbackListener {
     v4: TcpListener,
     v6: Option<TcpListener>,
     port: u16,
 }
 
 impl LoopbackListener {
-    async fn bind() -> Result<Self> {
+    pub(super) async fn bind() -> Result<Self> {
         let v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|e| Error::internal(format!("could not start the sign-in listener: {e}")))?;
@@ -1230,7 +1256,7 @@ impl LoopbackListener {
         Ok(Self { v4, v6, port })
     }
 
-    fn redirect_uri(&self) -> String {
+    pub(super) fn redirect_uri(&self) -> String {
         format!("http://localhost:{}", self.port)
     }
 
@@ -1458,38 +1484,38 @@ fn result_page(title: &str, message: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    id_token: Option<String>,
-    expires_in: u64,
+pub(super) struct TokenResponse {
+    pub(super) access_token: String,
+    pub(super) refresh_token: Option<String>,
+    pub(super) id_token: Option<String>,
+    pub(super) expires_in: u64,
     /// The scopes the access token is for, as Microsoft spells them.
     #[serde(default)]
-    scope: Option<String>,
+    pub(super) scope: Option<String>,
 }
 
 /// OAuth error from the authorization redirect or the token endpoint.
 #[derive(Debug, Default, Deserialize)]
-struct OAuthError {
-    error: String,
+pub(super) struct OAuthError {
+    pub(super) error: String,
     #[serde(default)]
-    error_description: String,
+    pub(super) error_description: String,
     /// AADSTS codes (token endpoint only; parsed from the description for
     /// redirects).
     #[serde(default)]
-    error_codes: Vec<u32>,
+    pub(super) error_codes: Vec<u32>,
     #[serde(default)]
-    error_subcode: Option<String>,
+    pub(super) error_subcode: Option<String>,
 }
 
 impl OAuthError {
-    fn has_code(&self, code: u32) -> bool {
+    pub(super) fn has_code(&self, code: u32) -> bool {
         self.error_codes.contains(&code) || aadsts_codes(&self.error_description).contains(&code)
     }
 
     /// The first line of Microsoft's description (the rest is trace and
     /// correlation ids), or the bare error code.
-    fn summary(&self) -> String {
+    pub(super) fn summary(&self) -> String {
         match first_line(&self.error_description) {
             "" => self.error.clone(),
             line => line.to_owned(),
@@ -1497,12 +1523,12 @@ impl OAuthError {
     }
 }
 
-enum TokenFailure {
+pub(super) enum TokenFailure {
     OAuth(OAuthError),
     Other(Error),
 }
 
-fn http_client() -> reqwest::Client {
+pub(super) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(30))
@@ -1510,7 +1536,7 @@ fn http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-async fn request_token(
+pub(super) async fn request_token(
     http: &reqwest::Client,
     config: &MicrosoftAuthConfig,
     form: &[(&str, &str)],
@@ -1556,7 +1582,7 @@ async fn request_token(
 /// Why an organization's settings keep someone from signing in, in a way
 /// approving the app doesn't fix (except `AppNotSetUp`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BlockedReason {
+pub(super) enum BlockedReason {
     /// AADSTS50105: the app requires assignment and the user isn't assigned.
     NotAssigned,
     /// AADSTS7000112: the app is disabled in the organization.
@@ -1590,7 +1616,7 @@ impl BlockedReason {
 
     /// The first code of `error` that is a reason, and the reason: from its
     /// `error_codes`, then from the codes its description names.
-    fn find(error: &OAuthError) -> Option<(Self, u32)> {
+    pub(super) fn find(error: &OAuthError) -> Option<(Self, u32)> {
         error
             .error_codes
             .iter()
@@ -1599,7 +1625,7 @@ impl BlockedReason {
             .find_map(|code| Self::of(code).map(|reason| (reason, code)))
     }
 
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::NotAssigned => "notAssigned",
             Self::AppDisabled => "appDisabled",
@@ -1847,7 +1873,7 @@ fn api_token_error(error: &OAuthError) -> ApiTokenError {
 }
 
 /// All `AADSTSnnnn` codes mentioned in a description.
-fn aadsts_codes(description: &str) -> Vec<u32> {
+pub(super) fn aadsts_codes(description: &str) -> Vec<u32> {
     description
         .match_indices("AADSTS")
         .filter_map(|(at, prefix)| {
@@ -1860,7 +1886,7 @@ fn aadsts_codes(description: &str) -> Vec<u32> {
         .collect()
 }
 
-fn first_line(text: &str) -> &str {
+pub(super) fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or_default().trim()
 }
 
@@ -1869,18 +1895,18 @@ fn first_line(text: &str) -> &str {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default, Deserialize)]
-struct IdTokenClaims {
-    tid: Option<String>,
-    oid: Option<String>,
-    name: Option<String>,
-    email: Option<String>,
-    preferred_username: Option<String>,
+pub(super) struct IdTokenClaims {
+    pub(super) tid: Option<String>,
+    pub(super) oid: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) email: Option<String>,
+    pub(super) preferred_username: Option<String>,
 }
 
 /// Reads the claims of an ID token without verifying its signature. That is
 /// sound here because the token comes straight from the token endpoint over
 /// TLS in answer to our own request (OpenID Connect Core 1.0 §3.1.3.7, step 6).
-fn decode_id_token(token: &str) -> Result<IdTokenClaims> {
+pub(super) fn decode_id_token(token: &str) -> Result<IdTokenClaims> {
     let invalid = || Error::provider("Microsoft returned an ID token that could not be read.");
     let payload = token.split('.').nth(1).ok_or_else(invalid)?;
     let bytes = URL_SAFE_NO_PAD
@@ -1890,7 +1916,7 @@ fn decode_id_token(token: &str) -> Result<IdTokenClaims> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::sync::Mutex as StdMutex;
 
     use wiremock::matchers::{body_string_contains, method, path};
@@ -1918,7 +1944,7 @@ mod tests {
         scopes.iter().map(|s| (*s).to_owned()).collect()
     }
 
-    fn id_token(claims: serde_json::Value) -> String {
+    pub(in crate::auth) fn id_token(claims: serde_json::Value) -> String {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
         let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
         format!("{header}.{payload}.c2lnbmF0dXJl")
@@ -1941,7 +1967,11 @@ mod tests {
         }))
     }
 
-    fn token_error(error: &str, description: &str, codes: &[u32]) -> ResponseTemplate {
+    pub(in crate::auth) fn token_error(
+        error: &str,
+        description: &str,
+        codes: &[u32],
+    ) -> ResponseTemplate {
         ResponseTemplate::new(400).set_body_json(json!({
             "error": error,
             "error_description": description,
@@ -1953,19 +1983,19 @@ mod tests {
     }
 
     /// Builds the URL the browser visits from the redirect URI and the state.
-    type Visit = Box<dyn Fn(&str, &str) -> String + Send + Sync>;
+    pub(in crate::auth) type Visit = Box<dyn Fn(&str, &str) -> String + Send + Sync>;
 
-    type Opener = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
+    pub(in crate::auth) type Opener = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
 
-    struct Browser {
-        open: Opener,
-        authorize_url: Arc<StdMutex<Option<Url>>>,
+    pub(in crate::auth) struct Browser {
+        pub(in crate::auth) open: Opener,
+        pub(in crate::auth) authorize_url: Arc<StdMutex<Option<Url>>>,
         statuses: Arc<StdMutex<Vec<u16>>>,
     }
 
     impl Browser {
         /// Waits until the browser has made `n` requests.
-        async fn wait_for(&self, n: usize) -> Vec<u16> {
+        pub(in crate::auth) async fn wait_for(&self, n: usize) -> Vec<u16> {
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let statuses = self.statuses.lock().unwrap().clone();
@@ -1982,7 +2012,7 @@ mod tests {
 
     /// Plays the browser: records the authorization URL and then visits each
     /// URL in turn on the loopback listener, recording the HTTP statuses.
-    fn fake_browser(visits: Vec<Visit>) -> Browser {
+    pub(in crate::auth) fn fake_browser(visits: Vec<Visit>) -> Browser {
         let authorize_url = Arc::new(StdMutex::new(None));
         let statuses = Arc::new(StdMutex::new(Vec::new()));
         let visits = Arc::new(visits);
@@ -2009,7 +2039,7 @@ mod tests {
         }
     }
 
-    fn redirect_with(query: &'static str) -> Visit {
+    pub(in crate::auth) fn redirect_with(query: &'static str) -> Visit {
         Box::new(move |redirect, state| format!("{redirect}/?{query}&state={state}"))
     }
 

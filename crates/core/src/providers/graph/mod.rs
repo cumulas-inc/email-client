@@ -11,6 +11,7 @@ mod calendar;
 mod client;
 mod contacts;
 mod labels;
+mod licenses;
 mod mail;
 mod subscriptions;
 mod tasks;
@@ -32,6 +33,10 @@ use crate::auth::TokenSource;
 use crate::error::Error;
 use crate::model::EmailAddress;
 use client::GraphClient;
+/// Graph's retry policy, which organization setup's InvokeCommand client
+/// follows too.
+pub(crate) use client::{MAX_RETRIES, is_retryable, retry_delay};
+pub use licenses::{LicenseHint, MIP_PREMIUM_PLAN_ID, MIP_PREMIUM_PLAN_NAME};
 
 /// Microsoft Graph v1.0 endpoint of the public cloud.
 pub const GRAPH_BASE_URL: &str = "https://graph.microsoft.com/v1.0";

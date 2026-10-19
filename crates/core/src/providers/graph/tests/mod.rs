@@ -6,6 +6,7 @@ mod calendar;
 mod client;
 mod contacts;
 mod labels;
+mod licenses;
 mod mail;
 mod protected;
 mod search;

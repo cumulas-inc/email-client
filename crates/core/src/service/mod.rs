@@ -128,7 +128,7 @@ pub struct CoreService {
     /// The organization setup session: at most one, in memory only. Held
     /// only to read or swap it, never across an await, so that sync
     /// commands can end it at once.
-    org_setup: Mutex<Option<Arc<crate::orgsetup::Session>>>,
+    org_setup: crate::orgsetup::SessionSlot,
     /// What organization setup did, kept across sessions until the next
     /// sign-in attempt.
     org_setup_log: Arc<crate::orgsetup::RunLog>,
@@ -158,7 +158,7 @@ impl CoreService {
             signatures: Arc::default(),
             searches: Mutex::default(),
             protection_locks: Mutex::default(),
-            org_setup: Mutex::default(),
+            org_setup: Arc::default(),
             org_setup_log: Arc::default(),
             pending_org_setup_sign_in: Mutex::default(),
         }

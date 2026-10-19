@@ -26,9 +26,9 @@ pub(super) const PREFER_UTC: &str = r#"outlook.timezone="UTC""#;
 pub(super) const PREFER_PAGE_SIZE: &str = "odata.maxpagesize=100";
 
 /// Retries of a throttled (429) or unavailable (503/504) request.
-const MAX_RETRIES: u32 = 3;
+pub(crate) const MAX_RETRIES: u32 = 3;
 /// Upper bound for one wait between retries, whatever `Retry-After` says.
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+pub(crate) const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// Guard against paging links that never end.
 pub(super) const MAX_PAGES: usize = 1000;
 /// Most requests Graph accepts in one JSON batch.
@@ -104,7 +104,7 @@ fn parse_error(body: Value) -> (String, String) {
         .unwrap_or_default()
 }
 
-fn is_retryable(status: StatusCode) -> bool {
+pub(crate) fn is_retryable(status: StatusCode) -> bool {
     matches!(
         status,
         StatusCode::TOO_MANY_REQUESTS
@@ -114,7 +114,7 @@ fn is_retryable(status: StatusCode) -> bool {
 }
 
 /// `Retry-After` in seconds when given, else exponential backoff; capped.
-fn retry_delay(retry_after: Option<&str>, attempt: u32) -> Duration {
+pub(crate) fn retry_delay(retry_after: Option<&str>, attempt: u32) -> Duration {
     retry_after
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
