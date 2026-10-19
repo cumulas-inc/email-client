@@ -97,7 +97,7 @@ export const CONSENT = {
   title: `An administrator needs to approve ${SETUP_APP_NAME}`,
   message: `Microsoft 365 needs an administrator to approve ${SETUP_APP_NAME} before you can use it.`,
   canApprove:
-    "If you're a Global Administrator or Privileged Role Administrator, you can approve it now: open the approval page and sign in, or select Sign in again and check “Consent on behalf of your organization”. Your browser then shows a page that can't connect; the approval is recorded.",
+    "If you're a Global Administrator, Privileged Role Administrator, Cloud Application Administrator or Application Administrator, you can approve it now: open the approval page and sign in (your browser then shows a page that can't connect; the approval is recorded). Global and Privileged Role Administrators can instead select Sign in again and check “Consent on behalf of your organization”.",
   warning: `Approving it for everyone lets anyone in your organization use it with their own Exchange rights. Afterwards, require assignment and assign only your IT admins (Enterprise apps → ${SETUP_APP_NAME} → Properties, then Users and groups). To limit it from the start, use the setup script on the IT page instead.`,
   /** Where the approval link ends up. */
   afterApproving:
