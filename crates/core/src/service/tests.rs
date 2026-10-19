@@ -101,6 +101,8 @@ pub(crate) struct FakeServer {
     /// Messages fetched, and the failure every fetch meets.
     pub fetches: usize,
     pub fetch_failure: Option<Error>,
+    /// The failure every read of transport headers meets.
+    pub transport_failure: Option<Error>,
     next_uid: u32,
 }
 
@@ -122,6 +124,32 @@ pub(crate) struct FakeOrganization {
     pub default_label: Option<String>,
     /// Drafts asking for these labels lose the property.
     pub drops_labels: Vec<String>,
+    /// Its mail goes through the Cumulas Signatures relay, which stamps it.
+    /// Rules act on the first pass, before the relay; auto-labeling only on
+    /// mail that counts as from inside.
+    pub relay: Option<FakeRelay>,
+    /// Rules for these that don't act (turned off, or in test mode): the
+    /// request stays, and nothing is applied.
+    pub rules_ignore: Vec<ProtectAction>,
+    /// A rule removes x-cumulas-label from all mail.
+    pub strips_label_requests: bool,
+    /// Rules that send mail asking for these as a link to Microsoft's
+    /// encrypted message portal.
+    pub portal_link_for: Vec<ProtectAction>,
+    /// Labels whose policy encrypts the mail, which then arrives without a
+    /// label that can be read.
+    pub encrypts_labels_without_header: Vec<String>,
+    /// Mail arrives with its transport headers, and the headers Graph
+    /// parses lack Exchange's own (AuthAs, the direction, the relay's
+    /// stamp).
+    pub transport_headers: bool,
+}
+
+/// The Cumulas Signatures relay in an organization's mail path.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FakeRelay {
+    /// Mail coming back from it counts as from inside the organization.
+    pub internal: bool,
 }
 
 /// A message that arrived from the account itself.
@@ -131,6 +159,8 @@ pub(crate) struct Delivered {
     pub folder: String,
     pub subject: String,
     pub content: MessageContent,
+    /// Its transport headers, raw.
+    pub transport: Option<String>,
 }
 
 impl FakeServer {
@@ -147,17 +177,76 @@ impl FakeServer {
             return;
         }
         let org = &self.organization;
+        let internal = org.relay.is_none_or(|r| r.internal);
         let action = request.and_then(|r| r.protect);
         let label = request.and_then(|r| r.label_id.clone());
-        let ruled = action.is_some_and(|a| org.encrypts.contains(&a));
-        let encrypted = ruled || org.encrypts_everything;
-        let applied = label
+        let acting = action.filter(|a| !org.rules_ignore.contains(a));
+        let portal = acting.is_some_and(|a| org.portal_link_for.contains(&a));
+        let ruled = acting.is_some_and(|a| org.encrypts.contains(&a)) || portal;
+        // Auto-labeling sees the request only if no rule removed it.
+        let requested_label = label.filter(|_| !org.strips_label_requests);
+        let hidden_label = requested_label
+            .as_ref()
+            .is_some_and(|l| internal && org.encrypts_labels_without_header.contains(l));
+        let encrypted = (ruled && !portal) || org.encrypts_everything || hidden_label;
+        let applied = requested_label
             .clone()
-            .filter(|l| org.labels.contains(l))
+            .filter(|l| internal && org.labels.contains(l))
             .or_else(|| org.default_label.clone());
+        let msip_labels = applied.map(|l| {
+            format!(
+                "MSIP_Label_{l}_Enabled=true; MSIP_Label_{l}_SiteId={}; \
+                 MSIP_Label_{l}_Method=Privileged",
+                org.tenant
+            )
+        });
+        let requested_action = action
+            .filter(|_| !ruled || org.keeps_header)
+            .map(|a| a.header_value().to_owned());
+        let auth_as = if internal { "Internal" } else { "Anonymous" };
+        self.next_uid += 1;
+        let message_id = format!("<arrived-{}@contoso.com>", self.next_uid);
+        // As transport delivered them: the hops' headers above the message's.
+        let transport = org.transport_headers.then(|| {
+            let mut headers = vec![
+                "Received: from AM0PR01MB0001.eurprd01.prod.outlook.com (2603:10a6::1) by\r\n \
+                 AM0PR01MB0002.eurprd01.prod.outlook.com with HTTPS; Mon, 19 Oct 2026 14:03:00 \
+                 +0000"
+                    .to_owned(),
+                format!("X-MS-Exchange-Organization-AuthAs: {auth_as}"),
+                "X-MS-Exchange-Organization-MessageDirectionality: Originating".to_owned(),
+            ];
+            if org.relay.is_some() {
+                headers.push("X-Signature-Stamped: 1".into());
+                // The first pass's, below the return's.
+                headers.push("X-MS-Exchange-Organization-AuthAs: Internal".into());
+            }
+            if encrypted {
+                headers.push("Content-Class: rpmsg.message".into());
+            }
+            if let Some(value) = &requested_action {
+                headers.push(format!("x-cumulas-protect: {value}"));
+            }
+            if let Some(value) = &requested_label {
+                headers.push(format!("x-cumulas-label: {value}"));
+            }
+            if let Some(value) = &msip_labels {
+                headers.push(format!("msip_labels: {value}"));
+            }
+            headers.push(format!("Message-ID: {message_id}"));
+            headers.join("\r\n") + "\r\n\r\n"
+        });
+        // Graph's parsed headers lack Exchange's own when the transport
+        // headers are what has them.
+        let graph = !org.transport_headers;
         let content = MessageContent {
             body_html: Some(if encrypted {
                 "<p>You've received an encrypted message.</p>".into()
+            } else if portal {
+                "<p>You've received an encrypted message. <a \
+                 href=\"https://outlook.office365.com/Encryption/retrieve.ashx?id=1\">Read the \
+                 message</a></p>"
+                    .into()
             } else {
                 message.body_html.clone()
             }),
@@ -175,28 +264,26 @@ impl FakeServer {
             },
             signals: MessageSignals {
                 content_class: encrypted.then(|| "rpmsg.message".into()),
-                msip_labels: applied.map(|l| {
-                    format!(
-                        "MSIP_Label_{l}_Enabled=true; MSIP_Label_{l}_SiteId={}; \
-                         MSIP_Label_{l}_Method=Privileged",
-                        org.tenant
-                    )
-                }),
+                msip_labels,
                 msip_labels_source: None,
-                requested_action: action
-                    .filter(|_| !ruled || org.keeps_header)
-                    .map(|a| a.header_value().into()),
-                requested_label: label,
+                requested_action_source: requested_action.as_ref().map(|_| "property".into()),
+                requested_action,
+                requested_label_source: requested_label.as_ref().map(|_| "property".into()),
+                requested_label,
+                relay_stamped: graph && org.relay.is_some(),
+                auth_as: graph.then(|| auth_as.into()),
+                directionality: graph.then(|| "Originating".into()),
                 ..MessageSignals::default()
             },
+            internet_message_id: Some(message_id),
             ..MessageContent::default()
         };
-        self.next_uid += 1;
         let delivered = Delivered {
             remote_id: format!("AAMk-arrived-{}", self.next_uid),
             folder: "INBOX".into(),
             subject: message.subject.clone(),
             content,
+            transport,
         };
         if self
             .hold
@@ -629,6 +716,18 @@ impl MailProvider for FakeMail {
     async fn own_address(&self) -> Result<Option<EmailAddress>> {
         Ok(self.server.lock().unwrap().own_address.clone())
     }
+
+    async fn transport_headers(&self, m: &MessageLocator) -> Result<Option<String>> {
+        let server = self.server.lock().unwrap();
+        if let Some(e) = &server.transport_failure {
+            return Err(e.clone());
+        }
+        Ok(server
+            .delivered
+            .iter()
+            .find(|d| d.remote_id == m.remote_id)
+            .and_then(|d| d.transport.clone()))
+    }
 }
 
 impl FakeMail {
@@ -716,6 +815,13 @@ pub(crate) struct FakeConnector {
     /// The sensitivity labels of Microsoft work and school accounts, when
     /// set.
     pub labels: Mutex<Option<Arc<dyn LabelsProvider>>>,
+    /// Where organization setup talks to (a mock server), when set: then a
+    /// setup sign-in is admin@contoso.com's, with static tokens.
+    pub admin_setup: Mutex<Option<AdminEndpoints>>,
+    /// What the next setup sign-ins fail with, in order.
+    pub admin_sign_in_failures: Mutex<VecDeque<Error>>,
+    /// Runs as a setup sign-in finishes, once the browser part is done.
+    pub admin_sign_in_finishing: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl FakeConnector {
@@ -737,6 +843,9 @@ impl FakeConnector {
             organization_signatures: Mutex::default(),
             organization_requests: AtomicUsize::new(0),
             labels: Mutex::default(),
+            admin_setup: Mutex::default(),
+            admin_sign_in_failures: Mutex::default(),
+            admin_sign_in_finishing: Mutex::default(),
         }
     }
 }
@@ -824,6 +933,70 @@ impl Connector for FakeConnector {
         self.organization_signatures.lock().unwrap().clone()
     }
 
+    async fn admin_setup_sign_in(
+        &self,
+        _open_browser: &BrowserOpener,
+        tenant_id: &str,
+        log: &crate::orgsetup::RunLog,
+    ) -> Result<crate::auth::admin_setup::AdminSignIn> {
+        use crate::auth::admin_setup::{
+            AdminSetupConfig, AdminSignIn, AdminTokens, EXCHANGE_MANAGE_SCOPE, Resource,
+            SETUP_CONSENT_SCOPES,
+        };
+        use crate::orgsetup::runlog::SignInRecord;
+
+        let endpoints = self
+            .admin_setup_endpoints()
+            .ok_or_else(crate::auth::admin_setup::setup_not_available)?;
+        let host = url::Url::parse(&endpoints.authority_host)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        let record = SignInRecord::new(
+            format!("{host}/{tenant_id}"),
+            &SETUP_CONSENT_SCOPES.join(" "),
+        );
+        let failure = self.admin_sign_in_failures.lock().unwrap().pop_front();
+        if let Some(error) = failure {
+            log.sign_in(record.failed(&error));
+            return Err(error);
+        }
+        log.sign_in(record.redeemed(Some(EXCHANGE_MANAGE_SCOPE), true, true));
+        if let Some(finishing) = self.admin_sign_in_finishing.lock().unwrap().as_ref() {
+            finishing();
+        }
+        let config = AdminSetupConfig {
+            client_id: endpoints.client_id,
+            tenant_id: tenant_id.to_owned(),
+            authority_host: endpoints.authority_host,
+        };
+        let tokens = AdminTokens::new(
+            &config,
+            "refresh-0",
+            log.clone(),
+            Arc::new(std::time::SystemTime::now),
+        );
+        tokens
+            .prime(
+                Resource::Exchange,
+                "exchange-token",
+                std::time::Duration::from_secs(3600),
+            )
+            .await;
+        Ok(AdminSignIn {
+            username: crate::orgsetup::tests::ADMIN.into(),
+            display_name: "Megan Bowen".into(),
+            tenant_id: tenant_id.to_owned(),
+            object_id: crate::orgsetup::tests::ADMIN_OID.into(),
+            tokens,
+            granted: EXCHANGE_MANAGE_SCOPE.into(),
+        })
+    }
+
+    fn admin_setup_endpoints(&self) -> Option<AdminEndpoints> {
+        self.admin_setup.lock().unwrap().clone()
+    }
+
     async fn push_source(&self, account: &Account) -> Result<PushSource> {
         if account.kind == AccountKind::Microsoft
             && let Some(relay) = self.relay.lock().unwrap().clone()
@@ -855,9 +1028,9 @@ struct RemindersChanged {
 type ChangeWatcher = Box<dyn Fn(&[DataKind], Option<&str>) + Send>;
 
 #[derive(Default)]
-struct RecordingSink {
+pub(in crate::service) struct RecordingSink {
     /// Every `data_changed`: the kinds and the account.
-    changes: Mutex<Vec<(Vec<DataKind>, Option<String>)>>,
+    pub(in crate::service) changes: Mutex<Vec<(Vec<DataKind>, Option<String>)>>,
     watcher: Mutex<Option<ChangeWatcher>>,
     reminders: Mutex<Vec<RemindersChanged>>,
     new_mail: Mutex<Vec<String>>,
@@ -1572,6 +1745,26 @@ async fn appearance_settings_are_validated_and_saved() {
     );
     // A rejected change leaves the saved settings alone.
     assert_eq!(h.service.get_settings().unwrap(), chosen);
+}
+
+#[tokio::test]
+async fn the_setup_app_is_never_the_mail_app() {
+    let h = harness();
+    let setup = crate::auth::admin_setup::PUBLISHED_SETUP_CLIENT_ID.unwrap();
+    for id in [setup.to_owned(), format!(" {} ", setup.to_uppercase())] {
+        let bad = Settings {
+            microsoft_client_id: Some(id.clone()),
+            ..Settings::default()
+        };
+        let err = h.service.update_settings(bad).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{id}");
+        assert!(
+            err.message.contains("only for organization setup"),
+            "{}",
+            err.message
+        );
+    }
+    assert_eq!(h.service.get_settings().unwrap().microsoft_client_id, None);
 }
 
 fn add_message(h: &Harness, account: &Account, folder: &str, remote: &str, subject: &str) {

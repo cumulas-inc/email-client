@@ -1,0 +1,40 @@
+{
+  "@odata.context": "https://outlook.office365.com/adminapi/beta/85f67998-e79a-4173-95c2-90b0e6dc231d/$metadata#Collection(Exchange.GenericHashTable)",
+  "value": [
+    {
+      "Name": "Cumulas Mail: Encrypt", "Guid": "3f6c2a1e-0000-4000-8000-000000000001", "Identity": "Cumulas Mail: Encrypt",
+      "Priority": 2, "State": "Enabled", "Mode": "Enforce",
+      "FromScope": "InOrganization", "ExceptIfFromScope": null,
+      "HeaderMatchesMessageHeader": "x-cumulas-protect", "HeaderMatchesPatterns": ["^encrypt$"],
+      "HeaderContainsMessageHeader": "X-Signature-Stamped", "HeaderContainsWords": ["1"],
+      "ApplyRightsProtectionTemplate": "Encrypt", "RemoveHeader": "x-cumulas-protect",
+      "StopRuleProcessing": false, "RouteMessageOutboundConnector": null,
+      "BlindCopyTo": [], "RedirectMessageTo": null, "ActivationDate": null,
+      "RuleErrorAction": "Ignore", "SetAuditSeverity": "Low", "Comments": "",
+      "WhenChanged": "2026-10-18T09:12:44Z"
+    },
+    {
+      "Name": "Cumulas Mail: Do Not Forward", "Guid": "3f6c2a1e-0000-4000-8000-000000000002", "Identity": "Cumulas Mail: Do Not Forward",
+      "Priority": "3", "State": 0, "Mode": "Audit",
+      "FromScope": "InOrganization",
+      "HeaderMatchesMessageHeader": "x-cumulas-protect", "HeaderMatchesPatterns": "^do-not-forward$",
+      "ApplyRightsProtectionTemplate": { "Name": "Do Not Forward", "Id": "11111111-0000-0000-0000-000000000002" },
+      "RemoveHeader": "x-cumulas-protect", "StopRuleProcessing": "False",
+      "RuleErrorAction": "Ignore", "SetAuditSeverity": "Low",
+      "SenderAddressLocation": "Header", "ApplyHtmlDisclaimerLocation": "Append", "RuleSubType": "None",
+      "WhenChanged": "/Date(1760778764000)/"
+    },
+    {
+      "Name": "Email signatures: add signature", "Guid": "3f6c2a1e-0000-4000-8000-000000000003",
+      "Priority": 0, "State": "Enabled", "Mode": "Enforce", "FromScope": "InOrganization",
+      "RouteMessageOutboundConnector": "Email signatures (to signature server)",
+      "ExceptIfHeaderMatchesMessageHeader": "X-Signature-Stamped", "ExceptIfHeaderMatchesPatterns": ["."],
+      "StopRuleProcessing": true
+    },
+    {
+      "Name": "Contoso: stop for partner.com", "Guid": "3f6c2a1e-0000-4000-8000-000000000004",
+      "Priority": 1, "State": "Enabled", "Mode": "Enforce",
+      "RecipientDomainIs": ["partner.example"], "StopRuleProcessing": true
+    }
+  ]
+}

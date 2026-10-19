@@ -212,6 +212,11 @@ interface ApprovalLinkProps {
   emphasis?: "primary" | "secondary" | "compact";
   /** Email IT opens this instead of the approval request (a blocked sign-in's own). */
   mailto?: string;
+  /**
+   * Offers Email IT. Off where whoever reads it is the administrator, and the
+   * text around the link says what approving does (organization setup).
+   */
+  emailIt?: boolean;
 }
 
 /** The approval link, to copy, to send to IT in a ready-made email, or to open as an administrator. */
@@ -224,6 +229,7 @@ export function ApprovalLink({
   features,
   emphasis = "primary",
   mailto,
+  emailIt: offerEmail = true,
 }: ApprovalLinkProps) {
   const backend = useBackend();
   const linkId = useId();
@@ -290,28 +296,32 @@ export function ApprovalLink({
 
       <div className="consent-email">
         <div className="consent-email__actions">
-          <button
-            type="button"
-            className={
-              emphasis === "primary" ? "btn btn--primary" : compact ? "btn btn--sm" : "btn"
-            }
-            onClick={emailIt}
-          >
-            <Mail size={compact ? 14 : 16} aria-hidden="true" />
-            Email IT
-          </button>
+          {offerEmail && (
+            <button
+              type="button"
+              className={
+                emphasis === "primary" ? "btn btn--primary" : compact ? "btn btn--sm" : "btn"
+              }
+              onClick={emailIt}
+            >
+              <Mail size={compact ? 14 : 16} aria-hidden="true" />
+              Email IT
+            </button>
+          )}
           <button type="button" className={compact ? "btn btn--sm" : "btn"} onClick={openPage}>
             <ExternalLink size={compact ? 14 : 16} aria-hidden="true" />
             Open approval page
           </button>
         </div>
-        <p className="consent-email__hint">
-          Email IT opens your email app with a ready-to-send request; just add your IT team&apos;s
-          address. If you&apos;re an administrator yourself, select{" "}
-          <strong>Open approval page</strong> and sign in with your admin account.
-          {adminPageUrl === null &&
-            " After approving, your browser shows a page that can't be reached. That's expected: close it and come back to Cumulas Mail."}
-        </p>
+        {offerEmail && (
+          <p className="consent-email__hint">
+            Email IT opens your email app with a ready-to-send request; just add your IT team&apos;s
+            address. If you&apos;re an administrator yourself, select{" "}
+            <strong>Open approval page</strong> and sign in with your admin account.
+            {adminPageUrl === null &&
+              " After approving, your browser shows a page that can't be reached. That's expected: close it and come back to Cumulas Mail."}
+          </p>
+        )}
       </div>
     </>
   );

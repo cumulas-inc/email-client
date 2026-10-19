@@ -16,13 +16,15 @@ use crate::model::{
     OutgoingMessage, PermissionRequest, ProtectAction, ProtectionKind, ReplyKind, SyncStatus,
     local_id,
 };
-use crate::protection::label_copied;
+use crate::protection::{HeadersFrom, SeenLabel, label_copied, org_setup_changed_key};
 use crate::providers::{MessageContent, MessageSignals};
 use crate::secrets::MemorySecretStore;
-use crate::service::tests::{FakeConnector, FakeLabels, FakeOrganization, FakeServer, summary};
+use crate::service::tests::{
+    FakeConnector, FakeLabels, FakeOrganization, FakeRelay, FakeServer, summary,
+};
 use crate::service::{CoreService, EventSink, MailAlert};
 use crate::signatures::CONSUMER_TENANT;
-use crate::store::Store;
+use crate::store::{Store, StoredOrganizationSignature};
 
 const TENANT: &str = "11111111-2222-3333-4444-555555555555";
 const OTHER_TENANT: &str = "99999999-2222-3333-4444-555555555555";
@@ -158,6 +160,7 @@ impl Setup {
                     at: Some(Utc::now() - Duration::days(days)),
                     note: None,
                     test_message_id: Some("AAMk-earlier".into()),
+                    ..CheckRecord::default()
                 };
             })
             .unwrap();
@@ -1008,7 +1011,7 @@ async fn checking_again_keeps_the_last_pass_until_its_decided() {
     let setup = s.refresh().await;
     assert_eq!(
         (setup.encrypt.state, setup.encrypt.note),
-        (CheckState::NotApplied, None)
+        (CheckState::NotApplied, Some(CheckNote::RequestIgnored))
     );
     assert_eq!(setup.encrypt.passed_at, None);
 }
@@ -1027,6 +1030,942 @@ async fn passed_checks_expire_after_90_days() {
     // Only passes expire.
     s.checked(&DO_NOT_FORWARD, CheckState::NotApplied, 91);
     assert_eq!(s.setup().do_not_forward.state, CheckState::NotApplied);
+}
+
+// --- What a check decides --------------------------------------------------------
+
+/// What an arrived test message showed: detected `kind`, with its request
+/// still on it or not.
+fn showed(kind: Option<ProtectionKind>, request_arrived: bool) -> CheckEvidence {
+    CheckEvidence {
+        detected: kind,
+        request_arrived,
+        auth_as: Some("Internal".into()),
+        headers_from: HeadersFrom::Graph,
+        ..CheckEvidence::default()
+    }
+}
+
+/// Back from the Cumulas Signatures relay as mail from outside.
+fn from_outside(evidence: CheckEvidence) -> CheckEvidence {
+    CheckEvidence {
+        relay_stamped: true,
+        auth_as: Some("Anonymous".into()),
+        ..evidence
+    }
+}
+
+fn labeled(evidence: CheckEvidence, id: &str, enabled: bool) -> CheckEvidence {
+    CheckEvidence {
+        own_labels: vec![SeenLabel {
+            id: id.into(),
+            enabled,
+        }],
+        ..evidence
+    }
+}
+
+/// One row of the judge's table: what arrived against what the control
+/// showed and the setup changes known, and what that decides.
+struct Row<'a> {
+    row: &'a str,
+    evidence: CheckEvidence,
+    control: &'a ControlOutcome,
+    settle: &'a Settle,
+    state: CheckState,
+    note: Option<CheckNote>,
+    /// Labels: the organization's label that arrived instead, and whether
+    /// the control had it too.
+    other: Option<&'a str>,
+    on_control: bool,
+}
+
+impl<'a> Row<'a> {
+    fn new(
+        row: &'a str,
+        evidence: CheckEvidence,
+        control: &'a ControlOutcome,
+        settle: &'a Settle,
+        decided: (CheckState, Option<CheckNote>),
+    ) -> Self {
+        Self {
+            row,
+            evidence,
+            control,
+            settle,
+            state: decided.0,
+            note: decided.1,
+            other: None,
+            on_control: false,
+        }
+    }
+
+    fn instead(self, other: &'a str, on_control: bool) -> Self {
+        Self {
+            other: Some(other),
+            on_control,
+            ..self
+        }
+    }
+}
+
+#[test]
+fn encrypt_and_do_not_forward_take_the_first_row_that_matches() {
+    let now = Utc::now();
+    let sent = now - Duration::minutes(2);
+    let quiet = Settle::default();
+    let recent = Settle {
+        rules_changed_at: Some(sent - Duration::minutes(10)),
+        policies_changed_at: None,
+    };
+    let labels_changed = Settle {
+        rules_changed_at: None,
+        policies_changed_at: recent.rules_changed_at,
+    };
+    let plain = ControlOutcome::default();
+    let protected = ControlOutcome {
+        protected: true,
+        ..ControlOutcome::default()
+    };
+    let relayed = ControlOutcome {
+        evidence: Some(from_outside(showed(None, false))),
+        ..ControlOutcome::default()
+    };
+    let rights = Some(ProtectionKind::RightsManaged);
+    use CheckNote as N;
+    use CheckState as S;
+    let rows = [
+        Row::new(
+            "1",
+            showed(rights, true),
+            &protected,
+            &quiet,
+            (S::Unknown, Some(N::OtherRule)),
+        ),
+        Row::new(
+            "2",
+            showed(rights, true),
+            &plain,
+            &quiet,
+            (S::Unknown, Some(N::HeaderKept)),
+        ),
+        Row::new(
+            "3",
+            showed(rights, false),
+            &plain,
+            &quiet,
+            (S::Applied, None),
+        ),
+        // Encrypted before the relay: the relay passes it on.
+        Row::new(
+            "3 relayed",
+            from_outside(showed(rights, false)),
+            &relayed,
+            &recent,
+            (S::Applied, None),
+        ),
+        Row::new(
+            "4 portal",
+            showed(Some(ProtectionKind::PortalLink), false),
+            &plain,
+            &quiet,
+            (S::Unknown, Some(N::OtherProtection)),
+        ),
+        Row::new(
+            "4 S/MIME",
+            showed(Some(ProtectionKind::SmimeEncrypted), true),
+            &plain,
+            &quiet,
+            (S::Unknown, Some(N::OtherProtection)),
+        ),
+        Row::new(
+            "4 signed",
+            from_outside(showed(Some(ProtectionKind::SmimeSigned), false)),
+            &plain,
+            &quiet,
+            (S::Unknown, Some(N::OtherProtection)),
+        ),
+        Row::new(
+            "5 its own",
+            from_outside(showed(None, true)),
+            &plain,
+            &recent,
+            (S::NotApplied, Some(N::RelayNotInternal)),
+        ),
+        Row::new(
+            "5 the control's",
+            showed(None, true),
+            &relayed,
+            &recent,
+            (S::NotApplied, Some(N::RelayNotInternal)),
+        ),
+        Row::new(
+            "6",
+            showed(None, true),
+            &plain,
+            &recent,
+            (S::NotApplied, Some(N::TooSoon)),
+        ),
+        Row::new(
+            "7",
+            showed(None, true),
+            &plain,
+            &quiet,
+            (S::NotApplied, Some(N::RequestIgnored)),
+        ),
+        Row::new(
+            "8",
+            showed(None, false),
+            &plain,
+            &quiet,
+            (S::NotApplied, Some(N::RequestRemoved)),
+        ),
+        // Through the relay but back as mail from inside, or without an
+        // AuthAs: never "not internal".
+        Row::new(
+            "7 internal return",
+            CheckEvidence {
+                relay_stamped: true,
+                ..showed(None, true)
+            },
+            &plain,
+            &quiet,
+            (S::NotApplied, Some(N::RequestIgnored)),
+        ),
+        Row::new(
+            "8 no AuthAs",
+            CheckEvidence {
+                relay_stamped: true,
+                auth_as: None,
+                ..showed(None, false)
+            },
+            &plain,
+            &quiet,
+            (S::NotApplied, Some(N::RequestRemoved)),
+        ),
+        // Auto-labeling's changes don't count for rules.
+        Row::new(
+            "7 policies changed",
+            showed(None, true),
+            &plain,
+            &labels_changed,
+            (S::NotApplied, Some(N::RequestIgnored)),
+        ),
+    ];
+    for item in [ENCRYPT, DO_NOT_FORWARD] {
+        for row in &rows {
+            let name = row.row;
+            let judged = judge(&item, &row.evidence, row.control, row.settle, sent, now);
+            assert_eq!(
+                (judged.state, judged.note),
+                (row.state, row.note),
+                "row {name}"
+            );
+            assert_eq!(
+                (judged.other_label_id, judged.other_label_on_control),
+                (None, false),
+                "row {name}"
+            );
+            // The change is kept whatever was decided.
+            assert_eq!(judged.changed_at, row.settle.rules_changed_at, "row {name}");
+        }
+    }
+}
+
+#[test]
+fn labels_take_the_first_row_that_matches() {
+    let now = Utc::now();
+    let sent = now - Duration::minutes(2);
+    let quiet = Settle::default();
+    let recent = Settle {
+        rules_changed_at: None,
+        policies_changed_at: Some(sent - Duration::hours(3)),
+    };
+    let plain = ControlOutcome::default();
+    let general_on_all = ControlOutcome {
+        label_id: Some(GENERAL.into()),
+        ..ControlOutcome::default()
+    };
+    let confidential_on_all = ControlOutcome {
+        label_id: Some(CONFIDENTIAL.into()),
+        ..ControlOutcome::default()
+    };
+    let relayed = ControlOutcome {
+        evidence: Some(from_outside(showed(None, false))),
+        ..ControlOutcome::default()
+    };
+    let rights = Some(ProtectionKind::RightsManaged);
+    let general_upper = GENERAL.to_uppercase();
+    use CheckNote as N;
+    use CheckState as S;
+    let rows = [
+        Row::new(
+            "1",
+            labeled(showed(None, true), GENERAL, true),
+            &general_on_all,
+            &quiet,
+            (S::Unknown, Some(N::OtherRule)),
+        ),
+        Row::new(
+            "2",
+            labeled(showed(None, true), GENERAL, true),
+            &plain,
+            &quiet,
+            (S::Applied, None),
+        ),
+        Row::new(
+            "2 encrypted",
+            labeled(showed(rights, true), &general_upper, true),
+            &relayed,
+            &recent,
+            (S::Applied, None),
+        ),
+        Row::new(
+            "3",
+            labeled(showed(None, true), CONFIDENTIAL, true),
+            &plain,
+            &quiet,
+            (S::NotApplied, Some(N::OtherLabel)),
+        )
+        .instead(CONFIDENTIAL, false),
+        Row::new(
+            "3 on all mail",
+            labeled(from_outside(showed(None, true)), CONFIDENTIAL, true),
+            &confidential_on_all,
+            &recent,
+            (S::NotApplied, Some(N::OtherLabel)),
+        )
+        .instead(CONFIDENTIAL, true),
+        Row::new(
+            "4",
+            showed(rights, true),
+            &plain,
+            &quiet,
+            (S::Unknown, Some(N::LabelUnreadable)),
+        ),
+        // A label that isn't enabled is none.
+        Row::new(
+            "4 disabled",
+            labeled(from_outside(showed(rights, false)), GENERAL, false),
+            &plain,
+            &recent,
+            (S::Unknown, Some(N::LabelUnreadable)),
+        ),
+        Row::new(
+            "5 its own",
+            from_outside(showed(None, true)),
+            &plain,
+            &recent,
+            (S::NotApplied, Some(N::RelayNotInternal)),
+        ),
+        Row::new(
+            "5 the control's",
+            labeled(showed(None, false), GENERAL, false),
+            &relayed,
+            &quiet,
+            (S::NotApplied, Some(N::RelayNotInternal)),
+        ),
+        Row::new(
+            "6",
+            showed(None, false),
+            &plain,
+            &recent,
+            (S::NotApplied, Some(N::TooSoon)),
+        ),
+        Row::new(
+            "7",
+            showed(None, true),
+            &plain,
+            &quiet,
+            (S::NotApplied, Some(N::RequestIgnored)),
+        ),
+        Row::new(
+            "8",
+            showed(None, false),
+            &plain,
+            &quiet,
+            (S::NotApplied, Some(N::RequestRemoved)),
+        ),
+    ];
+    for row in &rows {
+        let name = row.row;
+        let judged = judge(
+            &label(GENERAL),
+            &row.evidence,
+            row.control,
+            row.settle,
+            sent,
+            now,
+        );
+        assert_eq!(
+            (judged.state, judged.note),
+            (row.state, row.note),
+            "row {name}"
+        );
+        assert_eq!(judged.other_label_id.as_deref(), row.other, "row {name}");
+        assert_eq!(judged.other_label_on_control, row.on_control, "row {name}");
+        assert_eq!(
+            judged.changed_at, row.settle.policies_changed_at,
+            "row {name}"
+        );
+    }
+}
+
+#[test]
+fn a_setup_change_counts_for_an_hour_for_rules_and_a_day_for_policies() {
+    let now = Utc::now();
+    let sent = now - Duration::minutes(5);
+    let at = |before_sent: Duration| Some(sent - before_sent);
+    let changed = |item: &CheckItem, rules, policies| {
+        recent_change(
+            item,
+            &Settle {
+                rules_changed_at: rules,
+                policies_changed_at: policies,
+            },
+            sent,
+            now,
+        )
+    };
+    let hour = Duration::minutes(60);
+    let day = Duration::hours(24);
+    let second = Duration::seconds(1);
+    assert_eq!(
+        changed(&ENCRYPT, at(hour - second), None),
+        at(hour - second)
+    );
+    assert_eq!(changed(&ENCRYPT, at(hour), None), None);
+    assert_eq!(changed(&ENCRYPT, None, at(Duration::minutes(1))), None);
+    assert_eq!(
+        changed(&label(GENERAL), None, at(day - second)),
+        at(day - second)
+    );
+    assert_eq!(changed(&label(GENERAL), None, at(day)), None);
+    assert_eq!(
+        changed(&label(GENERAL), at(Duration::minutes(1)), None),
+        None
+    );
+    // Changed after the message was sent, before it was judged: it may
+    // have arrived in between.
+    assert_eq!(
+        changed(&ENCRYPT, Some(sent + Duration::minutes(2)), None),
+        Some(sent + Duration::minutes(2))
+    );
+    // A time that hasn't come is no change.
+    assert_eq!(changed(&ENCRYPT, Some(now + second), None), None);
+}
+
+// --- What a check found, against the organization ---------------------------------
+
+/// The account's organization adds its signature on send: its mail goes
+/// through the Cumulas Signatures relay.
+fn signed_on_send(s: &Setup) {
+    s.store()
+        .save_organization_signature(
+            &s.account.id,
+            &StoredOrganizationSignature {
+                state: crate::model::OrganizationSignatureState::AddedOnSend,
+                checked_at: Some(Utc::now()),
+                ..StoredOrganizationSignature::default()
+            },
+        )
+        .unwrap();
+}
+
+fn record(s: &Setup, item: &CheckItem) -> CheckRecord {
+    s.store()
+        .protection_checks(&s.account.id)
+        .unwrap()
+        .record(item)
+}
+
+#[tokio::test]
+async fn a_relay_whose_return_is_outside_mail_keeps_labels_from_working() {
+    for transport_headers in [false, true] {
+        let s = setup().await;
+        s.organization(FakeOrganization {
+            encrypts: vec![ProtectAction::Encrypt],
+            labels: vec![GENERAL.into()],
+            relay: Some(FakeRelay { internal: false }),
+            strips_label_requests: true,
+            transport_headers,
+            ..FakeOrganization::default()
+        });
+        s.service
+            .check_protection(&s.account.id, &[ENCRYPT, DO_NOT_FORWARD, label(GENERAL)])
+            .await
+            .unwrap();
+        let setup = s.refresh().await;
+        // Encrypt acts before the relay.
+        assert_eq!(
+            (setup.encrypt.state, setup.encrypt.note),
+            (CheckState::Applied, None)
+        );
+        for check in [setup.do_not_forward, s.label_check(GENERAL)] {
+            assert_eq!(
+                (check.state, check.note),
+                (CheckState::NotApplied, Some(CheckNote::RelayNotInternal)),
+                "{transport_headers}"
+            );
+            assert_eq!(check.changed_at, None);
+        }
+
+        // What it showed is kept: the delivering hop's AuthAs, not the
+        // first pass's.
+        let from = if transport_headers {
+            HeadersFrom::Transport
+        } else {
+            HeadersFrom::Graph
+        };
+        let general = record(&s, &label(GENERAL));
+        let evidence = general.evidence.unwrap();
+        assert!(evidence.relay_stamped && !evidence.request_arrived);
+        assert_eq!(evidence.auth_as.as_deref(), Some("Anonymous"));
+        assert_eq!(evidence.directionality.as_deref(), Some("Originating"));
+        assert_eq!(evidence.headers_from, from);
+        assert!(evidence.message_id.unwrap().starts_with("<arrived-"));
+        assert!(general.sent_at.is_some() && general.sent_at < general.at);
+        let encrypt = record(&s, &ENCRYPT).evidence.unwrap();
+        assert_eq!(encrypt.detected, Some(ProtectionKind::RightsManaged));
+        assert!(encrypt.rpmsg_attachment);
+        // And the control's, after its run.
+        let checks = s.store().protection_checks(&s.account.id).unwrap();
+        assert!(checks.run.is_none());
+        let control = checks.last_control.unwrap();
+        let evidence = control.outcome.evidence.unwrap();
+        assert!(relay_not_internal(&evidence));
+        assert_eq!(evidence.headers_from, from);
+        assert!(!control.outcome.protected);
+    }
+}
+
+#[tokio::test]
+async fn a_relay_whose_return_counts_as_internal_lets_everything_apply() {
+    let s = setup().await;
+    s.organization(FakeOrganization {
+        encrypts: vec![ProtectAction::Encrypt, ProtectAction::DoNotForward],
+        labels: vec![GENERAL.into()],
+        relay: Some(FakeRelay { internal: true }),
+        strips_label_requests: false,
+        transport_headers: true,
+        ..FakeOrganization::default()
+    });
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT, DO_NOT_FORWARD, label(GENERAL)])
+        .await
+        .unwrap();
+    let setup = s.refresh().await;
+    for check in [setup.encrypt, setup.do_not_forward, s.label_check(GENERAL)] {
+        assert_eq!((check.state, check.note), (CheckState::Applied, None));
+    }
+    let evidence = record(&s, &label(GENERAL)).evidence.unwrap();
+    assert!(evidence.relay_stamped);
+    assert_eq!(evidence.auth_as.as_deref(), Some("Internal"));
+    assert_eq!(
+        evidence.own_labels,
+        [SeenLabel {
+            id: GENERAL.into(),
+            enabled: true
+        }]
+    );
+    // Passed through the relay: still offered while the relay signs.
+    signed_on_send(&s);
+    assert_eq!(s.setup().encrypt.state, CheckState::Applied);
+}
+
+#[tokio::test]
+async fn requests_nothing_acted_on_and_requests_removed_say_so() {
+    let s = setup().await;
+    s.organization(FakeOrganization {
+        // In test mode, say: the request stays.
+        encrypts: vec![ProtectAction::Encrypt],
+        rules_ignore: vec![ProtectAction::Encrypt],
+        labels: vec![GENERAL.into()],
+        strips_label_requests: true,
+        ..FakeOrganization::default()
+    });
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT, label(GENERAL)])
+        .await
+        .unwrap();
+    let setup = s.refresh().await;
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::NotApplied, Some(CheckNote::RequestIgnored))
+    );
+    assert!(record(&s, &ENCRYPT).evidence.unwrap().request_arrived);
+    let general = s.label_check(GENERAL);
+    assert_eq!(
+        (general.state, general.note),
+        (CheckState::NotApplied, Some(CheckNote::RequestRemoved))
+    );
+    assert!(
+        !record(&s, &label(GENERAL))
+            .evidence
+            .unwrap()
+            .request_arrived
+    );
+}
+
+#[tokio::test]
+async fn checks_soon_after_setup_changed_here_are_too_soon() {
+    let s = setup().await;
+    let rules = Utc::now() - Duration::minutes(10);
+    let policies = Utc::now() - Duration::minutes(9);
+    s.store()
+        .set_app_value(
+            &org_setup_changed_key(TENANT),
+            &serde_json::to_string(&Settle {
+                rules_changed_at: Some(rules),
+                policies_changed_at: Some(policies),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    s.organization(FakeOrganization {
+        labels: vec![CONFIDENTIAL.into()],
+        ..FakeOrganization::default()
+    });
+    s.service
+        .check_protection(
+            &s.account.id,
+            &[ENCRYPT, label(GENERAL), label(CONFIDENTIAL)],
+        )
+        .await
+        .unwrap();
+    s.refresh().await;
+    let setup = s.setup();
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::NotApplied, Some(CheckNote::TooSoon))
+    );
+    // Kept from when it was judged, to the second the store keeps.
+    let kept = |at: Option<DateTime<Utc>>| at.map(|at| at.timestamp());
+    assert_eq!(kept(setup.encrypt.changed_at), kept(Some(rules)));
+    let general = s.label_check(GENERAL);
+    assert_eq!(
+        (general.state, general.note),
+        (CheckState::NotApplied, Some(CheckNote::TooSoon))
+    );
+    assert_eq!(kept(general.changed_at), kept(Some(policies)));
+    // Applied: the change still shows.
+    let confidential = s.label_check(CONFIDENTIAL);
+    assert_eq!(confidential.state, CheckState::Applied);
+    assert_eq!(kept(confidential.changed_at), kept(Some(policies)));
+}
+
+#[tokio::test]
+async fn another_label_or_another_protection_that_arrived_is_named() {
+    let s = setup().await;
+    s.organization(FakeOrganization {
+        portal_link_for: vec![ProtectAction::Encrypt],
+        default_label: Some(CONFIDENTIAL.into()),
+        ..FakeOrganization::default()
+    });
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT, label(GENERAL)])
+        .await
+        .unwrap();
+    let setup = s.refresh().await;
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::Unknown, Some(CheckNote::OtherProtection))
+    );
+    assert_eq!(
+        record(&s, &ENCRYPT).evidence.unwrap().detected,
+        Some(ProtectionKind::PortalLink)
+    );
+    let general = s.label_check(GENERAL);
+    assert_eq!(
+        (general.state, general.note),
+        (CheckState::NotApplied, Some(CheckNote::OtherLabel))
+    );
+    assert_eq!(general.other_label_id.as_deref(), Some(CONFIDENTIAL));
+    assert!(general.other_label_on_control);
+
+    // A label that encrypts, whose label can't be read.
+    s.organization(FakeOrganization {
+        encrypts_labels_without_header: vec![SECRET.into()],
+        ..FakeOrganization::default()
+    });
+    s.service
+        .check_protection(&s.account.id, &[label(SECRET)])
+        .await
+        .unwrap();
+    s.refresh().await;
+    let secret = s.label_check(SECRET);
+    assert_eq!(
+        (secret.state, secret.note),
+        (CheckState::Unknown, Some(CheckNote::LabelUnreadable))
+    );
+    assert_eq!(secret.other_label_id, None);
+}
+
+#[tokio::test]
+async fn without_transport_headers_the_check_reads_what_graph_parsed() {
+    let s = setup().await;
+    s.organization(FakeOrganization {
+        labels: vec![GENERAL.into()],
+        relay: Some(FakeRelay { internal: false }),
+        transport_headers: true,
+        ..FakeOrganization::default()
+    });
+    s.server.lock().unwrap().transport_failure = Some(Error::provider("Access is denied."));
+    s.service
+        .check_protection(&s.account.id, &[label(GENERAL)])
+        .await
+        .unwrap();
+    // Judged all the same, from less.
+    let setup = s.refresh().await;
+    assert!(!setup.checking);
+    let general = s.label_check(GENERAL);
+    assert_eq!(
+        (general.state, general.note),
+        (CheckState::NotApplied, Some(CheckNote::RequestIgnored))
+    );
+    let evidence = record(&s, &label(GENERAL)).evidence.unwrap();
+    assert_eq!(evidence.headers_from, HeadersFrom::Graph);
+    assert_eq!(evidence.auth_as, None);
+}
+
+#[tokio::test]
+async fn the_control_is_kept_once_judged() {
+    let s = setup().await;
+    s.server.lock().unwrap().hold = vec!["Cumulas Mail setup check".into()];
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT])
+        .await
+        .unwrap();
+    let run = s.run().unwrap();
+    {
+        let mut server = s.server.lock().unwrap();
+        let (held, arrived): (Vec<_>, Vec<_>) = std::mem::take(&mut server.held)
+            .into_iter()
+            .partition(|d| !d.subject.contains(&run.control_token));
+        server.held = held;
+        server.delivered.extend(arrived);
+    }
+    let setup = s.refresh().await;
+    assert!(setup.checking);
+    let checks = s.store().protection_checks(&s.account.id).unwrap();
+    let control = checks.last_control.unwrap();
+    assert_eq!(control.sent_at, run.control_sent_at);
+    assert_eq!(Some(&control.outcome), checks.run.unwrap().control.as_ref());
+    let evidence = control.outcome.evidence.unwrap();
+    assert!(!evidence.request_arrived);
+    assert_eq!(evidence.auth_as.as_deref(), Some("Internal"));
+
+    // The next check's control replaces it once that's judged.
+    s.server.lock().unwrap().release();
+    s.refresh().await;
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT])
+        .await
+        .unwrap();
+    let kept = s.store().protection_checks(&s.account.id).unwrap();
+    assert_eq!(kept.last_control.unwrap().sent_at, run.control_sent_at);
+    s.refresh().await;
+    let replaced = s.store().protection_checks(&s.account.id).unwrap();
+    assert!(replaced.last_control.unwrap().sent_at > run.control_sent_at);
+}
+
+#[tokio::test]
+async fn a_pass_from_before_the_relay_must_be_checked_again() {
+    let s = setup().await;
+    s.organization(FakeOrganization {
+        encrypts: vec![ProtectAction::Encrypt],
+        labels: vec![GENERAL.into()],
+        ..FakeOrganization::default()
+    });
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT, label(GENERAL)])
+        .await
+        .unwrap();
+    s.refresh().await;
+    // A pass from 0.4.0 kept no evidence.
+    s.checked(&DO_NOT_FORWARD, CheckState::Applied, 1);
+    assert_eq!(s.setup().encrypt.state, CheckState::Applied);
+
+    // The organization's mail now goes through the relay.
+    signed_on_send(&s);
+    let setup = s.setup();
+    for check in [&setup.encrypt, &s.label_check(GENERAL)] {
+        assert_eq!(
+            (check.state, check.note),
+            (CheckState::Expired, Some(CheckNote::RelayChanged))
+        );
+        assert_eq!(check.passed_at, None);
+        assert!(check.test_message);
+    }
+    // Without evidence, it never drifts.
+    assert_eq!(
+        (setup.do_not_forward.state, setup.do_not_forward.note),
+        (CheckState::Applied, None)
+    );
+
+    // Sending refuses what drifted, in its words.
+    let error = s
+        .service
+        .send_message(OutgoingMessage {
+            protect: Some(ProtectAction::Encrypt),
+            ..outgoing(&s)
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (
+            ErrorCode::InvalidInput,
+            "Encrypt was checked before your organization's mail went through the Cumulas \
+             Signatures relay. Check it again in Settings → Accounts."
+        )
+    );
+    let error = s
+        .service
+        .send_message(OutgoingMessage {
+            label_id: Some(GENERAL.into()),
+            ..outgoing(&s)
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "The label General was checked before your organization's mail went through the \
+         Cumulas Signatures relay. Check it again in Settings → Accounts."
+    );
+    s.service
+        .send_message(OutgoingMessage {
+            protect: Some(ProtectAction::DoNotForward),
+            ..outgoing(&s)
+        })
+        .await
+        .unwrap();
+
+    // A check that doesn't arrive keeps no drifted pass.
+    s.server.lock().unwrap().hold = vec!["Cumulas Mail setup check".into()];
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT])
+        .await
+        .unwrap();
+    s.age_run(16);
+    let setup = s.refresh().await;
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::Unknown, Some(CheckNote::NotArrived))
+    );
+}
+
+#[tokio::test]
+async fn a_pass_while_the_relay_routing_waits_counts_until_mail_goes_through_it() {
+    let s = setup().await;
+    s.organization(FakeOrganization {
+        encrypts: vec![ProtectAction::Encrypt],
+        labels: vec![GENERAL.into()],
+        ..FakeOrganization::default()
+    });
+    // Cumulas Signatures says the relay signs, but Exchange doesn't route
+    // mail through it yet (consent, a directory sync, the admin's step).
+    signed_on_send(&s);
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT])
+        .await
+        .unwrap();
+    let setup = s.refresh().await;
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::Applied, None)
+    );
+    assert!(record(&s, &ENCRYPT).relay_expected);
+    // So it's offered, and sending with it works.
+    s.service
+        .send_message(OutgoingMessage {
+            protect: Some(ProtectAction::Encrypt),
+            ..outgoing(&s)
+        })
+        .await
+        .unwrap();
+
+    // Routing goes live: a later check's control comes through the relay,
+    // and that pass no longer says anything of mail that does.
+    s.organization(FakeOrganization {
+        encrypts: vec![ProtectAction::Encrypt],
+        labels: vec![GENERAL.into()],
+        relay: Some(FakeRelay { internal: true }),
+        ..FakeOrganization::default()
+    });
+    s.service
+        .check_protection(&s.account.id, &[label(GENERAL)])
+        .await
+        .unwrap();
+    let setup = s.refresh().await;
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::Expired, Some(CheckNote::RelayChanged))
+    );
+    assert_eq!(s.label_check(GENERAL).state, CheckState::Applied);
+}
+
+#[tokio::test]
+async fn details_for_it_say_what_the_last_checks_found_without_the_messages() {
+    let s = setup().await;
+    s.organization(FakeOrganization {
+        encrypts: vec![ProtectAction::Encrypt],
+        labels: vec![GENERAL.into()],
+        relay: Some(FakeRelay { internal: false }),
+        strips_label_requests: true,
+        ..FakeOrganization::default()
+    });
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT, label(GENERAL)])
+        .await
+        .unwrap();
+    s.refresh().await;
+    let text = s.service.protection_check_details(&s.account.id).unwrap();
+    assert!(text.starts_with(&format!(
+        "Cumulas Mail {}: setup check details for adele@contoso.com\nOrganization (tenant): \
+         {TENANT}\n",
+        env!("CARGO_PKG_VERSION")
+    )));
+    for line in [
+        "  Went through the Cumulas Signatures relay (X-Signature-Stamped): yes",
+        "  Counted as from inside your organization (X-MS-Exchange-Organization-AuthAs): \
+         Anonymous",
+        "Path: relay present, return not internal",
+        "Do Not Forward: Not checked yet",
+        "  Note: Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats \
+         it as outside mail when it comes back, so labels can't work yet. They need Cumulas \
+         Signatures to count mail coming back from its server as mail from inside your \
+         organization: your IT team turns that on in Cumulas Signatures where it's offered \
+         (Finish setting up); otherwise ask Cumulas.",
+        "Setup changed on this computer: rules never, auto-labeling policies never",
+    ] {
+        assert!(text.lines().any(|l| l == line), "{line}\n{text}");
+    }
+    assert!(text.contains("\nEncrypt: Arrived encrypted · checked "));
+    assert!(text.contains(&format!(
+        "\nLabel General ({GENERAL}): Arrived without it · checked "
+    )));
+    // Labels not checked aren't listed.
+    assert!(!text.contains("Confidential"));
+    // The control and both test messages, for the transport rule report.
+    assert_eq!(
+        text.matches("  Get-MailDetailTransportRuleReport -MessageId '<arrived-")
+            .count(),
+        3
+    );
+    // Never the messages' text or their subjects.
+    let server = s.server.lock().unwrap();
+    assert!(!text.contains("Automated setup check"));
+    for subject in server.delivered.iter().map(|d| &d.subject) {
+        assert!(!text.contains(subject.as_str()), "{subject}");
+    }
+    drop(server);
+
+    // Only work accounts check.
+    let imap = crate::store::test_support::imap_account("imap");
+    s.store().insert_account(&imap).unwrap();
+    let error = s.service.protection_check_details(&imap.id).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Unsupported);
 }
 
 // --- Sending ----------------------------------------------------------------------

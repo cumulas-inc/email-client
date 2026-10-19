@@ -69,8 +69,10 @@ and restarts into it when you choose Restart (see
   and opens in Outlook on the web, where replies and forwards to it go too, so
   they stay protected; S/MIME signatures show, unchecked. Microsoft 365 work
   and school accounts can ask their organization's mail server to encrypt a
-  message or apply a sensitivity label, once IT has set up the rules and a
-  test message from Settings → Accounts arrives encrypted or labeled (see
+  message or apply a sensitivity label, once IT has set up the rules (an
+  administrator can do that from the app, or with the PowerShell script it
+  fills in) and a test message from Settings → Accounts arrives encrypted or
+  labeled (see
   [the admin guide](docs/microsoft-365.md#sensitivity-labels-and-encryption-it-admins)).
 - **New mail within seconds**: IMAP accounts keep a connection open (IMAP
   IDLE, and NOTIFY where the server offers it); Microsoft accounts get
@@ -174,8 +176,36 @@ CI runs all of these, plus a Flatpak build.
   because of a rule that encrypts by subject; a reply and a forward of labeled
   mail arrive with the label chosen, and a forward with its attachment once;
   `x-cumulas-label` in mail from outside the organization labels nothing; and,
-  through the Cumulas Signatures relay, mail is signed before it's encrypted.
-  Confirm the licensing the guide states.
+  through the Cumulas Signatures relay, mail is signed before it's encrypted
+  once mail coming back counts as internal; before that, encrypted mail goes
+  out unsigned. Confirm the licensing the guide states.
+- **Cumulas Mail - Admin Setup** registration
+  ([Registering the setup app](docs/microsoft-365.md#registering-the-setup-app-publisher)):
+  the owner has confirmed organizations-only account types, the single
+  `http://localhost` redirect, exactly Exchange.Manage plus
+  `openid profile offline_access`, and publisher verification; its approval
+  link ends at `http://localhost` without AADSTS50011.
+- The IT page's consent-policy notice and the 0.5.0 release notes' notice are
+  published with or before this release.
+- Cumulas Signatures is released with the verified-domain hand-back check;
+  mail coming back from the relay is counted as internal only where
+  `RELAY_INTERNAL_RETURN` allows it, and
+  [R16](docs/admin-setup-open-items.md) (Microsoft attributes relay hand-backs
+  by MAIL FROM, then RCPT TO: another relay client's null-sender mail to an
+  organization that ran the step must not count as internal there) has been
+  run before it allows other organizations.
+- In a tenant that uses the relay: run **Set up or check for your
+  organization**, wait an hour, check, and keep **Copy setup details** and
+  **Copy details for IT**. Confirm: the status pass works (InvokeCommand with
+  the setup app's token, Exchange and Security & Compliance); the rules and
+  auto-labeling policies are created and read back without extras; Encrypt
+  and Do Not Forward pass before and after the relay's return counts as
+  internal; the labels pass (with a license); the control counted as internal
+  (AuthAs Internal) after the relay step; which pass auto-labeling acted on
+  (the relay's log). Replace the synthetic fixtures in
+  `crates/core/src/orgsetup/tests/fixtures/` with what the details show, and
+  record what was seen for each of
+  [setup's open items, R1 to R18](docs/admin-setup-open-items.md).
 - Finish [setting up the self-hosted Flatpak repository](packaging/flatpak/README.md#setting-it-up)
   before the first release tag: the signing key, DNS and GitHub Pages are
   done; the `flatpak-signing` environment (with the secret moved into it), the

@@ -29,9 +29,11 @@ use crate::model::{
     MessageSummary, OutgoingMessage, ReplyKind, local_id,
 };
 use crate::protection::{
-    CONTENT_CLASS_PROPERTY, LABEL_HEADER, LABEL_PROPERTY, MESSAGE_CLASS_PROPERTY,
-    MIME_ATTACHMENT_PREFIX, MSIP_LABELS_PROPERTY, PROTECT_HEADER, PROTECT_PROPERTY,
-    headers_not_kept, is_blank, label_copied, own_label, smime_content_of, wants_attachments,
+    AUTH_AS_HEADER, CONTENT_CLASS_PROPERTY, DIRECTIONALITY_HEADER, LABEL_HEADER, LABEL_PROPERTY,
+    LABEL_STAMPED_HEADER, MAX_TRANSPORT_HEADERS_BYTES, MESSAGE_CLASS_PROPERTY,
+    MIME_ATTACHMENT_PREFIX, MSIP_LABELS_PROPERTY, PROTECT_HEADER, PROTECT_PROPERTY, STAMP_HEADER,
+    TRANSPORT_HEADERS_PROPERTY, headers_not_kept, is_blank, label_copied, own_label,
+    smime_content_of, wants_attachments,
 };
 use crate::providers::imap::mime;
 use crate::providers::{
@@ -462,6 +464,19 @@ fn sequential_property_reads(message_id: &str, properties: &[(&str, &str)]) -> V
         requests.push(request);
     }
     requests
+}
+
+/// A value read two ways, and which gave it: `first`'s, else `then`'s.
+fn sourced(
+    first: (Option<String>, &str),
+    then: (Option<String>, &str),
+) -> (Option<String>, Option<String>) {
+    match (first, then) {
+        ((Some(value), source), _) | ((None, _), (Some(value), source)) => {
+            (Some(value), Some(source.to_owned()))
+        }
+        _ => (None, None),
+    }
 }
 
 /// A link that's https, else nothing.
@@ -1410,12 +1425,18 @@ impl MailProvider for GraphProvider {
                 .filter(|v| !v.is_empty())
         };
         let property = |id: &str| properties.values.get(id).cloned();
-        let (msip_labels, msip_labels_source) =
-            match (header("msip_labels"), property("msipLabels")) {
-                (Some(value), _) => (Some(value), Some("header".to_owned())),
-                (None, Some(value)) => (Some(value), Some("property".to_owned())),
-                (None, None) => (None, None),
-            };
+        let (msip_labels, msip_labels_source) = sourced(
+            (header("msip_labels"), "header"),
+            (property("msipLabels"), "property"),
+        );
+        let (requested_action, requested_action_source) = sourced(
+            (property("requestedProtect"), "property"),
+            (header(PROTECT_HEADER), "header"),
+        );
+        let (requested_label, requested_label_source) = sourced(
+            (property("requestedLabel"), "property"),
+            (header(LABEL_HEADER), "header"),
+        );
         let mut signals = MessageSignals {
             content_class: property("contentClass").or_else(|| header("Content-Class")),
             message_class: detail
@@ -1427,8 +1448,14 @@ impl MailProvider for GraphProvider {
             msip_labels,
             msip_labels_source,
             has_attachments_flag: detail.has_attachments,
-            requested_action: property("requestedProtect").or_else(|| header(PROTECT_HEADER)),
-            requested_label: property("requestedLabel").or_else(|| header(LABEL_HEADER)),
+            requested_action,
+            requested_label,
+            requested_action_source,
+            requested_label_source,
+            relay_stamped: header(STAMP_HEADER).is_some(),
+            label_stamped: header(LABEL_STAMPED_HEADER),
+            auth_as: header(AUTH_AS_HEADER),
+            directionality: header(DIRECTIONALITY_HEADER),
             properties_unavailable: !properties.complete,
             ..MessageSignals::default()
         };
@@ -1726,6 +1753,27 @@ impl MailProvider for GraphProvider {
         );
         let link: WebLink = self.client.get_json(&url, &[PREFER_IMMUTABLE_ID]).await?;
         Ok(https_only(link.web_link))
+    }
+
+    async fn transport_headers(&self, message: &MessageLocator) -> Result<Option<String>> {
+        let url = self.client.url_with_query(
+            &format!("/me/messages/{}", segment(&message.remote_id)),
+            &[
+                ("$select", "id"),
+                ("$expand", &expand_property(TRANSPORT_HEADERS_PROPERTY)),
+            ],
+        );
+        let read: WithProperties = self.client.get_json(&url, &[PREFER_IMMUTABLE_ID]).await?;
+        Ok(read.value().map(|mut headers| {
+            if headers.len() > MAX_TRANSPORT_HEADERS_BYTES {
+                let mut end = MAX_TRANSPORT_HEADERS_BYTES;
+                while !headers.is_char_boundary(end) {
+                    end -= 1;
+                }
+                headers.truncate(end);
+            }
+            headers
+        }))
     }
 
     async fn find_in_inbox(

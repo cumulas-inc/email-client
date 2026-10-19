@@ -734,6 +734,31 @@ pub enum CheckNote {
     /// Microsoft 365 didn't keep the property on the test message's draft,
     /// so it wasn't sent. (With `NotApplied`.)
     HeaderNotKept,
+    /// The request reached delivery, but nothing acted on it. (With
+    /// `NotApplied`.)
+    RequestIgnored,
+    /// The request was gone when it arrived, and nothing was applied.
+    /// (With `NotApplied`.)
+    RequestRemoved,
+    /// It went through the Cumulas Signatures relay and came back as mail
+    /// from outside the organization. (With `NotApplied`.)
+    RelayNotInternal,
+    /// The organization's setup changed on this computer too recently to
+    /// tell (`CheckResult::changed_at`). (With `NotApplied`.)
+    TooSoon,
+    /// Another label of the organization arrived instead
+    /// (`CheckResult::other_label_id`). (With `NotApplied`.)
+    OtherLabel,
+    /// Encrypt or Do Not Forward: it arrived protected another way (S/MIME,
+    /// a link to Microsoft's encrypted message portal). (With `Unknown`.)
+    OtherProtection,
+    /// A label's test message arrived encrypted, but no label of the
+    /// organization could be read on it. (With `Unknown`.)
+    LabelUnreadable,
+    /// It passed before the account's mail went through the Cumulas
+    /// Signatures relay. (With `Expired`: worked out when the setup is
+    /// read, never stored.)
+    RelayChanged,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -749,6 +774,14 @@ pub struct CheckResult {
     /// while that pass is less than `CHECK_VALID_DAYS` old, a new check
     /// waiting or not; None when it isn't offered.
     pub passed_at: Option<DateTime<Utc>>,
+    /// With note `OtherLabel`: the organization's label that arrived
+    /// instead (lowercase GUID).
+    pub other_label_id: Option<String>,
+    /// With note `OtherLabel`: the control arrived with that label too.
+    pub other_label_on_control: bool,
+    /// A setup change from this computer recent enough to matter when this
+    /// was judged; None when there was none.
+    pub changed_at: Option<DateTime<Utc>>,
 }
 
 /// A sensitivity label Microsoft 365 lists for the person, for email.
@@ -834,6 +867,307 @@ pub struct ProtectionSetup {
     pub labels_error: Option<String>,
     /// A check is waiting for its messages.
     pub checking: bool,
+}
+
+// --- Organization setup (administrators) ---------------------------------------
+//
+// An administrator signs in with the separate setup app registration to
+// read, create and repair the organization's mail flow rules and
+// auto-labeling policies (`crate::orgsetup`), or copies a PowerShell script
+// that does the same.
+
+/// The administrator signed in for organization setup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupAdmin {
+    /// The sign-in name.
+    pub username: String,
+    pub display_name: String,
+}
+
+/// Whether setup can run from here for an account's organization, and
+/// what this computer did last. Known without asking Microsoft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupInfo {
+    /// This build names the setup app, so setup can run from here;
+    /// otherwise only the script.
+    pub automatic: bool,
+    pub tenant_id: String,
+    /// Signed in for setup on this computer now, for this organization.
+    pub signed_in: Option<OrgSetupAdmin>,
+    /// The setup app's approval link for this organization; None without
+    /// automatic setup.
+    pub approval_url: Option<String>,
+    /// When setup last changed mail flow rules from this computer; None if
+    /// never.
+    pub rules_changed_at: Option<DateTime<Utc>>,
+    /// When setup last changed auto-labeling policies or their rules from
+    /// this computer; None if never.
+    pub policies_changed_at: Option<DateTime<Utc>>,
+}
+
+/// Where a status row goes in the dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrgSetupSection {
+    Approval,
+    Encryption,
+    Labels,
+    Routing,
+}
+
+/// How a status row stands; each has a chip with words, never color alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrgSetupRowState {
+    Ok,
+    Missing,
+    Differs,
+    Off,
+    Waiting,
+    Blocked,
+    Unknown,
+    Info,
+}
+
+/// What a status row offers to fix it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrgSetupFix {
+    /// The footer's Set up or Repair.
+    Setup,
+    /// Cumulas Mail's own approval link.
+    Approval,
+    /// Cumulas Signatures' page for administrators (`OrgSetupRow::link`).
+    Signatures,
+    /// How to fix it by hand (`OrgSetupRow::detail`), and the script.
+    Manual,
+    /// Signing in with another account.
+    SignIn,
+}
+
+/// One thing setup needs, as read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupRow {
+    /// Stable: approval, setupApp, exchangeAccess, irm, templates,
+    /// encryptRule, dnfRule, labelsAccess, stripRule, licensing,
+    /// `label:<id>`, routing, `otherRouting:<name>`, `leftover:<name>`.
+    pub id: String,
+    pub section: OrgSetupSection,
+    pub title: String,
+    pub state: OrgSetupRowState,
+    pub summary: String,
+    pub detail: Option<String>,
+    /// The Exchange or Purview object it's about, if any.
+    pub object_name: Option<String>,
+    pub fix: Option<OrgSetupFix>,
+    /// For fix `Signatures`: Cumulas Signatures' page for administrators.
+    pub link: Option<String>,
+}
+
+/// A sensitivity label setup can make an auto-labeling policy for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupLabel {
+    /// The ID people's Cumulas Mail sends (Microsoft Graph's), lowercase.
+    pub id: String,
+    pub title: String,
+    /// In the label list of the account the dialog was opened from.
+    pub in_catalog: bool,
+    pub encrypts: bool,
+    /// Purview lists it as a label for email; None when it doesn't say.
+    pub for_email: Option<bool>,
+    pub state: OrgSetupRowState,
+}
+
+/// A rights protection template Exchange lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RmsTemplate {
+    pub name: String,
+    pub id: Option<String>,
+}
+
+/// Whether the organization's mail goes through the Cumulas Signatures
+/// relay, and whether mail coming back from it counts as internal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelayPath {
+    None,
+    CumulasInternal,
+    CumulasNotInternal,
+    /// The relay's rule is there, but its connector couldn't be read.
+    CumulasUnknown,
+}
+
+/// What the administrator chose to set up.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OrgSetupChoices {
+    /// Set up Encrypt and Do Not Forward.
+    pub actions: bool,
+    pub encrypt_template: Option<String>,
+    pub do_not_forward_template: Option<String>,
+    /// Labels to set up or repair, by the ID people's Cumulas Mail sends.
+    pub label_ids: Vec<String>,
+    /// Set up labels although the license hint says automatic labeling
+    /// isn't included.
+    pub labels_without_license: bool,
+}
+
+/// What a change does to its object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrgSetupAction {
+    Create,
+    Change,
+    TurnOn,
+    Move,
+    StartSimulation,
+}
+
+/// The kind of object a change is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrgSetupObject {
+    MailFlowRule,
+    AutoLabelingPolicy,
+    AutoLabelingRule,
+}
+
+/// One change setup would make, as the confirmation sheet shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupChange {
+    /// `<action>:<object>:<lowercase name>#<digest of its PowerShell>`, the
+    /// same for the same status and choices; apply refuses a change whose
+    /// calls differ from the confirmed ones as stale.
+    pub id: String,
+    pub action: OrgSetupAction,
+    pub object: OrgSetupObject,
+    pub name: String,
+    /// What changes, a sentence each.
+    pub details: Vec<String>,
+    /// The same in PowerShell.
+    pub powershell: String,
+}
+
+/// The changes some choices make.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupPlan {
+    pub changes: Vec<OrgSetupChange>,
+    /// Why these choices can't be set up; empty when they can.
+    pub problems: Vec<String>,
+    /// How many of Cumulas Mail's objects are left out because they can't
+    /// be changed from here.
+    pub blocked: u32,
+}
+
+/// What the work account's own licenses say about automatic labeling (a
+/// hint about one person, not the organization).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LicenseHintState {
+    Included,
+    /// Included, but Microsoft 365 hasn't finished turning it on.
+    Pending,
+    NotIncluded,
+    Unknown,
+}
+
+/// Everything setup read, and what it would change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupStatus {
+    pub read_at: DateTime<Utc>,
+    pub admin: OrgSetupAdmin,
+    pub rows: Vec<OrgSetupRow>,
+    pub labels: Vec<OrgSetupLabel>,
+    pub templates: Vec<RmsTemplate>,
+    pub relay: RelayPath,
+    /// From the work account's own licenses (a hint about one person).
+    pub license: LicenseHintState,
+    /// Mail flow rules could be read, so they can be set up from here.
+    pub exchange_readable: bool,
+    /// Security & Compliance could be read, so auto-labeling policies can
+    /// be set up from here.
+    pub labels_readable: bool,
+    /// Neither half could be read for lack of a role: one message instead
+    /// of rows.
+    pub no_role: bool,
+    /// Some of Cumulas Mail's rules or policies exist: the button says
+    /// Repair, else Set up.
+    pub any_ours: bool,
+    pub defaults: OrgSetupChoices,
+    pub plan: OrgSetupPlan,
+}
+
+/// How one change went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OrgSetupOutcome {
+    Done,
+    /// Done, but Security & Compliance doesn't list it yet.
+    NotYetListed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupChangeResult {
+    pub change: OrgSetupChange,
+    pub outcome: OrgSetupOutcome,
+    /// Done: a note (such as turning on after a simulation); failed or
+    /// skipped: why.
+    pub message: Option<String>,
+}
+
+/// What making the changes did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupResult {
+    /// Something changed since the plan was shown, so nothing was done:
+    /// `status.plan` is the plan to review.
+    pub stale: bool,
+    /// The sign-in ended during the changes; the rest were skipped.
+    pub signed_out: bool,
+    pub changes: Vec<OrgSetupChangeResult>,
+    pub status: OrgSetupStatus,
+}
+
+/// What the PowerShell script covers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OrgSetupScriptRequest {
+    /// From the dialog's choices once signed in; None: from the account.
+    pub choices: Option<OrgSetupChoices>,
+    /// The script view's Encryption checkbox.
+    pub actions: bool,
+    /// The script view's Sensitivity labels checkbox.
+    pub labels: bool,
+}
+
+/// One label's Microsoft Purview portal steps, filled in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortalSteps {
+    pub label_title: String,
+    pub policy_name: String,
+    pub rule_name: String,
+    pub pattern: String,
+}
+
+/// The PowerShell script that sets up the same, and the portal steps for
+/// admins without Windows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSetupScript {
+    pub script: String,
+    pub portal_steps: Vec<PortalSteps>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2089,10 +2423,32 @@ mod tests {
             (CheckNote::HeaderKept, "headerKept"),
             (CheckNote::NotArrived, "notArrived"),
             (CheckNote::HeaderNotKept, "headerNotKept"),
+            (CheckNote::RequestIgnored, "requestIgnored"),
+            (CheckNote::RequestRemoved, "requestRemoved"),
+            (CheckNote::RelayNotInternal, "relayNotInternal"),
+            (CheckNote::TooSoon, "tooSoon"),
+            (CheckNote::OtherLabel, "otherLabel"),
+            (CheckNote::OtherProtection, "otherProtection"),
+            (CheckNote::LabelUnreadable, "labelUnreadable"),
+            (CheckNote::RelayChanged, "relayChanged"),
         ];
         for (note, name) in notes {
             assert_eq!(serde_json::to_value(note).unwrap(), name);
         }
+        // Results without the newer fields read with their defaults.
+        let old: CheckResult = serde_json::from_value(json!({
+            "state": "applied", "at": null, "note": "otherRule", "testMessage": true,
+            "passedAt": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            (
+                old.other_label_id,
+                old.other_label_on_control,
+                old.changed_at
+            ),
+            (None, false, None)
+        );
         assert_eq!(
             serde_json::to_value(DataKind::Protection).unwrap(),
             "protection"
@@ -2122,13 +2478,17 @@ mod tests {
                 note: None,
                 test_message: true,
                 passed_at: Some(at),
+                ..CheckResult::default()
             },
             do_not_forward: CheckResult {
-                state: CheckState::Unknown,
+                state: CheckState::NotApplied,
                 at: Some(at),
-                note: Some(CheckNote::OtherRule),
+                note: Some(CheckNote::OtherLabel),
                 test_message: false,
                 passed_at: None,
+                other_label_id: Some("6c1b3b5e-0000-4000-8000-000000000002".into()),
+                other_label_on_control: true,
+                changed_at: Some(at),
             },
             labels: vec![LabelOption {
                 label: general,
@@ -2155,13 +2515,19 @@ mod tests {
                     "note": null,
                     "testMessage": true,
                     "passedAt": "2026-10-16T09:00:00Z",
+                    "otherLabelId": null,
+                    "otherLabelOnControl": false,
+                    "changedAt": null,
                 },
                 "doNotForward": {
-                    "state": "unknown",
+                    "state": "notApplied",
                     "at": "2026-10-16T09:00:00Z",
-                    "note": "otherRule",
+                    "note": "otherLabel",
                     "testMessage": false,
                     "passedAt": null,
+                    "otherLabelId": "6c1b3b5e-0000-4000-8000-000000000002",
+                    "otherLabelOnControl": true,
+                    "changedAt": "2026-10-16T09:00:00Z",
                 },
                 "labels": [{
                     "id": "6c1b3b5e-0000-4000-8000-000000000001",
@@ -2177,6 +2543,9 @@ mod tests {
                         "note": null,
                         "testMessage": false,
                         "passedAt": null,
+                        "otherLabelId": null,
+                        "otherLabelOnControl": false,
+                        "changedAt": null,
                     },
                 }],
                 "policy": {
@@ -2292,6 +2661,295 @@ mod tests {
         assert_eq!(
             outgoing.label_id.as_deref(),
             Some("6c1b3b5e-0000-4000-8000-000000000001")
+        );
+    }
+
+    /// What each value of an enum is called on the wire.
+    fn wire_names<T: Serialize>(values: &[T]) -> Vec<String> {
+        values
+            .iter()
+            .map(|v| {
+                serde_json::to_value(v)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The organization setup shapes `src/api/types.ts` mirrors (section 7.2
+    /// of the admin setup design).
+    #[test]
+    fn org_setup_shapes_match_the_ui() {
+        use serde_json::json;
+        assert_eq!(
+            wire_names(&[
+                OrgSetupSection::Approval,
+                OrgSetupSection::Encryption,
+                OrgSetupSection::Labels,
+                OrgSetupSection::Routing,
+            ]),
+            ["approval", "encryption", "labels", "routing"]
+        );
+        assert_eq!(
+            wire_names(&[
+                OrgSetupRowState::Ok,
+                OrgSetupRowState::Missing,
+                OrgSetupRowState::Differs,
+                OrgSetupRowState::Off,
+                OrgSetupRowState::Waiting,
+                OrgSetupRowState::Blocked,
+                OrgSetupRowState::Unknown,
+                OrgSetupRowState::Info,
+            ]),
+            [
+                "ok", "missing", "differs", "off", "waiting", "blocked", "unknown", "info"
+            ]
+        );
+        assert_eq!(
+            wire_names(&[
+                OrgSetupFix::Setup,
+                OrgSetupFix::Approval,
+                OrgSetupFix::Signatures,
+                OrgSetupFix::Manual,
+                OrgSetupFix::SignIn,
+            ]),
+            ["setup", "approval", "signatures", "manual", "signIn"]
+        );
+        assert_eq!(
+            wire_names(&[
+                RelayPath::None,
+                RelayPath::CumulasInternal,
+                RelayPath::CumulasNotInternal,
+                RelayPath::CumulasUnknown,
+            ]),
+            [
+                "none",
+                "cumulasInternal",
+                "cumulasNotInternal",
+                "cumulasUnknown"
+            ]
+        );
+        assert_eq!(
+            wire_names(&[
+                OrgSetupAction::Create,
+                OrgSetupAction::Change,
+                OrgSetupAction::TurnOn,
+                OrgSetupAction::Move,
+                OrgSetupAction::StartSimulation,
+            ]),
+            ["create", "change", "turnOn", "move", "startSimulation"]
+        );
+        assert_eq!(
+            wire_names(&[
+                OrgSetupObject::MailFlowRule,
+                OrgSetupObject::AutoLabelingPolicy,
+                OrgSetupObject::AutoLabelingRule,
+            ]),
+            ["mailFlowRule", "autoLabelingPolicy", "autoLabelingRule"]
+        );
+        assert_eq!(
+            wire_names(&[
+                LicenseHintState::Included,
+                LicenseHintState::Pending,
+                LicenseHintState::NotIncluded,
+                LicenseHintState::Unknown,
+            ]),
+            ["included", "pending", "notIncluded", "unknown"]
+        );
+        assert_eq!(
+            wire_names(&[
+                OrgSetupOutcome::Done,
+                OrgSetupOutcome::NotYetListed,
+                OrgSetupOutcome::Failed,
+                OrgSetupOutcome::Skipped,
+            ]),
+            ["done", "notYetListed", "failed", "skipped"]
+        );
+
+        let at = "2026-10-18T14:02:11Z".parse::<DateTime<Utc>>().unwrap();
+        let admin = OrgSetupAdmin {
+            username: "admin@contoso.com".into(),
+            display_name: "Ada Admin".into(),
+        };
+        let info = OrgSetupInfo {
+            automatic: true,
+            tenant_id: "85f67998-e79a-4173-95c2-90b0e6dc231d".into(),
+            signed_in: Some(admin.clone()),
+            approval_url: Some("https://login.microsoftonline.com/x".into()),
+            rules_changed_at: Some(at),
+            policies_changed_at: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&info).unwrap(),
+            json!({
+                "automatic": true,
+                "tenantId": "85f67998-e79a-4173-95c2-90b0e6dc231d",
+                "signedIn": { "username": "admin@contoso.com", "displayName": "Ada Admin" },
+                "approvalUrl": "https://login.microsoftonline.com/x",
+                "rulesChangedAt": "2026-10-18T14:02:11Z",
+                "policiesChangedAt": null,
+            })
+        );
+
+        let choices = OrgSetupChoices {
+            actions: true,
+            encrypt_template: Some("Encrypt".into()),
+            do_not_forward_template: None,
+            label_ids: vec!["6c1b3b5e-0000-4000-8000-000000000001".into()],
+            labels_without_license: false,
+        };
+        let change = OrgSetupChange {
+            id: "create:mailFlowRule:cumulas mail: encrypt".into(),
+            action: OrgSetupAction::Create,
+            object: OrgSetupObject::MailFlowRule,
+            name: "Cumulas Mail: Encrypt".into(),
+            details: vec!["Turns it on".into()],
+            powershell: "New-TransportRule -Name 'Cumulas Mail: Encrypt'".into(),
+        };
+        let status = OrgSetupStatus {
+            read_at: at,
+            admin,
+            rows: vec![OrgSetupRow {
+                id: "routing".into(),
+                section: OrgSetupSection::Routing,
+                title: "Mail routing".into(),
+                state: OrgSetupRowState::Differs,
+                summary: "Mail goes through the Cumulas Signatures relay.".into(),
+                detail: None,
+                object_name: Some("Email signatures: add signature".into()),
+                fix: Some(OrgSetupFix::Signatures),
+                link: Some("https://signature.cumulas.co/manage".into()),
+            }],
+            labels: vec![OrgSetupLabel {
+                id: "6c1b3b5e-0000-4000-8000-000000000001".into(),
+                title: "Confidential".into(),
+                in_catalog: true,
+                encrypts: true,
+                for_email: None,
+                state: OrgSetupRowState::Missing,
+            }],
+            templates: vec![RmsTemplate {
+                name: "Encrypt".into(),
+                id: None,
+            }],
+            relay: RelayPath::CumulasNotInternal,
+            license: LicenseHintState::NotIncluded,
+            exchange_readable: true,
+            labels_readable: false,
+            no_role: false,
+            any_ours: true,
+            defaults: choices.clone(),
+            plan: OrgSetupPlan {
+                changes: vec![change.clone()],
+                problems: vec![],
+                blocked: 1,
+            },
+        };
+        let result = OrgSetupResult {
+            stale: false,
+            signed_out: true,
+            changes: vec![OrgSetupChangeResult {
+                change,
+                outcome: OrgSetupOutcome::NotYetListed,
+                message: None,
+            }],
+            status,
+        };
+        let change_json = json!({
+            "id": "create:mailFlowRule:cumulas mail: encrypt",
+            "action": "create",
+            "object": "mailFlowRule",
+            "name": "Cumulas Mail: Encrypt",
+            "details": ["Turns it on"],
+            "powershell": "New-TransportRule -Name 'Cumulas Mail: Encrypt'",
+        });
+        let choices_json = json!({
+            "actions": true,
+            "encryptTemplate": "Encrypt",
+            "doNotForwardTemplate": null,
+            "labelIds": ["6c1b3b5e-0000-4000-8000-000000000001"],
+            "labelsWithoutLicense": false,
+        });
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            json!({
+                "stale": false,
+                "signedOut": true,
+                "changes": [{ "change": change_json, "outcome": "notYetListed", "message": null }],
+                "status": {
+                    "readAt": "2026-10-18T14:02:11Z",
+                    "admin": { "username": "admin@contoso.com", "displayName": "Ada Admin" },
+                    "rows": [{
+                        "id": "routing",
+                        "section": "routing",
+                        "title": "Mail routing",
+                        "state": "differs",
+                        "summary": "Mail goes through the Cumulas Signatures relay.",
+                        "detail": null,
+                        "objectName": "Email signatures: add signature",
+                        "fix": "signatures",
+                        "link": "https://signature.cumulas.co/manage",
+                    }],
+                    "labels": [{
+                        "id": "6c1b3b5e-0000-4000-8000-000000000001",
+                        "title": "Confidential",
+                        "inCatalog": true,
+                        "encrypts": true,
+                        "forEmail": null,
+                        "state": "missing",
+                    }],
+                    "templates": [{ "name": "Encrypt", "id": null }],
+                    "relay": "cumulasNotInternal",
+                    "license": "notIncluded",
+                    "exchangeReadable": true,
+                    "labelsReadable": false,
+                    "noRole": false,
+                    "anyOurs": true,
+                    "defaults": choices_json,
+                    "plan": { "changes": [change_json], "problems": [], "blocked": 1 },
+                },
+            })
+        );
+
+        // What the dialog sends.
+        assert_eq!(
+            serde_json::from_value::<OrgSetupChoices>(choices_json.clone()).unwrap(),
+            choices
+        );
+        let request: OrgSetupScriptRequest = serde_json::from_value(json!({
+            "choices": choices_json, "actions": true, "labels": false,
+        }))
+        .unwrap();
+        assert_eq!(
+            request,
+            OrgSetupScriptRequest {
+                choices: Some(choices),
+                actions: true,
+                labels: false,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(OrgSetupScript {
+                script: "# Cumulas Mail".into(),
+                portal_steps: vec![PortalSteps {
+                    label_title: "Confidential".into(),
+                    policy_name: "Cumulas Mail: Confidential".into(),
+                    rule_name: "Cumulas Mail: Confidential (header)".into(),
+                    pattern: "(?i)^(6c1b3b5e-0000-4000-8000-000000000001)$".into(),
+                }],
+            })
+            .unwrap(),
+            json!({
+                "script": "# Cumulas Mail",
+                "portalSteps": [{
+                    "labelTitle": "Confidential",
+                    "policyName": "Cumulas Mail: Confidential",
+                    "ruleName": "Cumulas Mail: Confidential (header)",
+                    "pattern": "(?i)^(6c1b3b5e-0000-4000-8000-000000000001)$",
+                }],
+            })
         );
     }
 }

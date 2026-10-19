@@ -268,8 +268,30 @@ export type CheckItem =
 export type CheckState =
   "notChecked" | "waiting" | "applied" | "expired" | "notApplied" | "unknown";
 
-/** Why a check ended as it did, when the state alone doesn't say. */
-export type CheckNote = "otherRule" | "headerKept" | "notArrived" | "headerNotKept";
+/**
+ * Why a check ended as it did, when the state alone doesn't say. With
+ * notApplied: the request reached delivery but nothing acted on it
+ * (requestIgnored), it was removed on the way (requestRemoved), the mail came
+ * back from the Cumulas Signatures relay as outside mail (relayNotInternal),
+ * the organization's setup changed too recently to tell (tooSoon, changedAt),
+ * or another label arrived (otherLabel, otherLabelId). With unknown: it arrived
+ * protected another way (otherProtection), or encrypted with no label that
+ * could be read (labelUnreadable). With expired: it passed before the mail went
+ * through the relay (relayChanged).
+ */
+export type CheckNote =
+  | "otherRule"
+  | "headerKept"
+  | "notArrived"
+  | "headerNotKept"
+  | "requestIgnored"
+  | "requestRemoved"
+  | "relayNotInternal"
+  | "tooSoon"
+  | "otherLabel"
+  | "otherProtection"
+  | "labelUnreadable"
+  | "relayChanged";
 
 export interface CheckResult {
   state: CheckState;
@@ -284,6 +306,12 @@ export interface CheckResult {
    * null when it isn't offered.
    */
   passedAt: string | null;
+  /** With note "otherLabel": the organization's label that arrived instead. */
+  otherLabelId: string | null;
+  /** With note "otherLabel": the control arrived with that label too. */
+  otherLabelOnControl: boolean;
+  /** A setup change from this computer recent enough to matter when this was judged. */
+  changedAt: string | null;
 }
 
 /** A sensitivity label Microsoft 365 lists for the person, with its check. */
@@ -329,6 +357,182 @@ export interface ProtectionSetup {
   /** A check is waiting for its messages. */
   checking: boolean;
 }
+
+// --- Organization setup (administrators) ----------------------------------------
+
+export interface OrgSetupAdmin {
+  /** The sign-in name. */
+  username: string;
+  displayName: string;
+}
+
+export interface OrgSetupInfo {
+  /** This build names the setup app, so setup can run from here; otherwise only the script. */
+  automatic: boolean;
+  tenantId: string;
+  /** Signed in for setup on this computer now, for this organization. */
+  signedIn: OrgSetupAdmin | null;
+  /** The setup app's approval link for this organization; null without automatic setup. */
+  approvalUrl: string | null;
+  /** When setup last changed mail flow rules / auto-labeling objects from this computer; null if never. */
+  rulesChangedAt: string | null;
+  policiesChangedAt: string | null;
+}
+
+export type OrgSetupSection = "approval" | "encryption" | "labels" | "routing";
+export type OrgSetupRowState =
+  "ok" | "missing" | "differs" | "off" | "waiting" | "blocked" | "unknown" | "info";
+export type OrgSetupFix = "setup" | "approval" | "signatures" | "manual" | "signIn";
+
+export interface OrgSetupRow {
+  /**
+   * Stable: approval, setupApp, exchangeAccess, irm, templates, encryptRule, dnfRule,
+   * labelsAccess, stripRule, licensing, label:<id>, routing, otherRouting:<name>, leftover:<name>.
+   */
+  id: string;
+  section: OrgSetupSection;
+  title: string;
+  state: OrgSetupRowState;
+  summary: string;
+  detail: string | null;
+  /** The Exchange or Purview object it's about, if any. */
+  objectName: string | null;
+  fix: OrgSetupFix | null;
+  /** For fix "signatures": Cumulas Signatures' page for administrators. */
+  link: string | null;
+}
+
+export interface OrgSetupLabel {
+  /** The ID people's Cumulas Mail sends (Microsoft Graph's), lowercase. */
+  id: string;
+  title: string;
+  /** In the label list of the account the dialog was opened from. */
+  inCatalog: boolean;
+  encrypts: boolean;
+  /** Purview lists it as a label for email; null when it doesn't say. */
+  forEmail: boolean | null;
+  state: OrgSetupRowState;
+}
+
+export interface RmsTemplate {
+  name: string;
+  id: string | null;
+}
+
+export type RelayPath = "none" | "cumulasInternal" | "cumulasNotInternal" | "cumulasUnknown";
+
+export interface OrgSetupChoices {
+  /** Set up Encrypt and Do Not Forward. */
+  actions: boolean;
+  encryptTemplate: string | null;
+  doNotForwardTemplate: string | null;
+  /** Labels to set up or repair, by the ID people's Cumulas Mail sends. */
+  labelIds: string[];
+  /** Set up labels although the license hint says automatic labeling isn't included. */
+  labelsWithoutLicense: boolean;
+}
+
+export type OrgSetupAction = "create" | "change" | "turnOn" | "move" | "startSimulation";
+export type OrgSetupObject = "mailFlowRule" | "autoLabelingPolicy" | "autoLabelingRule";
+
+export interface OrgSetupChange {
+  /**
+   * "<action>:<object>:<lowercase name>#<digest of its PowerShell>" (the demo leaves out the
+   * digest), the same for the same status and choices.
+   */
+  id: string;
+  action: OrgSetupAction;
+  object: OrgSetupObject;
+  name: string;
+  /** What changes, a sentence each. */
+  details: string[];
+  /** The same in PowerShell. */
+  powershell: string;
+}
+
+export interface OrgSetupPlan {
+  changes: OrgSetupChange[];
+  /** Why these choices can't be set up; empty when they can. */
+  problems: string[];
+  /** How many of Cumulas Mail's objects are left out because they can't be changed from here. */
+  blocked: number;
+}
+
+export type LicenseHintState = "included" | "pending" | "notIncluded" | "unknown";
+
+export interface OrgSetupStatus {
+  readAt: string;
+  admin: OrgSetupAdmin;
+  rows: OrgSetupRow[];
+  labels: OrgSetupLabel[];
+  templates: RmsTemplate[];
+  relay: RelayPath;
+  /** From the work account's own licenses (a hint about one person). */
+  license: LicenseHintState;
+  /** Mail flow rules could be read, so they can be set up from here. */
+  exchangeReadable: boolean;
+  /** Security & Compliance could be read, so auto-labeling policies can be set up from here. */
+  labelsReadable: boolean;
+  /** Neither half could be read for lack of a role: show the single message. */
+  noRole: boolean;
+  /** Some of Cumulas Mail's rules or policies exist: the button says Repair, else Set up. */
+  anyOurs: boolean;
+  defaults: OrgSetupChoices;
+  plan: OrgSetupPlan;
+}
+
+export type OrgSetupOutcome = "done" | "notYetListed" | "failed" | "skipped";
+
+export interface OrgSetupChangeResult {
+  change: OrgSetupChange;
+  outcome: OrgSetupOutcome;
+  /** "done": a note (such as turning on after a simulation); "failed"/"skipped": why. */
+  message: string | null;
+}
+
+export interface OrgSetupResult {
+  /** Something changed since the plan was shown, so nothing was done; review status.plan. */
+  stale: boolean;
+  /** The sign-in ended during the changes; the rest were skipped. */
+  signedOut: boolean;
+  changes: OrgSetupChangeResult[];
+  status: OrgSetupStatus;
+}
+
+export interface OrgSetupScriptRequest {
+  /** From the dialog's choices once signed in; null: from the account. */
+  choices: OrgSetupChoices | null;
+  /** The script view's checkboxes. */
+  actions: boolean;
+  labels: boolean;
+}
+
+export interface PortalSteps {
+  labelTitle: string;
+  policyName: string;
+  ruleName: string;
+  pattern: string;
+}
+
+export interface OrgSetupScript {
+  script: string;
+  portalSteps: PortalSteps[];
+}
+
+/**
+ * Why organization setup refused: the setup app needs an administrator's
+ * approval (setupConsent), the administrator is from another organization
+ * (otherTenant), the setup app isn't fully registered (setupNotRegistered), the
+ * organization has no Exchange Online (noExchange) or isn't in Microsoft's
+ * public cloud (otherCloud), or the setup sign-in ended (setupSignedOut).
+ */
+export type SetupReason =
+  | "setupConsent"
+  | "otherTenant"
+  | "setupNotRegistered"
+  | "noExchange"
+  | "otherCloud"
+  | "setupSignedOut";
 
 // --- Calendar ---------------------------------------------------------------
 
@@ -818,8 +1022,11 @@ export interface BackendError {
     /** The tenant has Microsoft's admin consent workflow ("Request approval") enabled. */
     canRequestApproval?: boolean;
     adminPageUrl?: string | null;
-    /** signInBlocked and authRequired-after-refresh: why. signInCancelled: "timeout". permissionRequired: which state. sendMessage: why it refused. */
-    reason?: SignInBlockedReason | "timeout" | PermissionRequiredReason | SendRefusedReason;
+    /** signInBlocked and authRequired-after-refresh: why. signInCancelled: "timeout". permissionRequired: which state. sendMessage: why it refused. Organization setup: why it refused. */
+    reason?:
+      SignInBlockedReason | "timeout" | PermissionRequiredReason | SendRefusedReason | SetupReason;
+    /** signInBlocked: "setup" when it's the sign-in with the setup app, not the mail app's. */
+    app?: "setup";
     /** signInBlocked (and authRequired after a blocked refresh): Microsoft's AADSTS code. */
     aadsts?: number;
     /** permissionRequired */

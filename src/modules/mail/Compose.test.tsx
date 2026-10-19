@@ -768,6 +768,9 @@ describe("Encryption and sensitivity labels", () => {
             note: null,
             testMessage: false,
             passedAt: null,
+            otherLabelId: null,
+            otherLabelOnControl: false,
+            changedAt: null,
           },
         })),
       }));
@@ -775,6 +778,32 @@ describe("Encryption and sensitivity labels", () => {
       expect(await within(c).findByText(hint)).toBeInTheDocument();
     },
   );
+
+  it("says when the labels were checked before the mail went through the relay", async () => {
+    const user = userEvent.setup();
+    await withSetup({}, (setup) => ({
+      labels: setup.labels.map((l) => ({
+        ...l,
+        check: {
+          state: "expired",
+          at: "2026-10-01T09:00:00Z",
+          note: "relayChanged",
+          testMessage: false,
+          passedAt: null,
+          otherLabelId: null,
+          otherLabelOnControl: false,
+          changedAt: null,
+        },
+      })),
+    }));
+    const c = await newMessage(user);
+    expect(
+      await within(c).findByText(
+        "Your organization requires a sensitivity label on email. The labels for alex.morgan@acme.example were checked before your organization's mail went through the Cumulas Signatures relay. Check them again in Settings → Accounts to apply them here.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(c).queryByText(/90 days/)).toBeNull();
+  });
 
   it("replies to labeled mail directly when no label is in use from Cumulas Mail", async () => {
     const user = userEvent.setup();
@@ -1082,6 +1111,39 @@ describe("Encryption and sensitivity labels", () => {
     await user.click(within(c).getByRole("button", { name: "Send" }));
     await waitFor(() => expect(backend.sent).toHaveLength(1));
     expect(backend.sent[0]).toMatchObject({ protect: null, labelId: GENERAL });
+  });
+
+  it("won't send a choice checked before the mail went through the relay", async () => {
+    const user = userEvent.setup();
+    let relay = false;
+    const backend = new MockBackend({ protectedMail: true, protection: "setup" });
+    const get = backend.getProtectionSetup.bind(backend);
+    vi.spyOn(backend, "getProtectionSetup").mockImplementation(async (id) => {
+      const setup = await get(id);
+      // The organization's mail goes through the relay now: the pass doesn't count.
+      return relay
+        ? {
+            ...setup,
+            encrypt: { ...setup.encrypt, state: "expired", note: "relayChanged", passedAt: null },
+          }
+        : setup;
+    });
+    const { client } = await renderMail({ backend });
+    const c = await newMessage(user);
+    await waitFor(() => expect(sensitivity("Sensitivity label: General")).toBeInTheDocument());
+    await user.click(encryption());
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Encrypt" }));
+    relay = true;
+    await act(() => client.invalidateQueries());
+    await waitFor(() =>
+      expect(encryption("Encryption: Encrypt (not available now)")).toBeInTheDocument(),
+    );
+
+    await sendNew(user);
+    expect(within(c).getByRole("alert")).toHaveTextContent(
+      "Encrypt was checked before your organization's mail went through the Cumulas Signatures relay, so it can't be applied. Check it again in Settings → Accounts, or choose Don't encrypt.",
+    );
+    expect(backend.sent).toHaveLength(0);
   });
 
   it("asks before dropping the original's label when none is required", async () => {

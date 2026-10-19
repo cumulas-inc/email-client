@@ -1,5 +1,13 @@
 import clsx from "clsx";
-import { ExternalLink, LoaderCircle, Lock, Mail, RefreshCw } from "lucide-react";
+import {
+  Building2,
+  ClipboardList,
+  ExternalLink,
+  LoaderCircle,
+  Lock,
+  Mail,
+  RefreshCw,
+} from "lucide-react";
 import { type ReactNode, useId, useState } from "react";
 
 import { useBackend } from "../../api/context";
@@ -15,6 +23,7 @@ import type {
 } from "../../api/types";
 import { Spinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
+import { copyLater } from "../../lib/clipboard";
 import {
   ACTION_NAMES,
   CHECK_TIMEOUT_MINUTES,
@@ -30,6 +39,17 @@ import { REFUSED_HINT } from "./FeaturePermission";
 import { noteFeatureTurnedOn } from "./featureToasts";
 import { PROTECTION_GUIDE_URL, refusedFeatureMailto } from "./microsoft";
 import {
+  CHECK_NOTES,
+  CHECK_ROWS,
+  CHECK_WAIT,
+  COPIED_DETAILS_FOR_IT,
+  COPY_DETAILS_FOR_IT,
+  ENTRY_BUTTON,
+  IT_CAN_FIX,
+  OTHER_LABEL_UNNAMED,
+} from "./orgsetup/copy";
+import { OrgSetupDialog } from "./orgsetup/OrgSetupDialog";
+import {
   useAdminConsentLink,
   useCheckProtection,
   useProtectionCheckPolling,
@@ -42,11 +62,72 @@ const DNF_NOTE =
 
 type Tone = "neutral" | "busy" | "ok" | "attention";
 
+/** How long before the check the organization's setup changed: "10 minutes", "3 hours". */
+function howLongBefore(changedAt: string, at: string | null): string {
+  const ms = Math.max(0, (at ? Date.parse(at) : Date.now()) - Date.parse(changedAt));
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return "less than a minute";
+  if (minutes < 60) return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return hours === 1 ? "1 hour" : `${hours} hours`;
+  return `${Math.round(hours / 24)} days`;
+}
+
+/**
+ * The note under a check that didn't pass, or couldn't tell (4.7): what the
+ * check found, a recent setup change, and that IT can fix it.
+ */
+function checkNote(
+  result: CheckResult,
+  item: CheckItem,
+  labels: readonly LabelOption[],
+): string | null {
+  const ago = result.changedAt ? howLongBefore(result.changedAt, result.at) : null;
+  const changed = ago ? CHECK_NOTES.changedBefore(ago) : "";
+  const kind = item.kind;
+  switch (result.note) {
+    case "requestIgnored":
+      return (
+        (item.kind === "action"
+          ? CHECK_NOTES.requestIgnoredAction(item.action)
+          : CHECK_NOTES.requestIgnoredLabel) +
+        changed +
+        IT_CAN_FIX
+      );
+    case "requestRemoved":
+      return CHECK_NOTES.requestRemoved(kind) + changed + IT_CAN_FIX;
+    case "relayNotInternal":
+      return (
+        (kind === "action"
+          ? CHECK_NOTES.relayNotInternalAction
+          : CHECK_NOTES.relayNotInternalLabel) +
+        changed +
+        IT_CAN_FIX
+      );
+    case "tooSoon":
+      return CHECK_NOTES.tooSoon(ago ?? "shortly");
+    case "otherLabel": {
+      const other = labels.find((l) => l.id === result.otherLabelId);
+      const title = other ? labelTitle(other) : OTHER_LABEL_UNNAMED;
+      return CHECK_NOTES.otherLabel(title, result.otherLabelOnControl) + changed;
+    }
+    case "otherProtection":
+      return CHECK_NOTES.otherProtection + changed;
+    case "labelUnreadable":
+      return CHECK_NOTES.labelUnreadable + changed;
+    default:
+      // Arrived without it, and nothing more to say about why.
+      return result.state === "notApplied" ? CHECK_NOTES.notApplied + changed + IT_CAN_FIX : null;
+  }
+}
+
 /** What a row says about its check, and the note under it. */
 function describeCheck(
   result: CheckResult,
-  kind: "action" | "label",
+  item: CheckItem,
+  labels: readonly LabelOption[],
 ): { text: string; note: string | null; tone: Tone } {
+  const kind = item.kind;
   const on = result.at ? checkDate(result.at) : null;
   const dated = (text: string) => (on ? `${text} · ${on}` : text);
   const checked = (text: string) => (on ? `${text} · checked ${on}` : text);
@@ -72,11 +153,14 @@ function describeCheck(
         tone: "ok",
       };
     case "expired":
-      return {
-        text: `Checked over ${CHECK_VALID_DAYS} days ago${on ? ` (${on})` : ""}. Check again to use it.`,
-        note: null,
-        tone: "attention",
-      };
+      // The relay came into the path after the pass: only the 90-day case is about its age.
+      return result.note === "relayChanged"
+        ? { text: CHECK_ROWS.relayChanged, note: CHECK_NOTES.relayChanged, tone: "attention" }
+        : {
+            text: `Checked over ${CHECK_VALID_DAYS} days ago${on ? ` (${on})` : ""}. Check again to use it.`,
+            note: null,
+            tone: "attention",
+          };
     case "notApplied":
       return result.note === "headerNotKept"
         ? {
@@ -85,8 +169,10 @@ function describeCheck(
             tone: "attention",
           }
         : {
-            text: checked("Arrived without it"),
-            note: "The test message arrived without it, as far as Cumulas Mail can tell.",
+            text: checked(
+              result.note === "otherLabel" ? CHECK_ROWS.otherLabel : "Arrived without it",
+            ),
+            note: checkNote(result, item, labels),
             tone: "attention",
           };
     case "unknown":
@@ -110,7 +196,11 @@ function describeCheck(
             tone: "attention",
           };
         default:
-          return { text: dated("Couldn't tell"), note: null, tone: "attention" };
+          return {
+            text: dated("Couldn't tell"),
+            note: checkNote(result, item, labels),
+            tone: "attention",
+          };
       }
   }
 }
@@ -122,7 +212,8 @@ interface CheckRowProps {
   spoken: string;
   item: CheckItem;
   result: CheckResult;
-  kind: "action" | "label";
+  /** The account's labels, to name one that arrived instead. */
+  labels: readonly LabelOption[];
   email: string;
   /** Checking can't start now: a check is waiting, or being sent. */
   busy: boolean;
@@ -184,7 +275,7 @@ function CheckRow({
   spoken,
   item,
   result,
-  kind,
+  labels,
   email,
   busy,
   pressed,
@@ -193,7 +284,7 @@ function CheckRow({
   onCheck,
   onOpen,
 }: CheckRowProps) {
-  const { text, note, tone } = describeCheck(result, kind);
+  const { text, note, tone } = describeCheck(result, item, labels);
   const again = result.state !== "notChecked";
   return (
     <li className="protection-row">
@@ -496,7 +587,7 @@ function LabelsGroup({
                 spoken={`the label ${title}`}
                 item={labelItem(label)}
                 result={label.check}
-                kind="label"
+                labels={labels}
                 email={email}
                 busy={busy}
                 pressed={pressed}
@@ -556,20 +647,52 @@ export function ProtectionField({ account, returnFocusId }: ProtectionFieldProps
     backend.openLink(PROTECTION_GUIDE_URL).catch((e: unknown) => toast.error(e));
   };
 
+  // What the checks found, for the organization's IT team.
+  const anyChecked =
+    setup !== undefined &&
+    [setup.encrypt, setup.doNotForward, ...setup.labels.map((l) => l.check)].some(
+      (c) => c.at !== null,
+    );
+  const copyDetails = () => {
+    copyLater(backend.getProtectionCheckDetails(account.id))
+      .then(() => toast.success(COPIED_DETAILS_FOR_IT))
+      .catch((e: unknown) => toast.error(e));
+  };
+  const [settingUp, setSettingUp] = useState(false);
+
   return (
     <div className="account-field protection-field">
       <div className="account-field__head">
         <span className="account-field__label">Sensitivity labels and encryption</span>
-        <button type="button" className="btn btn--subtle btn--sm" onClick={openGuide}>
-          <ExternalLink size={14} aria-hidden="true" />
-          How IT sets this up
-        </button>
+        <span className="protection-field__links">
+          <button type="button" className="btn btn--subtle btn--sm" onClick={openGuide}>
+            <ExternalLink size={14} aria-hidden="true" />
+            How IT sets this up
+          </button>
+          <button
+            type="button"
+            className="btn btn--subtle btn--sm"
+            aria-haspopup="dialog"
+            onClick={() => setSettingUp(true)}
+          >
+            <Building2 size={14} aria-hidden="true" />
+            {ENTRY_BUTTON}
+          </button>
+          {anyChecked && (
+            <button type="button" className="btn btn--subtle btn--sm" onClick={copyDetails}>
+              <ClipboardList size={14} aria-hidden="true" />
+              {COPY_DETAILS_FOR_IT}
+            </button>
+          )}
+        </span>
       </div>
+      {settingUp && <OrgSetupDialog account={account} onClose={() => setSettingUp(false)} />}
       <div>
         <p className="account-field__hint">
           Your organization&apos;s mail server can encrypt or label the mail you send from Cumulas
           Mail, once your IT team has set that up. Each option appears in new messages for{" "}
-          {CHECK_VALID_DAYS} days after a test message here arrives encrypted or labeled.
+          {CHECK_VALID_DAYS} days after a test message here arrives encrypted or labeled.{" "}
+          {CHECK_WAIT}
         </p>
         <p className="protection-field__progress" role="status">
           {checking
@@ -614,7 +737,7 @@ export function ProtectionField({ account, returnFocusId }: ProtectionFieldProps
                   spoken={ACTION_NAMES[action]}
                   item={actionItem(action)}
                   result={action === "encrypt" ? setup.encrypt : setup.doNotForward}
-                  kind="action"
+                  labels={setup.labels}
                   email={email}
                   busy={busy}
                   pressed={pressed}

@@ -1021,6 +1021,69 @@ async fn plain_sending_never_drops_a_request() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn delivered_mail_says_how_exchange_counted_it() {
+    let (server, provider) = setup().await;
+    let mut message = detail("<p>Hi</p>", Some("IPM.Note"), false);
+    message["internetMessageHeaders"] = json!([
+        { "name": "X-Signature-Stamped", "value": "1" },
+        { "name": "X-MS-Exchange-Organization-AuthAs", "value": "Anonymous" },
+        { "name": "X-MS-Exchange-Organization-MessageDirectionality", "value": "Originating" },
+        { "name": "x-cumulas-label-stamped", "value": LABEL },
+        { "name": "x-cumulas-label", "value": LABEL },
+    ]);
+    mount_detail(&server, message).await;
+    mount_properties(&server, &[("x-cumulas-protect", "encrypt")]).await;
+    let signals = provider
+        .fetch_message(&locator("msg-1"))
+        .await
+        .unwrap()
+        .signals;
+    assert!(signals.relay_stamped);
+    assert_eq!(signals.auth_as.as_deref(), Some("Anonymous"));
+    assert_eq!(signals.directionality.as_deref(), Some("Originating"));
+    assert_eq!(signals.label_stamped.as_deref(), Some(LABEL));
+    assert_eq!(
+        (
+            signals.requested_action.as_deref(),
+            signals.requested_action_source.as_deref()
+        ),
+        (Some("encrypt"), Some("property"))
+    );
+    assert_eq!(
+        (
+            signals.requested_label.as_deref(),
+            signals.requested_label_source.as_deref()
+        ),
+        (Some(LABEL), Some("header"))
+    );
+
+    // Without them, nothing is said; an empty stamp isn't one.
+    let (server, provider) = setup().await;
+    let mut message = detail("<p>Hi</p>", Some("IPM.Note"), false);
+    message["internetMessageHeaders"] = json!([
+        { "name": "X-Signature-Stamped", "value": " " },
+    ]);
+    mount_detail(&server, message).await;
+    mount_properties(&server, &[]).await;
+    let signals = provider
+        .fetch_message(&locator("msg-1"))
+        .await
+        .unwrap()
+        .signals;
+    assert!(!signals.relay_stamped);
+    assert_eq!(
+        (
+            signals.auth_as,
+            signals.directionality,
+            signals.label_stamped,
+            signals.requested_action_source,
+            signals.requested_label_source
+        ),
+        (None, None, None, None, None)
+    );
+}
+
 // --- Outlook on the web and the setup check --------------------------------------------
 
 #[tokio::test]
@@ -1148,4 +1211,77 @@ async fn the_draft_is_created_as_usual_for_requests() {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn transport_headers_are_read_from_their_property() {
+    let (server, provider) = setup().await;
+    let headers = "Received: from AM0PR01MB0001.eurprd01.prod.outlook.com\r\n\
+                   X-MS-Exchange-Organization-AuthAs: Internal";
+    for (id, answer) in [
+        (
+            "msg-1",
+            json!({
+                "id": "msg-1",
+                // Graph may spell the id otherwise; only the value counts.
+                "singleValueExtendedProperties": [{ "id": "String 0x7d", "value": format!("{headers}\r\n\r\n") }],
+            }),
+        ),
+        // Graph leaves the array out when the message has none.
+        ("msg-2", json!({ "id": "msg-2" })),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/me/messages/{id}")))
+            .and(query_param("$select", "id"))
+            .and(query_param(
+                "$expand",
+                "singleValueExtendedProperties($filter=id eq 'String 0x007D')",
+            ))
+            .and(prefers(PREFER_IMMUTABLE_ID))
+            .respond_with(ok_json(answer))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/me/messages/msg-3"))
+        .respond_with(graph_error(403, "ErrorAccessDenied", "Access is denied."))
+        .mount(&server)
+        .await;
+    assert_eq!(
+        provider
+            .transport_headers(&locator("msg-1"))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(headers)
+    );
+    assert_eq!(
+        provider.transport_headers(&locator("msg-2")).await.unwrap(),
+        None
+    );
+    // Refused: an error, which the check reads as none.
+    assert!(provider.transport_headers(&locator("msg-3")).await.is_err());
+}
+
+#[tokio::test]
+async fn transport_headers_are_kept_to_exchanges_limit() {
+    let (server, provider) = setup().await;
+    // Two bytes a character: the limit falls inside one.
+    let long = format!("X-Long: {}", "é".repeat(140_000));
+    Mock::given(method("GET"))
+        .and(path("/me/messages/msg-1"))
+        .respond_with(ok_json(json!({
+            "id": "msg-1",
+            "singleValueExtendedProperties": [{ "id": "String 0x7D", "value": long }],
+        })))
+        .mount(&server)
+        .await;
+    let read = provider
+        .transport_headers(&locator("msg-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(read.len() <= 256 * 1024 && read.len() > 256 * 1024 - 2);
+    assert!(long.starts_with(&read));
 }

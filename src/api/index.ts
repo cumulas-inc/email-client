@@ -2,6 +2,7 @@ import { isTauri } from "@tauri-apps/api/core";
 
 import type { Backend } from "./backend";
 import {
+  type DemoOrgSetup,
   type DemoProtection,
   type DemoPush,
   type DemoSignature,
@@ -26,7 +27,22 @@ const DEMO_SIGNATURE: readonly DemoSignature[] = [
 
 const DEMO_UPDATE: readonly DemoUpdate[] = ["installed", "restartfails"];
 
-const DEMO_PROTECTION: readonly DemoProtection[] = ["setup", "checking", "expired"];
+const DEMO_PROTECTION: readonly DemoProtection[] = ["setup", "checking", "expired", "relay"];
+
+const DEMO_ORG_SETUP: readonly DemoOrgSetup[] = [
+  "unconfigured",
+  "consent",
+  "fresh",
+  "partial",
+  "relay",
+  "unlicensed",
+  "noRole",
+  "exchangeOnly",
+  "blocked",
+  "done",
+  "failing",
+  "signedOut",
+];
 
 const DEMO_FEATURES: readonly AccountFeature[] = [
   "calendar",
@@ -64,9 +80,19 @@ function demoFeatures(value: string | null): AccountFeature[] {
  * reloads the demo as restarted into it (`?updated`, which says so), and
  * `?update=restartfails` one whose restart fails. `?protected` adds protected
  * and labeled mail (encrypted, signed, a link to Microsoft's portal, a Sent
- * copy that asked for encryption), and `?protection=setup|checking|expired`
+ * copy that asked for encryption), and `?protection=setup|checking|expired|relay`
  * starts the work account's checks of encryption and sensitivity labels
- * passed, waiting, or with Encrypt's too old to use.
+ * passed, waiting, with Encrypt's too old to use, or with labels failing
+ * because mail comes back from the Cumulas Signatures relay as outside mail.
+ * `?orgsetup=` sets up the work account's organization for Set up or check
+ * for your organization: `fresh` (the default) has nothing set up,
+ * `partial` what the 0.4.0 guide set up, `relay` that with the Cumulas
+ * Signatures relay, `done` everything; `unconfigured` is a build without
+ * the setup app (only the script), `consent` needs the setup app approved
+ * (open its approval link, then sign in again), `unlicensed` a license
+ * without automatic labeling, `noRole` and `exchangeOnly` an administrator
+ * without the roles, `blocked` a rule with settings Cumulas Mail doesn't
+ * set, and `failing` and `signedOut` changes that don't all go through.
  */
 export function createBackend(): Backend {
   if (isTauri()) return tauriBackend;
@@ -75,6 +101,7 @@ export function createBackend(): Backend {
   const signature = params.get("signature") as DemoSignature | null;
   const update = params.get("update") as DemoUpdate | null;
   const protection = params.get("protection") as DemoProtection | null;
+  const orgSetup = params.get("orgsetup") as DemoOrgSetup | null;
   return new MockBackend({
     latency: 80,
     // About as long as a real server takes to search a mailbox.
@@ -92,6 +119,7 @@ export function createBackend(): Backend {
     update: update && DEMO_UPDATE.includes(update) ? update : undefined,
     protectedMail: params.has("protected"),
     protection: protection && DEMO_PROTECTION.includes(protection) ? protection : undefined,
+    orgSetup: orgSetup && DEMO_ORG_SETUP.includes(orgSetup) ? orgSetup : undefined,
     restartedToUpdate: params.has("updated"),
     onRestart: () => {
       // As the desktop app comes back: the new version, saying so.

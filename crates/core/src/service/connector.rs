@@ -5,9 +5,14 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use url::Url;
 
 use super::permissions::NeedsPermission;
 use crate::auth::GrantRecord;
+use crate::auth::admin_setup::{
+    AdminSetupConfig, AdminSignIn, COMPLIANCE_DISCOVERY_HOST, EXCHANGE_RESOURCE, admin_sign_in,
+    is_setup_client_id, setup_client_id, setup_client_id_as_mail, setup_not_available,
+};
 use crate::auth::microsoft::{
     self, ApiTokenSource, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult, SyncTokenSource,
     admin_consent_link, is_personal_tenant, sync_scope,
@@ -16,6 +21,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
     Account, AccountFeature, AccountKind, AccountSettings, AdminConsentLink, ImapSettings,
 };
+use crate::orgsetup::{HostRules, RunLog};
 use crate::providers::graph::GraphProvider;
 use crate::providers::imap::{self, IdleConfig, ImapCredentials, ImapIdleWatcher, ImapProvider};
 use crate::providers::{
@@ -75,6 +81,13 @@ fn resolve_builtin_microsoft_client_id(built_in: Option<&str>) -> Option<String>
     };
     if value.eq_ignore_ascii_case(NO_CLIENT_ID) {
         return None;
+    }
+    if is_guid(value) && is_setup_client_id(value) {
+        tracing::warn!(
+            "ignoring the Microsoft client ID from the build ({MICROSOFT_CLIENT_ID_VAR}): it is \
+             the setup app's, and the two registrations must never be one"
+        );
+        return Some(PUBLISHED_MICROSOFT_CLIENT_ID.to_owned());
     }
     if is_guid(value) {
         return Some(value.to_ascii_lowercase());
@@ -145,6 +158,22 @@ impl ProviderSet {
 
 pub type BrowserOpener = dyn Fn(&str) -> Result<()> + Send + Sync;
 
+/// Where organization setup signs in and talks to, for a build that names a
+/// setup app (`crate::auth::admin_setup::setup_client_id`).
+#[derive(Debug, Clone)]
+pub struct AdminEndpoints {
+    /// The setup app's client ID: never the mail app's.
+    pub client_id: String,
+    /// `https://login.microsoftonline.com`.
+    pub authority_host: String,
+    /// `https://outlook.office365.com`.
+    pub exchange: Url,
+    /// `https://ps.compliance.protection.outlook.com`.
+    pub compliance_discovery: Url,
+    /// Where requests, redirects and next pages may go.
+    pub hosts: HostRules,
+}
+
 /// How an account hears about changes between full syncs.
 #[derive(Clone)]
 pub enum PushSource {
@@ -200,6 +229,23 @@ pub trait Connector: Send + Sync {
         &self,
         _account: &Account,
     ) -> Option<Arc<dyn OrganizationSignatures>> {
+        None
+    }
+
+    /// Interactive sign-in with the setup app for the organization
+    /// `tenant_id`, every attempt logged to `log`, failed or not.
+    async fn admin_setup_sign_in(
+        &self,
+        _open_browser: &BrowserOpener,
+        _tenant_id: &str,
+        _log: &RunLog,
+    ) -> Result<AdminSignIn> {
+        Err(setup_not_available())
+    }
+
+    /// Where the setup session talks to; `None` when this build has no
+    /// setup app (then only the PowerShell script sets things up).
+    fn admin_setup_endpoints(&self) -> Option<AdminEndpoints> {
         None
     }
 }
@@ -269,6 +315,14 @@ impl LiveConnector {
                  Settings → Accounts → Microsoft app registration.",
             )
         })?;
+        // Saved before Settings refused it: never signed in with, so the
+        // setup app's refresh token is never kept.
+        if is_setup_client_id(&client_id) {
+            return Err(Error::new(
+                ErrorCode::NotConfigured,
+                setup_client_id_as_mail().message,
+            ));
+        }
         let published = client_id.eq_ignore_ascii_case(PUBLISHED_MICROSOFT_CLIENT_ID);
         Ok(MicrosoftAuthConfig {
             published,
@@ -427,6 +481,36 @@ impl Connector for LiveConnector {
             scope,
         )))
     }
+
+    async fn admin_setup_sign_in(
+        &self,
+        open_browser: &BrowserOpener,
+        tenant_id: &str,
+        log: &RunLog,
+    ) -> Result<AdminSignIn> {
+        let endpoints = self
+            .admin_setup_endpoints()
+            .ok_or_else(setup_not_available)?;
+        let config = AdminSetupConfig {
+            client_id: endpoints.client_id,
+            tenant_id: tenant_id.to_owned(),
+            authority_host: endpoints.authority_host,
+        };
+        admin_sign_in(&config, open_browser, Duration::from_secs(300), log).await
+    }
+
+    fn admin_setup_endpoints(&self) -> Option<AdminEndpoints> {
+        // Never the mail app's own registration, whichever it is.
+        let mail = self.microsoft_config().ok();
+        let client_id = setup_client_id(mail.as_ref().map(|c| c.client_id.as_str()))?;
+        Some(AdminEndpoints {
+            client_id,
+            authority_host: microsoft::DEFAULT_AUTHORITY_HOST.to_owned(),
+            exchange: Url::parse(EXCHANGE_RESOURCE).ok()?,
+            compliance_discovery: Url::parse(COMPLIANCE_DISCOVERY_HOST).ok()?,
+            hosts: HostRules::production(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -453,6 +537,30 @@ mod tests {
         // A build with `none` and nothing in Settings: not configured.
         assert_eq!(microsoft_client_id(Some(" "), None), None);
         assert_eq!(microsoft_client_id(Some(ID), None).as_deref(), Some(ID));
+    }
+
+    #[test]
+    fn sign_in_never_uses_the_setup_apps_id_saved_as_the_mail_apps() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut settings = store.get_settings().unwrap();
+        let setup = crate::auth::admin_setup::PUBLISHED_SETUP_CLIENT_ID.unwrap();
+        settings.microsoft_client_id = Some(setup.to_uppercase());
+        store.save_settings(&settings).unwrap();
+        let connector = LiveConnector::new(
+            Arc::clone(&store),
+            Arc::new(crate::secrets::MemorySecretStore::default()),
+        );
+        let err = connector.microsoft_config().unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotConfigured);
+        assert!(
+            err.message.contains("only for organization setup"),
+            "{}",
+            err.message
+        );
+        // Another ID is used.
+        settings.microsoft_client_id = Some(ID.into());
+        store.save_settings(&settings).unwrap();
+        assert_eq!(connector.microsoft_config().unwrap().client_id, ID);
     }
 
     #[test]
@@ -503,5 +611,11 @@ mod tests {
             );
         }
         assert!(is_guid(PUBLISHED_MICROSOFT_CLIENT_ID));
+        // The setup app's: ignored, as the mail app must never be it.
+        let setup = crate::auth::admin_setup::PUBLISHED_SETUP_CLIENT_ID.unwrap();
+        assert_eq!(
+            resolve_builtin_microsoft_client_id(Some(&setup.to_uppercase())).as_deref(),
+            published
+        );
     }
 }

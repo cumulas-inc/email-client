@@ -36,6 +36,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { Menu, type MenuItem } from "../../components/Menu";
 import { PaneSpinner } from "../../components/Spinner";
 import { toast } from "../../components/toast";
+import { copyLater } from "../../lib/clipboard";
 import { displayName, formatCount, fullAddress } from "../../lib/format";
 import type { MailActions } from "./actions";
 import { Attachments } from "./Attachments";
@@ -360,35 +361,13 @@ function MessageView({ messageId, actions, onBack, onEditDraft }: MessageViewPro
     label: "Copy diagnostic details",
     icon: <ClipboardList size={16} aria-hidden="true" />,
     onSelect: () => {
-      // The write starts here, in the click: WebKit refuses one that starts
-      // only after the core answered, which can take a while. The text
-      // follows as a promise.
-      const text = backend.getMessageDiagnostics(message.id);
-      const copied =
-        typeof ClipboardItem !== "undefined" && navigator.clipboard?.write
-          ? navigator.clipboard.write([
-              new ClipboardItem({
-                "text/plain": text.then((t) => new Blob([t], { type: "text/plain" })),
-              }),
-            ])
-          : text.then((t) => {
-              // Never "Copied" when nothing was.
-              if (!navigator.clipboard) throw new Error("Copying isn't available here.");
-              return navigator.clipboard.writeText(t);
-            });
-      copied
+      copyLater(backend.getMessageDiagnostics(message.id))
         .then(() =>
           toast.success(
             "Copied diagnostic details. They describe the message's protection, not its content.",
           ),
         )
-        // The core's own error says more than the clipboard's.
-        .catch((e: unknown) =>
-          text.then(
-            () => toast.error(e),
-            (reason: unknown) => toast.error(reason),
-          ),
-        );
+        .catch((e: unknown) => toast.error(e));
     },
   });
   // Only designed mail (its own backgrounds) offers a choice of sheet.

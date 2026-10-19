@@ -29,6 +29,7 @@ use crate::model::{
 };
 use crate::search::SearchQuery;
 use crate::search::dates::Received;
+use graph::LicenseHint;
 
 /// Where a message lives on the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +212,22 @@ pub struct MessageSignals {
     /// properties first, else the headers.
     pub requested_action: Option<String>,
     pub requested_label: Option<String>,
+    /// Where `requested_action` and `requested_label` came from:
+    /// Some("property") | Some("header").
+    pub requested_action_source: Option<String>,
+    pub requested_label_source: Option<String>,
+    /// X-Signature-Stamped was on it: the Cumulas Signatures relay handled
+    /// it.
+    pub relay_stamped: bool,
+    /// x-cumulas-label-stamped (the earlier relay recipe's copy of the label
+    /// request).
+    pub label_stamped: Option<String>,
+    /// X-MS-Exchange-Organization-AuthAs: "Internal" when Exchange counted
+    /// it as from inside the organization.
+    pub auth_as: Option<String>,
+    /// X-MS-Exchange-Organization-MessageDirectionality: "Originating" or
+    /// "Incoming".
+    pub directionality: Option<String>,
     /// Graph: the batched named properties couldn't be read this time.
     pub properties_unavailable: bool,
     /// Graph: fetches in a row that couldn't read them (the service counts;
@@ -324,6 +341,15 @@ pub trait MailProvider: Send + Sync {
         Ok(None)
     }
 
+    /// The message's transport headers as delivered
+    /// (PR_TRANSPORT_MESSAGE_HEADERS), raw, at most
+    /// [`MAX_TRANSPORT_HEADERS_BYTES`](crate::protection::MAX_TRANSPORT_HEADERS_BYTES);
+    /// `None` when the server has none. Microsoft only; read by the setup
+    /// checks.
+    async fn transport_headers(&self, _message: &MessageLocator) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Sends a message that asks for protection or a label: a draft, the
     /// x-cumulas-* named properties, a read-back, then send. Nothing is sent
     /// unless the read-back matches `request`.
@@ -345,6 +371,12 @@ pub trait LabelsProvider: Send + Sync {
     /// The labels the person may apply to email, and their label policy
     /// (Graph beta). Fails with HTTP 403 when Microsoft 365 refuses it.
     async fn label_catalog(&self) -> Result<LabelCatalog>;
+
+    /// Whether the person's own licenses include automatic labeling (a
+    /// hint for organization setup); `None` when the provider can't tell.
+    async fn license_hint(&self) -> Result<Option<LicenseHint>> {
+        Ok(None)
+    }
 }
 
 /// A Microsoft Graph change subscription, as Graph lists it.

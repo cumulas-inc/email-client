@@ -398,6 +398,27 @@ check "site: index.html loads nothing from elsewhere" \
 check "site: the icon is there" test -s "$site/logo.svg"
 expect_success "site: the page for IT administrators matches the app" \
   "$here/check-admin-consent.sh" "$site/admin-consent/index.html"
+# What the check must catch in the page's scripts (the sed scripts name
+# PowerShell variables, which stay as they are).
+mutated() {
+  sed -E "$1" "$site/admin-consent/index.html" >"$work/mutated.html"
+  "$here/check-admin-consent.sh" "$work/mutated.html"
+}
+# shellcheck disable=SC2016
+{
+  expect_failure "site: the check refuses Microsoft Graph's include without -Permissions" \
+    mutated '/-ResourceApplication "00000003-0000-0000-c000-000000000000" `$/{N;s/ `\n  -Permissions \$ids//}'
+  expect_failure "site: the check refuses -Permissions on another include" \
+    mutated '/-ResourceApplication "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad"$/s/$/ `\n  -Permissions $ids/'
+  expect_failure "site: the check refuses Exchange.Manage approved on Microsoft Graph" \
+    mutated 's/-ResourceId \$exo\.Id/-ResourceId $graph.Id/'
+  expect_failure "site: the check refuses a setup script that goes on after an error" \
+    mutated "/^\\\$ErrorActionPreference = 'Stop'\$/d"
+  expect_failure "site: the check refuses a setup script that approves without checking assignment" \
+    mutated '/^\$set = Get-MgServicePrincipal/,/^}$/d'
+  expect_failure "site: the check refuses a consent script that doesn't stop without every permission" \
+    mutated '/^if \(\$ids\.Count -ne \$names\.Count\) \{$/,/^}$/d'
+}
 
 # --- What clients see -----------------------------------------------------------
 

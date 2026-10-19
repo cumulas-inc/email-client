@@ -63,6 +63,9 @@ const result = (patch: Partial<CheckResult>): CheckResult => ({
   testMessage: false,
   // A pass counts from when it arrived.
   passedAt: patch.state === "applied" ? (patch.at ?? null) : null,
+  otherLabelId: null,
+  otherLabelOnControl: false,
+  changedAt: null,
   ...patch,
 });
 
@@ -80,8 +83,10 @@ describe("Sensitivity labels and encryption", () => {
 
     expect(screen.getByText("Sensitivity labels and encryption")).toBeInTheDocument();
     expect(screen.getByText(/once your IT team has set that up/)).toHaveTextContent(
-      "Your organization's mail server can encrypt or label the mail you send from Cumulas Mail, once your IT team has set that up. Each option appears in new messages for 90 days after a test message here arrives encrypted or labeled.",
+      "Your organization's mail server can encrypt or label the mail you send from Cumulas Mail, once your IT team has set that up. Each option appears in new messages for 90 days after a test message here arrives encrypted or labeled. New rules can take 30 minutes or more to start working, and auto-labeling policies up to a day.",
     );
+    // Nothing checked yet: nothing for IT.
+    expect(screen.queryByRole("button", { name: "Copy details for IT" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "How IT sets this up" }));
     expect(openLink).toHaveBeenCalledWith(PROTECTION_GUIDE_URL);
 
@@ -127,11 +132,12 @@ describe("Sensitivity labels and encryption", () => {
     expect(statusOf("Highly Confidential › Project Atlas")).toHaveTextContent(
       `Arrived without it · checked ${on}`,
     );
+    // Why, as far as the check could tell, and who fixes it.
     expect(
-      within(row("Highly Confidential › Project Atlas")).getByText(
-        "The test message arrived without it, as far as Cumulas Mail can tell.",
-      ),
-    ).toBeInTheDocument();
+      row("Highly Confidential › Project Atlas").querySelector(".protection-row__note"),
+    ).toHaveTextContent(
+      /Your IT team can fix this\. Copy details for IT gives them what the check found\.$/,
+    );
     expect(statusOf("Public")).toHaveTextContent(`Couldn't tell · ${on}`);
     expect(
       within(row("Public")).getByText(
@@ -453,6 +459,211 @@ describe("Sensitivity labels and encryption", () => {
     await stubSetup(backend, () => ({ labels: [], labelsListedAt: null, labelsError: null }));
     await renderField(backend);
     expect(screen.getByText("Getting your labels from Microsoft 365…")).toBeInTheDocument();
+  });
+});
+
+describe("what the checks found", () => {
+  const at = "2026-10-12T09:30:00Z";
+  const on = checkDate(at);
+  const IT = " Your IT team can fix this. Copy details for IT gives them what the check found.";
+
+  /** The demo's setup with Encrypt, Do Not Forward and labels (by name) checked as given. */
+  async function withChecks(
+    encrypt: Partial<CheckResult>,
+    doNotForward: Partial<CheckResult>,
+    labels: Record<string, Partial<CheckResult>> = {},
+  ) {
+    const backend = new MockBackend();
+    await stubSetup(backend, (setup) => ({
+      encrypt: result({ at, ...encrypt }),
+      doNotForward: result({ at, ...doNotForward }),
+      labels: setup.labels.map((l) =>
+        labels[l.name] ? { ...l, check: result({ at, ...labels[l.name] }) } : l,
+      ),
+    }));
+    await renderField(backend);
+    return backend;
+  }
+
+  const noteOf = (name: string) =>
+    row(name).querySelector(".protection-row__note")?.textContent ?? null;
+
+  it("says when the test arrived without it, and nothing more is known", async () => {
+    await withChecks({ state: "notApplied" }, {});
+    expect(statusOf("Encrypt")).toHaveTextContent(`Arrived without it · checked ${on}`);
+    expect(noteOf("Encrypt")).toBe(
+      "The test message arrived without it, as far as Cumulas Mail can tell. New mail flow rules can take 30 minutes or more to start working, and auto-labeling policies up to a day." +
+        IT,
+    );
+  });
+
+  it("says when the server got the request but nothing acted on it, or it was removed", async () => {
+    await withChecks(
+      { state: "notApplied", note: "requestIgnored" },
+      { state: "notApplied", note: "requestRemoved" },
+      {
+        General: { state: "notApplied", note: "requestIgnored" },
+        Public: { state: "notApplied", note: "requestRemoved" },
+      },
+    );
+    expect(statusOf("Encrypt")).toHaveTextContent(`Arrived without it · checked ${on}`);
+    expect(noteOf("Encrypt")).toBe(
+      "Your organization's mail server got the request (x-cumulas-protect was still on the test message), but no rule acted on it. The rule “Cumulas Mail: Encrypt” may be missing, turned off, in test mode, or new: rules can take 30 minutes or more to start working." +
+        IT,
+    );
+    expect(noteOf("Do Not Forward")).toBe(
+      "The request was removed on the way, but the message wasn't encrypted. Usually “Cumulas Mail: Encrypt” or “Cumulas Mail: Do Not Forward” removed it while its template couldn't be applied, or another rule removed x-cumulas-protect." +
+        IT,
+    );
+    expect(noteOf("General")).toBe(
+      "Your organization's mail server got the request (x-cumulas-label was still on the test message), but no auto-labeling policy applied the label. The policy may be missing, still in simulation, not include you, not be in effect yet (allow up to a day), or need a license your plan doesn't have." +
+        IT,
+    );
+    expect(noteOf("Public")).toBe(
+      "The request was removed on the way, but the message wasn't labeled. Usually a rule removed it, such as “Cumulas Mail: ignore label requests from outside” when the message didn't count as from inside your organization." +
+        IT,
+    );
+  });
+
+  it("says when the Cumulas Signatures relay hands mail back as outside mail", async () => {
+    await withChecks(
+      { state: "notApplied", note: "relayNotInternal" },
+      { state: "applied", passedAt: at },
+      { General: { state: "notApplied", note: "relayNotInternal" } },
+    );
+    expect(noteOf("Encrypt")).toBe(
+      "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back. Cumulas Mail's encryption rules then need to come before the relay's rule: Set up or check for your organization does that." +
+        IT,
+    );
+    expect(statusOf("Do Not Forward")).toHaveTextContent(`Arrived encrypted · checked ${on}`);
+    expect(noteOf("General")).toBe(
+      "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. They need Cumulas Signatures to count mail coming back from its server as mail from inside your organization: your IT team turns that on in Cumulas Signatures where it's offered (Finish setting up); otherwise ask Cumulas." +
+        IT,
+    );
+  });
+
+  it("says when the check ran too soon after a setup change, and how long after", async () => {
+    await withChecks(
+      { state: "notApplied", note: "tooSoon", changedAt: "2026-10-12T09:20:00Z" },
+      { state: "notApplied", note: "relayNotInternal", changedAt: "2026-10-12T07:30:00Z" },
+    );
+    expect(statusOf("Encrypt")).toHaveTextContent(`Arrived without it · checked ${on}`);
+    expect(noteOf("Encrypt")).toBe(
+      "Your organization's setup changed 10 minutes before this check. New rules can take 30 minutes or more to start working, and auto-labeling policies up to a day. Check again later.",
+    );
+    // Another note says what it found, then when the setup changed.
+    expect(noteOf("Do Not Forward")).toBe(
+      "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back. Cumulas Mail's encryption rules then need to come before the relay's rule: Set up or check for your organization does that. Your organization's setup changed 2 hours before this check; if that's under an hour (a day for labels), check again later." +
+        IT,
+    );
+  });
+
+  it("names the label that arrived instead, and says when the organization labels all mail", async () => {
+    const backend = new MockBackend();
+    const labels = (await backend.getProtectionSetup("acct-work")).labels;
+    const confidential = labels.find((l) => l.name === "All Employees")!;
+    await withChecks(
+      {},
+      {},
+      {
+        General: { state: "notApplied", note: "otherLabel", otherLabelId: confidential.id },
+        Public: {
+          state: "notApplied",
+          note: "otherLabel",
+          otherLabelId: "00000000-0000-4000-8000-00000000abcd",
+          otherLabelOnControl: true,
+        },
+      },
+    );
+    expect(statusOf("General")).toHaveTextContent(`Arrived with another label · checked ${on}`);
+    expect(noteOf("General")).toBe("It arrived labeled Confidential › All Employees instead.");
+    expect(noteOf("Public")).toBe(
+      "It arrived labeled a different label of your organization instead. Your organization puts that label on all mail.",
+    );
+  });
+
+  it("says when the test arrived protected another way, or its label couldn't be read", async () => {
+    await withChecks(
+      { state: "unknown", note: "otherProtection" },
+      {},
+      { General: { state: "unknown", note: "labelUnreadable" } },
+    );
+    expect(statusOf("Encrypt")).toHaveTextContent(`Couldn't tell · ${on}`);
+    expect(noteOf("Encrypt")).toBe(
+      "The test message arrived protected another way (S/MIME, or as a link to Microsoft's encrypted message portal), so Cumulas Mail can't tell whether your organization's rule did it. Open the test message to see.",
+    );
+    expect(noteOf("General")).toBe(
+      "The test message arrived encrypted, but Cumulas Mail couldn't read its label. Open the test message to see which label it has.",
+    );
+  });
+
+  it("asks for a check again when the mail now goes through the relay", async () => {
+    await withChecks({ state: "expired", note: "relayChanged" }, { state: "expired" });
+    expect(statusOf("Encrypt")).toHaveTextContent(/^Check again to use it$/);
+    expect(noteOf("Encrypt")).toBe(
+      "Your organization's mail now goes through the Cumulas Signatures relay, which it didn't when this was checked.",
+    );
+    // Only a pass that's too old says so.
+    expect(statusOf("Do Not Forward")).toHaveTextContent(
+      `Checked over 90 days ago (${on}). Check again to use it.`,
+    );
+  });
+
+  it("copies what the checks found for IT", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async (_text: string) => undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    onTestFinished(() => void vi.unstubAllGlobals());
+    const backend = await withChecks({ state: "notApplied" }, {});
+    const details = vi
+      .spyOn(backend, "getProtectionCheckDetails")
+      .mockResolvedValue("Cumulas Mail 0.5.0: setup check details for alex.morgan@acme.example");
+
+    await user.click(screen.getByRole("button", { name: "Copy details for IT" }));
+    expect(details).toHaveBeenCalledWith("acct-work");
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        "Cumulas Mail 0.5.0: setup check details for alex.morgan@acme.example",
+      ),
+    );
+    await waitFor(() =>
+      expect(useToasts.getState().toasts.map((t) => t.message)).toEqual([
+        "Copied the check's details",
+      ]),
+    );
+  });
+
+  it("says when the details couldn't be copied", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
+    onTestFinished(() => void vi.unstubAllGlobals());
+    await withChecks({ state: "applied", passedAt: at }, {});
+    await user.click(screen.getByRole("button", { name: "Copy details for IT" }));
+    await waitFor(() =>
+      expect(useToasts.getState().toasts.map((t) => t.message)).toEqual([
+        "Copying isn't available here.",
+      ]),
+    );
+  });
+
+  it("opens Set up or check for your organization from its button", async () => {
+    const user = userEvent.setup();
+    const backend = new MockBackend();
+    await renderField(backend);
+    const entry = screen.getByRole("button", { name: "Set up or check for your organization…" });
+    expect(entry).toHaveAttribute("aria-haspopup", "dialog");
+    await user.click(entry);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Set up or check for your organization",
+    });
+    // Re-approving Cumulas Mail's own permissions needs no setup sign-in.
+    expect(
+      await within(dialog).findByRole("region", { name: "Cumulas Mail's permissions" }),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getAllByRole("button", { name: "Close" })[0]!);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(backend.calls.orgSetupEnded).toBe(1);
+    await waitFor(() => expect(entry).toHaveFocus());
   });
 });
 
