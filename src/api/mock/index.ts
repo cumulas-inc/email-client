@@ -500,8 +500,13 @@ const READ_FIRST = "Read your organization's setup first: select Read again.";
 /** Cumulas Signatures' page for administrators (AppInfo.signatureServer). */
 const SIGNATURES_MANAGE_URL = "https://signature.cumulas.co/manage";
 /** The demo organization's administrator, and their Microsoft Entra object ID. */
-const SETUP_ADMIN = { name: "sam.rivera", displayName: "Sam Rivera" };
-const SETUP_ADMIN_OBJECT_ID = "5f3a9c2e-7b1d-4e8f-a6c4-2d9b0e1f3a7c";
+const SETUP_ADMIN = {
+  name: "sam.rivera",
+  displayName: "Sam Rivera",
+  objectId: "5f3a9c2e-7b1d-4e8f-a6c4-2d9b0e1f3a7c",
+};
+/** The work account's own person's object ID, signing in without an administrator role. */
+const SETUP_USER_OBJECT_ID = "1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
 /** A label Purview lists that isn't published to the demo's work account. */
 const BOARD_LABEL: PurviewLabel = {
   id: "c3d4e5f6-0718-4a29-b3c4-d5e6f7a8b9c0",
@@ -764,7 +769,12 @@ export class MockBackend implements Backend {
   /** Each organization as setup finds it, by tenant, once looked at. */
   private organizations = new Map<string, DemoTenant>();
   /** The setup sign-in, like the core's: at most one, for one organization; whether it read yet. */
-  private orgSetupSession: { tenantId: string; admin: OrgSetupAdmin; read: boolean } | null = null;
+  private orgSetupSession: {
+    tenantId: string;
+    admin: OrgSetupAdmin;
+    objectId: string;
+    read: boolean;
+  } | null = null;
   /** The calls and sign-ins "Copy setup details" names. */
   private setupLog = new SetupLog();
   /** Ends the setup sign-in waiting in the browser, as Cancel does. */
@@ -2777,7 +2787,10 @@ export class MockBackend implements Backend {
   }
 
   /** What the core knows of the account and the administrator without Microsoft. */
-  private setupContext(account: Account, admin: OrgSetupAdmin): SetupContext {
+  private setupContext(
+    account: Account,
+    { admin, objectId }: { admin: OrgSetupAdmin; objectId: string },
+  ): SetupContext {
     const catalog = this.protectionOf(account)?.catalog?.labels ?? null;
     return {
       email: account.email,
@@ -2787,7 +2800,7 @@ export class MockBackend implements Backend {
       needsPermission: account.needsPermission.includes("sensitivityLabels"),
       refused: account.refusedFeatures.includes("sensitivityLabels"),
       admin,
-      adminObjectId: SETUP_ADMIN_OBJECT_ID,
+      adminObjectId: objectId,
       signaturesManageUrl: SIGNATURES_MANAGE_URL,
       now: Date.now(),
     };
@@ -2873,20 +2886,25 @@ export class MockBackend implements Backend {
       throw error;
     }
     // An administrator of the organization; in `noRole`, the account's own person, who isn't one.
-    const admin: OrgSetupAdmin =
-      this.orgSetupKind === "noRole"
-        ? { username: account.email, displayName: account.displayName }
-        : {
-            username: `${SETUP_ADMIN.name}@${emailDomain(account.email) ?? "acme.example"}`,
-            displayName: SETUP_ADMIN.displayName,
-          };
+    const own = this.orgSetupKind === "noRole";
+    const admin: OrgSetupAdmin = own
+      ? { username: account.email, displayName: account.displayName }
+      : {
+          username: `${SETUP_ADMIN.name}@${emailDomain(account.email) ?? "acme.example"}`,
+          displayName: SETUP_ADMIN.displayName,
+        };
     this.setupLog.signIn(
       at,
       tenant,
       'code redeemed · granted "https://outlook.office365.com/Exchange.Manage openid profile offline_access" · ID token yes · refresh token yes',
     );
     this.setupLog.signedIn(admin.username);
-    this.orgSetupSession = { tenantId: tenant, admin, read: false };
+    this.orgSetupSession = {
+      tenantId: tenant,
+      admin,
+      objectId: own ? SETUP_USER_OBJECT_ID : SETUP_ADMIN.objectId,
+      read: false,
+    };
     return { ...admin };
   }
 
@@ -2904,7 +2922,7 @@ export class MockBackend implements Backend {
     // Signed out meanwhile: the core's read ends the same way.
     if (this.orgSetupSession !== session) this.setupSession(account);
     const organization = this.organization(account);
-    const context = this.setupContext(account, session.admin);
+    const context = this.setupContext(account, session);
     this.setupLog.read(context.now, organization, account.email);
     session.read = true;
     return orgSetupStatus(organization, context);
@@ -2922,7 +2940,7 @@ export class MockBackend implements Backend {
     choices: OrgSetupChoices,
   ): {
     account: Account;
-    session: { admin: OrgSetupAdmin };
+    session: NonNullable<MockBackend["orgSetupSession"]>;
     organization: DemoTenant;
     context: SetupContext;
   } {
@@ -2931,7 +2949,7 @@ export class MockBackend implements Backend {
     const session = this.setupSession(account);
     if (!session.read) fail("invalidInput", READ_FIRST);
     const organization = this.organization(account);
-    const context = this.setupContext(account, session.admin);
+    const context = this.setupContext(account, session);
     const invalid = invalidChoice(organization, context, choices);
     if (invalid) fail("invalidInput", invalid);
     return { account, session, organization, context };
@@ -2987,7 +3005,7 @@ export class MockBackend implements Backend {
       this.orgSetupSession = null;
       this.setupLog.note(now, "Signed out: Microsoft 365 didn't accept the sign-in any more.");
     } else {
-      const after = this.setupContext(account, session.admin);
+      const after = this.setupContext(account, session);
       this.setupLog.read(after.now, organization, account.email);
       status = orgSetupStatus(organization, after);
     }

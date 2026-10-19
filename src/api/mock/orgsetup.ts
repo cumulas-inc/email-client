@@ -961,7 +961,7 @@ export function orgSetupStatus(tenant: DemoTenant, ctx: SetupContext): OrgSetupS
       inCatalog: l.inCatalog,
       encrypts: l.encrypts,
       forEmail: tenant.compliance ? true : null,
-      state: states.get(l.id) ?? "unknown",
+      state: (tenant.compliance && states.get(l.id)) || "unknown",
     })),
     templates: tenant.exchange ? tenant.templates.map((t) => ({ ...t })) : [],
     relay: tenant.exchange ? tenant.relay : "none",
@@ -1573,6 +1573,7 @@ export class SetupLog {
       this.entries.push(
         "",
         "Mail flow rules, by priority:",
+        ...(tenant.rules.length ? [] : ["  none"]),
         ...tenant.rules.map((r, i) => {
           const flags = [
             r.enabled ? "Enabled" : "Disabled",
