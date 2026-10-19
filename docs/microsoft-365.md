@@ -682,7 +682,8 @@ It uses Microsoft 365's PowerShell interface over HTTPS (`InvokeCommand`), which
 document for other apps, so it may stop working. When it fails, the dialog gives a PowerShell
 script, filled in for your organization, that does the same, and the filled-in Microsoft Purview
 portal steps for administrators without Windows (Security & Compliance PowerShell runs only on
-Windows). Organizations in government or other national clouds use the script too.
+Windows). Setup and its script work only with Microsoft's worldwide cloud (GCC included), not
+GCC High, DoD or 21Vianet.
 
 ##### Approval and security
 

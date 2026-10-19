@@ -703,6 +703,12 @@ fn validate_settings(s: &Settings) -> Result<()> {
             "Reminders must snooze for at least one minute.",
         ));
     }
+    if s.microsoft_client_id
+        .as_deref()
+        .is_some_and(crate::auth::admin_setup::is_setup_client_id)
+    {
+        return Err(crate::auth::admin_setup::setup_client_id_as_mail());
+    }
     let families = [s.interface_font.family(), s.reading_font.family()];
     if families
         .into_iter()

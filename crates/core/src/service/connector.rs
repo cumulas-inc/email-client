@@ -11,7 +11,7 @@ use super::permissions::NeedsPermission;
 use crate::auth::GrantRecord;
 use crate::auth::admin_setup::{
     AdminSetupConfig, AdminSignIn, COMPLIANCE_DISCOVERY_HOST, EXCHANGE_RESOURCE, admin_sign_in,
-    setup_client_id, setup_not_available,
+    is_setup_client_id, setup_client_id, setup_client_id_as_mail, setup_not_available,
 };
 use crate::auth::microsoft::{
     self, ApiTokenSource, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult, SyncTokenSource,
@@ -81,6 +81,13 @@ fn resolve_builtin_microsoft_client_id(built_in: Option<&str>) -> Option<String>
     };
     if value.eq_ignore_ascii_case(NO_CLIENT_ID) {
         return None;
+    }
+    if is_guid(value) && is_setup_client_id(value) {
+        tracing::warn!(
+            "ignoring the Microsoft client ID from the build ({MICROSOFT_CLIENT_ID_VAR}): it is \
+             the setup app's, and the two registrations must never be one"
+        );
+        return Some(PUBLISHED_MICROSOFT_CLIENT_ID.to_owned());
     }
     if is_guid(value) {
         return Some(value.to_ascii_lowercase());
@@ -308,6 +315,14 @@ impl LiveConnector {
                  Settings → Accounts → Microsoft app registration.",
             )
         })?;
+        // Saved before Settings refused it: never signed in with, so the
+        // setup app's refresh token is never kept.
+        if is_setup_client_id(&client_id) {
+            return Err(Error::new(
+                ErrorCode::NotConfigured,
+                setup_client_id_as_mail().message,
+            ));
+        }
         let published = client_id.eq_ignore_ascii_case(PUBLISHED_MICROSOFT_CLIENT_ID);
         Ok(MicrosoftAuthConfig {
             published,
@@ -525,6 +540,30 @@ mod tests {
     }
 
     #[test]
+    fn sign_in_never_uses_the_setup_apps_id_saved_as_the_mail_apps() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut settings = store.get_settings().unwrap();
+        let setup = crate::auth::admin_setup::PUBLISHED_SETUP_CLIENT_ID.unwrap();
+        settings.microsoft_client_id = Some(setup.to_uppercase());
+        store.save_settings(&settings).unwrap();
+        let connector = LiveConnector::new(
+            Arc::clone(&store),
+            Arc::new(crate::secrets::MemorySecretStore::default()),
+        );
+        let err = connector.microsoft_config().unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotConfigured);
+        assert!(
+            err.message.contains("only for organization setup"),
+            "{}",
+            err.message
+        );
+        // Another ID is used.
+        settings.microsoft_client_id = Some(ID.into());
+        store.save_settings(&settings).unwrap();
+        assert_eq!(connector.microsoft_config().unwrap().client_id, ID);
+    }
+
+    #[test]
     fn the_published_client_id_is_built_in_unless_the_build_names_another() {
         let published = Some(PUBLISHED_MICROSOFT_CLIENT_ID);
         // Not set, or set empty (as the Flatpak manifest does).
@@ -572,5 +611,11 @@ mod tests {
             );
         }
         assert!(is_guid(PUBLISHED_MICROSOFT_CLIENT_ID));
+        // The setup app's: ignored, as the mail app must never be it.
+        let setup = crate::auth::admin_setup::PUBLISHED_SETUP_CLIENT_ID.unwrap();
+        assert_eq!(
+            resolve_builtin_microsoft_client_id(Some(&setup.to_uppercase())).as_deref(),
+            published
+        );
     }
 }

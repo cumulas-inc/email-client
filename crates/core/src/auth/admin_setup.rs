@@ -85,10 +85,34 @@ pub const SETUP_ONLY_MARKERS: &[&str] = &[
 /// entered in Settings) is refused, with a warning: the two registrations
 /// must never be one.
 pub fn setup_client_id(mail_client_id: Option<&str>) -> Option<String> {
+    apart_from_mail(built_setup_client_id()?, mail_client_id)
+}
+
+/// The build's setup client ID, else the published one.
+fn built_setup_client_id() -> Option<&'static str> {
     // Worked out once, so that a bad value is warned about once.
     static BUILT: LazyLock<Option<String>> =
         LazyLock::new(|| resolve_setup_client_id(BUILD_SETUP_CLIENT_ID));
-    apart_from_mail(BUILT.as_deref()?, mail_client_id)
+    BUILT.as_deref()
+}
+
+/// Whether `id` is a setup app's client ID (the published one, or this
+/// build's): never the mail app's, whose refresh token is kept, as an
+/// approval of the setup app would let it get Exchange.Manage.
+pub fn is_setup_client_id(id: &str) -> bool {
+    [PUBLISHED_SETUP_CLIENT_ID, built_setup_client_id()]
+        .into_iter()
+        .flatten()
+        .any(|setup| setup.eq_ignore_ascii_case(id.trim()))
+}
+
+/// What Settings and sign-in say about the setup app's ID given as the
+/// mail app's.
+pub fn setup_client_id_as_mail() -> Error {
+    Error::invalid_input(format!(
+        "That's the ID of {SETUP_APP_NAME}, which is only for organization setup. Enter your \
+         mail app registration's ID."
+    ))
 }
 
 /// The build variable's setup client ID, else the published one; `None`
@@ -459,8 +483,9 @@ pub(super) fn admin_sign_in_error(config: &AdminSetupConfig, error: &OAuthError)
     }
     if error.has_code(OTHER_CLOUD_CODE) {
         return Error::provider(
-            "Microsoft couldn't find your organization in its public cloud. Organizations in \
-             government or other national clouds need to use the PowerShell script.",
+            "Microsoft couldn't find your organization in its worldwide cloud. Cumulas Mail works \
+             only with Microsoft's worldwide cloud, not government or other national clouds \
+             (GCC High, DoD, 21Vianet).",
         )
         .with_details(json!({ "reason": "otherCloud", "aadsts": OTHER_CLOUD_CODE }));
     }
@@ -779,6 +804,11 @@ mod tests {
             apart_from_mail(setup, Some(&format!(" {} ", setup.to_uppercase()))),
             None
         );
+        // Nor is the setup app ever the mail app.
+        assert!(is_setup_client_id(setup));
+        assert!(is_setup_client_id(&format!(" {} ", setup.to_uppercase())));
+        assert!(!is_setup_client_id(PUBLISHED_MICROSOFT_CLIENT_ID));
+        assert!(!is_setup_client_id(ID));
         // A build naming the published mail app as the setup app: refused,
         // whatever Settings says.
         let built = resolve_setup_client_id(Some(PUBLISHED_MICROSOFT_CLIENT_ID)).unwrap();
@@ -1144,9 +1174,9 @@ mod tests {
                 Refusal {
                     query: "error=invalid_request&error_description=AADSTS90002%3A+Tenant+not+found.",
                     code: ErrorCode::Provider,
-                    message: "Microsoft couldn't find your organization in its public cloud. \
-                              Organizations in government or other national clouds need to use \
-                              the PowerShell script."
+                    message: "Microsoft couldn't find your organization in its worldwide \
+                              cloud. Cumulas Mail works only with Microsoft's worldwide cloud, \
+                              not government or other national clouds (GCC High, DoD, 21Vianet)."
                         .into(),
                     reason: Some("otherCloud"),
                     aadsts: vec![90002],

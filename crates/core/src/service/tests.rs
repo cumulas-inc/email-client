@@ -1747,6 +1747,26 @@ async fn appearance_settings_are_validated_and_saved() {
     assert_eq!(h.service.get_settings().unwrap(), chosen);
 }
 
+#[tokio::test]
+async fn the_setup_app_is_never_the_mail_app() {
+    let h = harness();
+    let setup = crate::auth::admin_setup::PUBLISHED_SETUP_CLIENT_ID.unwrap();
+    for id in [setup.to_owned(), format!(" {} ", setup.to_uppercase())] {
+        let bad = Settings {
+            microsoft_client_id: Some(id.clone()),
+            ..Settings::default()
+        };
+        let err = h.service.update_settings(bad).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidInput, "{id}");
+        assert!(
+            err.message.contains("only for organization setup"),
+            "{}",
+            err.message
+        );
+    }
+    assert_eq!(h.service.get_settings().unwrap().microsoft_client_id, None);
+}
+
 fn add_message(h: &Harness, account: &Account, folder: &str, remote: &str, subject: &str) {
     let m = summary(&account.id, folder, remote, subject);
     h.server

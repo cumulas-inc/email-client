@@ -141,7 +141,7 @@ export function orgSetupSignInError(failure: OrgSetupSignInFailure, org: string)
       return {
         code: "provider",
         message:
-          "Microsoft couldn't find your organization in its public cloud. Organizations in government or other national clouds need to use the PowerShell script.",
+          "Microsoft couldn't find your organization in its worldwide cloud. Cumulas Mail works only with Microsoft's worldwide cloud, not government or other national clouds (GCC High, DoD, 21Vianet).",
         details: { reason: "otherCloud", aadsts: 90002 },
       };
     case "timeout":
