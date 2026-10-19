@@ -38,10 +38,17 @@
 #    the app IDs it looks up or names as an API (appId eq '…',
 #    -ResourceApplication) are those, Microsoft Graph's, and, in the setup
 #    app's section only, Office 365 Exchange Online's;
-#  - its consent policy script (id="consent-policy-script") names the API
-#    of each include, limits Microsoft Graph to exactly the permissions in
-#    CORE_SCOPES and OPTIONAL_SCOPES, and nothing outside the notice
-#    includes apps by publisher (ClientApplicationPublisherIds).
+#  - its consent policy script (id="consent-policy-script"), and the
+#    notice's commands that narrow an earlier policy (id="consent-policy-fix"),
+#    name the API of each include; exactly one include is Microsoft Graph's,
+#    and it alone carries -Permissions $ids, built from Graph's permissions
+#    and limited to exactly those in CORE_SCOPES and OPTIONAL_SCOPES, with
+#    a stop when one isn't found; and nothing outside the notice includes
+#    apps by publisher (ClientApplicationPublisherIds);
+#  - the setup app's script stops at the first error, checks that
+#    assignment is required before it approves the app, and approves, for
+#    the setup app ($sp) and for everyone, exactly Exchange.Manage on Office
+#    365 Exchange Online and the OpenID Connect scopes on Microsoft Graph.
 #
 # CI runs it on every pull request (ci.yml) and test.sh on the assembled
 # site, so a change to the app's permissions fails until the page matches.
@@ -277,6 +284,20 @@ comes_before() {
   text=$(cat)
   [ "$(first_line "$1" <<<"$text")" -lt "$(first_line "$2" <<<"$text")" ]
 }
+# Each PowerShell command of the input on one line: its lines continued
+# with a backtick joined.
+commands() {
+  awk '{
+    line = $0
+    if (sub(/`[[:space:]]*$/, "", line)) { joined = joined line " "; next }
+    print joined line
+    joined = ""
+  }'
+}
+# The commands of the input that run CMDLET.
+runs() {
+  grep -E -- "(^|[[:space:](])$1( |$)" || true
+}
 
 if [ -n "$setup_id" ]; then
   setup_flat=$(tr -s '[:space:]' ' ' <<<"$setup_section")
@@ -305,6 +326,53 @@ if [ -n "$setup_id" ]; then
     tr -s ' ' '\n' | sort -u)
   check "the setup script approves exactly SETUP_CONSENT_SCOPES" \
     test "$granted" = "$(printf '%s\n' "${approved[@]}" | sort -u)"
+  check "the setup script stops at its first error, before it changes anything" \
+    comes_before "\$ErrorActionPreference = 'Stop'" "Update-MgServicePrincipal" <<<"$setup_script"
+  check "the setup script stops at its first error, before it creates the app" \
+    comes_before "\$ErrorActionPreference = 'Stop'" "New-MgServicePrincipal " <<<"$setup_script"
+  # A check that assignment is required, which stops it, before any approval.
+  rechecked=$(grep -nE -- 'if \(-not .*\.AppRoleAssignmentRequired\)' <<<"$setup_script" | head -n 1 | cut -d: -f1 || true)
+  check "the setup script checks that assignment is required before it approves the app" \
+    test "${rechecked:-999999}" -lt "$(first_line "New-MgOauth2PermissionGrant" <<<"$setup_script")"
+  # Each approval: for the setup app, for everyone, and what for which API,
+  # by the app ID the variable it names was looked up with.
+  setup_commands=$(commands <<<"$setup_script")
+  declare -A looked_up=()
+  while read -r var app; do
+    looked_up[$var]=$app
+  done < <(sed -nE "s/^\\\$([A-Za-z0-9_]+) = Get-MgServicePrincipal +-Filter \"appId eq '([^'\$]*)'\".*/\1 \2/p" <<<"$setup_commands")
+  exchange_granted=()
+  graph_granted=()
+  grants_ok=true
+  while IFS= read -r grant; do
+    [ -n "$grant" ] || continue
+    # shellcheck disable=SC2016 # a PowerShell variable
+    var=$(sed -nE 's/.*-ResourceId \$([A-Za-z0-9_]+)\.Id( .*|$)/\1/p' <<<"$grant")
+    scope=$(sed -nE 's/.*-Scope "([^"]*)".*/\1/p' <<<"$grant")
+    grep -qF -- "-ClientId \$sp.Id" <<<"$grant" || grants_ok=false
+    grep -qF -- "-ConsentType AllPrincipals" <<<"$grant" || grants_ok=false
+    case "${looked_up[$var]:-}" in
+      "$exchange_app") read -ra words <<<"$scope" && exchange_granted+=("${words[@]}") ;;
+      "$graph_app") read -ra words <<<"$scope" && graph_granted+=("${words[@]}") ;;
+      *) grants_ok=false ;;
+    esac
+  done < <(runs New-MgOauth2PermissionGrant <<<"$setup_commands")
+  want_exchange=()
+  want_graph=()
+  for scope in "${setup_scopes[@]}"; do
+    case $scope in
+      https://outlook.office365.com/*) want_exchange+=("${scope#https://outlook.office365.com/}") ;;
+      */*) want_exchange+=("unexpected:$scope") ;;
+      *) want_graph+=("$scope") ;;
+    esac
+  done
+  sorted() { printf '%s\n' "$@" | sort -u; }
+  check "the setup script approves only for the setup app, for everyone, on Exchange or Graph" \
+    "$grants_ok"
+  check "the setup script approves on Office 365 Exchange Online exactly its SETUP_CONSENT_SCOPES" \
+    test "$(sorted "${exchange_granted[@]}")" = "$(sorted "${want_exchange[@]}")"
+  check "the setup script approves on Microsoft Graph exactly its SETUP_CONSENT_SCOPES" \
+    test "$(sorted "${graph_granted[@]}")" = "$(sorted "${want_graph[@]}")"
 
   notice=$(awk '
     /<aside id="consent-policy-notice"/ { inside = 1 }
@@ -369,18 +437,39 @@ check "the setup app's section looks up only those and Office 365 Exchange Onlin
 
 # --- The consent policy -------------------------------------------------------------------
 
-consent_script=$(pre_by_id consent-policy-script <"$page")
-check "the page has the consent policy script (id=\"consent-policy-script\")" test -n "$consent_script"
-includes=$(grep -cF -- "New-MgPolicyPermissionGrantPolicyInclude" <<<"$consent_script" || true)
-apis=$(grep -cF -- "-ResourceApplication" <<<"$consent_script" || true)
-check "every include of the consent policy names its API (-ResourceApplication)" \
-  test "$includes" -gt 0 -a "$includes" = "$apis"
-check "the consent policy limits Microsoft Graph to its -Permissions" \
-  grep -qF -- "-Permissions" <<<"$consent_script"
-# The permissions it names: its single-quoted names, but app IDs.
-named=$(grep -oE "'[^']*'" <<<"$consent_script" | tr -d "'" | grep -vxE -- "$guid" | sort -u || true)
-check "the consent policy names exactly the permissions in CORE_SCOPES and OPTIONAL_SCOPES" \
-  test "$named" = "$(printf '%s\n' "${core_scopes[@]}" "${optional_scopes[@]}" | sort -u)"
+# The policy's includes as the script ($1, the <pre>'s id) adds them. Its
+# patterns name PowerShell variables, which stay as they are.
+# shellcheck disable=SC2016
+check_consent_includes() {
+  local id=$1 script cmds includes graph_includes others named
+  script=$(pre_by_id "$id" <"$page")
+  check "the page has the consent policy commands (id=\"$id\")" test -n "$script"
+  cmds=$(commands <<<"$script")
+  includes=$(runs New-MgPolicyPermissionGrantPolicyInclude <<<"$cmds")
+  check "$id: every include of the consent policy names its API (-ResourceApplication)" \
+    test -n "$includes" -a -z "$(grep -vF -- "-ResourceApplication" <<<"$includes" || true)"
+  graph_includes=$(grep -F -- "-ResourceApplication \"$graph_app\"" <<<"$includes" || true)
+  others=$(grep -vF -- "-ResourceApplication \"$graph_app\"" <<<"$includes" || true)
+  check "$id: exactly one include is Microsoft Graph's" \
+    test "$(grep -c . <<<"$graph_includes" || true)" = 1
+  check "$id: Microsoft Graph's include is limited to -Permissions \$ids" \
+    grep -qE -- '-Permissions \$ids( |$)' <<<"$graph_includes"
+  check "$id: no other include has -Permissions" \
+    test -z "$(grep -F -- "-Permissions" <<<"$others" || true)"
+  check "$id: \$ids are Microsoft Graph's permissions" \
+    grep -qE -- '^\$ids = .*\$graph\.Oauth2PermissionScopes' <<<"$cmds"
+  check "$id: it stops at its first error" \
+    comes_before '$ErrorActionPreference = "Stop"' "New-MgPolicyPermissionGrantPolicyInclude" <<<"$script"
+  # Without every permission, -Permissions would be empty: all of Graph's.
+  check "$id: it stops when a permission isn't found, before the includes" \
+    comes_before 'if ($ids.Count -ne $names.Count)' "New-MgPolicyPermissionGrantPolicyInclude" <<<"$script"
+  # The permissions it names: its single-quoted names, but app IDs.
+  named=$(grep -oE "'[^']*'" <<<"$script" | tr -d "'" | grep -vxE -- "$guid" | sort -u || true)
+  check "$id: the consent policy names exactly the permissions in CORE_SCOPES and OPTIONAL_SCOPES" \
+    test "$named" = "$(printf '%s\n' "${core_scopes[@]}" "${optional_scopes[@]}" | sort -u)"
+}
+check_consent_includes consent-policy-script
+check_consent_includes consent-policy-fix
 without_notice=$(awk '
   /<aside id="consent-policy-notice"/ { inside = 1 }
   !inside { print }

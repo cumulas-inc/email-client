@@ -659,9 +659,16 @@
                     >If you created the cumulas-mail consent policy with an earlier version of this
                     page</strong
                   >, its includes may let people approve any permission for Cumulas Mail, or for any
-                  app from Cumulas Inc, including Cumulas Mail - Admin Setup. Check and narrow it:
+                  app from Cumulas Inc, including Cumulas Mail - Admin Setup. Check and narrow it
+                  with this, rather than running the script below again (the policy exists):
                 </p>
-                <pre class="script"><code>Get-MgPolicyPermissionGrantPolicyInclude `
+                <pre
+                  class="script"
+                  id="consent-policy-fix"
+                ><code>Connect-MgGraph -Scopes "Policy.ReadWrite.PermissionGrant", `
+  "Application.Read.All"
+$ErrorActionPreference = "Stop"
+Get-MgPolicyPermissionGrantPolicyInclude `
   -PermissionGrantPolicyId "cumulas-mail" |
   Format-List Id,ClientApplicationIds,
     ClientApplicationPublisherIds,ResourceApplication,
@@ -671,8 +678,34 @@
 Remove-MgPolicyPermissionGrantPolicyInclude `
   -PermissionGrantPolicyId "cumulas-mail" `
   -PermissionGrantConditionSetId "&lt;Id&gt;"
-# Add the two narrowed includes below, then keep the
-# setup app out explicitly:
+# Then add the two narrowed includes:
+$graph = Get-MgServicePrincipal `
+  -Filter "appId eq '00000003-0000-0000-c000-000000000000'"
+$names = @('openid', 'profile', 'email', 'offline_access',
+  'User.Read', 'Mail.ReadWrite', 'Mail.Send',
+  'MailboxSettings.Read', 'Calendars.ReadWrite',
+  'Contacts.ReadWrite', 'Tasks.ReadWrite',
+  'InformationProtectionPolicy.Read')
+$ids = @($graph.Oauth2PermissionScopes |
+  Where-Object { $_.Value -in $names } |
+  Select-Object -ExpandProperty Id)
+# Without them all, an include would cover every permission.
+if ($ids.Count -ne $names.Count) {
+  throw "Not every Microsoft Graph permission was found; nothing was added."
+}
+New-MgPolicyPermissionGrantPolicyInclude `
+  -PermissionGrantPolicyId "cumulas-mail" `
+  -PermissionType "delegated" `
+  -ClientApplicationIds "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad" `
+  -ResourceApplication "00000003-0000-0000-c000-000000000000" `
+  -Permissions $ids
+# Instant updates: Cumulas Mail's own API (Sync.Receive)
+New-MgPolicyPermissionGrantPolicyInclude `
+  -PermissionGrantPolicyId "cumulas-mail" `
+  -PermissionType "delegated" `
+  -ClientApplicationIds "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad" `
+  -ResourceApplication "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad"
+# And keep the setup app out explicitly:
 New-MgPolicyPermissionGrantPolicyExclude `
   -PermissionGrantPolicyId "cumulas-mail" `
   -PermissionType "delegated" `
@@ -688,6 +721,7 @@ New-MgPolicyPermissionGrantPolicyExclude `
                 id="consent-policy-script"
               ><code>Connect-MgGraph -Scopes "Policy.ReadWrite.PermissionGrant", `
   "Policy.ReadWrite.Authorization", "Application.Read.All"
+$ErrorActionPreference = "Stop"
 
 # A policy for Cumulas Mail's delegated permissions only
 New-MgPolicyPermissionGrantPolicy -Id "cumulas-mail" `
@@ -697,13 +731,18 @@ New-MgPolicyPermissionGrantPolicy -Id "cumulas-mail" `
 # Microsoft Graph: only what Cumulas Mail asks for
 $graph = Get-MgServicePrincipal `
   -Filter "appId eq '00000003-0000-0000-c000-000000000000'"
-$ids = $graph.Oauth2PermissionScopes |
-  Where-Object { $_.Value -in @('openid', 'profile',
-    'email', 'offline_access', 'User.Read',
-    'Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.Read',
-    'Calendars.ReadWrite', 'Contacts.ReadWrite',
-    'Tasks.ReadWrite', 'InformationProtectionPolicy.Read') } |
-  Select-Object -ExpandProperty Id
+$names = @('openid', 'profile', 'email', 'offline_access',
+  'User.Read', 'Mail.ReadWrite', 'Mail.Send',
+  'MailboxSettings.Read', 'Calendars.ReadWrite',
+  'Contacts.ReadWrite', 'Tasks.ReadWrite',
+  'InformationProtectionPolicy.Read')
+$ids = @($graph.Oauth2PermissionScopes |
+  Where-Object { $_.Value -in $names } |
+  Select-Object -ExpandProperty Id)
+# Without them all, an include would cover every permission.
+if ($ids.Count -ne $names.Count) {
+  throw "Not every Microsoft Graph permission was found; nothing was added."
+}
 New-MgPolicyPermissionGrantPolicyInclude `
   -PermissionGrantPolicyId "cumulas-mail" `
   -PermissionType "delegated" `
@@ -834,6 +873,8 @@ Update-MgPolicyAuthorizationPolicy `
           ><code>Connect-MgGraph -Scopes "Application.ReadWrite.All", `
   "AppRoleAssignment.ReadWrite.All", `
   "DelegatedPermissionGrant.ReadWrite.All", "User.ReadBasic.All"
+# Any error stops it, before anything is approved.
+$ErrorActionPreference = 'Stop'
 # Cumulas Mail - Admin Setup
 $app = "b4f17c55-b9f6-4a84-958f-afe3842da327"
 $sp = Get-MgServicePrincipal -Filter "appId eq '$app'"
@@ -851,6 +892,11 @@ New-MgServicePrincipalAppRoleAssignedTo `
 
 # Only then, approve it for the organization (assignment
 # limits who can use it):
+$set = Get-MgServicePrincipal -ServicePrincipalId $sp.Id `
+  -Property appRoleAssignmentRequired
+if (-not $set.AppRoleAssignmentRequired) {
+  throw 'Assignment required is not set; nothing was approved.'
+}
 $exo = Get-MgServicePrincipal `
   -Filter "appId eq '00000002-0000-0ff1-ce00-000000000000'"
 $graph = Get-MgServicePrincipal `
