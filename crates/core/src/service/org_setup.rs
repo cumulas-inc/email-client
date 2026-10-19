@@ -379,16 +379,31 @@ impl CoreService {
         if let Some(snapshot) = &snapshot {
             ctx.licensing = snapshot.licensing.clone();
         }
-        let choices = request.choices.clone().unwrap_or_default();
+        let mut choices = request.choices.clone().unwrap_or_default();
+        if !request.labels {
+            choices.label_ids.clear();
+        }
+        if snapshot.is_none() {
+            // Purview's list went with the sign-in: the labels chosen from it
+            // that the account's own list doesn't have are left out (anything
+            // that isn't a label ID is still refused).
+            choices.label_ids.retain(|id| {
+                let id = id.trim().to_ascii_lowercase();
+                !is_guid(&id) || ctx.catalog.as_ref().is_some_and(|c| c.label(&id).is_some())
+            });
+        }
         let choices = wanted::validate(&choices, snapshot.as_deref(), &ctx)?;
-        let ids: Vec<String> = match (request.labels, &request.choices) {
-            (false, _) => Vec::new(),
-            (true, Some(_)) => choices.label_ids.clone(),
-            (true, None) => ctx
-                .catalog
+        // With labels but none chosen (or none left): the account's list,
+        // as before a sign-in.
+        let ids: Vec<String> = if !request.labels {
+            Vec::new()
+        } else if !choices.label_ids.is_empty() {
+            choices.label_ids.clone()
+        } else {
+            ctx.catalog
                 .as_ref()
                 .map(|c| c.labels.iter().map(|l| l.id.to_ascii_lowercase()).collect())
-                .unwrap_or_default(),
+                .unwrap_or_default()
         };
         let purview = snapshot
             .as_ref()

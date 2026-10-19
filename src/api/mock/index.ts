@@ -3026,15 +3026,23 @@ export class MockBackend implements Backend {
     const account = this.setupAccount(accountId);
     const tenant = this.tenantOf(account);
     const catalog = this.protectionOf(account)?.catalog?.labels ?? [];
-    const chosen = request.choices?.labelIds.map((id) => id.trim().toLowerCase());
-    // Like the core's validation: only labels the account or Purview lists.
-    const known = this.purviewLabels();
-    if (chosen?.some((id) => !known.some((l) => l.id === id))) {
+    // Like the core: Purview's list only with a sign-in; without one, the
+    // labels chosen from it that the account's own list doesn't have are left out.
+    const signedIn = this.orgSetupSession?.tenantId === tenant && this.orgSetupSession.read;
+    const known = signedIn
+      ? this.purviewLabels()
+      : catalog.map((l) => ({ id: l.id, name: l.name, title: labelTitle(l) }));
+    const guid = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+    const chosen = (request.labels ? (request.choices?.labelIds ?? []) : [])
+      .map((id) => id.trim().toLowerCase())
+      .filter((id) => signedIn || !guid.test(id) || catalog.some((l) => l.id.toLowerCase() === id));
+    if (chosen.some((id) => !known.some((l) => l.id === id))) {
       fail("invalidInput", "That label isn't one Purview lists.");
     }
+    // With labels but none chosen: the account's list, as before a sign-in.
     const labels = !request.labels
       ? []
-      : chosen
+      : chosen.length > 0
         ? known.filter((l) => chosen.includes(l.id))
         : catalog.map((l) => ({ id: l.id, name: l.name, title: labelTitle(l) }));
     const portalSteps = labels.map((label) => ({

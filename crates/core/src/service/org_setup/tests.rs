@@ -626,6 +626,77 @@ mod signed_in {
     }
 
     #[tokio::test]
+    async fn the_script_keeps_to_the_labels_it_can_check() {
+        use crate::orgsetup::tests::{SECRET, catalog};
+        let Setup {
+            service,
+            work,
+            _server,
+            ..
+        } = setup().await;
+        service
+            .org_setup_sign_in(no_browser(), &work.id)
+            .await
+            .unwrap();
+        service.read_org_setup(&work.id).await.unwrap();
+        // The account's own list lacks Highly Confidential; Purview has it.
+        let mut listed = catalog();
+        listed.labels.retain(|l| l.id != SECRET);
+        service
+            .store()
+            .save_label_catalog(&work.id, &listed, Utc::now())
+            .unwrap();
+        // Reading labels approved.
+        let granted: Vec<String> = crate::auth::microsoft::all_scopes()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        service
+            .store()
+            .set_sign_in_grant(&work.id, &granted)
+            .unwrap();
+        let script = |choices: &OrgSetupChoices, labels: bool| {
+            service.org_setup_script(
+                &work.id,
+                &OrgSetupScriptRequest {
+                    choices: Some(choices.clone()),
+                    actions: true,
+                    labels,
+                },
+            )
+        };
+        let titles = |s: &OrgSetupScript| {
+            s.portal_steps
+                .iter()
+                .map(|p| p.label_title.clone())
+                .collect::<Vec<_>>()
+        };
+        // Signed in with no label chosen, Sensitivity labels ticked: the
+        // account's list, as before a sign-in.
+        let none = OrgSetupChoices::default();
+        assert_eq!(
+            titles(&script(&none, true).unwrap()),
+            ["Confidential", "General"]
+        );
+        // A label only Purview lists, chosen while signed in.
+        let board = OrgSetupChoices {
+            label_ids: vec![SECRET.into()],
+            ..none.clone()
+        };
+        assert_eq!(
+            titles(&script(&board, true).unwrap()),
+            ["Highly Confidential"]
+        );
+        // Once the sign-in ended, Purview's list is gone: that label is left
+        // out, and the script is still there.
+        service.end_org_setup();
+        let after = script(&board, true).unwrap();
+        assert!(after.script.contains("Get-TemplateName"));
+        assert!(!titles(&after).contains(&"Highly Confidential".to_owned()));
+        assert!(script(&board, false).unwrap().portal_steps.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_new_sign_in_replaces_the_session_and_starts_a_new_log() {
         let Setup {
             service,

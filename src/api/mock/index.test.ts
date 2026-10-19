@@ -1653,6 +1653,40 @@ describe("the demo's organization setup", () => {
     ).rejects.toEqual({ code: "invalidInput", message: "That label isn't one Purview lists." });
   });
 
+  it("keeps the script to the labels it can check, signed in or not", async () => {
+    const { backend } = await signedIn("partial");
+    // Signed in, Sensitivity labels ticked with none chosen: the account's list.
+    const none = await backend.getOrgSetupScript("acct-work", {
+      choices: { ...choices, labelIds: [] },
+      actions: true,
+      labels: true,
+    });
+    expect(none.portalSteps).toHaveLength(5);
+    // A label only Purview lists, chosen while signed in…
+    const board = { ...choices, labelIds: [BOARD] };
+    const withBoard = await backend.getOrgSetupScript("acct-work", {
+      choices: board,
+      actions: true,
+      labels: true,
+    });
+    expect(withBoard.portalSteps.map((s) => s.labelTitle)).toEqual(["Highly Confidential › Board"]);
+    // …is left out once the sign-in ended, and the rest of the script stays.
+    await backend.endOrgSetup();
+    const after = await backend.getOrgSetupScript("acct-work", {
+      choices: board,
+      actions: true,
+      labels: true,
+    });
+    expect(after.script).toContain("'Cumulas Mail: Encrypt'");
+    expect(after.portalSteps.map((s) => s.labelTitle)).not.toContain("Highly Confidential › Board");
+    const without = await backend.getOrgSetupScript("acct-work", {
+      choices: board,
+      actions: true,
+      labels: false,
+    });
+    expect(without.portalSteps).toEqual([]);
+  });
+
   it("signs an administrator in with the setup app, then reads, then plans", async () => {
     const backend = new MockBackend();
     expect(await backend.getOrgSetupInfo("acct-work")).toEqual({
