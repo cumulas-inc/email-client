@@ -11,7 +11,7 @@ signature when your organization sets one up there.
 Cumulas Mail has no telemetry, no analytics, no crash reporting and no
 advertising, and you don't need a Cumulas account.
 
-_Last updated: October 18, 2026._
+_Last updated: October 19, 2026._
 
 ## What the app keeps on your computer
 
@@ -31,7 +31,11 @@ _Last updated: October 18, 2026._
   same database.
 - **For Microsoft 365 work and school accounts**, the sensitivity labels
   Microsoft 365 lists for you once you turn them on, and what the checks of
-  encryption and labels in Settings found, in the same database.
+  encryption and labels in Settings found and what each check's test
+  messages showed, in the same database. After an administrator sets up
+  encryption and labels from the app, it also keeps when that last changed
+  the organization's rules and policies, so that checks run soon after can
+  say it's too soon to tell.
 - **Attachments you open**, in the app's cache folder,
   `~/.cache/co.cumulas.Mail/`, readable only by you. They're removed when the
   app next starts, and any older than a day when you open another.
@@ -120,6 +124,24 @@ account to yourself through Microsoft 365, to see what your organization's
 mail server does with them. Once it has read them, it moves them to Deleted
 Items. **Copy diagnostic details** copies a description of a message's
 protection to your clipboard; nothing is sent.
+
+The checks keep, with each result, what Microsoft 365 said about how it
+handled the test message: its Message-ID, whether it went through your
+organization's signature relay, whether Microsoft 365 counted it as from
+inside your organization, and what protection and labels arrived. **Copy
+details for IT** copies that to your clipboard; nothing is sent.
+
+**When an administrator sets up encryption and labels for their
+organization** (Set up or check for your organization), the app signs them
+in to a separate app, Cumulas Mail - Admin Setup, and talks to Microsoft 365
+directly: Exchange Online and Security & Compliance, to read and change the
+organization's mail flow rules and auto-labeling policies. It also reads
+which licenses the work account itself has, with the access that account
+already gave. The sign-in is kept in memory only while that window is open
+and is never saved; Microsoft keeps the administrator's approval of the setup
+app until they remove it. The app keeps a record of those calls in memory
+until the next setup sign-in or until it quits, for **Copy setup details**;
+nothing goes to Cumulas.
 
 Pictures and other content from the internet in messages are blocked unless
 you allow them, because loading them can tell senders when and where you

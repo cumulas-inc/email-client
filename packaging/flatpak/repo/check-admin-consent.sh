@@ -18,7 +18,30 @@
 #    writes HTML, and the script shows each answer Microsoft can bring an
 #    administrator back with, and nothing else of the address
 #    (check-admin-consent.mjs);
-#  - the install page links to it.
+#  - the install page links to it;
+#  - the setup app, Cumulas Mail - Admin Setup (crates/core/src/auth/
+#    admin_setup.rs), stays apart from the mail app: no SETUP_ONLY_MARKERS
+#    string (its API, scope and resource apps) in the mail app's scopes,
+#    its approval links, the page's approval link or the docs' steps for
+#    registering it, and the two client IDs differ;
+#  - with PUBLISHED_SETUP_CLIENT_ID set, the page has the setup app's
+#    section (id="setup-app"): its client ID, the permissions it asks for
+#    (SETUP_CONSENT_SCOPES), and a setup script that requires assignment and
+#    assigns admins before it approves the app for the organization, with
+#    exactly those permissions; no link to approve it for everyone; the
+#    notice for consent policies made from the page's earlier version
+#    (id="consent-policy-notice"), which keeps the setup app out; and the
+#    setup app's approval link, built here from the constants, is
+#    PUBLISHED_SETUP_LINK, which the app's tests build, and the docs show
+#    it. Unset: no such section;
+#  - the client IDs in the page are the mail app's and the setup app's, and
+#    the app IDs it looks up or names as an API (appId eq '…',
+#    -ResourceApplication) are those, Microsoft Graph's, and, in the setup
+#    app's section only, Office 365 Exchange Online's;
+#  - its consent policy script (id="consent-policy-script") names the API
+#    of each include, limits Microsoft Graph to exactly the permissions in
+#    CORE_SCOPES and OPTIONAL_SCOPES, and nothing outside the notice
+#    includes apps by publisher (ClientApplicationPublisherIds).
 #
 # CI runs it on every pull request (ci.yml) and test.sh on the assembled
 # site, so a change to the app's permissions fails until the page matches.
@@ -39,14 +62,18 @@ if [ $# -gt 1 ]; then
 fi
 page=${1:-$here/admin-consent.html}
 microsoft=$root/crates/core/src/auth/microsoft.rs
+admin_setup=$root/crates/core/src/auth/admin_setup.rs
 connector=$root/crates/core/src/service/connector.rs
 docs=$root/docs/microsoft-365.md
 landing=https://flatpak.cumulas.co/admin-consent/
 publisher_id=7118869
 oidc_scopes=(openid profile email offline_access)
+graph_app=00000003-0000-0000-c000-000000000000
+exchange_app=00000002-0000-0ff1-ce00-000000000000
+guid='[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}'
 
 [ -s "$page" ] || die "$page is missing or empty."
-for file in "$microsoft" "$connector" "$docs"; do
+for file in "$microsoft" "$admin_setup" "$connector" "$docs"; do
   [ -s "$file" ] || die "$file is missing."
 done
 
@@ -112,6 +139,24 @@ mapfile -t optional_scopes < <(rust_const "$microsoft" OPTIONAL_SCOPES | strings
 [ "${#core_scopes[@]}" -gt 0 ] || die "No CORE_SCOPES in $microsoft."
 [ "${#optional_scopes[@]}" -gt 0 ] || die "No OPTIONAL_SCOPES in $microsoft."
 
+# The setup app: PUBLISHED_SETUP_CLIENT_ID is None, or Some("<GUID>").
+setup_decl=$(rust_const "$admin_setup" PUBLISHED_SETUP_CLIENT_ID)
+if grep -qE '=[[:space:]]*None[[:space:]]*;' <<<"$setup_decl"; then
+  setup_id=
+elif grep -qE '=[[:space:]]*Some\([[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*\)[[:space:]]*;' <<<"$setup_decl"; then
+  setup_id=$(strings <<<"$setup_decl")
+  grep -qxE "$guid" <<<"$setup_id" ||
+    die "PUBLISHED_SETUP_CLIENT_ID in $admin_setup isn't a GUID: $setup_id"
+else
+  die "No PUBLISHED_SETUP_CLIENT_ID (None or Some(\"<GUID>\")) in $admin_setup."
+fi
+mapfile -t setup_scopes < <(rust_const "$admin_setup" SETUP_CONSENT_SCOPES | strings)
+mapfile -t setup_markers < <(rust_const "$admin_setup" SETUP_ONLY_MARKERS | strings)
+setup_redirect=$(rust_const "$admin_setup" SETUP_REDIRECT_URI | strings)
+[ "${#setup_scopes[@]}" -gt 0 ] || die "No SETUP_CONSENT_SCOPES in $admin_setup."
+[ "${#setup_markers[@]}" -gt 0 ] || die "No SETUP_ONLY_MARKERS in $admin_setup."
+[ -n "$setup_redirect" ] || die "No SETUP_REDIRECT_URI in $admin_setup."
+
 # --- Where Microsoft brings administrators back -----------------------------------
 
 repo_host=${REPO_URL#https://}
@@ -169,9 +214,180 @@ check "the page's table lists Sync.Receive only when the link asks for it" \
   test "$(names_push "$page" "<code>Sync.Receive</code>")" = "$includes_push"
 check "docs/microsoft-365.md says the link asks for Sync.Receive only when it does" \
   test "$(names_push "$docs" "above plus \`Sync.Receive\`")" = "$includes_push"
-check "every client ID in the page is the published one, $client_id" \
-  test "$(grep -oiE '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' "$page" | tr 'A-F' 'a-f' | sort -u)" \
-  = "$(tr 'A-F' 'a-f' <<<"$client_id")"
+
+# --- The setup app stays apart from the mail app -------------------------------------
+
+# Whether TEXT names none of SETUP_ONLY_MARKERS, ASCII case ignored, as the
+# app's test does (form-encoding leaves them as they are).
+lacks_setup_markers() {
+  local marker
+  for marker in "${setup_markers[@]}"; do
+    if grep -qiF -- "$marker" <<<"$1"; then return 1; fi
+  done
+}
+# The docs' "## Registering the app (publisher)", up to the next "## ".
+mail_registration=$(awk '
+  /^## / { inside = ($0 == "## Registering the app (publisher)") }
+  inside
+' "$docs")
+[ -n "$mail_registration" ] || die "No \"## Registering the app (publisher)\" in $docs."
+mail_links=$(sed -n 's/^[[:space:]]*const PUBLISHED_LINK_WITH\(OUT\)\{0,1\}_PUSH: &str = "\([^"]*\)";.*/\2/p' "$microsoft")
+check "CORE_SCOPES names nothing of the setup app's" lacks_setup_markers "${core_scopes[*]}"
+check "OPTIONAL_SCOPES names nothing of the setup app's" lacks_setup_markers "${optional_scopes[*]}"
+check "PUBLISHED_LINK_WITH_PUSH and _WITHOUT_PUSH name nothing of the setup app's" \
+  lacks_setup_markers "$mail_links"
+check "the page's approval link names nothing of the setup app's" lacks_setup_markers "$links"
+check "the docs' steps for registering the mail app name nothing of the setup app's" \
+  lacks_setup_markers "$mail_registration"
+if [ -n "$setup_id" ]; then
+  check "the setup app's client ID isn't the mail app's" \
+    test "$(tr 'A-F' 'a-f' <<<"$setup_id")" != "$(tr 'A-F' 'a-f' <<<"$client_id")"
+fi
+
+# --- The setup app ----------------------------------------------------------------------
+
+# The page's section for it, and the parts of the page outside it.
+setup_section=$(awk '
+  /<section id="setup-app"/ { inside = 1 }
+  inside { print }
+  inside && /<\/section>/ { exit }
+' "$page")
+outside_setup=$(awk '
+  /<section id="setup-app"/ { inside = 1 }
+  !inside { print }
+  inside && /<\/section>/ { inside = 0 }
+' "$page")
+# The text of a <pre> by its id, from the line with the id to its </pre>.
+pre_by_id() {
+  awk -v id="id=\"$1\"" '
+    index($0, id) { inside = 1 }
+    inside { print }
+    inside && /<\/pre>/ { exit }
+  '
+}
+# The line number of the first line with TEXT in the input, or a large one.
+first_line() {
+  local n
+  n=$(grep -nF -- "$1" | head -n 1 | cut -d: -f1 || true)
+  echo "${n:-999999}"
+}
+# Whether the first line of the input with $1 comes before the first with $2.
+comes_before() {
+  local text
+  text=$(cat)
+  [ "$(first_line "$1" <<<"$text")" -lt "$(first_line "$2" <<<"$text")" ]
+}
+
+if [ -n "$setup_id" ]; then
+  setup_flat=$(tr -s '[:space:]' ' ' <<<"$setup_section")
+  in_setup() {
+    grep -qF -- "$1" <<<"$setup_flat"
+  }
+  check "the page has the setup app's section (id=\"setup-app\")" test -n "$setup_section"
+  check "the setup app's section shows its client ID" in_setup "<code>$setup_id</code>"
+  # Its permissions, as people approve them: the API's name only.
+  approved=()
+  for scope in "${setup_scopes[@]}"; do
+    approved+=("${scope##*/}")
+    check "the setup app's section names ${scope##*/}" in_setup "<code>${scope##*/}</code>"
+  done
+  setup_script=$(pre_by_id setup-app-script <<<"$setup_section")
+  check "the setup app's section has its setup script (id=\"setup-app-script\")" \
+    test -n "$setup_script"
+  check "the setup script names the setup app's client ID" grep -qF -- "$setup_id" <<<"$setup_script"
+  check "the setup script approves the app for the organization" \
+    grep -qF -- "New-MgOauth2PermissionGrant" <<<"$setup_script"
+  check "the setup script requires assignment before it approves the app" \
+    comes_before "AppRoleAssignmentRequired:\$true" "New-MgOauth2PermissionGrant" <<<"$setup_script"
+  check "the setup script assigns admins before it approves the app" \
+    comes_before "New-MgServicePrincipalAppRoleAssignedTo" "New-MgOauth2PermissionGrant" <<<"$setup_script"
+  granted=$(grep -oE -- '-Scope "[^"]*"' <<<"$setup_script" | sed 's/^-Scope "\(.*\)"$/\1/' |
+    tr -s ' ' '\n' | sort -u)
+  check "the setup script approves exactly SETUP_CONSENT_SCOPES" \
+    test "$granted" = "$(printf '%s\n' "${approved[@]}" | sort -u)"
+
+  notice=$(awk '
+    /<aside id="consent-policy-notice"/ { inside = 1 }
+    inside { print }
+    inside && /<\/aside>/ { exit }
+  ' "$page")
+  check "the page has the notice for earlier consent policies (id=\"consent-policy-notice\")" \
+    test -n "$notice"
+  # Its exclude: the command, with its continued lines.
+  exclude=$(awk '
+    /New-MgPolicyPermissionGrantPolicyExclude/ { inside = 1 }
+    inside { print; if ($0 !~ /`[[:space:]]*$/) exit }
+  ' <<<"$notice" | tr -s '[:space:]`' ' ')
+  check "the notice keeps the setup app out of the consent policy" \
+    grep -qF -- "-ClientApplicationIds \"$setup_id\"" <<<"$exclude"
+
+  # The link the app shows administrators of a tenant: here for the tenant
+  # "organizations", with the OpenID Connect scopes as they are.
+  setup_link="$endpoint?client_id=$(form_encode "$setup_id")"
+  setup_link+="&scope=$(form_encode "${setup_scopes[*]}")"
+  setup_link+="&redirect_uri=$(form_encode "$setup_redirect")"
+  setup_app_link=$(sed -n 's/^[[:space:]]*const PUBLISHED_SETUP_LINK: &str = "\([^"]*\)";.*/\1/p' "$admin_setup")
+  [ -n "$setup_app_link" ] || die "No PUBLISHED_SETUP_LINK in $admin_setup."
+  check "the setup app's approval link is PUBLISHED_SETUP_LINK, which the app's tests build" \
+    test "$setup_link" = "$setup_app_link"
+  check "docs/microsoft-365.md shows the setup app's approval link" \
+    grep -qxF -- "$setup_link" <<<"$(sed 's/^[[:space:]]*//' "$docs")"
+else
+  check "without a setup app, the page has no section for it" \
+    test -z "$(grep -F 'id="setup-app"' "$page" || true)"
+fi
+
+# --- App IDs in the page -----------------------------------------------------------------
+
+lower_ids() {
+  grep -oE -- "$guid" | tr 'A-F' 'a-f' | sort -u
+}
+# Lines that look an app up or name the API a permission is of: their IDs
+# are resource apps, not apps that sign in.
+resource_line='appId eq|-ResourceApplication'
+clients=$(grep -vE -- "$resource_line" "$page" | lower_ids || true)
+expected=$client_id
+which="the published one, $client_id"
+if [ -n "$setup_id" ]; then
+  expected+=$'\n'$setup_id
+  which+=", or the setup app's, $setup_id"
+fi
+check "every client ID in the page is $which" test "$clients" = "$(lower_ids <<<"$expected")"
+# Allowed: Microsoft Graph, the mail app (its own API) and the setup app;
+# Office 365 Exchange Online only in the setup app's section.
+only_ids() {
+  local found id
+  found=$(grep -E -- "$resource_line" | lower_ids || true)
+  for id in $found; do
+    grep -qxF -- "$id" <<<"$(lower_ids <<<"$*")" || return 1
+  done
+}
+check "the page looks up only Microsoft Graph, the mail app and the setup app outside the setup app's section" \
+  only_ids "$graph_app" "$client_id" "$setup_id" <<<"$outside_setup"
+check "the setup app's section looks up only those and Office 365 Exchange Online" \
+  only_ids "$graph_app" "$exchange_app" "$client_id" "$setup_id" <<<"$setup_section"
+
+# --- The consent policy -------------------------------------------------------------------
+
+consent_script=$(pre_by_id consent-policy-script <"$page")
+check "the page has the consent policy script (id=\"consent-policy-script\")" test -n "$consent_script"
+includes=$(grep -cF -- "New-MgPolicyPermissionGrantPolicyInclude" <<<"$consent_script" || true)
+apis=$(grep -cF -- "-ResourceApplication" <<<"$consent_script" || true)
+check "every include of the consent policy names its API (-ResourceApplication)" \
+  test "$includes" -gt 0 -a "$includes" = "$apis"
+check "the consent policy limits Microsoft Graph to its -Permissions" \
+  grep -qF -- "-Permissions" <<<"$consent_script"
+# The permissions it names: its single-quoted names, but app IDs.
+named=$(grep -oE "'[^']*'" <<<"$consent_script" | tr -d "'" | grep -vxE -- "$guid" | sort -u || true)
+check "the consent policy names exactly the permissions in CORE_SCOPES and OPTIONAL_SCOPES" \
+  test "$named" = "$(printf '%s\n' "${core_scopes[@]}" "${optional_scopes[@]}" | sort -u)"
+without_notice=$(awk '
+  /<aside id="consent-policy-notice"/ { inside = 1 }
+  !inside { print }
+  inside && /<\/aside>/ { inside = 0 }
+' "$page")
+check "nothing outside the notice includes apps by publisher (ClientApplicationPublisherIds)" \
+  test -z "$(grep -F ClientApplicationPublisherIds <<<"$without_notice" || true)"
 
 # --- What the page says ---------------------------------------------------------------
 
