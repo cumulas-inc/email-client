@@ -189,9 +189,11 @@ CI runs all of these, plus a Flatpak build.
   published with or before this release.
 - Cumulas Signatures is released with the verified-domain hand-back check;
   mail coming back from the relay is counted as internal only where
-  `RELAY_INTERNAL_RETURN` allows it, and R16 (another relay client's mail,
-  handed back, doesn't count as internal in a tenant that ran the step) has
-  been run before it allows other organizations.
+  `RELAY_INTERNAL_RETURN` allows it, and
+  [R16](docs/admin-setup-open-items.md) (Microsoft attributes relay hand-backs
+  by MAIL FROM, then RCPT TO: another relay client's null-sender mail to an
+  organization that ran the step must not count as internal there) has been
+  run before it allows other organizations.
 - In a tenant that uses the relay: run **Set up or check for your
   organization**, wait an hour, check, and keep **Copy setup details** and
   **Copy details for IT**. Confirm: the status pass works (InvokeCommand with
@@ -202,7 +204,8 @@ CI runs all of these, plus a Flatpak build.
   (AuthAs Internal) after the relay step; which pass auto-labeling acted on
   (the relay's log). Replace the synthetic fixtures in
   `crates/core/src/orgsetup/tests/fixtures/` with what the details show, and
-  the open items of the admin setup design (section 2.6) with what was seen.
+  record what was seen for each of
+  [setup's open items, R1 to R18](docs/admin-setup-open-items.md).
 - Finish [setting up the self-hosted Flatpak repository](packaging/flatpak/README.md#setting-it-up)
   before the first release tag: the signing key, DNS and GitHub Pages are
   done; the `flatpak-signing` environment (with the secret moved into it), the

@@ -4,6 +4,9 @@
 //! through Exchange Online's InvokeCommand interface, or writes a PowerShell
 //! script that does the same. Only objects whose names start with
 //! "Cumulas Mail: " are ever changed, and nothing is ever deleted.
+//!
+//! R1 to R18 in comments are what only a real tenant can show:
+//! `docs/admin-setup-open-items.md`.
 
 pub mod apply;
 pub mod discovery;
