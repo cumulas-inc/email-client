@@ -149,11 +149,40 @@ async fn a_fresh_organization_is_set_up_in_order_and_read_back() {
             "Priority": 0, "Mode": "Enforce", "Comments": MARKER,
         }))
     );
-    assert_eq!(writes[1].1["Name"], json!(ENCRYPT_RULE));
-    assert_eq!(writes[2].1["Name"], json!(DNF_RULE));
+    // Nothing blocks: they land last, without a Priority.
     assert_eq!(
-        writes[4].1["HeaderMatchesPatterns"],
-        json!({ "@odata.type": "#Exchange.GenericHashTable", "x-cumulas-label": format!("(?i)^({CONFIDENTIAL})$") })
+        writes[1].1,
+        params(json!({
+            "Name": ENCRYPT_RULE, "ExceptIfFromScope": "NotInOrganization",
+            "HeaderMatchesMessageHeader": "x-cumulas-protect", "HeaderMatchesPatterns": ["^encrypt$"],
+            "ApplyRightsProtectionTemplate": "Encrypt", "RemoveHeader": "x-cumulas-protect",
+            "RuleErrorAction": "Defer", "Mode": "Enforce", "Comments": MARKER,
+        }))
+    );
+    assert_eq!(
+        writes[2].1,
+        params(json!({
+            "Name": DNF_RULE, "ExceptIfFromScope": "NotInOrganization",
+            "HeaderMatchesMessageHeader": "x-cumulas-protect", "HeaderMatchesPatterns": ["^do-not-forward$"],
+            "ApplyRightsProtectionTemplate": "Do Not Forward", "RemoveHeader": "x-cumulas-protect",
+            "RuleErrorAction": "Defer", "Mode": "Enforce", "Comments": MARKER,
+        }))
+    );
+    assert_eq!(
+        writes[3].1,
+        params(json!({
+            "Name": "Cumulas Mail: Confidential", "ApplySensitivityLabel": CONFIDENTIAL,
+            "ExchangeLocation": ["All"], "OverwriteLabel": true, "Mode": "TestWithoutNotifications",
+            "Comment": MARKER,
+        }))
+    );
+    assert_eq!(
+        writes[4].1,
+        params(json!({
+            "Name": "Cumulas Mail: Confidential (header)", "Policy": "Cumulas Mail: Confidential",
+            "Workload": "Exchange",
+            "HeaderMatchesPatterns": { "@odata.type": "#Exchange.GenericHashTable", "x-cumulas-label": format!("(?i)^({CONFIDENTIAL})$") },
+        }))
     );
     assert_eq!(
         writes[5].1,
