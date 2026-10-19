@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use super::tenant::{FakeTenant, rule};
-use super::{CLIENT, TENANT, snapshot_of};
+use super::{CLIENT, TENANT, catalog, snapshot_of};
 use crate::auth::admin_setup::SETUP_APP_NAME;
 use crate::orgsetup::invoke::ErrorDetail;
 use crate::orgsetup::runlog::{CallRecord, Entry, RunHeader, RunLog, SignInRecord, details_text};
@@ -109,7 +109,7 @@ fn other_rules_appear_by_name_and_order_only_and_ours_in_full_but_capped() {
             rule(ENCRYPT_RULE, json!({ "Comments": long, "RemoveHeader": "x-cumulas-protect" })),
         ]
     });
-    let summary = snapshot_summary(&snapshot_of(&tenant));
+    let summary = snapshot_summary(&snapshot_of(&tenant), Some(&catalog()));
     assert!(
         summary
             .contains("  0  Contoso: stop for partner.com · Enabled · Enforce · stops later rules"),
@@ -130,6 +130,15 @@ fn other_rules_appear_by_name_and_order_only_and_ours_in_full_but_capped() {
     assert!(raw.trim().starts_with('{'), "{raw}");
     assert_eq!(raw.trim().chars().count(), 4000);
     assert!(summary.contains("Labels: Confidential (Guid"), "{summary}");
+    assert!(
+        summary.contains("ImmutableId 6c1b0f3e-1111-4a8b-9c2d-000000000001, email yes, in your list yes); General"),
+        "{summary}"
+    );
+    let unknown = snapshot_summary(&snapshot_of(&tenant), None);
+    assert!(
+        unknown.contains("email yes, in your list unknown)"),
+        "{unknown}"
+    );
 
     // In the run log, it's one entry.
     let log = RunLog::default();

@@ -302,7 +302,10 @@ pub async fn admin_sign_in(
     let refresh_token = tokens.refresh_token.as_deref().ok_or_else(|| {
         Error::provider("Microsoft did not return a refresh token (offline_access missing).")
     })?;
-    let (Some(tenant_id), Some(object_id)) = (claims.tid, claims.oid) else {
+    // The oid goes into the command that removes this administrator's
+    // approval: a GUID only.
+    let object_id = claims.oid.map(|o| o.trim().to_ascii_lowercase());
+    let (Some(tenant_id), Some(object_id)) = (claims.tid, object_id.filter(|o| is_guid(o))) else {
         return Err(Error::provider(
             "Microsoft's response did not identify the account (tid/oid missing).",
         ));
@@ -348,7 +351,7 @@ pub async fn admin_sign_in(
         username,
         display_name,
         tenant_id: config.tenant_id.clone(),
-        object_id: object_id.trim().to_ascii_lowercase(),
+        object_id,
         tokens: admin_tokens,
         granted: tokens.scope.unwrap_or_default(),
     })
@@ -1028,6 +1031,35 @@ mod tests {
             assert_eq!(error.details.unwrap()["reason"], "otherTenant");
             assert_eq!(sign_ins(&log)[0].outcome, "code redeemed");
             assert!(crate::orgsetup::details_text(&log).contains(OTHER_TENANT));
+        }
+
+        #[tokio::test]
+        async fn an_account_id_that_isnt_a_guid_is_refused() {
+            // It would go into the command that removes the approval.
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(token_path()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "token_type": "Bearer", "expires_in": 3599,
+                    "access_token": "exchange-1", "refresh_token": "refresh-1",
+                    "id_token": id_token(json!({
+                        "tid": TENANT, "oid": "x' or 1 eq 1 or 'a",
+                        "preferred_username": "MeganB@contoso.com",
+                    })),
+                })))
+                .mount(&server)
+                .await;
+            let browser = fake_browser(vec![redirect_with("code=c")]);
+            let error = admin_sign_in(
+                &config(&server),
+                &*browser.open,
+                Duration::from_secs(10),
+                &RunLog::default(),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(error.code, ErrorCode::Provider);
         }
 
         /// One refusal at the redirect: what the admin is told, and its

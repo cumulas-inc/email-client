@@ -32,6 +32,7 @@ use crate::model::{
 };
 use crate::protection::{Settle, clean_value};
 use crate::providers::graph::LicenseHint;
+use crate::signatures::config::is_guid;
 
 /// One part of a read.
 #[derive(Debug, Clone, PartialEq)]
@@ -355,7 +356,9 @@ pub async fn read_snapshot(session: &Session, ctx: &SetupContext) -> Result<Snap
         compliance,
         licensing: ctx.licensing.clone(),
     };
-    session.log().snapshot(snapshot_summary(&snapshot));
+    session
+        .log()
+        .snapshot(snapshot_summary(&snapshot, ctx.catalog.as_ref()));
     Ok(snapshot)
 }
 
@@ -456,9 +459,9 @@ fn labels_failure<T>(labels: Part<Vec<LabelView>>) -> Part<T> {
 }
 
 /// What a read found, for the run log: the rule order (others by name and
-/// order only), the relay's connector, labels, and ours as Microsoft 365
-/// returned them.
-pub fn snapshot_summary(snapshot: &Snapshot) -> String {
+/// order only), the relay's connector, labels (and whether the work
+/// account's `catalog` has them), and ours as Microsoft 365 returned them.
+pub fn snapshot_summary(snapshot: &Snapshot, catalog: Option<&LabelCatalog>) -> String {
     let mut out = String::new();
     if let Some(failure) = snapshot.exchange_failure() {
         let _ = writeln!(
@@ -536,16 +539,19 @@ pub fn snapshot_summary(snapshot: &Snapshot) -> String {
                 .labels
                 .iter()
                 .map(|l| {
+                    let listed = catalog.map(|c| {
+                        c.label(&l.guid).is_some()
+                            || l.immutable_id
+                                .as_deref()
+                                .is_some_and(|i| c.label(i).is_some())
+                    });
                     format!(
-                        "{} (Guid {}, ImmutableId {}, email {})",
+                        "{} (Guid {}, ImmutableId {}, email {}, in your list {})",
                         l.title(),
                         l.guid,
                         l.immutable_id.as_deref().unwrap_or("none"),
-                        match l.for_email() {
-                            Some(true) => "yes",
-                            Some(false) => "no",
-                            None => "unknown",
-                        }
+                        shown_yes(l.for_email()),
+                        shown_yes(listed)
                     )
                 })
                 .collect();
@@ -586,6 +592,14 @@ pub fn snapshot_summary(snapshot: &Snapshot) -> String {
         }
     }
     out
+}
+
+fn shown_yes(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    }
 }
 
 fn shown_bool(value: Option<bool>) -> &'static str {
@@ -726,8 +740,18 @@ fn with_detail(mut row: OrgSetupRow, detail: impl Into<String>) -> OrgSetupRow {
     row
 }
 
-/// How to remove this administrator's approval of the setup app.
+/// How to remove this administrator's approval of the setup app. Both IDs
+/// go into a double-quoted filter, so only GUIDs do (sign-in checks them).
 pub fn remove_approval(client_id: &str, admin_object_id: &str) -> String {
+    let guid = |id: &str, instead: &str| {
+        if is_guid(id) {
+            id.to_owned()
+        } else {
+            instead.to_owned()
+        }
+    };
+    let client_id = guid(client_id, "<the setup app's client ID>");
+    let admin_object_id = guid(admin_object_id, "<your object ID>");
     format!(
         "Microsoft keeps your approval of {SETUP_APP_NAME} until you remove it. If this was a \
          one-off setup, remove it:\n\n\

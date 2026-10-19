@@ -521,14 +521,19 @@ fn was(value: Option<&str>) -> String {
     value.map_or_else(|| "none".to_owned(), str::to_owned)
 }
 
-/// What differs on one of our rules (D12: one with extras is blocked).
+/// What differs on one of our rules (D12: one with extras is blocked, and
+/// so is a strip rule that encrypts).
 pub fn diff_rule(
     rule: &TransportRuleView,
     wanted: &WantedRule,
     template_id: Option<&str>,
 ) -> RuleOutcome {
-    if !rule.extras.is_empty() {
-        return RuleOutcome::Blocked(rule.extras.clone());
+    let mut extras = rule.extras.clone();
+    if let (None, Some(template)) = (&wanted.template, &rule.template) {
+        extras.push(("ApplyRightsProtectionTemplate".into(), template.clone()));
+    }
+    if !extras.is_empty() {
+        return RuleOutcome::Blocked(extras);
     }
     let mut changes = RuleChanges::default();
     let set = |changes: &mut RuleChanges, key: &str, value: Value, line: String| {

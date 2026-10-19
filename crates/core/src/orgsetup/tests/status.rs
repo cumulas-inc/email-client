@@ -84,6 +84,10 @@ fn a_fresh_organization_reads_as_not_set_up() {
         detail.contains(&format!("principalId eq '{ADMIN_OID}'")),
         "{detail}"
     );
+    // Only GUIDs go into its filter.
+    let odd = crate::orgsetup::status::remove_approval(CLIENT, "x' or 1 eq 1 or 'a");
+    assert!(odd.contains("principalId eq '<your object ID>'"), "{odd}");
+    assert!(!odd.contains("1 eq 1"), "{odd}");
     assert_eq!(
         summary("irm"),
         (

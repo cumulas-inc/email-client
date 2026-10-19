@@ -82,6 +82,17 @@ pub enum Entry {
     },
 }
 
+impl Entry {
+    /// When it happened (a call: when it started).
+    pub fn at(&self) -> DateTime<Utc> {
+        match self {
+            Entry::Note { at, .. } | Entry::Snapshot { at, .. } => *at,
+            Entry::SignIn(record) => record.at,
+            Entry::Call(record) => record.at,
+        }
+    }
+}
+
 /// A sign-in attempt with the setup app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignInRecord {
@@ -271,10 +282,13 @@ impl RunLog {
 /// The "Copy setup details" text; empty while nothing was logged.
 pub fn details_text(log: &RunLog) -> String {
     let header = log.header();
-    let (entries, dropped) = {
+    let (mut entries, dropped) = {
         let entries = log.inner.entries.lock().unwrap();
         (entries.kept.clone(), entries.dropped)
     };
+    // A call is logged once it ends, with the time it started: what was
+    // noted while it ran comes after it.
+    entries.sort_by_key(Entry::at);
     if header == RunHeader::default() && entries.is_empty() {
         return String::new();
     }

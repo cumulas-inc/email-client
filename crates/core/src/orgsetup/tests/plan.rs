@@ -498,6 +498,22 @@ fn labels_wait_for_label_requests_from_outside_to_be_removed() {
     assert!(assessment.planned.is_empty());
     assert!(assessment.problems.contains(&STRIP_FIRST.to_owned()));
 
+    // The strip rule never encrypts: one that does is blocked too.
+    let mut strip = good(STRIP_RULE);
+    strip["ApplyRightsProtectionTemplate"] = json!("Encrypt");
+    tenant.with(|s| s.rules = vec![strip]);
+    let assessment = plan::assess(
+        &snapshot_of(&tenant),
+        &ctx(),
+        &choices(false, &[CONFIDENTIAL]),
+    );
+    assert!(assessment.planned.is_empty());
+    assert_eq!(assessment.blocked, 1);
+    assert!(matches!(
+        &assessment.rule(OwnRule::Strip).outcome,
+        RuleOutcome::Blocked(extras) if extras == &[("ApplyRightsProtectionTemplate".to_owned(), "Encrypt".to_owned())]
+    ));
+
     // Unlicensed: no label changes unless chosen anyway.
     let tenant = FakeTenant::fresh();
     let mut snapshot = snapshot_of(&tenant);

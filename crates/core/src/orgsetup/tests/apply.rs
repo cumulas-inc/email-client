@@ -4,16 +4,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
+use url::Url;
 use wiremock::{MockServer, ResponseTemplate};
 
 use super::tenant::{FakeTenant, rule};
-use super::{CONFIDENTIAL, GENERAL, ctx, session};
+use super::{ADMIN, CLIENT, CONFIDENTIAL, GENERAL, TENANT, ctx, session};
 use crate::model::{OrgSetupChangeResult, OrgSetupChoices, OrgSetupOutcome};
-use crate::orgsetup::Session;
 use crate::orgsetup::apply::{ApplyOutcome, SIGNED_OUT, WINDOW_CLOSED, apply};
 use crate::orgsetup::plan::{self, STRIP_FIRST};
+use crate::orgsetup::runlog::RunHeader;
 use crate::orgsetup::status::{SessionInfo, read_snapshot};
 use crate::orgsetup::wanted::{DNF_RULE, ENCRYPT_RULE, MARKER, STRIP_RULE};
+use crate::orgsetup::{Session, details_text};
 
 fn choices(actions: bool, labels: &[&str]) -> OrgSetupChoices {
     OrgSetupChoices {
@@ -572,4 +574,69 @@ async fn a_change_microsoft_accepts_but_doesnt_keep_fails_with_what_it_shows() {
             "Microsoft 365 accepted the change but shows something else: applies to mail from your organization's addresses (it applied only to mail Microsoft 365 had authenticated)"
         )
     );
+}
+
+/// A whole run as "Copy setup details" gives it: run with `--nocapture` to
+/// read it (WP1's manual check against the modeled organization).
+#[tokio::test]
+async fn a_whole_run_reads_as_setup_details() {
+    let tenant = FakeTenant::fresh();
+    let (server, session) = start(&tenant).await;
+    session.log().start(RunHeader {
+        tenant_id: Some(TENANT.into()),
+        client_id: Some(CLIENT.into()),
+        admin: None,
+    });
+    session.log().set_admin(ADMIN);
+    let outcome = set_up(&session, &choices(true, &[CONFIDENTIAL])).await;
+    assert!(
+        outcome
+            .result
+            .changes
+            .iter()
+            .all(|c| c.outcome == OrgSetupOutcome::Done)
+    );
+    let text = details_text(session.log());
+    println!("{text}");
+
+    let host = Url::parse(&server.uri())
+        .map(|u| format!("{}:{}", u.host_str().unwrap(), u.port().unwrap()))
+        .unwrap();
+    for expected in [
+        format!(
+            "Cumulas Mail {}: organization setup details\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+        format!("Tenant: {TENANT}\nSetup app: Cumulas Mail - Admin Setup ({CLIENT})\nSigned in as: {ADMIN}\n"),
+        format!("  Read mail flow rules\n  Get-TransportRule (ResultSize) on {host} · anchor UPN · 200 · "),
+        "Security & Compliance token: https://ps.compliance.protection.outlook.com/.default issued"
+            .to_owned(),
+        format!("Security & Compliance host: {host} (global, anchor UPN)"),
+        "  Create “Cumulas Mail: Encrypt”\n  New-TransportRule (Name='Cumulas Mail: Encrypt', \
+         ApplyRightsProtectionTemplate='Encrypt', Comments='Managed by Cumulas Mail"
+            .to_owned(),
+        "ExceptIfFromScope='NotInOrganization', HeaderMatchesMessageHeader='x-cumulas-protect', \
+         HeaderMatchesPatterns=@('^encrypt$'), Mode='Enforce', RemoveHeader='x-cumulas-protect', \
+         RuleErrorAction='Defer') on "
+            .to_owned(),
+        "  What Microsoft 365 returned:\n  Initial domain: contoso.onmicrosoft.com\n".to_owned(),
+        "  Mail flow rules, by priority:\n    0  Cumulas Mail: ignore label requests from outside · Enabled · Enforce\n"
+            .to_owned(),
+        "Labels: Confidential (Guid 6c1b0f3e-1111-4a8b-9c2d-000000000001".to_owned(),
+        "  Cumulas Mail's objects as Microsoft 365 returned them:\n".to_owned(),
+    ] {
+        assert!(text.contains(&expected), "missing {expected:?} in\n{text}");
+    }
+    // In the order things happened: the region is found, then its token
+    // and host are noted.
+    let found = text
+        .find("  Find the Security & Compliance host\n")
+        .unwrap();
+    let token = text.find("Security & Compliance token:").unwrap();
+    assert!(found < token, "{text}");
+    // Reads that name nothing of ours carry no values; no token is there.
+    assert!(text.contains("Get-AcceptedDomain on "), "{text}");
+    for secret in ["exchange-token", "refresh-0", "refresh-rotated", "Bearer"] {
+        assert!(!text.contains(secret), "{secret} in\n{text}");
+    }
 }

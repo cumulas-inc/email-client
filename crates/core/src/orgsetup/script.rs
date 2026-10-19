@@ -163,6 +163,10 @@ function Get-Extras($Rule) {
     if ($null -ne $v -and "$v" -ne '' -and "$v" -ne 'False' -and @($v).Count) { $p }
   }
 }
+# The strip rule never encrypts either.
+function Get-StripExtras($Rule) {
+  @(Get-Extras $Rule) + @(if ("$($Rule.ApplyRightsProtectionTemplate)") { 'ApplyRightsProtectionTemplate' })
+}
 $Strip = {STRIP}
 # Only routing rules for mail from inside the organization may come before the strip rule.
 function Test-StripPlaced($Rule) {
@@ -182,7 +186,7 @@ Connect-ExchangeOnline -ShowBanner:$false
 const STRIP_PART: &str = r#"
 # Label requests in mail that isn't authenticated mail from inside your organization are removed.
 $rule = Get-OwnRule $Strip
-$extra = if ($rule) { @(Get-Extras $rule) } else { @() }
+$extra = if ($rule) { @(Get-StripExtras $rule) } else { @() }
 if (-not $rule) {
   New-TransportRule -Name $Strip -ExceptIfFromScope InOrganization -RemoveHeader {LABEL_HEADER} `
     -Priority 0 -Mode Enforce -Comments $Marker | Out-Null
@@ -287,7 +291,7 @@ const LABELS_PART: &str = r#"
 # Auto-labeling acts on mail by sender address, so label requests from outside must be removed
 # first. Part 2 checks Part 1's rule itself and stops without it.
 $rule = Get-OwnRule $Strip
-if (-not $rule -or -not (Test-Active $rule) -or @(Get-Extras $rule).Count -or -not (Test-StripPlaced $rule)) {
+if (-not $rule -or -not (Test-Active $rule) -or @(Get-StripExtras $rule).Count -or -not (Test-StripPlaced $rule)) {
   throw "Label requests from outside aren't blocked yet ($Strip). Run Part 1 as an Exchange Administrator or Global Administrator, then run this again."
 }
 Disconnect-ExchangeOnline -Confirm:$false

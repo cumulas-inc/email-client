@@ -510,6 +510,46 @@ async fn unavailable_is_retried_for_reads_but_never_for_writes() {
 }
 
 #[tokio::test]
+async fn no_answer_is_tried_once_more_for_a_read_and_never_for_a_write() {
+    let server = MockServer::start().await;
+    // A port nothing listens on.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = Url::parse(&format!("http://{}", closed.local_addr().unwrap())).unwrap();
+    drop(closed);
+    let log = RunLog::default();
+    let client = InvokeClient::new(
+        http_client().unwrap(),
+        InvokeTarget {
+            resource: Resource::Exchange,
+            base: base.clone(),
+            tenant_id: TENANT.into(),
+            anchors: Anchor::exchange(ADMIN, TENANT),
+        },
+        Arc::new(tokens(&server, &log).await),
+        HostRules::also(&base),
+        log.clone(),
+        CancellationToken::new(),
+    );
+
+    let started = Instant::now();
+    let error = client.invoke(&rules()).await.unwrap_err();
+    assert!(matches!(&error, InvokeError::Network(_)), "{error:?}");
+    // Its message never names where it went.
+    let port = base.port().unwrap().to_string();
+    assert!(!error.message().contains(&port), "{error:?}");
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    // Both tries with the admin's mailbox: no answer says nothing about it.
+    assert_eq!(
+        calls(&log)[0].attempts,
+        [(Some("UPN"), None), (Some("UPN"), None)]
+    );
+
+    let error = client.invoke(&create()).await.unwrap_err();
+    assert!(matches!(error, InvokeError::Network(_)), "{error:?}");
+    assert_eq!(calls(&log)[1].attempts, [(Some("UPN"), None)]);
+}
+
+#[tokio::test]
 async fn a_rejected_token_is_refreshed_once() {
     let server = MockServer::start().await;
     Mock::given(path(format!("/{TENANT}/oauth2/v2.0/token")))
