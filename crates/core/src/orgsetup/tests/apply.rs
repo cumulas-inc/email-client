@@ -650,7 +650,7 @@ async fn without_a_compliance_role_the_rules_are_still_made() {
     for done in &results[..3] {
         assert_eq!(done.1, OrgSetupOutcome::Done, "{done:?}");
     }
-    let forbidden = "Your account can't change auto-labeling policies. Sign in as a Compliance Administrator or Global Administrator (or a member of the Information Protection Admins role group).";
+    let forbidden = "Your account can't change auto-labeling policies. Sign in as a Compliance Administrator or Global Administrator.";
     assert_eq!(results[3].1, OrgSetupOutcome::Failed);
     assert_eq!(results[3].2.as_deref(), Some(forbidden));
     assert!(

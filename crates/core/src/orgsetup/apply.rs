@@ -32,8 +32,7 @@ const EXCHANGE_FORBIDDEN: &str = "Your account can't change mail flow rules. Sig
                                   the role through Privileged Identity Management, Exchange can \
                                   take a while to apply it.";
 const COMPLIANCE_FORBIDDEN: &str = "Your account can't change auto-labeling policies. Sign in as \
-                                    a Compliance Administrator or Global Administrator (or a \
-                                    member of the Information Protection Admins role group).";
+                                    a Compliance Administrator or Global Administrator.";
 /// In the result, whose Read again shows the status rows.
 const IRM_OFF: &str = "Exchange can't encrypt yet: Message Encryption is off. Select Read again \
                        to see “Message Encryption” and what to run.";
