@@ -439,3 +439,40 @@ export const OTHER_LABEL_UNNAMED = "a different label of your organization";
 /** "Copy details for IT" in Sensitivity labels and encryption, and its toast. */
 export const COPY_DETAILS_FOR_IT = "Copy details for IT";
 export const COPIED_DETAILS_FOR_IT = "Copied the check's details";
+
+// --- The dialog's own words (no core counterpart) ---------------------------------
+
+export const DIALOG = {
+  copiedSetupDetails: "Copied the setup details",
+  /** Under a failed sign-in, with the code Microsoft gave. */
+  lookUpCode: (aadsts: number) => `What AADSTS${aadsts} means`,
+  /** Where the consent state points for approving with assignment first. */
+  itPage: "Setup script on the IT page",
+  /** Shown while the plan for changed choices is worked out. */
+  planning: "Working out the changes…",
+  /** Over the label checkboxes. */
+  labelsToSetUp: "Labels to set up or repair",
+  encryptTemplate: "Template for Encrypt",
+  doNotForwardTemplate: "Template for Do Not Forward",
+  chooseTemplate: "Choose a template",
+  /** The disclosure of a long row detail. */
+  moreDetail: "Details",
+  /** The script view's read-only script. */
+  scriptLabel: "PowerShell script",
+  copied: "Copied",
+  copyFailed: "Couldn't copy automatically. The text is selected — press Ctrl+C to copy it.",
+  /** The portal steps' Copy buttons, read out with what they copy. */
+  copyPolicyName: (name: string) => `Copy the policy name ${name}`,
+  copyRuleName: (name: string) => `Copy the rule name ${name}`,
+  copyPattern: (pattern: string) => `Copy the pattern ${pattern}`,
+  /** A read or a change that failed as a whole (not one half of it). */
+  readFailed: "Cumulas Mail couldn't read your organization's setup.",
+  applyFailed: "Cumulas Mail couldn't make the changes.",
+};
+
+/** The IT page's section on the setup app, with the script that approves it with assignment. */
+export const SETUP_APP_IT_PAGE_URL = "https://flatpak.cumulas.co/admin-consent/#setup-app";
+
+/** The guide's PowerShell for the rules and auto-labeling policies. */
+export const POWERSHELL_GUIDE_URL =
+  "https://github.com/cumulas-inc/email-client/blob/main/docs/microsoft-365.md#encrypt-and-do-not-forward";

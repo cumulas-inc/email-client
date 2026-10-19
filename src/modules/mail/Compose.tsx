@@ -129,8 +129,9 @@ function labelDropText(name: string | null, kind: ReplyKind | null): string {
 
 /**
  * Why the organization's required label can't be applied from here: the
- * person's own check is missing, running, or too old, or the checks ran
- * and none arrived labeled (IT's part).
+ * person's own check is missing, running, or too old (or from before the
+ * Cumulas Signatures relay was in the way), or the checks ran and none
+ * arrived labeled (IT's part).
  */
 function requiredLabelHint(setup: ProtectionSetup, email: string): string {
   const required = "Your organization requires a sensitivity label on email.";
@@ -142,21 +143,30 @@ function requiredLabelHint(setup: ProtectionSetup, email: string): string {
     return `${required} Cumulas Mail can apply labels for ${email} after a check in Settings → Accounts shows a test message arrives labeled.`;
   }
   if (states.includes("expired")) {
-    return `${required} The labels for ${email} were last checked more than ${CHECK_VALID_DAYS} days ago. Check them again in Settings → Accounts to apply them here.`;
+    const relay = setup.labels.some(
+      (l) => l.check.state === "expired" && l.check.note === "relayChanged",
+    );
+    return relay
+      ? `${required} The labels for ${email} were checked before your organization's mail went through the Cumulas Signatures relay. Check them again in Settings → Accounts to apply them here.`
+      : `${required} The labels for ${email} were last checked more than ${CHECK_VALID_DAYS} days ago. Check them again in Settings → Accounts to apply them here.`;
   }
   return `${required} Cumulas Mail can't apply labels for ${email} until your IT team sets them up.`;
 }
 
 /**
  * Why a choice the draft holds can't be sent: its check is running again,
- * expired, or didn't pass. `clear` is what to choose instead.
+ * expired (by age, or by the relay coming into the path), or didn't pass.
+ * `clear` is what to choose instead.
  */
 function unavailableText(name: string, check: CheckResult | null, clear: string): string {
   switch (check?.state) {
     case "waiting":
       return `${name} is being checked in Settings → Accounts and can't be applied until the check passes. Choose ${clear}, or wait for the check.`;
     case "expired":
-      return `${name} was last checked more than ${CHECK_VALID_DAYS} days ago, so it can't be applied. Check it again in Settings → Accounts, or choose ${clear}.`;
+      // Checked before the relay was in the way: the pass says nothing about mail now.
+      return check.note === "relayChanged"
+        ? `${name} was checked before your organization's mail went through the Cumulas Signatures relay, so it can't be applied. Check it again in Settings → Accounts, or choose ${clear}.`
+        : `${name} was last checked more than ${CHECK_VALID_DAYS} days ago, so it can't be applied. Check it again in Settings → Accounts, or choose ${clear}.`;
     case undefined:
       return `${name} isn't available for this account any more. Choose ${clear}.`;
     default:

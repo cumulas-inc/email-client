@@ -313,6 +313,24 @@ const scenes = [
     },
   },
   {
+    shots: ["settings-org-setup", "settings-org-setup-changes"],
+    // The 0.4.0 guide's objects: rules to repair, a policy in simulation, a leftover rule.
+    query: "?orgsetup=partial",
+    async run(page, shot) {
+      await openMessage(page, LAUNCH_CHECKLIST);
+      await openSettings(page, "Accounts");
+      await page.getByRole("button", { name: "Manage Alex Morgan" }).click();
+      await page.getByRole("button", { name: "Set up or check for your organization…" }).click();
+      await page.getByRole("button", { name: "Sign in as an administrator" }).click();
+      await page.getByRole("button", { name: "Sign out" }).waitFor();
+      await shot("settings-org-setup");
+
+      await page.getByRole("button", { name: "Repair", exact: true }).click();
+      await page.getByRole("heading", { name: "Make these changes in Microsoft 365?" }).waitFor();
+      await shot("settings-org-setup-changes");
+    },
+  },
+  {
     shots: ["settings-account-fix"],
     async run(page, shot, { moduleUrl }) {
       // Make the demo's IMAP account fail its next sync, as if its password

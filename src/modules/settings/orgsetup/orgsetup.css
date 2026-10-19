@@ -1,0 +1,515 @@
+/* Settings → Accounts → Sensitivity labels and encryption → Set up or check
+   for your organization: the setup dialog. Its rows look like the checks'
+   rows it sits under, with a chip that says each row's state in words. */
+
+.orgsetup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  text-wrap: pretty;
+}
+
+.orgsetup-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.orgsetup-note {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.orgsetup-wait {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) 0;
+  color: var(--fg-secondary);
+  text-align: center;
+}
+
+.orgsetup-buttons,
+.orgsetup-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* --- Sections and rows ---------------------------------------------------- */
+
+.orgsetup-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.orgsetup-section__title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+}
+
+.orgsetup-rows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.orgsetup-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px var(--space-3);
+}
+
+.orgsetup-row + .orgsetup-row {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.orgsetup-row__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+}
+
+.orgsetup-row__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.orgsetup-row__summary,
+.orgsetup-row__detail {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.orgsetup-row__actions {
+  margin-top: var(--space-1);
+}
+
+/* The state, in words; the tint only helps. */
+.orgsetup-chip {
+  flex: none;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-round);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  line-height: 16px;
+  white-space: nowrap;
+  background: var(--bg-sunken);
+  color: var(--fg-secondary);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.orgsetup-chip--ok {
+  background: var(--success-subtle);
+  color: var(--success);
+  box-shadow: none;
+}
+
+.orgsetup-chip--attention {
+  background: var(--warning-subtle);
+  color: var(--warning);
+  box-shadow: none;
+}
+
+.orgsetup-chip--problem {
+  background: var(--danger-subtle);
+  color: var(--danger);
+  box-shadow: none;
+}
+
+.orgsetup-chip--busy {
+  background: var(--brand-subtle);
+  color: var(--brand-text);
+  box-shadow: none;
+}
+
+/* A quiet disclosure under a row: Details, How to fix, What approving can't fix. */
+.orgsetup-disclosure {
+  margin-top: var(--space-1);
+  font-size: var(--text-sm);
+}
+
+.orgsetup-disclosure > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  border-radius: var(--radius-sm);
+  color: var(--fg-link);
+  font-weight: var(--weight-medium);
+  list-style: none;
+  cursor: pointer;
+}
+
+.orgsetup-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.orgsetup-disclosure > summary::before {
+  content: "";
+  flex: none;
+  width: 5px;
+  height: 5px;
+  margin: 0 3px 0 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  rotate: -45deg;
+  transition: rotate var(--duration-normal) var(--ease-in-out);
+}
+
+.orgsetup-disclosure[open] > summary::before {
+  rotate: 45deg;
+}
+
+.orgsetup-disclosure > :not(summary) {
+  margin-top: var(--space-2);
+}
+
+.orgsetup-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.orgsetup-detail__text {
+  color: var(--fg-secondary);
+  white-space: pre-line;
+}
+
+/* PowerShell to run, kept as written. */
+.orgsetup-code {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.orgsetup-code__text,
+.orgsetup-script__text {
+  width: 100%;
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.orgsetup-code__text:focus {
+  outline: none;
+}
+
+/* --- Permissions ------------------------------------------------------------ */
+
+.orgsetup-approve__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.orgsetup-approve__body[hidden] {
+  display: none;
+}
+
+/* --- Status ------------------------------------------------------------------ */
+
+.orgsetup-status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.orgsetup-signed-in {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.orgsetup-choices {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.orgsetup-templates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding-left: 24px;
+}
+
+.orgsetup-templates .field {
+  flex: 1 1 220px;
+}
+
+.orgsetup-labels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.orgsetup-labels__legend {
+  margin-bottom: var(--space-1);
+  padding: 0;
+  font-weight: var(--weight-medium);
+}
+
+.orgsetup-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.orgsetup-label input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+.orgsetup-label label {
+  cursor: pointer;
+}
+
+.orgsetup-label__lock {
+  flex: none;
+  color: var(--fg-tertiary);
+}
+
+.orgsetup-tag {
+  flex: none;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-regular);
+}
+
+/* The labels' own rows line up under their checkboxes. */
+.orgsetup-labels .orgsetup-row > :not(.orgsetup-row__head) {
+  padding-left: 24px;
+}
+
+.orgsetup-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.orgsetup-plan__line {
+  font-weight: var(--weight-medium);
+}
+
+.orgsetup-problems {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+/* --- Confirmation sheet -------------------------------------------------------- */
+
+.orgsetup-changes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.orgsetup-change-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.orgsetup-change {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: 10px var(--space-3);
+}
+
+.orgsetup-change + .orgsetup-change {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.orgsetup-change__title {
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.orgsetup-change__details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding-left: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+/* --- Result ---------------------------------------------------------------------- */
+
+.orgsetup-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.orgsetup-outcomes {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.orgsetup-outcome {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 10px var(--space-3);
+}
+
+.orgsetup-outcome + .orgsetup-outcome {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.orgsetup-outcome > svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--fg-tertiary);
+}
+
+.orgsetup-outcome--done > svg,
+.orgsetup-outcome--notYetListed > svg {
+  color: var(--success);
+}
+
+.orgsetup-outcome--failed > svg {
+  color: var(--danger);
+}
+
+.orgsetup-outcome__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.orgsetup-outcome__title {
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.orgsetup-outcome__line {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.orgsetup-next {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* --- Script ---------------------------------------------------------------------- */
+
+.orgsetup-script {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.orgsetup-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+/* A script reads line by line: long lines scroll rather than wrap. */
+.orgsetup-script__text {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.orgsetup-portal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.orgsetup-portal__title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.orgsetup-portal__step {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.orgsetup-portal__copies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
