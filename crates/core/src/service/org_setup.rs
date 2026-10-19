@@ -8,6 +8,7 @@
 //! the next sign-in attempt, so "Copy setup details" works in every state.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
 use chrono::Utc;
@@ -132,6 +133,9 @@ impl CoreService {
         };
         self.cancel_org_setup_sign_in();
         self.end_org_setup();
+        // Closing the dialog from here on ends this sign-in too, also once
+        // it can no longer be canceled.
+        let generation = self.org_setup_generation.load(Ordering::SeqCst);
         let log = Arc::clone(&self.org_setup_log);
         log.start(RunHeader {
             tenant_id: Some(tenant.clone()),
@@ -175,13 +179,28 @@ impl CoreService {
             (*log).clone(),
             clock,
         )?);
-        *self.org_setup.lock().unwrap() = Some(Arc::clone(&session));
+        {
+            let mut slot = self.org_setup.lock().unwrap();
+            if self.org_setup_generation.load(Ordering::SeqCst) != generation {
+                // The dialog closed as the sign-in finished: its tokens go
+                // with the session now.
+                drop(slot);
+                session.cancel();
+                log.note("Signed out: the setup window closed as the sign-in finished.");
+                return Err(Error::new(
+                    ErrorCode::SignInCancelled,
+                    "Sign-in was canceled.",
+                ));
+            }
+            *slot = Some(Arc::clone(&session));
+        }
         orgsetup::watch_idle(Arc::clone(&self.org_setup), &session, idle_tick);
         Ok(session.admin.clone())
     }
 
-    /// Abandons the setup sign-in waiting for the browser.
+    /// Abandons the setup sign-in waiting for the browser, or finishing.
     pub fn cancel_org_setup_sign_in(&self) {
+        self.org_setup_generation.fetch_add(1, Ordering::SeqCst);
         if let Some(cancel) = self.pending_org_setup_sign_in.lock().unwrap().take() {
             let _ = cancel.send(());
         }
@@ -418,6 +437,7 @@ impl CoreService {
     /// Forgets the setup sign-in at once (its tokens go with it once a call
     /// in flight returns); the run log stays.
     pub fn end_org_setup(&self) {
+        self.org_setup_generation.fetch_add(1, Ordering::SeqCst);
         let session = self.org_setup.lock().unwrap().take();
         if let Some(session) = session {
             orgsetup::sign_out(&self.org_setup, &session, "Signed out.");

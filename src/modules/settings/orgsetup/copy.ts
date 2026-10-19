@@ -129,6 +129,10 @@ export const NOT_IN_YOUR_LIST = "not in your list";
 export const FOOTER = {
   changes: (n: number) => `${n} ${n === 1 ? "change" : "changes"} to make`,
   nothing: "Everything is set up.",
+  /** No changes, but not every row is right: none for what's chosen. */
+  nothingChosen: "Nothing to change for these choices.",
+  /** No changes because nothing could be read. */
+  nothingReadable: "Nothing can be checked or changed with this sign-in.",
   blocked: (n: number) => `${n} can't be changed from here (see above).`,
 };
 
@@ -164,6 +168,8 @@ export const OBJECT_KINDS: Record<OrgSetupObject, string> = {
 };
 
 export const APPLYING = "Making changes… This can take a minute.";
+/** The dialog's title while the changes are made. */
+export const APPLYING_TITLE = "Making changes…";
 
 export const STALE =
   "Something changed in Microsoft 365 since you looked, so nothing was changed. Review the changes again.";

@@ -14,6 +14,11 @@ interface DialogProps {
   titleId?: string;
   /** False while what the dialog started can't be left halfway: Escape and Close do nothing. */
   canClose?: boolean;
+  /**
+   * Whether a click on the backdrop closes it. False for a dialog that holds
+   * something a stray click mustn't end, such as a sign-in.
+   */
+  closeOnBackdrop?: boolean;
 }
 
 /** Modal dialog built on <dialog>: focus trapping and Escape come for free. */
@@ -26,6 +31,7 @@ export function Dialog({
   width = 480,
   titleId: givenTitleId,
   canClose = true,
+  closeOnBackdrop = true,
 }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const ownTitleId = useId();
@@ -65,9 +71,19 @@ export function Dialog({
         e.stopPropagation();
         if (canClose) onClose();
       }}
+      onClose={() => {
+        // Closed by the browser itself: a second Escape can't be refused.
+        // Open again while it can't close; otherwise its owner closes it.
+        const dialog = ref.current;
+        if (!canClose) {
+          if (dialog && !dialog.open && typeof dialog.showModal === "function") dialog.showModal();
+        } else {
+          onClose();
+        }
+      }}
       onMouseDown={(e) => {
         // Click on the backdrop closes.
-        if (e.target === ref.current && canClose) onClose();
+        if (e.target === ref.current && canClose && closeOnBackdrop) onClose();
       }}
     >
       <div className="dialog__header">

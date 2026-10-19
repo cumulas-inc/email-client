@@ -820,6 +820,8 @@ pub(crate) struct FakeConnector {
     pub admin_setup: Mutex<Option<AdminEndpoints>>,
     /// What the next setup sign-ins fail with, in order.
     pub admin_sign_in_failures: Mutex<VecDeque<Error>>,
+    /// Runs as a setup sign-in finishes, once the browser part is done.
+    pub admin_sign_in_finishing: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl FakeConnector {
@@ -843,6 +845,7 @@ impl FakeConnector {
             labels: Mutex::default(),
             admin_setup: Mutex::default(),
             admin_sign_in_failures: Mutex::default(),
+            admin_sign_in_finishing: Mutex::default(),
         }
     }
 }
@@ -959,6 +962,9 @@ impl Connector for FakeConnector {
             return Err(error);
         }
         log.sign_in(record.redeemed(Some(EXCHANGE_MANAGE_SCOPE), true, true));
+        if let Some(finishing) = self.admin_sign_in_finishing.lock().unwrap().as_ref() {
+            finishing();
+        }
         let config = AdminSetupConfig {
             client_id: endpoints.client_id,
             tenant_id: tenant_id.to_owned(),

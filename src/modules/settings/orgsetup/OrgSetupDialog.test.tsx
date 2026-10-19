@@ -31,9 +31,11 @@ import { renderWithBackend } from "../../../test/render";
 import {
   ACTION_VERBS,
   APPLYING,
+  APPLYING_TITLE,
   CHIPS,
   CONFIRM,
   CONSENT,
+  DIALOG,
   DIALOG_TITLE,
   DONE,
   FOOTER,
@@ -50,6 +52,7 @@ import {
   SETUP_APP_IT_PAGE_URL,
   SIGNED_IN_AS,
   SIGNED_OUT,
+  SIGNING_IN,
   SKIPPED_SIGNED_OUT,
   STALE,
 } from "./copy";
@@ -697,6 +700,8 @@ describe("Set up or check for your organization", () => {
     const release = hold();
     await user.click(within(dialog).getByRole("button", { name: "Make these changes" }));
     expect(await within(dialog).findByText(APPLYING)).toBeInTheDocument();
+    // The title says what's happening, not the question already answered.
+    await waitFor(() => expect(title(APPLYING_TITLE)).toHaveFocus());
     // What the browser does with Escape.
     fireEvent(dialog, new Event("cancel", { cancelable: true }));
     expect(within(dialog).getByRole("button", { name: "Close" })).toBeDisabled();
@@ -949,7 +954,7 @@ describe("Set up or check for your organization", () => {
     expect(
       within(dialog).getByRole("button", { name: "Sign in with another account" }),
     ).toBeInTheDocument();
-    expect(within(dialog).getByText(FOOTER.nothing)).toBeInTheDocument();
+    expect(within(dialog).getByText(FOOTER.nothingReadable)).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Set up" })).toBeDisabled();
   });
 
@@ -1065,6 +1070,8 @@ describe("Set up or check for your organization", () => {
     await user.click(within(dialog).getByRole("button", { name: "Make these changes" }));
 
     expect(await within(dialog).findByText(STALE)).toBeInTheDocument();
+    // Said out loud: the title that gets the keyboard is the one from before.
+    expect(within(dialog).getByText(STALE).closest('[role="alert"]')).not.toBeNull();
     expect(await within(dialog).findByText(FOOTER.changes(5))).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Review" }));
     expect(await within(dialog).findByText(`Move mail flow rule “${DNF}”`)).toBeInTheDocument();
@@ -1088,6 +1095,95 @@ describe("Set up or check for your organization", () => {
     await act(async () => answer({ changes: [], problems: [], blocked: 0 }));
     expect(within(dialog).getByText(FOOTER.changes(4))).toBeInTheDocument();
     expect(within(dialog).getByRole("checkbox", { name: "Board" })).not.toBeChecked();
+  });
+
+  it("doesn't say everything is set up when nothing is chosen", async () => {
+    const { backend } = setUpBackend("unlicensed");
+    const { user, dialog } = await openDialog(backend);
+    await signIn(user, dialog);
+    expect(await within(dialog).findByText(FOOTER.changes(2))).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "Set up Encrypt and Do Not Forward" }),
+    );
+    expect(await within(dialog).findByText(FOOTER.nothingChosen)).toBeInTheDocument();
+    expect(within(dialog).queryByText(FOOTER.nothing)).toBeNull();
+  });
+
+  it("keeps the sign-in on a click on the backdrop", async () => {
+    const { backend } = setUpBackend("partial");
+    const { user, dialog } = await openDialog(backend);
+    await signIn(user, dialog);
+    fireEvent.mouseDown(dialog);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(backend.calls.orgSetupEnded).toBe(0);
+  });
+
+  it("makes the changes only once they were shown, not on a double-click's second click", async () => {
+    const { backend, apply } = setUpBackend("partial");
+    const { user, dialog } = await openDialog(backend);
+    await signIn(user, dialog);
+    await user.click(within(dialog).getByRole("button", { name: "Repair" }));
+    const make = within(dialog).getByRole("button", { name: "Make these changes" });
+    fireEvent.click(make, { detail: 2 });
+    expect(apply).not.toHaveBeenCalled();
+    expect(title(CONFIRM.title)).toBeInTheDocument();
+    fireEvent.click(make, { detail: 1 });
+    expect(await within(dialog).findByText(DONE.everyoneElse)).toBeInTheDocument();
+    expect(apply).toHaveBeenCalledTimes(1);
+    // The result's notes point at the status: Read again goes back to it.
+    await user.click(within(dialog).getByRole("button", { name: "Read again" }));
+    expect(await within(dialog).findByText(SIGNED_IN_AS(ADMIN.username))).toBeInTheDocument();
+    expect(backend.calls.orgSetupEnded).toBe(0);
+  });
+
+  it("says the changes weren't made when they fail as a whole", async () => {
+    const { backend, apply } = setUpBackend("partial");
+    const { user, dialog } = await openDialog(backend);
+    await signIn(user, dialog);
+    await user.click(within(dialog).getByRole("button", { name: "Repair" }));
+    apply.mockRejectedValueOnce({
+      code: "invalidInput",
+      message: "That label isn't one Purview lists.",
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Make these changes" }));
+    expect(await within(dialog).findByText(DIALOG.applyFailed)).toBeInTheDocument();
+    expect(within(dialog).queryByText(DIALOG.readFailed)).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "Read again" })).toBeInTheDocument();
+  });
+
+  it("shows the setup app's approval when it isn't set up in the organization yet", async () => {
+    const { backend, signIn: signInSpy } = setUpBackend("partial");
+    signInSpy.mockRejectedValueOnce({
+      code: "signInBlocked",
+      message:
+        "Your organization isn't set up for Cumulas Mail - Admin Setup yet. Ask your IT team to approve it.",
+      details: { reason: "appNotSetUp", aadsts: 65005, adminConsentUrl: SETUP_LINK },
+    });
+    const { user, dialog } = await openDialog(backend);
+    await user.click(within(dialog).getByRole("button", { name: "Sign in as an administrator" }));
+    expect(
+      await within(dialog).findByLabelText("Approval link for your IT administrator"),
+    ).toHaveValue(SETUP_LINK);
+    expect(within(dialog).getByRole("button", { name: DIALOG.itPage })).toBeInTheDocument();
+  });
+
+  it("forgets a sign-in that finishes after the dialog closed", async () => {
+    const { backend, signIn: signInSpy } = setUpBackend("partial");
+    let finish!: () => void;
+    signInSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve(ADMIN);
+        }),
+    );
+    const { user, dialog } = await openDialog(backend);
+    await user.click(within(dialog).getByRole("button", { name: "Sign in as an administrator" }));
+    expect(await within(dialog).findByText(SIGNING_IN)).toBeInTheDocument();
+    await user.click(within(dialog).getAllByRole("button", { name: "Close" })[0]!);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const ended = backend.calls.orgSetupEnded;
+    await act(async () => finish());
+    await waitFor(() => expect(backend.calls.orgSetupEnded).toBe(ended + 1));
   });
 
   it("closes by itself on Escape, not Settings around it", async () => {

@@ -134,6 +134,9 @@ pub struct CoreService {
     org_setup_log: Arc<crate::orgsetup::RunLog>,
     /// Cancels the setup sign-in waiting for the browser.
     pending_org_setup_sign_in: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Bumped when setup ends or its sign-in is canceled: a sign-in that
+    /// finishes after that keeps no session.
+    org_setup_generation: std::sync::atomic::AtomicU64,
 }
 
 impl CoreService {
@@ -161,6 +164,7 @@ impl CoreService {
             org_setup: Arc::default(),
             org_setup_log: Arc::default(),
             pending_org_setup_sign_in: Mutex::default(),
+            org_setup_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

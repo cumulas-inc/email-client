@@ -8,6 +8,7 @@ import type {
   OrgSetupChoices,
   OrgSetupPlan,
   OrgSetupRow,
+  OrgSetupRowState,
   OrgSetupSection,
   OrgSetupStatus,
 } from "../../../api/types";
@@ -269,6 +270,14 @@ export function StatusView({
         : choices.labelIds.filter((l) => l !== labelId),
     });
   const n = plan.changes.length;
+  // Without changes: everything is right only when every row says so.
+  const settled: OrgSetupRowState[] = ["ok", "info", "waiting"];
+  const nothing =
+    status.noRole || (!status.exchangeReadable && !status.labelsReadable)
+      ? FOOTER.nothingReadable
+      : status.rows.some((r) => r.section !== "approval" && !settled.includes(r.state))
+        ? FOOTER.nothingChosen
+        : FOOTER.nothing;
 
   return (
     <div className="orgsetup-status">
@@ -402,7 +411,7 @@ export function StatusView({
         <p className="orgsetup-plan__line" role="status">
           {planning
             ? DIALOG.planning
-            : `${n > 0 ? FOOTER.changes(n) : FOOTER.nothing}${plan.blocked > 0 ? ` ${FOOTER.blocked(plan.blocked)}` : ""}`}
+            : `${n > 0 ? FOOTER.changes(n) : nothing}${plan.blocked > 0 ? ` ${FOOTER.blocked(plan.blocked)}` : ""}`}
         </p>
         {!planning && plan.problems.length > 0 && (
           <ul className="orgsetup-problems" role="alert">

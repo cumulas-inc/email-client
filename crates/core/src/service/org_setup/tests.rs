@@ -594,6 +594,38 @@ mod signed_in {
     }
 
     #[tokio::test]
+    async fn closing_as_the_sign_in_finishes_keeps_no_session() {
+        let Setup {
+            service,
+            connector,
+            work,
+            _server,
+            ..
+        } = setup().await;
+        // The dialog closes once the browser part is done, too late to
+        // cancel the sign-in itself.
+        let weak = Arc::downgrade(&service);
+        *connector.admin_sign_in_finishing.lock().unwrap() = Some(Box::new(move || {
+            if let Some(service) = weak.upgrade() {
+                service.end_org_setup();
+            }
+        }));
+        assert_code(
+            service.org_setup_sign_in(no_browser(), &work.id).await,
+            ErrorCode::SignInCancelled,
+        );
+        assert!(!session_slot(&service));
+        assert_eq!(service.org_setup_info(&work.id).unwrap().signed_in, None);
+        // The next sign-in works.
+        connector.admin_sign_in_finishing.lock().unwrap().take();
+        service
+            .org_setup_sign_in(no_browser(), &work.id)
+            .await
+            .unwrap();
+        assert!(session_slot(&service));
+    }
+
+    #[tokio::test]
     async fn a_new_sign_in_replaces_the_session_and_starts_a_new_log() {
         let Setup {
             service,

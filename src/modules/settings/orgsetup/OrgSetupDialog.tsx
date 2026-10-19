@@ -21,6 +21,7 @@ import { MICROSOFT_ERROR_LOOKUP, PROTECTION_GUIDE_URL } from "../microsoft";
 import { ChangesSheet } from "./ChangesSheet";
 import {
   APPLYING,
+  APPLYING_TITLE,
   BUTTONS,
   CONFIRM,
   CONSENT,
@@ -56,8 +57,8 @@ type View =
   | { kind: "intro" }
   | { kind: "signingIn"; from: View }
   | { kind: "consent"; error: BackendError }
-  /** A sign-in, a read or the changes failed as a whole. */
-  | { kind: "failed"; error: unknown; retry: "signIn" | "read" }
+  /** A sign-in, a read or the changes failed as a whole (the changes: none was made). */
+  | { kind: "failed"; error: unknown; retry: "signIn" | "read"; during?: "apply" }
   | { kind: "reading" }
   | { kind: "status"; stale: boolean }
   | { kind: "confirm" }
@@ -84,7 +85,7 @@ type Action =
   | { type: "signInFailed"; error: unknown }
   | { type: "reading" }
   | { type: "read"; status: OrgSetupStatus }
-  | { type: "failed"; error: unknown; retry: "signIn" | "read" }
+  | { type: "failed"; error: unknown; retry: "signIn" | "read"; during?: "apply" }
   | { type: "signedOut" }
   | { type: "choices"; choices: OrgSetupChoices }
   | { type: "planned"; plan: OrgSetupPlan }
@@ -130,8 +131,10 @@ function reduce(state: State, action: Action): State {
         plan: action.status.plan,
         planning: false,
       };
-    case "failed":
-      return { ...state, view: { kind: "failed", error: action.error, retry: action.retry } };
+    case "failed": {
+      const { error, retry, during } = action;
+      return { ...state, view: { kind: "failed", error, retry, during } };
+    }
     case "signedOut":
       return { ...state, view: { kind: "signedOut" }, script: null, planning: false };
     case "choices":
@@ -281,7 +284,12 @@ export function OrgSetupDialog({ account, onClose }: OrgSetupDialogProps) {
       if (!gone.current) dispatch({ type: "signInFailed", error: e });
       return;
     }
-    if (!gone.current) await read();
+    // Closed as the sign-in finished: it's forgotten too.
+    if (gone.current) {
+      backend.endOrgSetup().catch(() => undefined);
+      return;
+    }
+    await read();
   };
 
   const replan = (next: OrgSetupChoices) => {
@@ -330,7 +338,11 @@ export function OrgSetupDialog({ account, onClose }: OrgSetupDialogProps) {
       }
     } catch (e) {
       if (gone.current) return;
-      dispatch(signedOut(e) ? { type: "signedOut" } : { type: "failed", error: e, retry: "read" });
+      dispatch(
+        signedOut(e)
+          ? { type: "signedOut" }
+          : { type: "failed", error: e, retry: "read", during: "apply" },
+      );
     }
   };
 
@@ -490,24 +502,48 @@ export function OrgSetupDialog({ account, onClose }: OrgSetupDialogProps) {
           isBackendError(error) && typeof error.details?.aadsts === "number"
             ? error.details.aadsts
             : undefined;
+        // The setup app isn't set up in the organization yet (AADSTS65005): its approval.
+        const approval =
+          isBackendError(error) && typeof error.details?.adminConsentUrl === "string"
+            ? error.details.adminConsentUrl
+            : null;
+        const failedTitle =
+          view.retry === "signIn"
+            ? undefined
+            : view.during === "apply"
+              ? DIALOG.applyFailed
+              : DIALOG.readFailed;
         body = (
-          <Callout
-            tone="danger"
-            role="alert"
-            title={view.retry === "signIn" ? undefined : DIALOG.readFailed}
-          >
-            <p className="selectable">{errorMessage(error)}</p>
-            {aadsts !== undefined && (
-              <button
-                type="button"
-                className="btn btn--subtle btn--sm"
-                onClick={() => openLink(MICROSOFT_ERROR_LOOKUP(aadsts))}
-              >
-                <ExternalLink size={14} aria-hidden="true" />
-                {DIALOG.lookUpCode(aadsts)}
-              </button>
+          <>
+            <Callout tone="danger" role="alert" title={failedTitle}>
+              <p className="selectable">{errorMessage(error)}</p>
+              {aadsts !== undefined && (
+                <button
+                  type="button"
+                  className="btn btn--subtle btn--sm"
+                  onClick={() => openLink(MICROSOFT_ERROR_LOOKUP(aadsts))}
+                >
+                  <ExternalLink size={14} aria-hidden="true" />
+                  {DIALOG.lookUpCode(aadsts)}
+                </button>
+              )}
+            </Callout>
+            {approval && (
+              <>
+                <ApprovalLink adminConsentUrl={approval} emailIt={false} emphasis="secondary" />
+                <div>
+                  <button
+                    type="button"
+                    className="btn btn--subtle btn--sm"
+                    onClick={() => openLink(SETUP_APP_IT_PAGE_URL)}
+                  >
+                    <ExternalLink size={14} aria-hidden="true" />
+                    {DIALOG.itPage}
+                  </button>
+                </div>
+              </>
             )}
-          </Callout>
+          </>
         );
         footer = (
           <>
@@ -542,7 +578,7 @@ export function OrgSetupDialog({ account, onClose }: OrgSetupDialogProps) {
             onSignOut={signOut}
             notice={
               view.stale && (
-                <Callout tone="warning">
+                <Callout tone="warning" role="alert">
                   <p>{STALE}</p>
                 </Callout>
               )
@@ -571,12 +607,23 @@ export function OrgSetupDialog({ account, onClose }: OrgSetupDialogProps) {
         footer = (
           <>
             {button(BUTTONS.back, () => dispatch({ type: "back" }))}
-            {button(BUTTONS.makeChanges, () => void apply(), true)}
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={(e) => {
+                // The second click of a double-click on Set up or Repair lands
+                // here: the changes are made only once they've been seen.
+                if (e.detail > 1) return;
+                void apply();
+              }}
+            >
+              {BUTTONS.makeChanges}
+            </button>
           </>
         );
         break;
       case "applying":
-        title = CONFIRM.title;
+        title = APPLYING_TITLE;
         body = (
           <div className="orgsetup-wait" role="status">
             <Spinner size={24} label="Making changes" />
@@ -594,7 +641,9 @@ export function OrgSetupDialog({ account, onClose }: OrgSetupDialogProps) {
           <>
             {detailsButton}
             {!finished && scriptButton}
-            {result.signedOut && button(BUTTONS.signIn, () => void startSignIn())}
+            {result.signedOut
+              ? button(BUTTONS.signIn, () => void startSignIn())
+              : button(BUTTONS.readAgain, () => void read())}
             {button(BUTTONS.close, close, true)}
           </>
         );
@@ -621,6 +670,7 @@ export function OrgSetupDialog({ account, onClose }: OrgSetupDialogProps) {
       titleId={titleId}
       width={720}
       canClose={view.kind !== "applying"}
+      closeOnBackdrop={false}
       footer={footer && <div className="orgsetup-footer">{footer}</div>}
     >
       <div className="orgsetup" aria-busy={view.kind === "applying" || undefined}>

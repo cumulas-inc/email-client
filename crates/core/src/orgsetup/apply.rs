@@ -34,8 +34,9 @@ const EXCHANGE_FORBIDDEN: &str = "Your account can't change mail flow rules. Sig
 const COMPLIANCE_FORBIDDEN: &str = "Your account can't change auto-labeling policies. Sign in as \
                                     a Compliance Administrator or Global Administrator (or a \
                                     member of the Information Protection Admins role group).";
-const IRM_OFF: &str =
-    "Exchange can't encrypt yet: Message Encryption is off. See “Message Encryption” above.";
+/// In the result, whose Read again shows the status rows.
+const IRM_OFF: &str = "Exchange can't encrypt yet: Message Encryption is off. Select Read again \
+                       to see “Message Encryption” and what to run.";
 const BUSY: &str = "Microsoft 365 is busy. Try again in a few minutes.";
 const BACK_IN_SIMULATION: &str = "Microsoft 365 put it back into simulation; it turns itself on \
                                   again an hour after the simulation completes.";
