@@ -149,11 +149,7 @@ function rowsOf(org: Org): OrgSetupRow[] {
       fix: "approval",
     }),
     row("setupApp", "approval", ROW_TITLES.setupApp, "info", ROWS.setupApp(ADMIN.username), {
-      detail: [
-        REMOVE_APPROVAL.intro,
-        REMOVE_APPROVAL.command(SETUP_CLIENT_ID, ADMIN_OID),
-        REMOVE_APPROVAL.orDelete,
-      ].join("\n\n"),
+      detail: REMOVE_APPROVAL.detail(SETUP_CLIENT_ID, ADMIN_OID),
     }),
   ];
   if (!exchangeReads(org)) {
@@ -726,9 +722,15 @@ describe("Set up or check for your organization", () => {
     expect(within(dialog).queryByRole("button", { name: "Show the PowerShell script" })).toBeNull();
     await user.click(within(dialog).getByText("Done with setup?"));
     expect(within(dialog).getByText(REMOVE_APPROVAL.intro)).toBeVisible();
-    expect(
-      within(dialog).getByText(/Remove-MgOauth2PermissionGrant/, { selector: "pre" }),
-    ).toHaveTextContent(`principalId eq '${ADMIN_OID}'`);
+    const commands = within(dialog).getAllByText(/Remove-MgOauth2PermissionGrant/, {
+      selector: "pre",
+    });
+    // The administrator's own approval, then an approval for everyone, which
+    // has no principal.
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toHaveTextContent(`principalId eq '${ADMIN_OID}'`);
+    expect(within(dialog).getByText(REMOVE_APPROVAL.forEveryone)).toBeVisible();
+    expect(commands[1]).toHaveTextContent("consentType eq 'AllPrincipals'");
     expect(within(dialog).getByText(REMOVE_APPROVAL.orDelete)).toBeVisible();
 
     // Closing forgets the sign-in, and the keyboard goes back.

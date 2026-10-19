@@ -197,16 +197,34 @@ export const PERMISSIONS = {
 };
 
 export const REMOVE_APPROVAL = {
-  intro: `Microsoft keeps your approval of ${SETUP_APP_NAME} until you remove it. If this was a one-off setup, remove it:`,
+  intro: `Microsoft keeps your approval of ${SETUP_APP_NAME} until you remove it. If this was a one-off setup, remove it, signed in as a Global Administrator, Cloud Application Administrator or Application Administrator. This removes the approval you gave for yourself, and says whether it's also approved for everyone:`,
   /** The command that removes this administrator's approval (both values GUIDs). */
   command: (setupClientId: string, adminObjectId: string) =>
     [
       "Connect-MgGraph -Scopes 'DelegatedPermissionGrant.ReadWrite.All','Application.Read.All'",
       `$sp = Get-MgServicePrincipal -Filter "appId eq '${setupClientId}'"`,
-      `Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and principalId eq '${adminObjectId}'" |`,
-      "  ForEach-Object { Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id }",
+      `$mine = @(Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and principalId eq '${adminObjectId}'")`,
+      "$mine | ForEach-Object { Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id }",
+      `$everyone = @(Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals'")`,
+      `"Removed your approvals: $($mine.Count). Approvals for everyone: $($everyone.Count)."`,
     ].join("\n"),
-  orDelete: `Or delete it for everyone: Entra admin center → Enterprise apps → ${SETUP_APP_NAME} → Properties → Delete. To keep it for later repairs: set Assignment required to Yes, assign only your IT admins under Users and groups, and add a Conditional Access policy for it that requires phishing-resistant MFA or a compliant device.`,
+  /** An approval for everyone has no principal, so the command above leaves it. */
+  forEveryone:
+    "If it's approved for everyone in your organization (with the approval link, “Consent on behalf of your organization” or the IT page's setup script), that approval stays until you remove it too:",
+  commandForEveryone: [
+    `Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals'" |`,
+    "  ForEach-Object { Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id }",
+  ].join("\n"),
+  orDelete: `Or delete it, with every approval of it: Entra admin center → Enterprise apps → ${SETUP_APP_NAME} → Properties → Delete. To keep it for later repairs: set Assignment required to Yes, assign only your IT admins under Users and groups, and add a Conditional Access policy for it that requires phishing-resistant MFA or a compliant device.`,
+  /** The setup app row's detail, as the core writes it. */
+  detail: (setupClientId: string, adminObjectId: string) =>
+    [
+      REMOVE_APPROVAL.intro,
+      REMOVE_APPROVAL.command(setupClientId, adminObjectId),
+      REMOVE_APPROVAL.forEveryone,
+      REMOVE_APPROVAL.commandForEveryone,
+      REMOVE_APPROVAL.orDelete,
+    ].join("\n\n"),
 };
 
 // --- Status rows -----------------------------------------------------------------

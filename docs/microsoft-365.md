@@ -288,8 +288,10 @@ another setup registration needs the same steps:
    ```
 
    Microsoft must end at `http://localhost` (a page that can't connect),
-   without AADSTS50011 or AADSTS700016. Then remove the approval there if you
-   don't want to keep it (see [Approval and security](#approval-and-security)).
+   without AADSTS50011 or AADSTS700016. That approval is for everyone in that
+   tenant: if you don't want to keep it, remove it with the command for an
+   approval for everyone, or delete the enterprise app (see
+   [Approval and security](#approval-and-security)).
 
 Its client ID, `b4f17c55-b9f6-4a84-958f-afe3842da327`, is built in as
 `PUBLISHED_SETUP_CLIENT_ID` (`crates/core/src/auth/admin_setup.rs`).
@@ -698,16 +700,28 @@ approves the app.
 An approval stays in your organization until you remove it, and someone who tricks an
 administrator into signing in with this app's ID could get that administrator's Exchange rights.
 After a one-off setup, remove your approval (**Done with setup?** at the end of the dialog shows
-this with your object ID filled in):
+this with your object ID filled in). Removing approvals takes a Global Administrator, Cloud
+Application Administrator or Application Administrator. This removes the approval you gave for
+yourself, and says how many approvals for everyone there are:
 
 ```powershell
 Connect-MgGraph -Scopes 'DelegatedPermissionGrant.ReadWrite.All','Application.Read.All'
 $sp = Get-MgServicePrincipal -Filter "appId eq 'b4f17c55-b9f6-4a84-958f-afe3842da327'"
-Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and principalId eq '<your object ID>'" |
+$mine = @(Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and principalId eq '<your object ID>'")
+$mine | ForEach-Object { Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id }
+$everyone = @(Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals'")
+"Removed your approvals: $($mine.Count). Approvals for everyone: $($everyone.Count)."
+```
+
+An approval for everyone (with the approval link, _Consent on behalf of your organization_ or the
+IT page's setup script) isn't anyone's own, so that command leaves it. Remove it too:
+
+```powershell
+Get-MgOauth2PermissionGrant -Filter "clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals'" |
   ForEach-Object { Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id }
 ```
 
-Or delete it for everyone, with every approval of it: Entra admin center → Enterprise apps →
+Or delete the app, with every approval of it: Entra admin center → Enterprise apps →
 Cumulas Mail - Admin Setup → Properties → Delete. To keep it for later repairs, set **Assignment
 required** to Yes, assign only your IT administrators under **Users and groups**, and add a
 Conditional Access policy for it that requires phishing-resistant MFA or a compliant device.
@@ -1134,8 +1148,8 @@ Rules left from the earlier relay recipe ("Cumulas Mail: … after the signature
 Mail: ignore stamped label requests from outside") go the same way. In the portals: Microsoft
 Purview → **Solutions → Information Protection → Policies → Auto-labeling policies**, then the
 Exchange admin center → **Mail flow → Rules**, deleting each one whose name starts with
-`Cumulas Mail:`. Then remove your approval of Cumulas Mail - Admin Setup, or the app (see
-[Approval and security](#approval-and-security)).
+`Cumulas Mail:`. Then remove the approvals of Cumulas Mail - Admin Setup, yours and any for
+everyone, or the app (see [Approval and security](#approval-and-security)).
 
 Cumulas Mail's encryption and label options then stop working for everyone, but people's passed
 checks keep offering them until their next check or for 90 days, so tell them.

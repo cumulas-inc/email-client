@@ -870,7 +870,9 @@ New-MgOauth2PermissionGrant -ClientId $sp.Id `
           <p>
             An approval stays until you remove it. Someone who tricks an administrator into signing
             in with this app's ID could get that administrator's Exchange rights. Remove the
-            approval after a one-off setup:
+            approvals after a one-off setup, signed in with one of the roles under
+            <strong>Approve it for everyone</strong>. This removes every approval of the app: the
+            approval for everyone that the setup script above gives, and each administrator's own:
           </p>
           <pre
             class="script"
@@ -878,15 +880,16 @@ New-MgOauth2PermissionGrant -ClientId $sp.Id `
   'Application.Read.All'
 $sp = Get-MgServicePrincipal `
   -Filter "appId eq 'b4f17c55-b9f6-4a84-958f-afe3842da327'"
-Get-MgOauth2PermissionGrant -Filter `
-  "clientId eq '$($sp.Id)' and principalId eq '&lt;admin object ID&gt;'" |
-  ForEach-Object {
-    Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id
-  }</code></pre>
+$all = @(Get-MgOauth2PermissionGrant -All `
+  -Filter "clientId eq '$($sp.Id)'")
+$all | ForEach-Object {
+  Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id
+}
+"Removed approvals: $($all.Count)"</code></pre>
           <p>
             or delete the app, with every approval of it: Enterprise apps → Cumulas Mail - Admin
-            Setup → Properties → Delete. Cumulas Mail shows this command, filled in, when setup is
-            done.
+            Setup → Properties → Delete. When setup is done, Cumulas Mail shows the commands that
+            remove only the signed-in administrator's own approval, and an approval for everyone.
           </p>
           <p>
             After an administrator approves it with the link Cumulas Mail shows, their browser shows

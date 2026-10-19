@@ -747,11 +747,7 @@ function rows(tenant: DemoTenant, ctx: SetupContext, choices: OrgSetupChoices): 
   );
   out.push(
     row("setupApp", "approval", ROW_TITLES.setupApp, "info", ROWS.setupApp(ctx.admin.username), {
-      detail: [
-        REMOVE_APPROVAL.intro,
-        REMOVE_APPROVAL.command(SETUP_CLIENT_ID, ctx.adminObjectId),
-        REMOVE_APPROVAL.orDelete,
-      ].join("\n\n"),
+      detail: REMOVE_APPROVAL.detail(SETUP_CLIENT_ID, ctx.adminObjectId),
     }),
   );
 

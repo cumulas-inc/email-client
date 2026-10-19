@@ -1830,6 +1830,8 @@ describe("the demo's organization setup", () => {
     expect(row(status, "setupApp")!.detail).toContain(
       "principalId eq '5f3a9c2e-7b1d-4e8f-a6c4-2d9b0e1f3a7c'",
     );
+    // And an approval for everyone, which has no principal.
+    expect(row(status, "setupApp")!.detail).toContain("consentType eq 'AllPrincipals'");
     expect(row(status, "encryptRule")).toMatchObject({
       section: "encryption",
       title: "Encrypt rule",

@@ -84,6 +84,28 @@ fn a_fresh_organization_reads_as_not_set_up() {
         detail.contains(&format!("principalId eq '{ADMIN_OID}'")),
         "{detail}"
     );
+    // An approval for everyone has no principal: the command counts it, and
+    // the next one removes it.
+    assert!(
+        detail.contains(
+            "$everyone = @(Get-MgOauth2PermissionGrant -Filter \"clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals'\")"
+        ),
+        "{detail}"
+    );
+    assert!(
+        detail.contains(
+            "Get-MgOauth2PermissionGrant -Filter \"clientId eq '$($sp.Id)' and consentType eq 'AllPrincipals'\" |\n  ForEach-Object { Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id }"
+        ),
+        "{detail}"
+    );
+    // Each command is its own paragraph, as the dialog shows them.
+    let paragraphs: Vec<&str> = detail.split("\n\n").collect();
+    assert_eq!(paragraphs.len(), 5, "{detail}");
+    assert!(paragraphs[1].starts_with("Connect-MgGraph"), "{detail}");
+    assert!(
+        paragraphs[3].starts_with("Get-MgOauth2PermissionGrant"),
+        "{detail}"
+    );
     // Only GUIDs go into its filter.
     let odd = crate::orgsetup::status::remove_approval(CLIENT, "x' or 1 eq 1 or 'a");
     assert!(odd.contains("principalId eq '<your object ID>'"), "{odd}");
