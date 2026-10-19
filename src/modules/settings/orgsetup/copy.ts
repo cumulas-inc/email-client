@@ -32,6 +32,11 @@ export function psQuote(value: string): string {
   return `'${value.replace(/['‘’‚‛]/g, (q) => q + q)}'`;
 }
 
+/** "1 minute", "5 minutes", as the core counts them. */
+function count(n: number, unit: string): string {
+  return n === 1 ? `1 ${unit}` : `${n} ${unit}s`;
+}
+
 // --- Entry -----------------------------------------------------------------------
 
 /** The button in Sensitivity labels and encryption that opens the dialog. */
@@ -290,7 +295,7 @@ export const ROWS = {
     conflict: (rule: string, conditions: string) =>
       `“${rule}” comes first and stops later rules for mail it matches (${conditions}). Mail it matches isn't encrypted.`,
     waiting: (minutes: number) =>
-      `Set up ${minutes} minutes ago. New rules can take 30 minutes or more to start working.`,
+      `Set up ${count(minutes, "minute")} ago. New rules can take 30 minutes or more to start working.`,
     ok: "Set up.",
     /** The strip rule's placement difference. */
     movesFirst: "moves to the top",
@@ -328,7 +333,7 @@ export const ROWS = {
     simulationOnly: "In simulation: it doesn't label anything.",
     distributing: "Microsoft 365 is still applying it.",
     settling: (hours: number) =>
-      `Turned on ${hours} hours ago. Auto-labeling policies can take up to a day to start working.`,
+      `Turned on ${count(hours, "hour")} ago. Auto-labeling policies can take up to a day to start working.`,
     ok: "On.",
     /** `by`: "Guid", "ImmutableId" or "the ID Cumulas Mail sends". */
     matchedBy: (by: string, id: string) => `Matched by ${by} (header value ${id}).`,

@@ -471,7 +471,7 @@ export function policyNames(label: { id: string; name: string }): {
   const policyName = fits(`${OWN_PREFIX}${label.name}`, `${OWN_PREFIX}label ${label.id}`);
   return {
     policyName,
-    ruleName: fits(`${policyName} (header)`, `${OWN_PREFIX}label ${label.id} (header)`),
+    ruleName: fits(`${policyName} (header)`, `${OWN_PREFIX}${label.id} (header)`),
   };
 }
 

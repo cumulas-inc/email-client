@@ -562,6 +562,12 @@ fn label_rows_follow_their_policies() {
         summary,
         "Turned on 3 hours ago. Auto-labeling policies can take up to a day to start working."
     );
+    let (_, summary, _) =
+        check(json!({ "WhenChanged": (Utc::now() - Duration::minutes(70)).to_rfc3339() }));
+    assert_eq!(
+        summary,
+        "Turned on 1 hour ago. Auto-labeling policies can take up to a day to start working."
+    );
     assert_eq!(
         check(json!({ "SharePointLocation": ["All"] })).1,
         "Its auto-labeling policy has SharePoint or OneDrive locations that Cumulas Mail doesn't set. Remove them in the Microsoft Purview portal, then select Read again."

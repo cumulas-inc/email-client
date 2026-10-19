@@ -230,7 +230,7 @@ fn portal_steps_use_the_names_and_pattern_setup_uses() {
     );
     assert_eq!(
         steps[0].rule_name,
-        format!("Cumulas Mail: label {CONFIDENTIAL} (header)")
+        format!("Cumulas Mail: {CONFIDENTIAL} (header)")
     );
     // A name that fits, but not with " (header)".
     long.labels[0].view = view(CONFIDENTIAL, &"x".repeat(48));
@@ -241,6 +241,7 @@ fn portal_steps_use_the_names_and_pattern_setup_uses() {
     );
     assert_eq!(
         steps[0].rule_name,
-        format!("Cumulas Mail: label {CONFIDENTIAL} (header)")
+        format!("Cumulas Mail: {CONFIDENTIAL} (header)")
     );
+    assert!(steps[0].rule_name.len() <= 64);
 }

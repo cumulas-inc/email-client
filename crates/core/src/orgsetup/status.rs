@@ -1139,6 +1139,15 @@ fn minutes_since(at: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
     (now - at).num_minutes().max(1)
 }
 
+/// "1 minute", "5 minutes".
+fn count(n: i64, unit: &str) -> String {
+    if n == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{n} {unit}s")
+    }
+}
+
 /// A rule of ours's row; none when mail flow rules weren't read.
 fn rule_row(
     state: &RuleState,
@@ -1249,9 +1258,9 @@ fn rule_row(
                     Some(at) => make(
                         S::Waiting,
                         format!(
-                            "Set up {} minutes ago. New rules can take 30 minutes or more to start \
-                         working.",
-                            minutes_since(at, ctx.now)
+                            "Set up {} ago. New rules can take 30 minutes or more to start \
+                             working.",
+                            count(minutes_since(at, ctx.now), "minute")
                         ),
                     ),
                     None => make(S::Ok, "Set up.".into()),
@@ -1523,9 +1532,9 @@ fn policy_state(
         Some(at) => (
             S::Waiting,
             format!(
-                "Turned on {} hours ago. Auto-labeling policies can take up to a day to start \
+                "Turned on {} ago. Auto-labeling policies can take up to a day to start \
                  working.",
-                (ctx.now - at).num_hours().max(1)
+                count((ctx.now - at).num_hours().max(1), "hour")
             ),
             None,
         ),

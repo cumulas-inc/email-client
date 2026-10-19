@@ -206,12 +206,12 @@ pub fn policy_name(label: &LabelView) -> String {
     }
 }
 
-/// "<policy name> (header)", or "Cumulas Mail: label <guid> (header)" when
-/// that would pass [`MAX_NAME`].
+/// "<policy name> (header)", or "Cumulas Mail: <guid> (header)" when that
+/// would pass [`MAX_NAME`] (with "label " it would too, by one).
 pub fn policy_rule_name(policy_name: &str, label: &LabelView) -> String {
     let name = format!("{policy_name} (header)");
     if name_length(&name) > MAX_NAME {
-        format!("{PREFIX}label {} (header)", label.guid)
+        format!("{PREFIX}{} (header)", label.guid)
     } else {
         name
     }

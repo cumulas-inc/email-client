@@ -919,7 +919,8 @@ Or in the [Exchange admin center](https://admin.exchange.microsoft.com):
    completes. To turn it on yourself once the portal shows _Simulation complete_:
    `Set-AutoSensitivityLabelPolicy -Identity $name -Mode Enable`. Names can be at most 64
    characters: for a label with a long name, Cumulas Mail names the policy
-   `Cumulas Mail: label <the label's Guid>`.
+   `Cumulas Mail: label <the label's Guid>`, and its rule `Cumulas Mail: <the label's Guid> (header)`
+   when `(header)` doesn't fit.
 
    Or in the [Microsoft Purview portal](https://purview.microsoft.com), which also works from Linux
    and macOS:

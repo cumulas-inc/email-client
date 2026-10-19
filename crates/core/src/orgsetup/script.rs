@@ -48,18 +48,8 @@ pub struct ScriptLabel {
 
 /// A value as a PowerShell string: in single quotes, with single quotes
 /// (typographic ones too, which PowerShell also reads as quotes) doubled.
-pub fn ps(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
-    for c in value.chars() {
-        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
-            out.push(c);
-        }
-        out.push(c);
-    }
-    out.push('\'');
-    out
-}
+/// The same quoting as "Copy details for IT".
+pub use crate::protection::ps_quote as ps;
 
 /// A value for a comment: line breaks and `#` replaced by spaces.
 pub fn comment(value: &str) -> String {
@@ -317,7 +307,7 @@ foreach ($want in @(
   $name = 'Cumulas Mail: ' + "$($label.Name)".Trim()
   if ($name.Length -gt 64 -or -not "$($label.Name)".Trim()) { $name = 'Cumulas Mail: label ' + $guid }
   $ruleName = "$name (header)"
-  if ($ruleName.Length -gt 64) { $ruleName = 'Cumulas Mail: label ' + $guid + ' (header)' }
+  if ($ruleName.Length -gt 64) { $ruleName = 'Cumulas Mail: ' + $guid + ' (header)' }
 
   $policy = $policies | Where-Object { $_.Name -eq $name } | Select-Object -First 1
   if ($policy -and "$($policy.Mode)" -eq 'PendingDeletion') { Write-Warning "Microsoft 365 is still deleting $name. Run this again later."; continue }

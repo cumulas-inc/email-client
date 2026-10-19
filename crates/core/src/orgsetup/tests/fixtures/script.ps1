@@ -211,7 +211,7 @@ foreach ($want in @(
   $name = 'Cumulas Mail: ' + "$($label.Name)".Trim()
   if ($name.Length -gt 64 -or -not "$($label.Name)".Trim()) { $name = 'Cumulas Mail: label ' + $guid }
   $ruleName = "$name (header)"
-  if ($ruleName.Length -gt 64) { $ruleName = 'Cumulas Mail: label ' + $guid + ' (header)' }
+  if ($ruleName.Length -gt 64) { $ruleName = 'Cumulas Mail: ' + $guid + ' (header)' }
 
   $policy = $policies | Where-Object { $_.Name -eq $name } | Select-Object -First 1
   if ($policy -and "$($policy.Mode)" -eq 'PendingDeletion') { Write-Warning "Microsoft 365 is still deleting $name. Run this again later."; continue }
