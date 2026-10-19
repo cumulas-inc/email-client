@@ -5,8 +5,9 @@
      code's link) only, and never the address's free text. Nothing is
      loaded from elsewhere and nothing is sent anywhere. assemble-site.sh
      publishes it as admin-consent/index.html; check-admin-consent.sh checks
-     it against the app (the approval link, the permissions) and runs the
-     script against each answer Microsoft can send. -->
+     it against the app (the approval link, the permissions, the setup app's
+     section and the consent policy) and runs the script against each answer
+     Microsoft can send. -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -247,6 +248,16 @@
 
       .result--failed p:first-of-type {
         overflow-wrap: anywhere;
+      }
+
+      /* Something an organization that followed an earlier version of this
+         page must do. */
+      .notice {
+        margin: 8px 0 16px;
+        padding: 12px 16px 4px;
+        border-radius: 10px;
+        background: var(--warning-subtle);
+        border-left: 3px solid var(--warning);
       }
 
       pre,
@@ -576,6 +587,13 @@
               >the admin guide</a
             >. Cumulas Mail offers each option only after a test message shows that it works.
           </p>
+          <p>
+            An administrator can set this up from Cumulas Mail itself: Settings → Accounts → (a work
+            account) → Sensitivity labels and encryption → Set up or check for your organization. It
+            signs you in with a separate app, Cumulas Mail - Admin Setup (<a href="#setup-app"
+              >below</a
+            >).
+          </p>
         </section>
 
         <section>
@@ -634,27 +652,70 @@
           </p>
           <ol>
             <li>
-              <strong>A custom app consent policy for just this app.</strong> Create a permission
-              grant policy that includes delegated permissions for client application ID
-              <code>10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad</code> (or publisher ID
-              <code>7118869</code>), and add it to the default user role's assigned policies,
+              <strong>A custom app consent policy for just this app.</strong>
+              <aside id="consent-policy-notice" class="notice">
+                <p>
+                  <strong
+                    >If you created the cumulas-mail consent policy with an earlier version of this
+                    page</strong
+                  >, its includes may let people approve any permission for Cumulas Mail, or for any
+                  app from Cumulas Inc, including Cumulas Mail - Admin Setup. Check and narrow it:
+                </p>
+                <pre class="script"><code>Get-MgPolicyPermissionGrantPolicyInclude `
+  -PermissionGrantPolicyId "cumulas-mail" |
+  Format-List Id,ClientApplicationIds,
+    ClientApplicationPublisherIds,ResourceApplication,
+    Permissions
+# Remove each include whose ResourceApplication is
+# "any" or empty, or that names publisher 7118869:
+Remove-MgPolicyPermissionGrantPolicyInclude `
+  -PermissionGrantPolicyId "cumulas-mail" `
+  -PermissionGrantConditionSetId "&lt;Id&gt;"
+# Add the two narrowed includes below, then keep the
+# setup app out explicitly:
+New-MgPolicyPermissionGrantPolicyExclude `
+  -PermissionGrantPolicyId "cumulas-mail" `
+  -PermissionType "delegated" `
+  -ClientApplicationIds "b4f17c55-b9f6-4a84-958f-afe3842da327"</code></pre>
+              </aside>
+              Create a permission grant policy that includes, for client application ID
+              <code>10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad</code> only, the delegated permissions
+              Cumulas Mail asks for, and add it to the default user role's assigned policies,
               alongside the existing ones: don't replace them. With Microsoft Graph PowerShell
               (check it in a test tenant first):
               <pre
                 class="script"
+                id="consent-policy-script"
               ><code>Connect-MgGraph -Scopes "Policy.ReadWrite.PermissionGrant", `
-  "Policy.ReadWrite.Authorization"
+  "Policy.ReadWrite.Authorization", "Application.Read.All"
 
 # A policy for Cumulas Mail's delegated permissions only
 New-MgPolicyPermissionGrantPolicy -Id "cumulas-mail" `
   -DisplayName "Cumulas Mail" `
   -Description "People may approve Cumulas Mail themselves."
+
+# Microsoft Graph: only what Cumulas Mail asks for
+$graph = Get-MgServicePrincipal `
+  -Filter "appId eq '00000003-0000-0000-c000-000000000000'"
+$ids = $graph.Oauth2PermissionScopes |
+  Where-Object { $_.Value -in @('openid', 'profile',
+    'email', 'offline_access', 'User.Read',
+    'Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.Read',
+    'Calendars.ReadWrite', 'Contacts.ReadWrite',
+    'Tasks.ReadWrite', 'InformationProtectionPolicy.Read') } |
+  Select-Object -ExpandProperty Id
 New-MgPolicyPermissionGrantPolicyInclude `
   -PermissionGrantPolicyId "cumulas-mail" `
   -PermissionType "delegated" `
-  -ClientApplicationIds "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad"
-# Or -ClientApplicationPublisherIds "7118869": every app
-# from Cumulas Inc.
+  -ClientApplicationIds "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad" `
+  -ResourceApplication "00000003-0000-0000-c000-000000000000" `
+  -Permissions $ids
+# Instant updates: Cumulas Mail's own API (Sync.Receive)
+New-MgPolicyPermissionGrantPolicyInclude `
+  -PermissionGrantPolicyId "cumulas-mail" `
+  -PermissionType "delegated" `
+  -ClientApplicationIds "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad" `
+  -ResourceApplication "10abb2b9-1a7a-4dbc-ba0f-c9a0de9088ad"
 
 # Add it to the policies already assigned; don't replace them.
 $roles = Get-MgPolicyAuthorizationPolicy |
@@ -664,6 +725,9 @@ $assigned = @($roles.PermissionGrantPoliciesAssigned) +
 $update = @{ PermissionGrantPoliciesAssigned = $assigned }
 Update-MgPolicyAuthorizationPolicy `
   -DefaultUserRolePermissions $update</code></pre>
+              Name the API in each include, and Microsoft Graph's permissions, as above: without
+              <code>-ResourceApplication</code> and <code>-Permissions</code>, an include covers
+              every delegated permission of every API, administrators' ones included.
             </li>
             <li>
               <strong>Low-impact classification.</strong> In Entra ID → Enterprise apps → Consent
@@ -708,6 +772,126 @@ Update-MgPolicyAuthorizationPolicy `
             didn't allow the sign-in. The Entra sign-in logs show which policy applied. Rules that
             require a compliant or managed device may not be met by Cumulas Mail, which signs in
             through the person's web browser on Linux.
+          </p>
+        </section>
+
+        <section id="setup-app">
+          <h2>Cumulas Mail - Admin Setup</h2>
+          <p>
+            A separate app, from the same verified publisher, that administrators sign in to when
+            they set up encryption and labels from Cumulas Mail. Cumulas Mail itself never gets
+            these permissions.
+          </p>
+          <p>
+            Application (client) ID <code>b4f17c55-b9f6-4a84-958f-afe3842da327</code>, publisher ID
+            <code>7118869</code>.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Permission</th>
+                <th scope="col">What it's for</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Exchange.Manage</code> (Office 365 Exchange Online, delegated)</td>
+                <td>
+                  Running Exchange Online and Security &amp; Compliance commands as you, within your
+                  admin roles: listing, creating and changing Cumulas Mail's rules and auto-labeling
+                  policies
+                </td>
+              </tr>
+              <tr>
+                <td><code>openid</code>, <code>profile</code>, <code>offline_access</code></td>
+                <td>Signing you in, and keeping the sign-in while the setup window is open</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            Cumulas Mail keeps this sign-in in memory while the setup window is open and never
+            stores it.
+          </p>
+
+          <h3>Approving it</h3>
+          <p>
+            Each administrator approves it for themselves when they first sign in. If Microsoft
+            shows <em>Consent on behalf of your organization</em>, leave it unchecked. If your
+            settings need an administrator's approval, use the setup script below rather than
+            approving it for everyone in one click: it limits the app to the admins you name first.
+          </p>
+
+          <h3>Setup script for organizations</h3>
+          <p>
+            With Microsoft Graph PowerShell, signed in with one of the roles under
+            <strong>Approve it for everyone</strong> (check it in a test tenant first). It creates
+            the app in your organization, lets only the people assigned to it use it, assigns your
+            IT admins, and only then approves it for them:
+          </p>
+          <pre
+            class="script"
+            id="setup-app-script"
+          ><code>Connect-MgGraph -Scopes "Application.ReadWrite.All", `
+  "AppRoleAssignment.ReadWrite.All", `
+  "DelegatedPermissionGrant.ReadWrite.All", "User.ReadBasic.All"
+# Cumulas Mail - Admin Setup
+$app = "b4f17c55-b9f6-4a84-958f-afe3842da327"
+$sp = Get-MgServicePrincipal -Filter "appId eq '$app'"
+if (-not $sp) { $sp = New-MgServicePrincipal -AppId $app }
+
+# Only assigned people may use it.
+Update-MgServicePrincipal -ServicePrincipalId $sp.Id `
+  -AppRoleAssignmentRequired:$true
+
+# For each of your IT admins:
+$admin = Get-MgUser -UserId "admin@contoso.com"
+New-MgServicePrincipalAppRoleAssignedTo `
+  -ServicePrincipalId $sp.Id -PrincipalId $admin.Id `
+  -ResourceId $sp.Id -AppRoleId ([Guid]::Empty)
+
+# Only then, approve it for the organization (assignment
+# limits who can use it):
+$exo = Get-MgServicePrincipal `
+  -Filter "appId eq '00000002-0000-0ff1-ce00-000000000000'"
+$graph = Get-MgServicePrincipal `
+  -Filter "appId eq '00000003-0000-0000-c000-000000000000'"
+New-MgOauth2PermissionGrant -ClientId $sp.Id `
+  -ConsentType AllPrincipals -ResourceId $exo.Id `
+  -Scope "Exchange.Manage"
+New-MgOauth2PermissionGrant -ClientId $sp.Id `
+  -ConsentType AllPrincipals -ResourceId $graph.Id `
+  -Scope "openid profile offline_access"</code></pre>
+          <p>
+            Then add a Conditional Access policy for Cumulas Mail - Admin Setup that requires
+            phishing-resistant MFA or a compliant device.
+          </p>
+
+          <h3>Why it matters</h3>
+          <p>
+            An approval stays until you remove it. Someone who tricks an administrator into signing
+            in with this app's ID could get that administrator's Exchange rights. Remove the
+            approval after a one-off setup:
+          </p>
+          <pre
+            class="script"
+          ><code>Connect-MgGraph -Scopes 'DelegatedPermissionGrant.ReadWrite.All', `
+  'Application.Read.All'
+$sp = Get-MgServicePrincipal `
+  -Filter "appId eq 'b4f17c55-b9f6-4a84-958f-afe3842da327'"
+Get-MgOauth2PermissionGrant -Filter `
+  "clientId eq '$($sp.Id)' and principalId eq '&lt;admin object ID&gt;'" |
+  ForEach-Object {
+    Remove-MgOauth2PermissionGrant -OAuth2PermissionGrantId $_.Id
+  }</code></pre>
+          <p>
+            or delete the app, with every approval of it: Enterprise apps → Cumulas Mail - Admin
+            Setup → Properties → Delete. Cumulas Mail shows this command, filled in, when setup is
+            done.
+          </p>
+          <p>
+            After an administrator approves it with the link Cumulas Mail shows, their browser shows
+            a page that can't connect. The approval is recorded: they return to Cumulas Mail and
+            select Sign in again.
           </p>
         </section>
 
