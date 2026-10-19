@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
-import { MockBackend, mockAdminConsentUrl } from "../../../api/mock";
+import {
+  type DemoOrgSetup,
+  MockBackend,
+  mockAdminConsentUrl,
+  mockSetupConsentUrl,
+} from "../../../api/mock";
 import { DEMO_LABEL_IDS } from "../../../api/mock/data";
 import type {
   Account,
@@ -24,6 +29,7 @@ import { Dialog } from "../../../components/Dialog";
 import { useToasts } from "../../../components/toast";
 import { renderWithBackend } from "../../../test/render";
 import {
+  ACTION_VERBS,
   APPLYING,
   CHIPS,
   CONFIRM,
@@ -34,6 +40,7 @@ import {
   INTRO,
   LABEL_DISCLOSURE,
   NO_ROLE,
+  OBJECT_KINDS,
   PERMISSIONS,
   PLAN_PROBLEMS,
   REMOVE_APPROVAL,
@@ -64,7 +71,7 @@ const ENCRYPT = "Cumulas Mail: Encrypt";
 const DNF = "Cumulas Mail: Do Not Forward";
 const STRIP = "Cumulas Mail: ignore label requests from outside";
 const LICENSE_MISSING =
-  "Microsoft 365 says a license is missing: both the administrator who signs in and the people who send need a plan that includes automatic labeling (3.5). Microsoft said: The tenant isn't licensed for auto-labeling.";
+  "Microsoft 365 says a license is missing: both the administrator who signs in and the people who send need a plan that includes automatic labeling. Microsoft said: The tenant isn't licensed for auto-labeling.";
 
 type Scenario =
   | "partial"
@@ -1105,5 +1112,234 @@ describe("Set up or check for your organization", () => {
     await signIn(user, dialog);
     unmount();
     expect(backend.calls.orgSetupEnded).toBe(1);
+  });
+});
+
+// The same dialog against the demo backend's own organizations (?orgsetup=),
+// so the dialog and the demo agree on what each scenario reads and does.
+describe("Set up or check for your organization, against the demo", () => {
+  const CONFIDENTIAL = "Cumulas Mail: Confidential";
+  const changeLine = (
+    action: keyof typeof ACTION_VERBS,
+    object: keyof typeof OBJECT_KINDS,
+    name: string,
+  ) => `${ACTION_VERBS[action]} ${OBJECT_KINDS[object]} “${name}”`;
+  const sheet = (dialog: HTMLElement) =>
+    within(dialog)
+      .getAllByRole("listitem")
+      .filter((li) => li.classList.contains("orgsetup-change"))
+      .map((li) => li.querySelector(".orgsetup-change__title")?.textContent);
+
+  /** The dialog on the demo organization `scenario`, signed in when it can be. */
+  async function demo(scenario: DemoOrgSetup) {
+    const backend = new MockBackend({ orgSetup: scenario });
+    const opened = await openDialog(backend);
+    return { ...opened, backend };
+  }
+
+  it("repairs what the 0.4.0 guide set up, from the sign-in to Done", async () => {
+    const { backend, user, dialog, opener } = await demo("partial");
+    await signIn(user, dialog);
+
+    const encrypt = statusRow(dialog, "Encryption", ROW_TITLES.encryptRule);
+    expect(within(encrypt).getByText(CHIPS.differs)).toBeInTheDocument();
+    expect(
+      within(encrypt).getByText(
+        ROWS.rule.differs(
+          "applies to mail from your organization's addresses (it applied only to mail Microsoft 365 had authenticated)",
+        ),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(statusRow(dialog, "Encryption", ROW_TITLES.dnfRule)).getByText(
+        ROWS.rule.testMode("Audit"),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(
+        statusRow(dialog, "Mail routing", "Cumulas Mail: Confidential after the signature"),
+      ).getByText(ROWS.leftover.unused),
+    ).toBeInTheDocument();
+    const labels = within(dialog).getByRole("group", { name: "Labels to set up or repair" });
+    expect(within(labels).getByRole("checkbox", { name: "Confidential" })).toBeChecked();
+    expect(within(labels).getByRole("checkbox", { name: "General" })).not.toBeChecked();
+    expect(within(dialog).getByText(FOOTER.changes(3))).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Repair" }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { level: 2, name: CONFIRM.title })).toHaveFocus(),
+    );
+    expect(sheet(dialog)).toEqual([
+      changeLine("change", "mailFlowRule", ENCRYPT),
+      changeLine("change", "mailFlowRule", DNF),
+      changeLine("turnOn", "autoLabelingPolicy", CONFIDENTIAL),
+    ]);
+    expect(
+      within(dialog).getByText(
+        `Set-AutoSensitivityLabelPolicy -Identity '${CONFIDENTIAL}' -Mode 'Enable'`,
+      ),
+    ).not.toBeVisible();
+
+    await user.click(within(dialog).getByRole("button", { name: "Make these changes" }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { level: 2, name: DONE.title })).toHaveFocus(),
+    );
+    expect(
+      within(dialog).getAllByText(DONE.done, { selector: ".orgsetup-outcome__line" }),
+    ).toHaveLength(3);
+    expect(within(dialog).getByText(DONE.checkEncryption)).toBeInTheDocument();
+    expect(within(dialog).getByText(DONE.checkLabels)).toBeInTheDocument();
+    // The organization now has what was confirmed, and the time it changed.
+    expect(await backend.getOrgSetupInfo("acct-work")).toMatchObject({
+      rulesChangedAt: expect.any(String),
+      policiesChangedAt: expect.any(String),
+    });
+    expect((await backend.readOrgSetup("acct-work")).plan.changes).toEqual([]);
+
+    const writeText = vi.fn(async (_text: string) => undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    onTestFinished(() => void vi.unstubAllGlobals());
+    await user.click(within(dialog).getByRole("button", { name: "Copy setup details" }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        expect.stringContaining(`Set-AutoSensitivityLabelPolicy`),
+      ),
+    );
+
+    await user.click(within(dialog).getAllByRole("button", { name: "Close" }).at(-1)!);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(backend.calls.orgSetupEnded).toBe(1);
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it("offers only the script in a build without a setup app", async () => {
+    const { dialog } = await demo("unconfigured");
+    expect(await within(dialog).findByText(INTRO.scriptOnly(ORG))).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "Sign in as an administrator" }),
+    ).toBeNull();
+    expect(await within(dialog).findByLabelText("PowerShell script")).toHaveTextContent(
+      `# Cumulas Mail: encryption and sensitivity labels for ${ORG}`,
+    );
+  });
+
+  it("signs in once the setup app's approval page was opened", async () => {
+    const { user, dialog } = await demo("consent");
+    await user.click(
+      await within(dialog).findByRole("button", { name: "Sign in as an administrator" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { level: 2, name: CONSENT.title })).toHaveFocus(),
+    );
+    expect(within(dialog).getByLabelText("Approval link for your IT administrator")).toHaveValue(
+      mockSetupConsentUrl("demo-tenant"),
+    );
+    expect(within(dialog).queryByRole("button", { name: "Email IT" })).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "Open approval page" }));
+    await user.click(within(dialog).getByRole("button", { name: "Sign in again" }));
+    expect(await within(dialog).findByText(SIGNED_IN_AS(ADMIN.username))).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Set up" })).toBeEnabled();
+  });
+
+  it("holds labels back without the license, until Set up labels anyway", async () => {
+    const { user, dialog } = await demo("unlicensed");
+    await signIn(user, dialog);
+    expect(
+      within(statusRow(dialog, "Sensitivity labels", ROW_TITLES.licensing)).getByText(
+        ROWS.licensing.notIncluded(EMAIL),
+      ),
+    ).toBeInTheDocument();
+    const labels = within(dialog).getByRole("group", { name: "Labels to set up or repair" });
+    await user.click(within(labels).getByRole("checkbox", { name: "General" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      PLAN_PROBLEMS.unlicensed(EMAIL),
+    );
+    await user.click(within(labels).getByRole("checkbox", { name: "Set up labels anyway" }));
+    await waitFor(() => expect(within(dialog).queryByRole("alert")).toBeNull());
+    expect(within(dialog).getByRole("button", { name: "Set up" })).toBeEnabled();
+  });
+
+  it("says once that the account can read neither half", async () => {
+    const { user, dialog } = await demo("noRole");
+    await user.click(
+      await within(dialog).findByRole("button", { name: "Sign in as an administrator" }),
+    );
+    expect(await within(dialog).findByText(NO_ROLE)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Set up" })).toBeDisabled();
+  });
+
+  it("plans no labels when only Exchange could be read", async () => {
+    const { user, dialog } = await demo("exchangeOnly");
+    await signIn(user, dialog);
+    expect(
+      within(statusRow(dialog, "Sensitivity labels", ROW_TITLES.labelsAccess)).getByText(
+        ROWS.labelsAccess.noRole,
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText(FOOTER.changes(2))).toBeInTheDocument();
+    const labels = within(dialog).getByRole("group", { name: "Labels to set up or repair" });
+    await user.click(within(labels).getByRole("checkbox", { name: "General" }));
+    // Only the rule that blocks label requests from outside joins them.
+    expect(await within(dialog).findByText(FOOTER.changes(3))).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Set up" }));
+    expect(sheet(dialog)).toEqual([
+      changeLine("create", "mailFlowRule", STRIP),
+      changeLine("create", "mailFlowRule", ENCRYPT),
+      changeLine("create", "mailFlowRule", DNF),
+    ]);
+  });
+
+  it("counts a rule it can't change from here", async () => {
+    const { user, dialog } = await demo("blocked");
+    await signIn(user, dialog);
+    expect(
+      within(dialog).getByText(`${FOOTER.changes(2)} ${FOOTER.blocked(1)}`),
+    ).toBeInTheDocument();
+    expect(
+      within(statusRow(dialog, "Encryption", ROW_TITLES.encryptRule)).getByText(CHIPS.blocked),
+    ).toBeInTheDocument();
+  });
+
+  it("finds nothing to do in an organization that's set up", async () => {
+    const { user, dialog } = await demo("done");
+    await signIn(user, dialog);
+    expect(within(dialog).getByText(FOOTER.nothing)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Repair" })).toBeDisabled();
+  });
+
+  it("says which changes Purview refused, and offers the script", async () => {
+    const { user, dialog } = await demo("failing");
+    await signIn(user, dialog);
+    await user.click(within(dialog).getByRole("button", { name: "Repair" }));
+    await user.click(within(dialog).getByRole("button", { name: "Make these changes" }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { level: 2, name: DONE.someFailed })).toHaveFocus(),
+    );
+    expect(within(dialog).getByText(DONE.checkEncryption)).toBeInTheDocument();
+    expect(within(dialog).queryByText(DONE.checkLabels)).toBeNull();
+    expect(
+      within(dialog).getByRole("button", { name: "Show the PowerShell script" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps what was made when the sign-in ends halfway", async () => {
+    const { user, dialog } = await demo("signedOut");
+    await signIn(user, dialog);
+    await user.click(within(dialog).getByRole("button", { name: "Set up" }));
+    await user.click(within(dialog).getByRole("button", { name: "Make these changes" }));
+    expect(await within(dialog).findByText(DONE.signedOut)).toBeInTheDocument();
+    expect(within(dialog).getByText(DONE.skipped(SIGNED_OUT))).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Sign in" }));
+    expect(await within(dialog).findByText(FOOTER.changes(1))).toBeInTheDocument();
+  });
+
+  it("links the relay's routing row to Cumulas Signatures", async () => {
+    const { backend, user, dialog } = await demo("relay");
+    const openLink = vi.spyOn(backend, "openLink").mockResolvedValue(undefined);
+    await signIn(user, dialog);
+    const routing = statusRow(dialog, "Mail routing", ROW_TITLES.routing);
+    expect(within(routing).getByText(ROWS.routing.cumulasNotInternal)).toBeInTheDocument();
+    await user.click(within(routing).getByRole("button", { name: "Open Cumulas Signatures" }));
+    expect(openLink).toHaveBeenCalledWith(SIGNATURES_MANAGE);
   });
 });
