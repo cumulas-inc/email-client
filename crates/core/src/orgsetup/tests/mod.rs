@@ -43,6 +43,11 @@ pub(crate) const CONFIDENTIAL: &str = "6c1b0f3e-1111-4a8b-9c2d-000000000001";
 pub(crate) const GENERAL: &str = "6c1b0f3e-1111-4a8b-9c2d-000000000002";
 pub(crate) const SECRET: &str = "6c1b0f3e-1111-4a8b-9c2d-000000000003";
 
+/// A change's ID without the digest of its calls.
+pub(crate) fn base_id(id: &str) -> &str {
+    id.split_once('#').map_or(id, |(base, _)| base)
+}
+
 /// A token endpoint's answer.
 pub(crate) fn token_response(access: &str) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({

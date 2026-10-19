@@ -1041,8 +1041,9 @@ pub enum OrgSetupObject {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrgSetupChange {
-    /// `<action>:<object>:<lowercase name>`, the same for the same status
-    /// and choices.
+    /// `<action>:<object>:<lowercase name>#<digest of its PowerShell>`, the
+    /// same for the same status and choices; apply refuses a change whose
+    /// calls differ from the confirmed ones as stale.
     pub id: String,
     pub action: OrgSetupAction,
     pub object: OrgSetupObject,

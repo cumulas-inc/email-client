@@ -436,7 +436,10 @@ export type OrgSetupAction = "create" | "change" | "turnOn" | "move" | "startSim
 export type OrgSetupObject = "mailFlowRule" | "autoLabelingPolicy" | "autoLabelingRule";
 
 export interface OrgSetupChange {
-  /** "<action>:<object>:<lowercase name>", the same for the same status and choices. */
+  /**
+   * "<action>:<object>:<lowercase name>#<digest of its PowerShell>" (the demo leaves out the
+   * digest), the same for the same status and choices.
+   */
   id: string;
   action: OrgSetupAction;
   object: OrgSetupObject;

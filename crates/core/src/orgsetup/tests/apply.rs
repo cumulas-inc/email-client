@@ -67,7 +67,13 @@ async fn set_up(session: &Session, choices: &OrgSetupChoices) -> ApplyOutcome {
 fn outcomes(result: &[OrgSetupChangeResult]) -> Vec<(String, OrgSetupOutcome, Option<String>)> {
     result
         .iter()
-        .map(|r| (r.change.id.clone(), r.outcome, r.message.clone()))
+        .map(|r| {
+            (
+                super::base_id(&r.change.id).to_owned(),
+                r.outcome,
+                r.message.clone(),
+            )
+        })
         .collect()
 }
 
@@ -238,7 +244,7 @@ async fn a_stale_plan_writes_nothing() {
     assert!(!outcome.rules_changed && !outcome.policies_changed);
     // The plan to review now repairs it.
     assert_eq!(
-        outcome.result.status.plan.changes[0].id,
+        super::base_id(&outcome.result.status.plan.changes[0].id),
         "change:mailFlowRule:cumulas mail: encrypt"
     );
     // A made-up confirmation likewise.
@@ -248,6 +254,68 @@ async fn a_stale_plan_writes_nothing() {
         &["create:mailFlowRule:contoso: x".into()],
     )
     .await;
+    assert!(outcome.result.stale);
+    assert!(tenant.writes().is_empty());
+}
+
+#[tokio::test]
+async fn a_change_whose_calls_changed_is_stale_too() {
+    // Ours above a stopper and the relay's rule, its return not internal:
+    // they stay above the relay.
+    let stopper = rule("Contoso: stop", json!({ "StopRuleProcessing": true }));
+    let relay = rule(
+        crate::orgsetup::wanted::RELAY_RULE,
+        json!({
+            "FromScope": "InOrganization", "StopRuleProcessing": true,
+            "RouteMessageOutboundConnector": "Email signatures (to signature server)",
+        }),
+    );
+    let protect = |name: &str, pattern: &str, template: &str| {
+        rule(
+            name,
+            json!({
+                "ExceptIfFromScope": "NotInOrganization", "HeaderMatchesMessageHeader": "x-cumulas-protect",
+                "HeaderMatchesPatterns": [pattern], "ApplyRightsProtectionTemplate": template,
+                "RemoveHeader": "x-cumulas-protect", "RuleErrorAction": "Defer",
+            }),
+        )
+    };
+    let inbound = |internal: bool| json!({ "Name": crate::orgsetup::wanted::RELAY_INBOUND, "ConnectorType": "OnPremises", "TreatMessagesAsInternal": internal });
+    let tenant = FakeTenant::fresh();
+    tenant.with(|s| {
+        s.rules = vec![
+            relay.clone(),
+            stopper.clone(),
+            protect(ENCRYPT_RULE, "^encrypt$", "Encrypt"),
+            protect(DNF_RULE, "^do-not-forward$", "Do Not Forward"),
+        ];
+        s.inbound = vec![inbound(false)];
+    });
+    let (_server, session) = start(&tenant).await;
+    let chosen = choices(true, &[]);
+    let confirmed = shown(&session, &chosen).await;
+    assert!(
+        confirmed
+            .iter()
+            .any(|id| super::base_id(id) == "move:mailFlowRule:cumulas mail: encrypt"),
+        "{confirmed:?}"
+    );
+    // Before Make these changes, the return becomes internal: the same
+    // move, to the other side of the relay.
+    tenant.with(|s| s.inbound = vec![inbound(true)]);
+    let fresh = shown(&session, &chosen).await;
+    assert_eq!(
+        fresh
+            .iter()
+            .map(|id| super::base_id(id))
+            .collect::<Vec<_>>(),
+        confirmed
+            .iter()
+            .map(|id| super::base_id(id))
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(fresh, confirmed);
+    let outcome = run(&session, &chosen, &confirmed).await;
     assert!(outcome.result.stale);
     assert!(tenant.writes().is_empty());
 }

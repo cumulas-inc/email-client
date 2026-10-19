@@ -282,6 +282,11 @@ export const ROWS = {
       "Your account can't read mail flow rules. Sign in as an Exchange Administrator or Global Administrator.",
     unreachable: (message: string) => `Couldn't reach Exchange Online (${message}).`,
     other: (message: string) => `Couldn't read mail flow rules: ${message}.`,
+    /** Mail flow rules read, then the connectors didn't. */
+    connectorsNoRole:
+      "Your account can't read connectors, so Cumulas Mail can't tell how mail is routed or change mail flow rules. Sign in as an Exchange Administrator or Global Administrator.",
+    connectorsOther: (message: string) =>
+      `Couldn't read connectors, so mail flow rules aren't changed: ${message}.`,
   },
   labelsAccess: {
     noRole:

@@ -242,6 +242,22 @@ fn each_half_that_couldnt_be_read_gets_its_row() {
         row(&status, "exchangeAccess").fix,
         Some(OrgSetupFix::Manual)
     );
+    // Mail flow rules read, then the connectors didn't: worded after them.
+    let mut snapshot = snapshot_of(&tenant);
+    snapshot.inbound = Part::Failed(failure(FailureKind::NoRole, "denied"));
+    snapshot.outbound = Part::Skipped;
+    let status = of(&snapshot, &ctx());
+    assert_eq!(
+        row(&status, "exchangeAccess").summary,
+        "Your account can't read connectors, so Cumulas Mail can't tell how mail is routed or change mail flow rules. Sign in as an Exchange Administrator or Global Administrator."
+    );
+    assert!(has_row(&status, "encryptRule"));
+    snapshot.inbound = Part::Failed(failure(FailureKind::Other, "Something broke."));
+    let status = of(&snapshot, &ctx());
+    assert_eq!(
+        row(&status, "exchangeAccess").summary,
+        "Couldn't read connectors, so mail flow rules aren't changed: Something broke."
+    );
 }
 
 #[test]
@@ -717,5 +733,49 @@ fn the_approval_row_follows_the_work_account() {
     assert_eq!(
         row(&status, "approval").summary,
         "Microsoft 365 refused the label list for adele@contoso.com, often because of licensing."
+    );
+}
+
+#[test]
+fn a_repair_that_moves_ours_below_a_stopper_names_it() {
+    // Placed above everything while the relay's return wasn't internal;
+    // now it is, and a stopper sits between ours and the relay's rule.
+    let tenant = FakeTenant::fresh();
+    tenant.with(|s| {
+        let protect = |name: &str, pattern: &str, template: &str| {
+            rule(
+                name,
+                json!({
+                    "ExceptIfFromScope": "NotInOrganization", "HeaderMatchesMessageHeader": "x-cumulas-protect",
+                    "HeaderMatchesPatterns": [pattern], "ApplyRightsProtectionTemplate": template,
+                    "RemoveHeader": "x-cumulas-protect", "RuleErrorAction": "Defer",
+                }),
+            )
+        };
+        s.rules = vec![
+            protect(ENCRYPT_RULE, "^encrypt$", "Encrypt"),
+            protect(DNF_RULE, "^do-not-forward$", "Do Not Forward"),
+            rule(
+                "Contoso: stop for partner.com",
+                json!({ "StopRuleProcessing": true }),
+            ),
+            rule(
+                RELAY_RULE,
+                json!({ "FromScope": "InOrganization", "StopRuleProcessing": true, "RouteMessageOutboundConnector": "Email signatures (to signature server)" }),
+            ),
+        ];
+        s.inbound = vec![
+            json!({ "Name": RELAY_INBOUND, "ConnectorType": "OnPremises", "TreatMessagesAsInternal": true }),
+        ];
+    });
+    let status = of(&snapshot_of(&tenant), &ctx());
+    let encrypt = row(&status, "encryptRule");
+    assert_eq!(encrypt.state, OrgSetupRowState::Differs);
+    assert!(
+        encrypt
+            .summary
+            .contains("moves below “Contoso: stop for partner.com”"),
+        "{}",
+        encrypt.summary
     );
 }

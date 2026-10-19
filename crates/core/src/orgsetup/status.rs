@@ -848,7 +848,13 @@ fn rows(
 
     // --- Encryption ----------------------------------------------------------
     if let Some(failure) = snapshot.exchange_failure() {
-        rows.push(access_row(failure, true));
+        // Mail flow rules read, then the connectors didn't.
+        let what = if snapshot.rules.read().is_some() {
+            "connectors"
+        } else {
+            "mail flow rules"
+        };
+        rows.push(access_row(failure, Some(what)));
     }
     if let Some(irm) = snapshot.irm.read() {
         let r = match (irm.azure_rms, irm.internal) {
@@ -933,7 +939,7 @@ fn rows(
 
     // --- Sensitivity labels --------------------------------------------------
     if let Some(failure) = snapshot.compliance.failure() {
-        rows.push(access_row(failure, false));
+        rows.push(access_row(failure, None));
     }
     if let Some(mut r) = rule_row(
         assessment.rule(OwnRule::Strip),
@@ -1110,14 +1116,16 @@ fn recipients(conditions: &[(String, String)]) -> Option<String> {
 }
 
 /// A half's row when it couldn't be read (3.6.1).
-fn access_row(failure: &ReadFailure, exchange: bool) -> OrgSetupRow {
+/// The row of a half that couldn't be read: Exchange Online's with what it
+/// couldn't read (`exchange`), else Security & Compliance's.
+fn access_row(failure: &ReadFailure, exchange: Option<&str>) -> OrgSetupRow {
     use OrgSetupRowState as S;
-    let (id, title, section, what, place) = if exchange {
+    let (id, title, section, what, place) = if let Some(what) = exchange {
         (
             "exchangeAccess",
             "Exchange Online",
             OrgSetupSection::Encryption,
-            "mail flow rules",
+            what,
             "Exchange Online",
         )
     } else {
@@ -1133,7 +1141,12 @@ fn access_row(failure: &ReadFailure, exchange: bool) -> OrgSetupRow {
     let (state, summary, fix) = match failure.kind {
         FailureKind::NoRole => (
             S::Blocked,
-            if exchange {
+            if exchange == Some("connectors") {
+                "Your account can't read connectors, so Cumulas Mail can't tell how mail is \
+                 routed or change mail flow rules. Sign in as an Exchange Administrator or Global \
+                 Administrator."
+                    .to_owned()
+            } else if exchange.is_some() {
                 "Your account can't read mail flow rules. Sign in as an Exchange Administrator or \
                  Global Administrator."
                     .to_owned()
@@ -1155,6 +1168,11 @@ fn access_row(failure: &ReadFailure, exchange: bool) -> OrgSetupRow {
         FailureKind::Unreachable => (
             S::Unknown,
             format!("Couldn't reach {place} ({message})."),
+            OrgSetupFix::Manual,
+        ),
+        FailureKind::Other if what == "connectors" => (
+            S::Unknown,
+            format!("Couldn't read connectors, so mail flow rules aren't changed: {message}."),
             OrgSetupFix::Manual,
         ),
         FailureKind::Other => (
@@ -1228,9 +1246,16 @@ fn rule_row(
         RuleOutcome::Assessed { changes, placement } => {
             let moved = match placement {
                 Placement::Move { row, .. } => Some(row.clone()),
+                // Every line: one names the rule ours would move below.
                 Placement::Conflict {
                     to: Some(_), lines, ..
-                } => lines.first().map(|l| row_text(l)),
+                } => Some(
+                    lines
+                        .iter()
+                        .map(|l| row_text(l))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
                 _ => None,
             };
             let test_mode = changes.mode.as_deref().filter(|m| {

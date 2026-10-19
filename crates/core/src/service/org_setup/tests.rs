@@ -273,7 +273,10 @@ mod signed_in {
         assert_eq!(plan, status.plan);
         let confirmed: Vec<String> = plan.changes.iter().map(|c| c.id.clone()).collect();
         assert_eq!(
-            confirmed,
+            confirmed
+                .iter()
+                .map(|id| crate::orgsetup::tests::base_id(id))
+                .collect::<Vec<_>>(),
             [
                 "create:mailFlowRule:cumulas mail: encrypt",
                 "create:mailFlowRule:cumulas mail: do not forward"

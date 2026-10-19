@@ -1,5 +1,7 @@
 //! The planner, on modeled organizations (no network).
 
+use std::collections::HashSet;
+
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde_json::{Map, Value, json};
@@ -33,8 +35,12 @@ fn planned(tenant: &FakeTenant, choices: &OrgSetupChoices) -> Vec<Planned> {
     plan::assess(&snapshot_of(tenant), &ctx(), choices).planned
 }
 
+/// The changes' IDs without the digest of their calls.
 fn ids(planned: &[Planned]) -> Vec<String> {
-    planned.iter().map(|p| p.change.id.clone()).collect()
+    planned
+        .iter()
+        .map(|p| super::base_id(&p.change.id).to_owned())
+        .collect()
 }
 
 fn params(value: Value) -> Map<String, Value> {
@@ -349,7 +355,12 @@ fn encrypt_and_do_not_forward_go_above_rules_that_stop_or_route() {
 
     // A foreign stopper above the internal-return relay: a conflict.
     let (planned, placement) = placed(
-        vec![stopper, relay_rule(), good(ENCRYPT_RULE), good(DNF_RULE)],
+        vec![
+            stopper.clone(),
+            relay_rule(),
+            good(ENCRYPT_RULE),
+            good(DNF_RULE),
+        ],
         Some(true),
     );
     assert!(planned.is_empty(), "{:?}", ids(&planned));
@@ -367,6 +378,48 @@ fn encrypt_and_do_not_forward_go_above_rules_that_stop_or_route() {
         other => panic!("{other:?}"),
     }
 
+    // Nothing in the way between the relay and ours: no move, with or
+    // without a stopper above the relay.
+    let other = rule("Contoso: other", json!({}));
+    let (planned, placement) = placed(
+        vec![
+            stopper.clone(),
+            relay_rule(),
+            other.clone(),
+            good(ENCRYPT_RULE),
+            good(DNF_RULE),
+        ],
+        Some(true),
+    );
+    assert!(planned.is_empty(), "{:?}", ids(&planned));
+    assert!(matches!(placement, Placement::Conflict { to: None, .. }));
+
+    // Ours above a stopper that's above the internal-return relay (as when
+    // they were placed above everything while the return wasn't internal):
+    // moving after the relay would put them below the stopper, so that's
+    // named before the admin confirms.
+    let (planned, placement) = placed(
+        vec![
+            good(ENCRYPT_RULE),
+            good(DNF_RULE),
+            stopper.clone(),
+            relay_rule(),
+        ],
+        Some(true),
+    );
+    let below = "Moves below “Contoso: stop for partner.com”, which stops later rules for mail it matches, so it no longer acts on that mail";
+    let (to, details) = moves(&planned, ENCRYPT_RULE).unwrap();
+    assert_eq!(to, 3);
+    assert!(details[0].starts_with("Moves after “Email signatures: add signature”"));
+    assert_eq!(details[1], below);
+    assert_eq!(moves(&planned, DNF_RULE).unwrap().1[1], below);
+    match placement {
+        Placement::Conflict { to, rule, .. } => {
+            assert_eq!(to, Some(3));
+            assert_eq!(rule, "Contoso: stop for partner.com");
+        }
+        other => panic!("{other:?}"),
+    }
     // New rules go straight to their place.
     let (planned, _) = placed(vec![relay_rule()], Some(false));
     assert_eq!(planned[0].calls[0].params["Priority"], json!(0));
@@ -401,7 +454,7 @@ fn the_strip_rule_moves_first_when_a_stopper_comes_before_it() {
     });
     let planned = planned(&tenant, &choices(false, &[CONFIDENTIAL]));
     assert_eq!(
-        planned[0].change.id,
+        ids(&planned)[0],
         "move:mailFlowRule:cumulas mail: ignore label requests from outside"
     );
     assert_eq!(planned[0].calls[0].params["Priority"], json!(0));
@@ -598,9 +651,47 @@ fn auto_labeling_policies_are_repaired_and_turned_on_as_documented() {
     let tenant = with_policy(json!({}), &right);
     assert!(planned(&tenant, &choices(true, &[CONFIDENTIAL])).is_empty());
 
-    // The pattern differs: the rule is changed, and the policy is on, so
-    // apply looks whether it went back into simulation.
-    let tenant = with_policy(json!({}), &format!("^{CONFIDENTIAL}$"));
+    // The 0.4.0 guide's pattern, for exactly the ID people send: right, so
+    // a policy that works and is on isn't edited.
+    for old in [
+        format!("^{CONFIDENTIAL}$"),
+        format!("^{}$", CONFIDENTIAL.to_uppercase()),
+        format!("(?i)^{CONFIDENTIAL}$"),
+    ] {
+        let tenant = with_policy(json!({}), &old);
+        assert!(
+            planned(&tenant, &choices(true, &[CONFIDENTIAL])).is_empty(),
+            "{old}"
+        );
+    }
+    // The label named by its ImmutableId: the same label.
+    const IMMUTABLE: &str = "9d0e0c1b-2222-4c3d-8e4f-000000000001";
+    let tenant = with_policy(
+        json!({ "ApplySensitivityLabel": IMMUTABLE }),
+        &format!("(?i)^({CONFIDENTIAL}|{IMMUTABLE})$"),
+    );
+    tenant.with(|s| s.labels[0]["ImmutableId"] = json!(IMMUTABLE));
+    assert!(planned(&tenant, &choices(true, &[CONFIDENTIAL])).is_empty());
+    // Another label's ID is still a difference.
+    let tenant = with_policy(json!({ "ApplySensitivityLabel": GENERAL }), &right);
+    assert_eq!(
+        ids(&planned(&tenant, &choices(true, &[CONFIDENTIAL]))),
+        ["change:autoLabelingPolicy:cumulas mail: confidential"]
+    );
+    // The stamped header of the earlier relay recipe needs repair.
+    let tenant = with_policy(json!({}), &right);
+    tenant.with(|s| {
+        s.policy_rules[0]["HeaderMatchesPatterns"] =
+            json!({ "x-cumulas-label-stamped": format!("^{CONFIDENTIAL}$") })
+    });
+    assert_eq!(
+        ids(&planned(&tenant, &choices(true, &[CONFIDENTIAL]))),
+        ["change:autoLabelingRule:cumulas mail: confidential (header)"]
+    );
+
+    // The pattern names another ID: the rule is changed, and the policy is
+    // on, so apply looks whether it went back into simulation.
+    let tenant = with_policy(json!({}), &format!("^{GENERAL}$"));
     let planned = planned(&tenant, &choices(true, &[CONFIDENTIAL]));
     assert_eq!(
         ids(&planned),
@@ -663,6 +754,40 @@ fn auto_labeling_policies_are_repaired_and_turned_on_as_documented() {
         ["turnOn:autoLabelingPolicy:cumulas mail: confidential"]
     );
     assert_eq!(planned[0].calls[0].params["Enabled"], json!(true));
+    // Turned off, and its simulation complete: one change turns it on.
+    let tenant = with_policy(
+        json!({ "Enabled": false, "Mode": "TestWithoutNotifications", "SimulationStatus": "Completed", "SimulationCompletedTime": "2026-10-02T09:00:00Z" }),
+        &right,
+    );
+    let planned = self::planned(&tenant, &choices(true, &[CONFIDENTIAL]));
+    assert_eq!(
+        ids(&planned),
+        ["turnOn:autoLabelingPolicy:cumulas mail: confidential"]
+    );
+    assert_eq!(planned[0].calls.len(), 2);
+    assert_eq!(planned[0].calls[0].params["Enabled"], json!(true));
+    assert_eq!(planned[0].calls[1].params["Mode"], json!("Enable"));
+    assert_eq!(
+        planned[0].change.details[1..],
+        ["Turns it on", "Turns it on: its simulation is complete"]
+    );
+    assert!(planned[0].change.powershell.contains("-Mode 'Enable'"));
+    // Turned off in the portal (Mode Disable): back into simulation, then
+    // its simulation starts.
+    let tenant = with_policy(json!({ "Mode": "Disable" }), &right);
+    let planned = self::planned(&tenant, &choices(true, &[CONFIDENTIAL]));
+    assert_eq!(
+        ids(&planned),
+        ["startSimulation:autoLabelingPolicy:cumulas mail: confidential"]
+    );
+    assert_eq!(
+        planned[0].calls[0].params,
+        params(
+            json!({ "Identity": "Cumulas Mail: Confidential", "Mode": "TestWithoutNotifications" })
+        )
+    );
+    assert_eq!(planned[0].calls[1].params["StartSimulation"], json!(true));
+    assert_eq!(planned[0].change.details[1], plan::BACK_INTO_SIMULATION);
 
     // Other differences: only what differs, with the marker.
     let tenant = with_policy(
@@ -857,5 +982,48 @@ fn every_planned_call_addresses_only_our_own_objects() {
         };
         let assessment = plan::assess(&snapshot, &ctx(), &choices);
         check_ownership(&snapshot, &assessment.planned, seed);
+        // Each change has its own ID: the sheet and the result key them.
+        let ids: HashSet<&str> = assessment
+            .planned
+            .iter()
+            .map(|p| p.change.id.as_str())
+            .collect();
+        assert_eq!(ids.len(), assessment.planned.len(), "seed {seed}");
     }
+}
+
+#[test]
+fn nothing_is_planned_for_mail_flow_rules_when_the_connectors_didnt_read() {
+    // The relay's return is internal and ours are right after it, but its
+    // connector couldn't be read: no move above the relay.
+    let tenant = FakeTenant::fresh();
+    tenant.with(|s| {
+        s.rules = vec![relay_rule(), old_encrypt(), good(DNF_RULE)];
+        s.inbound = vec![relay_inbound(true)];
+    });
+    let mut snapshot = snapshot_of(&tenant);
+    assert!(
+        plan::assess(&snapshot, &ctx(), &choices(true, &[]))
+            .planned
+            .iter()
+            .all(|p| p.change.action != OrgSetupAction::Move)
+    );
+    snapshot.inbound = Part::Failed(ReadFailure {
+        kind: FailureKind::Unreachable,
+        detail: ErrorDetail::default(),
+    });
+    snapshot.outbound = Part::Skipped;
+    let assessment = plan::assess(&snapshot, &ctx(), &choices(true, &[CONFIDENTIAL]));
+    assert!(
+        assessment.planned.is_empty(),
+        "{:?}",
+        ids(&assessment.planned)
+    );
+    // The rules are still assessed for their rows.
+    assert!(matches!(
+        assessment.rule(OwnRule::Encrypt).outcome,
+        RuleOutcome::Assessed { .. }
+    ));
+    // Labels wait for the strip rule, which can't be set up meanwhile.
+    assert_eq!(assessment.problems, [STRIP_FIRST]);
 }

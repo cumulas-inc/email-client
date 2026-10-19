@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use super::invoke::Cmdlet;
 use super::objects::{
@@ -36,6 +37,8 @@ pub const LABEL_DISCLOSURE: &str = "Anyone in your organization can apply a labe
 /// Under a change to an auto-labeling policy that is on.
 pub const BACK_TO_SIMULATION: &str =
     "Microsoft 365 may put it back into simulation for a few hours; it turns itself on again.";
+/// Before starting the simulation of a policy turned off in the portal.
+pub const BACK_INTO_SIMULATION: &str = "Puts it back into simulation";
 /// Labels chosen while label requests from outside can't be removed first
 /// (D11).
 pub const STRIP_FIRST: &str = "Label requests from outside must be blocked first: sign in as an \
@@ -378,6 +381,33 @@ fn above_line(passed: &[&Slot]) -> String {
     }
 }
 
+/// "Moves below “X”, which stops later rules for mail it matches, so it no
+/// longer acts on that mail".
+fn below_line(passed: &[&Slot]) -> String {
+    let names: Vec<&str> = passed.iter().map(|s| s.name.as_str()).collect();
+    let stops = passed.iter().all(|s| s.stops);
+    let routes = passed.iter().all(|s| s.routes && !s.stops);
+    let what = if stops {
+        "stops later rules"
+    } else if routes {
+        "sends mail out through another service"
+    } else {
+        "stops later rules or sends mail out through another service"
+    };
+    if passed.len() == 1 {
+        format!(
+            "Moves below {}, which {what} for mail it matches, so it no longer acts on that mail",
+            quoted(&names)
+        )
+    } else {
+        let what = what.replace("stops", "stop").replace("sends", "send");
+        format!(
+            "Moves below {}, which {what} for mail they match, so it no longer acts on that mail",
+            quoted(&names)
+        )
+    }
+}
+
 const ABOVE_RELAY: &str = "Moves above “Email signatures: add signature”, because mail coming \
                            back from the relay doesn't count as internal: encrypted mail then \
                            goes out without a signature";
@@ -453,6 +483,13 @@ fn place_protect(slots: &[Slot], own: usize, relay_internal: bool) -> Placement 
             .filter(|&&j| j > relay)
             .map(|&j| &slots[j])
             .collect();
+        // Rules ours would move below on their way to after the relay's
+        // rule: each keeps them from acting on the mail it matches.
+        let passed: Vec<usize> = if relay_below {
+            (own + 1..relay).filter(|&j| slots[j].blocks()).collect()
+        } else {
+            Vec::new()
+        };
         let mut lines = Vec::new();
         let mut row = None;
         if relay_below {
@@ -464,8 +501,16 @@ fn place_protect(slots: &[Slot], own: usize, relay_internal: bool) -> Placement 
             row.get_or_insert_with(|| row_text(&line));
             lines.push(line);
         }
-        if let Some(&first) = above.iter().find(|&&j| j < relay) {
-            let conflict = &slots[first];
+        if !passed.is_empty() {
+            let passed: Vec<&Slot> = passed.iter().map(|&j| &slots[j]).collect();
+            lines.push(below_line(&passed));
+        }
+        let conflict = above
+            .iter()
+            .find(|&&j| j < relay)
+            .or(passed.first())
+            .map(|&j| &slots[j]);
+        if let Some(conflict) = conflict {
             let conditions = if conflict.conditions.is_empty() {
                 "every message".to_owned()
             } else {
@@ -476,8 +521,9 @@ fn place_protect(slots: &[Slot], own: usize, relay_internal: bool) -> Placement 
                     .collect::<Vec<_>>()
                     .join("; ")
             };
+            // Ours move only for a reason the lines give.
             return Placement::Conflict {
-                to: (to != own).then_some(to),
+                to: (to != own && !lines.is_empty()).then_some(to),
                 lines,
                 rule: conflict.name.clone(),
                 conditions,
@@ -706,7 +752,15 @@ fn template_of<'t>(
     (Some(name.to_owned()), id)
 }
 
-fn change_id(action: OrgSetupAction, object: OrgSetupObject, name: &str) -> String {
+/// `<action>:<object>:<lowercase name>#<digest>`, the digest of the calls'
+/// PowerShell: a change whose calls differ from the ones the administrator
+/// confirmed is another change, so apply refuses it as stale (D9).
+fn change_id(
+    action: OrgSetupAction,
+    object: OrgSetupObject,
+    name: &str,
+    powershell: &str,
+) -> String {
     let action = match action {
         OrgSetupAction::Create => "create",
         OrgSetupAction::Change => "change",
@@ -719,7 +773,11 @@ fn change_id(action: OrgSetupAction, object: OrgSetupObject, name: &str) -> Stri
         OrgSetupObject::AutoLabelingPolicy => "autoLabelingPolicy",
         OrgSetupObject::AutoLabelingRule => "autoLabelingRule",
     };
-    format!("{action}:{object}:{}", name.trim().to_lowercase())
+    let digest: String = Sha256::digest(powershell.as_bytes())[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{action}:{object}:{}#{digest}", name.trim().to_lowercase())
 }
 
 fn planned(
@@ -732,7 +790,7 @@ fn planned(
     let powershell = calls.iter().map(render_call).collect::<Vec<_>>().join("\n");
     Planned {
         change: OrgSetupChange {
-            id: change_id(action, object, name),
+            id: change_id(action, object, name, &powershell),
             action,
             object,
             name: name.to_owned(),
@@ -781,6 +839,9 @@ pub fn assess(snapshot: &Snapshot, ctx: &SetupContext, choices: &OrgSetupChoices
         Part::Read(templates) => Some(templates.as_slice()),
         _ => None,
     };
+    // A half that didn't read gets no changes (3.6.1), even when its mail
+    // flow rules did: where ours go depends on the connectors read after them.
+    let exchange_read = snapshot.exchange_failure().is_none();
     let mut ordered: Vec<&TransportRuleView> =
         rules.map(|r| r.iter().collect()).unwrap_or_default();
     ordered.sort_by_key(|r| r.priority.unwrap_or(i64::MAX));
@@ -846,7 +907,7 @@ pub fn assess(snapshot: &Snapshot, ctx: &SetupContext, choices: &OrgSetupChoices
                 _ => place_protect(&slots, own, relay_internal),
             };
         }
-        if covered {
+        if covered && exchange_read {
             let planned = plan_rule(
                 &wanted,
                 rule.as_ref(),
@@ -876,6 +937,7 @@ pub fn assess(snapshot: &Snapshot, ctx: &SetupContext, choices: &OrgSetupChoices
     let strip_ok = strip_is_ok(strip);
     if labels_allowed
         && (rules.is_none()
+            || (!exchange_read && !strip_ok)
             || matches!(
                 strip.outcome,
                 RuleOutcome::Blocked(_) | RuleOutcome::NoId | RuleOutcome::Unread
@@ -1202,7 +1264,11 @@ fn diff_label(
 ) -> LabelChanges {
     let mut changes = LabelChanges::default();
     let applied = policy.label.as_deref();
-    if !(same(applied, &view.guid) || same(applied, &view.name)) {
+    let immutable = view
+        .immutable_id
+        .as_deref()
+        .is_some_and(|i| same(applied, i));
+    if !(same(applied, &view.guid) || same(applied, &view.name) || immutable) {
         changes
             .policy_set
             .insert("ApplySensitivityLabel".into(), json!(view.guid));
@@ -1244,8 +1310,14 @@ fn diff_label(
                 .push(format!("Adds its rule for the header {LABEL_HEADER}"));
         }
         Some(rule) => {
+            // Right: the pattern setup sets, or one for exactly the ID
+            // people's Cumulas Mail sends (as the 0.4.0 guide made it), so a
+            // policy that works isn't edited.
+            let sent = [format!("^{id}$"), format!("(?i)^{id}$")];
             let right = matches!(rule.header_patterns.as_slice(),
-                [(key, value)] if key.eq_ignore_ascii_case(LABEL_HEADER) && value.trim() == pattern);
+                [(key, value)] if key.eq_ignore_ascii_case(LABEL_HEADER)
+                    && (value.trim() == pattern
+                        || sent.iter().any(|s| value.trim().eq_ignore_ascii_case(s))));
             if !right {
                 changes.rule_set.insert(
                     "HeaderMatchesPatterns".into(),
@@ -1440,20 +1512,60 @@ fn plan_label(state: &LabelState) -> Vec<Planned> {
                 let call = Cmdlet::write("Set-AutoSensitivityLabelPolicy", step("Turn on", name))
                     .with("Identity", policy.name.as_str())
                     .with("Mode", "Enable");
-                out.push(planned(
-                    OrgSetupAction::TurnOn,
-                    policy_object,
-                    name,
-                    vec!["Turns it on: its simulation is complete".to_owned()],
-                    vec![call],
-                ));
+                let line = "Turns it on: its simulation is complete".to_owned();
+                // Turned off as well: one change that turns it on.
+                match out.last_mut() {
+                    Some(last)
+                        if last.change.action == OrgSetupAction::TurnOn
+                            && last.change.object == policy_object =>
+                    {
+                        last.calls.push(call);
+                        last.change.details.push(line);
+                        *last = planned(
+                            OrgSetupAction::TurnOn,
+                            policy_object,
+                            name,
+                            last.change.details.clone(),
+                            last.calls.clone(),
+                        );
+                    }
+                    _ => out.push(planned(
+                        OrgSetupAction::TurnOn,
+                        policy_object,
+                        name,
+                        vec![line],
+                        vec![call],
+                    )),
+                }
             } else {
+                let mut calls = Vec::new();
+                let mut lines = Vec::new();
+                // Turned off in the portal (Disable): starting a simulation
+                // doesn't change its mode, so it goes back into simulation
+                // first, as a new policy starts in it.
+                if policy
+                    .mode
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case("Disable"))
+                {
+                    calls.push(
+                        Cmdlet::write(
+                            "Set-AutoSensitivityLabelPolicy",
+                            step("Put back into simulation", name),
+                        )
+                        .with("Identity", policy.name.as_str())
+                        .with("Mode", "TestWithoutNotifications"),
+                    );
+                    lines.push(BACK_INTO_SIMULATION.to_owned());
+                }
+                calls.push(start_simulation(&policy.name));
+                lines.push(simulation_line.to_owned());
                 out.push(planned(
                     OrgSetupAction::StartSimulation,
                     policy_object,
                     name,
-                    vec![simulation_line.to_owned()],
-                    vec![start_simulation(&policy.name)],
+                    lines,
+                    calls,
                 ));
             }
             out

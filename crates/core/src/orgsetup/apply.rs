@@ -742,6 +742,21 @@ impl Run<'_> {
         if view.is_on() || !view.is_named(policy) || !is_owned(&view.name) {
             return None;
         }
+        // Turned off (Disable) rather than in simulation: starting a
+        // simulation doesn't change its mode.
+        if view
+            .mode
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case("Disable"))
+        {
+            let back = Cmdlet::write(
+                "Set-AutoSensitivityLabelPolicy",
+                format!("Put “{policy}” back into simulation"),
+            )
+            .with("Identity", view.name.as_str())
+            .with("Mode", "TestWithoutNotifications");
+            self.write(client, &back).await.ok()?;
+        }
         let call = Cmdlet::write(
             "Set-AutoSensitivityLabelPolicy",
             format!("Start the simulation of “{policy}” again"),
@@ -1066,9 +1081,16 @@ fn verify_rule(after: &Assessment, planned: &Planned) -> Shown {
     };
     let misplaced = match placement {
         Placement::Move { row, .. } => Some(row.clone()),
+        // Every line: one names the rule ours would move below.
         Placement::Conflict {
             to: Some(_), lines, ..
-        } => lines.first().map(|l| row_text(l)),
+        } => Some(
+            lines
+                .iter()
+                .map(|l| row_text(l))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
         _ => None,
     };
     let keys: Vec<&String> = planned
