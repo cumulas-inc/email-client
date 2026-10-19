@@ -1207,7 +1207,11 @@ fn rule_row(
                 with_fix(
                     make(
                         S::Off,
-                        format!("In test mode ({mode}): it doesn't encrypt."),
+                        if id == "stripRule" {
+                            format!("In test mode ({mode}): it doesn't remove label requests.")
+                        } else {
+                            format!("In test mode ({mode}): it doesn't encrypt.")
+                        },
                     ),
                     OrgSetupFix::Setup,
                 )

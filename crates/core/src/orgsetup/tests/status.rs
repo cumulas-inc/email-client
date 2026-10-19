@@ -355,6 +355,18 @@ fn rule_rows_say_what_needs_repair() {
             "Removes x-cumulas-label from mail that isn't authenticated mail from inside your organization, so nobody outside can ask for a label."
         )
     );
+    // In test mode, it says what it then doesn't do.
+    set_strip("Mode", json!("Audit"));
+    let status = of(&snapshot_of(&tenant), &ctx());
+    let strip = row(&status, "stripRule");
+    assert_eq!(
+        (strip.state, strip.summary.as_str()),
+        (
+            OrgSetupRowState::Off,
+            "In test mode (Audit): it doesn't remove label requests."
+        )
+    );
+    set_strip("Mode", json!("Enforce"));
     // Turned off.
     set_strip("State", json!("Disabled"));
     let status = of(&snapshot_of(&tenant), &ctx());
