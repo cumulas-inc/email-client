@@ -244,6 +244,7 @@ fn labels_policies_and_rules_read_defensively() {
         )]
     );
     assert_eq!(rules[0].disabled, Some(false));
+    // AccessScope "None": the condition isn't used.
     assert!(rules[0].other_conditions.is_empty());
     assert_eq!(rules[1].policy.as_deref(), Some("Cumulas Mail: Shared"));
     assert_eq!(
@@ -256,7 +257,8 @@ fn labels_policies_and_rules_read_defensively() {
             ("x-cumulas-label-stamped".to_owned(), "^c$".to_owned()),
         ]
     );
-    assert_eq!(rules[1].other_conditions, ["SentTo"]);
+    // An AccessScope that's used still counts; 0 is None as a number.
+    assert_eq!(rules[1].other_conditions, ["AccessScope", "SentTo"]);
     assert_eq!(
         rules[2].header_patterns,
         [("x-cumulas-label".to_owned(), "^x$".to_owned())]

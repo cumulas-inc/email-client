@@ -3,7 +3,8 @@
 //! administrators without Windows.
 //!
 //! Every value that goes into the script is quoted by [`ps`] (or, in
-//! comments, flattened by [`comment`]); there is no other interpolation.
+//! comments, flattened by [`comment`]) and filled in by [`fill`], in one
+//! pass that never looks inside a value; there is no other interpolation.
 //! Label IDs are validated GUIDs before they get here.
 
 use chrono::{DateTime, Utc};
@@ -12,8 +13,10 @@ use serde_json::Value;
 use super::invoke::{Cmdlet, ordered_params};
 use super::objects::LabelView;
 use super::wanted::{
-    self, DNF_PATTERN, DNF_RULE, DNF_TEMPLATE, ENCRYPT_PATTERN, ENCRYPT_RULE, ENCRYPT_TEMPLATE,
-    EXTRA_PARAMETERS, LABEL_HEADER, MARKER, PROTECT_HEADER, RELAY_INBOUND, RELAY_RULE, STRIP_RULE,
+    self, AUTO_RULE_CONDITIONS, AUTO_RULE_DEFAULTS, DNF_PATTERN, DNF_RULE, DNF_TEMPLATE,
+    ENCRYPT_PATTERN, ENCRYPT_RULE, ENCRYPT_TEMPLATE, EXTRA_PARAMETERS, LABEL_HEADER, MARKER,
+    POLICY_OTHER_LOCATIONS, PROTECT_HEADER, RELAY_INBOUND, RELAY_RULE, STAMPED_LABEL_HEADER,
+    STRIP_RULE,
 };
 use crate::model::{OrgSetupScript, PortalSteps};
 
@@ -98,6 +101,37 @@ pub fn render_call(cmdlet: &Cmdlet) -> String {
     for (key, value) in ordered_params(&cmdlet.params) {
         out.push_str(&format!(" -{key} {}", render_value(value)));
     }
+    out
+}
+
+/// Fills `{NAME}` placeholders with their values, scanning `template` once:
+/// a value is never scanned again, so text in it that looks like a
+/// placeholder stays as it is. Braces that aren't a known placeholder
+/// (PowerShell's own) stay too.
+pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let value = after.find('}').and_then(|close| {
+            values
+                .iter()
+                .find(|(name, _)| *name == &after[..close])
+                .map(|(_, value)| (close, *value))
+        });
+        match value {
+            Some((close, value)) => {
+                out.push_str(value);
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
     out
 }
 
@@ -231,6 +265,11 @@ function Move-ToPlace([string]$Name) {
     foreach ($r in @($above | Where-Object { $_.Priority -lt $relay.Priority })) {
       Write-Warning "'$($r.Name)' comes before the relay's rule and stops later rules for the mail it matches, so $Name doesn't act on that mail. Decide whether it should."
     }
+    if ($relayBelow) {
+      foreach ($r in @($rules | Where-Object { $_.Priority -gt $own.Priority -and $_.Priority -lt $relay.Priority -and (Test-Blocks $_) })) {
+        Write-Warning "$Name moves below '$($r.Name)', which stops later rules or sends mail out for the mail it matches, so $Name won't act on that mail any more. Decide whether it should."
+      }
+    }
   } else {
     $to = $above[0].Priority
   }
@@ -293,6 +332,20 @@ Connect-IPPSSession
 $labels = @(Get-Label)
 $policies = @(Get-AutoSensitivityLabelPolicy)
 $policyRules = @(Get-AutoSensitivityLabelRule)
+# Conditions and locations Cumulas Mail never sets: a policy of ours with any of them is left alone.
+$AutoRuleConditions = @({AUTO_CONDITIONS})
+# Conditions that always carry a value, and the one that means they aren't used.
+$AutoRuleDefaults = @{ {AUTO_DEFAULTS} }
+$OtherLocations = @({OTHER_LOCATIONS})
+function Get-AutoExtras($Rule) {
+  foreach ($p in $AutoRuleConditions) {
+    $v = $Rule.$p
+    if ($AutoRuleDefaults.ContainsKey($p) -and "$v".Trim() -in $AutoRuleDefaults[$p], '0') { continue }
+    if ($null -ne $v -and "$v" -ne '' -and "$v" -ne 'False' -and @($v).Count) { $p }
+  }
+  if ("$($Rule.Workload)" -and "$($Rule.Workload)" -ne 'Exchange') { 'Workload' }
+  if (@($Rule.HeaderMatchesPatterns.Keys).Count -gt 1) { 'HeaderMatchesPatterns' }
+}
 
 foreach ($want in @(
 {LABELS}
@@ -322,36 +375,60 @@ foreach ($want in @(
     continue
   }
 
-  # Only Cumulas Mail's own rule, and only email: anything else is left alone.
+  # Only Cumulas Mail's own rule, with only its header pattern, and only email: anything else is
+  # left alone.
   $own = @($policyRules | Where-Object { "$($_.ParentPolicyName)" -eq $name -or "$($_.Policy)" -eq $name })
-  $elsewhere = @(@($policy.SharePointLocation) + @($policy.OneDriveLocation) + @($policy.TeamsLocation) | Where-Object { $_ })
-  if (@($own | Where-Object { $_.Name -ne $ruleName }).Count -or $elsewhere.Count) {
-    Write-Warning "$name has rules or locations Cumulas Mail doesn't set, so it was left alone. Remove them in the Microsoft Purview portal, then run this again."
+  $elsewhere = @(foreach ($p in $OtherLocations) { @($policy.$p) | Where-Object { "$_" } })
+  $rule = $own | Where-Object { $_.Name -eq $ruleName } | Select-Object -First 1
+  $extra = @(if ($rule) { Get-AutoExtras $rule })
+  if (@($own | Where-Object { $_.Name -ne $ruleName }).Count -or $elsewhere.Count -or $extra.Count) {
+    Write-Warning "$name has rules, conditions or locations Cumulas Mail doesn't set$(if ($extra.Count) { " ($($extra -join ', '))" }), so it was left alone. Remove them in the Microsoft Purview portal, then run this again."
     continue
   }
+  $changed = $false
   $fix = @{}
-  if (-not (Test-Same $policy.ApplySensitivityLabel $guid) -and -not (Test-Same $policy.ApplySensitivityLabel $label.Name)) { $fix.ApplySensitivityLabel = $guid }
+  $applied = $policy.ApplySensitivityLabel
+  if (-not ((Test-Same $applied $guid) -or (Test-Same $applied $label.Name) -or ("$($label.ImmutableId)" -and (Test-Same $applied "$($label.ImmutableId)")))) { $fix.ApplySensitivityLabel = $guid }
   if (-not (@($policy.ExchangeLocation) | Where-Object { "$_" -eq 'All' })) { $fix.AddExchangeLocation = 'All' }
   if ($Group -and -not (Test-Same (@($policy.ExchangeSenderMemberOf) | ForEach-Object { "$_".ToLowerInvariant() }) $Group.ToLowerInvariant())) { $fix.ExchangeSenderMemberOf = $Group }
   if (-not $policy.OverwriteLabel) { $fix.OverwriteLabel = $true }
+  if ($fix.Count) { $changed = $true }
   if ($policy.Enabled -eq $false) { $fix.Enabled = $true }
   if ($fix.Count) { $fix.Comment = $Marker; Set-AutoSensitivityLabelPolicy -Identity $policy.Identity @fix; "Repaired: $name" }
 
-  $rule = $own | Where-Object { $_.Name -eq $ruleName } | Select-Object -First 1
   if (-not $rule) {
     New-AutoSensitivityLabelRule -Policy $name -Name $ruleName -Workload Exchange `
       -HeaderMatchesPatterns @{ {LABEL_HEADER} = $pattern } | Out-Null
+    $changed = $true
     "Added its rule: $ruleName"
-  } elseif (-not ($rule.HeaderMatchesPatterns | Out-String).Contains($pattern) -or $rule.Disabled) {
-    Set-AutoSensitivityLabelRule -Identity $rule.Identity -HeaderMatchesPatterns @{ {LABEL_HEADER} = $pattern } -Disabled $false
-    "Repaired its rule: $ruleName"
+  } else {
+    # Right: the pattern Cumulas Mail sets, or one for exactly the ID people's Cumulas Mail sends.
+    $text = ($rule.HeaderMatchesPatterns | Out-String -Width 4096).ToLowerInvariant()
+    $right = $text.Contains({LABEL_HEADER}) -and -not $text.Contains({STAMPED_HEADER}) -and
+      ($text.Contains($pattern) -or $text.Contains('^' + $want.Id + '$'))
+    $fixRule = @{}
+    if (-not $right) { $fixRule.HeaderMatchesPatterns = @{ {LABEL_HEADER} = $pattern } }
+    if ($rule.Disabled) { $fixRule.Disabled = $false }
+    if ($fixRule.Count) {
+      Set-AutoSensitivityLabelRule -Identity $rule.Identity @fixRule
+      $changed = $true
+      "Repaired its rule: $ruleName"
+    }
   }
 
+  # A simulation that runs and turns the policy on by itself is left to finish: starting it again
+  # would start it over.
   $policy = Get-AutoSensitivityLabelPolicy | Where-Object { $_.Name -eq $name } | Select-Object -First 1
-  if ("$($policy.Mode)" -ne 'Enable') {
+  $after = "$($policy.AutoEnableAfter)"
+  if ("$($policy.Mode)" -eq 'Enable') { "On: $name" }
+  elseif (-not $changed -and "$($policy.Mode)" -like 'TestWith*' -and $after -and $after -notin '00:00:00', '0') {
+    "In simulation; it turns on by itself an hour after the simulation completes: $name"
+  } else {
+    # Turned off in the portal: back into simulation first.
+    if ("$($policy.Mode)" -eq 'Disable') { Set-AutoSensitivityLabelPolicy -Identity $policy.Identity -Mode TestWithoutNotifications }
     Set-AutoSensitivityLabelPolicy -Identity $policy.Identity -StartSimulation $true -AutoEnableAfter (New-TimeSpan -Hours 1)
     "In simulation; it turns on by itself an hour after the simulation completes: $name"
-  } else { "On: $name" }
+  }
 }
 "#;
 
@@ -391,30 +468,35 @@ pub fn script(input: &ScriptInput) -> OrgSetupScript {
             line(text)
         });
     }
-    let extras: Vec<String> = EXTRA_PARAMETERS.iter().map(|p| ps(p)).collect();
-    out.push_str(
-        &PREAMBLE
-            .replace("{MARKER}", &ps(MARKER))
-            .replace("{EXTRAS}", &extras.join(", "))
-            .replace("{STRIP}", &ps(STRIP_RULE)),
-    );
+    let quoted = |names: &[&str]| names.iter().map(|p| ps(p)).collect::<Vec<_>>().join(", ");
+    let (marker, strip, label_header) = (ps(MARKER), ps(STRIP_RULE), ps(LABEL_HEADER));
+    out.push_str(&fill(
+        PREAMBLE,
+        &[
+            ("MARKER", &marker),
+            ("EXTRAS", &quoted(EXTRA_PARAMETERS)),
+            ("STRIP", &strip),
+        ],
+    ));
     let labels = !input.labels.is_empty();
     if labels {
-        out.push_str(&STRIP_PART.replace("{LABEL_HEADER}", &ps(LABEL_HEADER)));
+        out.push_str(&fill(STRIP_PART, &[("LABEL_HEADER", &label_header)]));
     }
     if input.actions {
-        out.push_str(
-            &ACTIONS_PART
-                .replace("{RELAY_RULE}", &ps(RELAY_RULE))
-                .replace("{RELAY_INBOUND}", &ps(RELAY_INBOUND))
-                .replace("{ENCRYPT_RULE}", &ps(ENCRYPT_RULE))
-                .replace("{DNF_RULE}", &ps(DNF_RULE))
-                .replace("{ENCRYPT_PATTERN}", &ps(ENCRYPT_PATTERN))
-                .replace("{DNF_PATTERN}", &ps(DNF_PATTERN))
-                .replace("{ENCRYPT_TEMPLATE}", &ps(&input.encrypt_template))
-                .replace("{DNF_TEMPLATE}", &ps(&input.dnf_template))
-                .replace("{PROTECT_HEADER}", &ps(PROTECT_HEADER)),
-        );
+        out.push_str(&fill(
+            ACTIONS_PART,
+            &[
+                ("RELAY_RULE", &ps(RELAY_RULE)),
+                ("RELAY_INBOUND", &ps(RELAY_INBOUND)),
+                ("ENCRYPT_RULE", &ps(ENCRYPT_RULE)),
+                ("DNF_RULE", &ps(DNF_RULE)),
+                ("ENCRYPT_PATTERN", &ps(ENCRYPT_PATTERN)),
+                ("DNF_PATTERN", &ps(DNF_PATTERN)),
+                ("ENCRYPT_TEMPLATE", &ps(&input.encrypt_template)),
+                ("DNF_TEMPLATE", &ps(&input.dnf_template)),
+                ("PROTECT_HEADER", &ps(PROTECT_HEADER)),
+            ],
+        ));
     }
     if labels {
         let wanted: Vec<String> = input
@@ -422,11 +504,21 @@ pub fn script(input: &ScriptInput) -> OrgSetupScript {
             .iter()
             .map(|l| format!("  @{{ Id = {}; Title = {} }}", ps(&l.id), ps(&l.title)))
             .collect();
-        out.push_str(
-            &LABELS_PART
-                .replace("{LABEL_HEADER}", &ps(LABEL_HEADER))
-                .replace("{LABELS}", &wanted.join(",\n")),
-        );
+        let defaults: Vec<String> = AUTO_RULE_DEFAULTS
+            .iter()
+            .map(|(name, unused)| format!("{name} = {}", ps(unused)))
+            .collect();
+        out.push_str(&fill(
+            LABELS_PART,
+            &[
+                ("LABEL_HEADER", &label_header),
+                ("STAMPED_HEADER", &ps(STAMPED_LABEL_HEADER)),
+                ("AUTO_CONDITIONS", &quoted(AUTO_RULE_CONDITIONS)),
+                ("AUTO_DEFAULTS", &defaults.join("; ")),
+                ("OTHER_LOCATIONS", &quoted(POLICY_OTHER_LOCATIONS)),
+                ("LABELS", &wanted.join(",\n")),
+            ],
+        ));
     }
     out.push_str("Disconnect-ExchangeOnline -Confirm:$false\n");
     OrgSetupScript {

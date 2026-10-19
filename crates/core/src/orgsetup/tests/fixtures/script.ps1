@@ -137,6 +137,11 @@ function Move-ToPlace([string]$Name) {
     foreach ($r in @($above | Where-Object { $_.Priority -lt $relay.Priority })) {
       Write-Warning "'$($r.Name)' comes before the relay's rule and stops later rules for the mail it matches, so $Name doesn't act on that mail. Decide whether it should."
     }
+    if ($relayBelow) {
+      foreach ($r in @($rules | Where-Object { $_.Priority -gt $own.Priority -and $_.Priority -lt $relay.Priority -and (Test-Blocks $_) })) {
+        Write-Warning "$Name moves below '$($r.Name)', which stops later rules or sends mail out for the mail it matches, so $Name won't act on that mail any more. Decide whether it should."
+      }
+    }
   } else {
     $to = $above[0].Priority
   }
@@ -196,6 +201,20 @@ Connect-IPPSSession
 $labels = @(Get-Label)
 $policies = @(Get-AutoSensitivityLabelPolicy)
 $policyRules = @(Get-AutoSensitivityLabelRule)
+# Conditions and locations Cumulas Mail never sets: a policy of ours with any of them is left alone.
+$AutoRuleConditions = @('AccessScope', 'ActivationDate', 'AnyOfRecipientAddressContainsWords', 'AnyOfRecipientAddressMatchesPatterns', 'ContentContainsSensitiveInformation', 'ContentExtensionMatchesWords', 'ContentPropertyContainsWords', 'DocumentCreatedBy', 'DocumentIsPasswordProtected', 'DocumentIsUnsupported', 'DocumentNameMatchesWords', 'DocumentSizeOver', 'ExceptIfAccessScope', 'ExceptIfAnyOfRecipientAddressContainsWords', 'ExceptIfAnyOfRecipientAddressMatchesPatterns', 'ExceptIfContentContainsSensitiveInformation', 'ExceptIfContentExtensionMatchesWords', 'ExceptIfContentPropertyContainsWords', 'ExceptIfDocumentCreatedBy', 'ExceptIfDocumentIsPasswordProtected', 'ExceptIfDocumentIsUnsupported', 'ExceptIfDocumentNameMatchesWords', 'ExceptIfDocumentSizeOver', 'ExceptIfFrom', 'ExceptIfFromAddressContainsWords', 'ExceptIfFromAddressMatchesPatterns', 'ExceptIfFromMemberOf', 'ExceptIfHeaderMatchesPatterns', 'ExceptIfProcessingLimitExceeded', 'ExceptIfRecipientDomainIs', 'ExceptIfSenderDomainIs', 'ExceptIfSenderIPRanges', 'ExceptIfSentTo', 'ExceptIfSentToMemberOf', 'ExceptIfSubjectMatchesPatterns', 'ExpiryDate', 'From', 'FromAddressContainsWords', 'FromAddressMatchesPatterns', 'FromMemberOf', 'ProcessingLimitExceeded', 'RecipientDomainIs', 'SenderDomainIs', 'SenderIPRanges', 'SentTo', 'SentToMemberOf', 'SubjectMatchesPatterns')
+# Conditions that always carry a value, and the one that means they aren't used.
+$AutoRuleDefaults = @{ AccessScope = 'None'; ExceptIfAccessScope = 'None' }
+$OtherLocations = @('SharePointLocation', 'OneDriveLocation', 'TeamsLocation', 'SharePointAdaptiveScopes', 'OneDriveAdaptiveScopes')
+function Get-AutoExtras($Rule) {
+  foreach ($p in $AutoRuleConditions) {
+    $v = $Rule.$p
+    if ($AutoRuleDefaults.ContainsKey($p) -and "$v".Trim() -in $AutoRuleDefaults[$p], '0') { continue }
+    if ($null -ne $v -and "$v" -ne '' -and "$v" -ne 'False' -and @($v).Count) { $p }
+  }
+  if ("$($Rule.Workload)" -and "$($Rule.Workload)" -ne 'Exchange') { 'Workload' }
+  if (@($Rule.HeaderMatchesPatterns.Keys).Count -gt 1) { 'HeaderMatchesPatterns' }
+}
 
 foreach ($want in @(
   @{ Id = '6c1b0f3e-1111-4a8b-9c2d-000000000001'; Title = 'Confidential' },
@@ -226,35 +245,59 @@ foreach ($want in @(
     continue
   }
 
-  # Only Cumulas Mail's own rule, and only email: anything else is left alone.
+  # Only Cumulas Mail's own rule, with only its header pattern, and only email: anything else is
+  # left alone.
   $own = @($policyRules | Where-Object { "$($_.ParentPolicyName)" -eq $name -or "$($_.Policy)" -eq $name })
-  $elsewhere = @(@($policy.SharePointLocation) + @($policy.OneDriveLocation) + @($policy.TeamsLocation) | Where-Object { $_ })
-  if (@($own | Where-Object { $_.Name -ne $ruleName }).Count -or $elsewhere.Count) {
-    Write-Warning "$name has rules or locations Cumulas Mail doesn't set, so it was left alone. Remove them in the Microsoft Purview portal, then run this again."
+  $elsewhere = @(foreach ($p in $OtherLocations) { @($policy.$p) | Where-Object { "$_" } })
+  $rule = $own | Where-Object { $_.Name -eq $ruleName } | Select-Object -First 1
+  $extra = @(if ($rule) { Get-AutoExtras $rule })
+  if (@($own | Where-Object { $_.Name -ne $ruleName }).Count -or $elsewhere.Count -or $extra.Count) {
+    Write-Warning "$name has rules, conditions or locations Cumulas Mail doesn't set$(if ($extra.Count) { " ($($extra -join ', '))" }), so it was left alone. Remove them in the Microsoft Purview portal, then run this again."
     continue
   }
+  $changed = $false
   $fix = @{}
-  if (-not (Test-Same $policy.ApplySensitivityLabel $guid) -and -not (Test-Same $policy.ApplySensitivityLabel $label.Name)) { $fix.ApplySensitivityLabel = $guid }
+  $applied = $policy.ApplySensitivityLabel
+  if (-not ((Test-Same $applied $guid) -or (Test-Same $applied $label.Name) -or ("$($label.ImmutableId)" -and (Test-Same $applied "$($label.ImmutableId)")))) { $fix.ApplySensitivityLabel = $guid }
   if (-not (@($policy.ExchangeLocation) | Where-Object { "$_" -eq 'All' })) { $fix.AddExchangeLocation = 'All' }
   if ($Group -and -not (Test-Same (@($policy.ExchangeSenderMemberOf) | ForEach-Object { "$_".ToLowerInvariant() }) $Group.ToLowerInvariant())) { $fix.ExchangeSenderMemberOf = $Group }
   if (-not $policy.OverwriteLabel) { $fix.OverwriteLabel = $true }
+  if ($fix.Count) { $changed = $true }
   if ($policy.Enabled -eq $false) { $fix.Enabled = $true }
   if ($fix.Count) { $fix.Comment = $Marker; Set-AutoSensitivityLabelPolicy -Identity $policy.Identity @fix; "Repaired: $name" }
 
-  $rule = $own | Where-Object { $_.Name -eq $ruleName } | Select-Object -First 1
   if (-not $rule) {
     New-AutoSensitivityLabelRule -Policy $name -Name $ruleName -Workload Exchange `
       -HeaderMatchesPatterns @{ 'x-cumulas-label' = $pattern } | Out-Null
+    $changed = $true
     "Added its rule: $ruleName"
-  } elseif (-not ($rule.HeaderMatchesPatterns | Out-String).Contains($pattern) -or $rule.Disabled) {
-    Set-AutoSensitivityLabelRule -Identity $rule.Identity -HeaderMatchesPatterns @{ 'x-cumulas-label' = $pattern } -Disabled $false
-    "Repaired its rule: $ruleName"
+  } else {
+    # Right: the pattern Cumulas Mail sets, or one for exactly the ID people's Cumulas Mail sends.
+    $text = ($rule.HeaderMatchesPatterns | Out-String -Width 4096).ToLowerInvariant()
+    $right = $text.Contains('x-cumulas-label') -and -not $text.Contains('x-cumulas-label-stamped') -and
+      ($text.Contains($pattern) -or $text.Contains('^' + $want.Id + '$'))
+    $fixRule = @{}
+    if (-not $right) { $fixRule.HeaderMatchesPatterns = @{ 'x-cumulas-label' = $pattern } }
+    if ($rule.Disabled) { $fixRule.Disabled = $false }
+    if ($fixRule.Count) {
+      Set-AutoSensitivityLabelRule -Identity $rule.Identity @fixRule
+      $changed = $true
+      "Repaired its rule: $ruleName"
+    }
   }
 
+  # A simulation that runs and turns the policy on by itself is left to finish: starting it again
+  # would start it over.
   $policy = Get-AutoSensitivityLabelPolicy | Where-Object { $_.Name -eq $name } | Select-Object -First 1
-  if ("$($policy.Mode)" -ne 'Enable') {
+  $after = "$($policy.AutoEnableAfter)"
+  if ("$($policy.Mode)" -eq 'Enable') { "On: $name" }
+  elseif (-not $changed -and "$($policy.Mode)" -like 'TestWith*' -and $after -and $after -notin '00:00:00', '0') {
+    "In simulation; it turns on by itself an hour after the simulation completes: $name"
+  } else {
+    # Turned off in the portal: back into simulation first.
+    if ("$($policy.Mode)" -eq 'Disable') { Set-AutoSensitivityLabelPolicy -Identity $policy.Identity -Mode TestWithoutNotifications }
     Set-AutoSensitivityLabelPolicy -Identity $policy.Identity -StartSimulation $true -AutoEnableAfter (New-TimeSpan -Hours 1)
     "In simulation; it turns on by itself an hour after the simulation completes: $name"
-  } else { "On: $name" }
+  }
 }
 Disconnect-ExchangeOnline -Confirm:$false

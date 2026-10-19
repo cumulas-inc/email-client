@@ -8,7 +8,9 @@
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 
-use super::wanted::{AUTO_RULE_CONDITIONS, EXTRA_PARAMETERS, POLICY_OTHER_LOCATIONS};
+use super::wanted::{
+    AUTO_RULE_CONDITIONS, AUTO_RULE_DEFAULTS, EXTRA_PARAMETERS, POLICY_OTHER_LOCATIONS,
+};
 
 /// A field of an object, its name's case ignored.
 pub fn field<'v>(value: &'v Value, name: &str) -> Option<&'v Value> {
@@ -639,6 +641,7 @@ impl AutoRuleView {
             disabled: get_bool(value, "Disabled"),
             other_conditions: non_empty(value, AUTO_RULE_CONDITIONS)
                 .into_iter()
+                .filter(|(p, _)| !unused_condition(value, p))
                 .map(|(p, _)| p)
                 .collect(),
             when_changed: field(value, "WhenChanged").and_then(date),
@@ -657,6 +660,19 @@ impl AutoRuleView {
             .as_deref()
             .is_some_and(|p| p.trim().eq_ignore_ascii_case(name))
     }
+}
+
+/// Whether an auto-labeling rule's condition `name` holds the value that
+/// means it isn't used ([`AUTO_RULE_DEFAULTS`]).
+fn unused_condition(value: &Value, name: &str) -> bool {
+    AUTO_RULE_DEFAULTS
+        .iter()
+        .filter(|(condition, _)| *condition == name)
+        .any(|(_, unused)| match field(value, name) {
+            Some(Value::String(s)) => s.trim().eq_ignore_ascii_case(unused),
+            Some(Value::Number(n)) => n.as_f64() == Some(0.0),
+            _ => false,
+        })
 }
 
 /// `HeaderMatchesPatterns` in any of its shapes: an object

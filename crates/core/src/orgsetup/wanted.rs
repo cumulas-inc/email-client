@@ -164,6 +164,12 @@ pub const AUTO_RULE_CONDITIONS: &[&str] = &[
     "SenderDomainIs", "SenderIPRanges", "SentTo", "SentToMemberOf", "SubjectMatchesPatterns",
 ];
 
+/// Conditions among [`AUTO_RULE_CONDITIONS`] that always carry a value,
+/// and the one that means the condition isn't used (`None`; also read as
+/// the number 0): never counted as another condition.
+pub const AUTO_RULE_DEFAULTS: &[(&str, &str)] =
+    &[("AccessScope", "None"), ("ExceptIfAccessScope", "None")];
+
 /// Locations of an auto-labeling policy other than Exchange email: ours
 /// have none (D12).
 pub const POLICY_OTHER_LOCATIONS: &[&str] = &[

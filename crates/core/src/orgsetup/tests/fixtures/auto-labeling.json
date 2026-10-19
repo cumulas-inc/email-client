@@ -24,12 +24,13 @@
     {
       "Name": "Cumulas Mail: Confidential (header)", "ParentPolicyName": "Cumulas Mail: Confidential", "Workload": "Exchange",
       "HeaderMatchesPatterns": { "@odata.type": "#Exchange.GenericHashTable", "x-cumulas-label": "^6c1b0f3e-1111-4a8b-9c2d-000000000001$" },
+      "AccessScope": "None", "ExceptIfAccessScope": "None",
       "Disabled": false
     },
     {
       "Name": "Cumulas Mail: Shared (header)", "Policy": "Cumulas Mail: Shared", "Workload": "Exchange",
       "HeaderMatchesPatterns": [{ "Key": "x-cumulas-label-stamped", "Value": ["(?i)^(a|b)$", "^c$"] }],
-      "SentTo": ["someone@contoso.com"]
+      "SentTo": ["someone@contoso.com"], "AccessScope": "NotInOrganization", "ExceptIfAccessScope": 0
     },
     {
       "Name": "Cumulas Mail: Shared (other)", "Policy": "Cumulas Mail: Shared",

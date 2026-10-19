@@ -82,6 +82,89 @@ fn values_are_quoted_and_comments_flattened() {
 }
 
 #[test]
+fn a_value_that_looks_like_a_placeholder_stays_in_its_string() {
+    let mut odd = input();
+    odd.encrypt_template = "Encrypt {DNF_TEMPLATE}".into();
+    odd.dnf_template = "{PROTECT_HEADER}) ; Write-Host INJECTED ; (".into();
+    odd.labels[0].title = "{LABEL_HEADER} {LABELS}".into();
+    let script = script(&odd).script;
+    assert!(
+        script.contains("(Get-TemplateName 'Encrypt {DNF_TEMPLATE}')"),
+        "{script}"
+    );
+    assert!(script.contains("(Get-TemplateName '{PROTECT_HEADER}) ; Write-Host INJECTED ; (')"));
+    assert!(script.contains("Title = '{LABEL_HEADER} {LABELS}'"));
+    // PowerShell's own braces stay; every placeholder is filled.
+    assert!(script.contains("ForEach-Object { $_.ToLowerInvariant() }"));
+    for placeholder in [
+        "{MARKER}",
+        "{EXTRAS}",
+        "{STRIP}",
+        "{RELAY_RULE}",
+        "{AUTO_CONDITIONS}",
+    ] {
+        assert!(!script.contains(placeholder), "{placeholder}");
+    }
+    assert_eq!(
+        crate::orgsetup::script::fill("{A}{B} {C} {A", &[("A", "{B}"), ("B", "b")]),
+        "{B}b {C} {A"
+    );
+}
+
+#[test]
+fn part_two_leaves_alone_what_the_app_leaves_alone() {
+    let script = script(&input()).script;
+    // Every condition and location the app blocks a policy for (D12).
+    for name in crate::orgsetup::wanted::AUTO_RULE_CONDITIONS
+        .iter()
+        .chain(crate::orgsetup::wanted::POLICY_OTHER_LOCATIONS)
+    {
+        assert!(script.contains(&format!("'{name}'")), "{name}");
+    }
+    assert!(
+        script.contains(
+            "$AutoRuleDefaults = @{ AccessScope = 'None'; ExceptIfAccessScope = 'None' }"
+        )
+    );
+    assert!(script.contains(
+        "if (\"$($Rule.Workload)\" -and \"$($Rule.Workload)\" -ne 'Exchange') { 'Workload' }"
+    ));
+    assert!(script.contains(
+        "if (@($Rule.HeaderMatchesPatterns.Keys).Count -gt 1) { 'HeaderMatchesPatterns' }"
+    ));
+    // Checked before anything of the policy changes.
+    let extras = script.find("-or $extra.Count) {").unwrap();
+    assert!(
+        extras
+            < script
+                .find("Set-AutoSensitivityLabelPolicy -Identity $policy.Identity @fix")
+                .unwrap()
+    );
+    // The label it applies may be named by its Guid, name or ImmutableId, and
+    // a rule from the earlier guide that matches the ID people send is right.
+    assert!(script.contains("(Test-Same $applied \"$($label.ImmutableId)\")"));
+    assert!(script.contains("$text.Contains('^' + $want.Id + '$')"));
+    assert!(script.contains("-not $text.Contains('x-cumulas-label-stamped')"));
+}
+
+#[test]
+fn running_it_again_leaves_a_running_simulation_alone() {
+    let script = script(&input()).script;
+    let start = script
+        .rfind("-StartSimulation $true -AutoEnableAfter (New-TimeSpan -Hours 1)")
+        .unwrap();
+    let left = script
+        .find("elseif (-not $changed -and \"$($policy.Mode)\" -like 'TestWith*' -and $after")
+        .unwrap();
+    assert!(left < start);
+    // A policy turned off in the portal goes back into simulation first.
+    let back = script
+        .find("if (\"$($policy.Mode)\" -eq 'Disable') { Set-AutoSensitivityLabelPolicy -Identity $policy.Identity -Mode TestWithoutNotifications }")
+        .unwrap();
+    assert!(left < back && back < start);
+}
+
+#[test]
 fn only_chosen_parts_are_there() {
     let full = script(&input()).script;
     assert!(full.contains("Get-RMSTemplate") && full.contains("Connect-IPPSSession"));
