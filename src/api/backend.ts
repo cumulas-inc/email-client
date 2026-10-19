@@ -22,6 +22,14 @@ import type {
   MessageQuery,
   Navigate,
   NewImapAccount,
+  OrgSetupAdmin,
+  OrgSetupChoices,
+  OrgSetupInfo,
+  OrgSetupPlan,
+  OrgSetupResult,
+  OrgSetupScript,
+  OrgSetupScriptRequest,
+  OrgSetupStatus,
   OutgoingMessage,
   PermissionRequest,
   ProtectionSetup,
@@ -199,6 +207,37 @@ export interface Backend {
   openInOutlook(messageId: string): Promise<void>;
   /** What the app knows of a message's protection and label, for a bug report: never its content. */
   getMessageDiagnostics(messageId: string): Promise<string>;
+  /** "Copy details for IT": what the account's last checks found. */
+  getProtectionCheckDetails(accountId: string): Promise<string>;
+
+  // Organization setup (administrators)
+  /** Whether automatic setup is available, and signed in, for the account's organization. No network. Rejects with unsupported for accounts other than work and school ones. */
+  getOrgSetupInfo(accountId: string): Promise<OrgSetupInfo>;
+  /**
+   * Signs an administrator in with the setup app in the browser. Rejects with
+   * adminConsentRequired (details.reason "setupConsent", details.adminConsentUrl), consentDeclined,
+   * signInBlocked (details.app "setup"), signInCancelled, invalidInput (details.reason "otherTenant"),
+   * provider (details.reason "setupNotRegistered" | "noExchange" | "otherCloud"), notConfigured,
+   * unsupported (not a work account).
+   */
+  orgSetupSignIn(accountId: string): Promise<OrgSetupAdmin>;
+  cancelOrgSetupSignIn(): Promise<void>;
+  /** Reads what setup needs. Rejects with authRequired (details.reason "setupSignedOut") when the sign-in ended. */
+  readOrgSetup(accountId: string): Promise<OrgSetupStatus>;
+  /** The changes these choices make, from the last read. */
+  planOrgSetup(accountId: string, choices: OrgSetupChoices): Promise<OrgSetupPlan>;
+  /** Reads again and makes the changes only if they're still `confirmed` (else result.stale). */
+  applyOrgSetup(
+    accountId: string,
+    choices: OrgSetupChoices,
+    confirmed: string[],
+  ): Promise<OrgSetupResult>;
+  /** The PowerShell script and the portal steps, filled in; works without signing in. */
+  getOrgSetupScript(accountId: string, request: OrgSetupScriptRequest): Promise<OrgSetupScript>;
+  /** "Copy setup details": sign-in attempts and the calls setup made, for support. Any state. */
+  getOrgSetupDetails(): Promise<string>;
+  /** Forgets the setup sign-in. */
+  endOrgSetup(): Promise<void>;
 
   // Signatures
   /** The account's own signature and what its organization last said about its own. */

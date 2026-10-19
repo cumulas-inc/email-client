@@ -25,6 +25,14 @@ import type {
   MessageLabel,
   MessageSummary,
   Navigate,
+  OrgSetupAdmin,
+  OrgSetupChoices,
+  OrgSetupInfo,
+  OrgSetupPlan,
+  OrgSetupResult,
+  OrgSetupScript,
+  OrgSetupScriptRequest,
+  OrgSetupStatus,
   OrganizationSignature,
   PermissionRequest,
   PermissionRequiredReason,
@@ -58,6 +66,7 @@ import {
   isConsumerDomain,
   isPersonalAccount,
 } from "../../modules/settings/microsoft";
+import { OWN_PREFIX, psQuote } from "../../modules/settings/orgsetup/copy";
 import {
   type CatalogLabel,
   type MockState,
@@ -453,11 +462,24 @@ const ENCRYPTED_ORIGINAL =
 const OPEN_CONTAINER =
   "This file holds a protected message's content, which Cumulas Mail can't open. Open the message in Outlook on the web.";
 const NO_TEST_MESSAGE = "There's no test message to open. Check again.";
+// The core's messages about organization setup.
+const ORG_SETUP_WORK_ONLY =
+  "Only Microsoft 365 work and school accounts have an organization to set up.";
+const SETUP_NOT_AVAILABLE =
+  "Automatic setup isn't available in this version of Cumulas Mail. Use the PowerShell script instead.";
 
 /** What a check decided, as the core keeps it: never "expired" or "waiting". */
 type CheckRecord = Omit<CheckResult, "passedAt">;
 
-const NOT_CHECKED: CheckRecord = { state: "notChecked", at: null, note: null, testMessage: false };
+const NOT_CHECKED: CheckRecord = {
+  state: "notChecked",
+  at: null,
+  note: null,
+  testMessage: false,
+  otherLabelId: null,
+  otherLabelOnControl: false,
+  changedAt: null,
+};
 const NO_POLICY: LabelPolicy = {
   required: false,
   defaultLabelId: null,
@@ -483,6 +505,7 @@ interface MockProtection {
 /** How each check of the demo's "setup" turned out: most arrived protected. */
 function demoOutcome(item: CheckItem, at: string): CheckRecord {
   const result = (state: CheckResult["state"], note: CheckResult["note"] = null): CheckRecord => ({
+    ...NOT_CHECKED,
     state,
     at,
     note,
@@ -638,6 +661,8 @@ export class MockBackend implements Backend {
     testNotifications: 0,
     /** What was opened in Outlook on the web: message ids, or `check:<account>:<item>`. */
     openedInOutlook: [] as string[],
+    /** How often the setup sign-in was forgotten (endOrgSetup). */
+    orgSetupEnded: 0,
   };
   private seq = 1000;
   private latency: number;
@@ -2355,7 +2380,7 @@ export class MockBackend implements Backend {
       const state = decidedState(record);
       const passedAt = state === "applied" ? record.at : null;
       return run && this.isWaiting(protection, item)
-        ? { state: "waiting", at: run.sentAt, note: null, testMessage: false, passedAt }
+        ? { ...NOT_CHECKED, state: "waiting", at: run.sentAt, passedAt }
         : { ...record, state, passedAt };
     };
     const catalog = protection.catalog;
@@ -2549,6 +2574,141 @@ export class MockBackend implements Backend {
       fail("notFound", NO_TEST_MESSAGE);
     }
     this.calls.openedInOutlook.push(`check:${accountId}:${checkKey(item)}`);
+  }
+
+  /** Like the core for now: nothing to copy yet. */
+  async getProtectionCheckDetails(accountId: string) {
+    await this.delay();
+    this.account(accountId);
+    return "";
+  }
+
+  // --- organization setup ---------------------------------------------------------
+  //
+  // As a build without a setup app: automatic setup isn't available, and the
+  // dialog offers the PowerShell script and the Microsoft Purview portal steps.
+
+  /** Like the core: only work and school accounts have an organization to set up. */
+  private setupAccount(accountId: string): Account {
+    const account = this.account(accountId);
+    if (!this.isWorkAccount(account)) fail("unsupported", ORG_SETUP_WORK_ONLY);
+    return account;
+  }
+
+  async getOrgSetupInfo(accountId: string): Promise<OrgSetupInfo> {
+    await this.delay();
+    const account = this.setupAccount(accountId);
+    return {
+      automatic: false,
+      tenantId: account.settings.kind === "microsoft" ? account.settings.tenantId : "",
+      signedIn: null,
+      approvalUrl: null,
+      rulesChangedAt: null,
+      policiesChangedAt: null,
+    };
+  }
+
+  async orgSetupSignIn(accountId: string): Promise<OrgSetupAdmin> {
+    await this.delay();
+    this.setupAccount(accountId);
+    fail("notConfigured", SETUP_NOT_AVAILABLE);
+  }
+
+  async cancelOrgSetupSignIn() {}
+
+  async readOrgSetup(accountId: string): Promise<OrgSetupStatus> {
+    await this.delay();
+    this.setupAccount(accountId);
+    fail("notConfigured", SETUP_NOT_AVAILABLE);
+  }
+
+  async planOrgSetup(accountId: string, _choices: OrgSetupChoices): Promise<OrgSetupPlan> {
+    await this.delay();
+    this.setupAccount(accountId);
+    fail("notConfigured", SETUP_NOT_AVAILABLE);
+  }
+
+  async applyOrgSetup(
+    accountId: string,
+    _choices: OrgSetupChoices,
+    _confirmed: string[],
+  ): Promise<OrgSetupResult> {
+    await this.delay();
+    this.setupAccount(accountId);
+    fail("notConfigured", SETUP_NOT_AVAILABLE);
+  }
+
+  /**
+   * A shortened script with the core's header lines, and the portal steps
+   * of the labels it covers: the chosen ones, else the account's when
+   * `request.labels` is set.
+   */
+  async getOrgSetupScript(
+    accountId: string,
+    request: OrgSetupScriptRequest,
+  ): Promise<OrgSetupScript> {
+    await this.delay();
+    const account = this.setupAccount(accountId);
+    const tenant = account.settings.kind === "microsoft" ? account.settings.tenantId : "";
+    const catalog = this.protectionOf(account)?.catalog?.labels ?? [];
+    const chosen = request.choices?.labelIds;
+    const labels = request.labels ? catalog.filter((l) => !chosen || chosen.includes(l.id)) : [];
+    // Like the core's names: at most 64 characters, else by the label's ID.
+    const fits = (name: string, fallback: string) => (name.length > 64 ? fallback : name);
+    const portalSteps = labels.map((label) => {
+      const policyName = fits(`${OWN_PREFIX}${label.name}`, `${OWN_PREFIX}label ${label.id}`);
+      return {
+        labelTitle: labelTitle(label),
+        policyName,
+        ruleName: fits(`${policyName} (header)`, `${OWN_PREFIX}label ${label.id} (header)`),
+        pattern: `(?i)^(${label.id})$`,
+      };
+    });
+    const made = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const org = emailDomain(account.email) ?? account.email;
+    const lines = [
+      `# Cumulas Mail: encryption and sensitivity labels for ${org} (tenant ${tenant}).`,
+      `# Made by Cumulas Mail ${(await this.getAppInfo()).version} on ${made} UTC. Safe to run again: it creates what's missing,`,
+      "# repairs what differs, and never changes or deletes anything whose name doesn't start with",
+      '# "Cumulas Mail:" (it may move other rules down a place, keeping their order).',
+      "# (A shortened demo script.)",
+      "",
+      "$ErrorActionPreference = 'Stop'",
+      "Connect-ExchangeOnline -ShowBanner:$false",
+      ...(labels.length
+        ? [
+            `New-TransportRule -Name ${psQuote(`${OWN_PREFIX}ignore label requests from outside`)} -ExceptIfFromScope InOrganization -RemoveHeader 'x-cumulas-label' -Priority 0 -Mode Enforce`,
+          ]
+        : []),
+      ...(request.actions
+        ? [
+            `New-TransportRule -Name ${psQuote(`${OWN_PREFIX}Encrypt`)} -ExceptIfFromScope NotInOrganization -HeaderMatchesMessageHeader 'x-cumulas-protect' -HeaderMatchesPatterns '^encrypt$' -ApplyRightsProtectionTemplate ${psQuote(request.choices?.encryptTemplate ?? "Encrypt")} -RemoveHeader 'x-cumulas-protect' -RuleErrorAction Defer -Mode Enforce`,
+            `New-TransportRule -Name ${psQuote(`${OWN_PREFIX}Do Not Forward`)} -ExceptIfFromScope NotInOrganization -HeaderMatchesMessageHeader 'x-cumulas-protect' -HeaderMatchesPatterns '^do-not-forward$' -ApplyRightsProtectionTemplate ${psQuote(request.choices?.doNotForwardTemplate ?? "Do Not Forward")} -RemoveHeader 'x-cumulas-protect' -RuleErrorAction Defer -Mode Enforce`,
+          ]
+        : []),
+      ...(labels.length
+        ? [
+            "Disconnect-ExchangeOnline -Confirm:$false",
+            "Connect-IPPSSession",
+            ...portalSteps.flatMap((steps) => [
+              `New-AutoSensitivityLabelPolicy -Name ${psQuote(steps.policyName)} -ExchangeLocation 'All' -OverwriteLabel $true -Mode TestWithoutNotifications`,
+              `New-AutoSensitivityLabelRule -Policy ${psQuote(steps.policyName)} -Name ${psQuote(steps.ruleName)} -Workload Exchange -HeaderMatchesPatterns @{ 'x-cumulas-label' = ${psQuote(steps.pattern)} }`,
+            ]),
+          ]
+        : []),
+      "Disconnect-ExchangeOnline -Confirm:$false",
+    ];
+    return { script: `${lines.join("\n")}\n`, portalSteps };
+  }
+
+  /** Nothing to copy: no setup sign-in was tried. */
+  async getOrgSetupDetails() {
+    await this.delay();
+    return "";
+  }
+
+  async endOrgSetup() {
+    this.calls.orgSetupEnded += 1;
   }
 
   // --- signatures -----------------------------------------------------------------

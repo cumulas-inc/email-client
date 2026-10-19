@@ -2173,6 +2173,74 @@ mod tests {
         assert!(admin_consent_url(&own_push, None).contains("Sync.Receive"));
     }
 
+    /// The setup app's Exchange.Manage stays with the setup app: nothing
+    /// the mail app asks for, refreshes or links to names it.
+    #[test]
+    fn setup_scopes_never_reach_the_mail_app() {
+        use crate::auth::admin_setup::{PUBLISHED_SETUP_CLIENT_ID, SETUP_ONLY_MARKERS};
+
+        let mut texts: Vec<String> = Vec::new();
+        texts.extend(all_scopes().iter().map(|s| (*s).to_owned()));
+        texts.extend(strings(CORE_SCOPES));
+        texts.extend(OPTIONAL_SCOPES.iter().map(|(_, s)| (*s).to_owned()));
+        texts.extend(strings(LEGACY_SCOPES));
+        let legacy = legacy_graph_scopes();
+        let everything: Vec<String> = strings(&all_scopes());
+        let records: [Option<&[String]>; 3] = [None, Some(&legacy), Some(&everything)];
+        let mut requests = vec![
+            PermissionRequest::All,
+            PermissionRequest::MailOnly,
+            PermissionRequest::Current,
+        ];
+        requests.extend(
+            AccountFeature::ALL
+                .iter()
+                .map(|&feature| PermissionRequest::Feature { feature }),
+        );
+        for request in requests {
+            for record in records {
+                texts.extend(sign_in_scopes(request, record));
+            }
+        }
+        for explicit in [true, false] {
+            for record in records {
+                texts.push(graph_refresh_scope(explicit, record));
+            }
+        }
+        let own = MicrosoftAuthConfig::new(PUBLISHED_MICROSOFT_CLIENT_ID, None);
+        let other = MicrosoftAuthConfig::new(
+            "99999999-8888-7777-6666-555555555555",
+            Some("contoso.com".into()),
+        );
+        for config in [published(), own, other] {
+            texts.push(admin_consent_url(&config, None));
+            texts.push(admin_consent_url(&config, Some("contoso.com")));
+            texts.push(admin_consent_link(&config, None).admin_consent_url);
+            texts.push(sync_scope(&config.client_id));
+        }
+        texts.push(PUBLISHED_LINK_WITH_PUSH.into());
+        texts.push(PUBLISHED_LINK_WITHOUT_PUSH.into());
+        // Encoded as the links carry them, too.
+        let encoded: Vec<String> = SETUP_ONLY_MARKERS
+            .iter()
+            .map(|m| url::form_urlencoded::byte_serialize(m.as_bytes()).collect())
+            .collect();
+        for text in &texts {
+            let text = text.to_ascii_lowercase();
+            for marker in SETUP_ONLY_MARKERS
+                .iter()
+                .map(|m| m.to_string())
+                .chain(encoded.clone())
+            {
+                assert!(
+                    !text.contains(&marker.to_ascii_lowercase()),
+                    "{marker} in {text}"
+                );
+            }
+            assert!(!text.contains(PUBLISHED_SETUP_CLIENT_ID.unwrap()), "{text}");
+        }
+    }
+
     #[test]
     fn core_and_legacy_scopes_are_frozen() {
         assert_eq!(

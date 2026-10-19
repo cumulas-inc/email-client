@@ -12,6 +12,8 @@
 //! S/MIME keeps its content); a label shows only for the account's own
 //! organization, and only by the name the organization gives it.
 
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::{Error, ErrorCode};
@@ -536,6 +538,105 @@ pub fn requested(signals: &MessageSignals) -> (Option<ProtectAction>, Option<Str
         .filter(|l| is_guid(l))
         .map(str::to_ascii_lowercase);
     (action, label)
+}
+
+// --- Setup check evidence ----------------------------------------------------
+
+/// What a setup check's arrived message showed, kept with its verdict (the
+/// store) and printed by "Copy details for IT". Values pass through
+/// [`clean_value`]: control and bidirectional characters removed, `None`
+/// when empty; header values at most 200 characters, the Message-ID at most
+/// 998 (RFC 5322's line limit), so it can be pasted into
+/// Get-MailDetailTransportRuleReport.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CheckEvidence {
+    /// The internetMessageId of the arrived copy.
+    pub message_id: Option<String>,
+    /// The request (x-cumulas-protect or x-cumulas-label, header or its
+    /// property) was still on the arrived copy. On a delivered copy the
+    /// property exists only if the header did, so either means the header
+    /// reached delivery. Always false for the control.
+    pub request_arrived: bool,
+    /// X-Signature-Stamped: the Cumulas Signatures relay handled it.
+    pub relay_stamped: bool,
+    /// x-cumulas-label-stamped (the earlier relay recipe's copy of the
+    /// label request).
+    pub label_stamped: Option<String>,
+    /// X-MS-Exchange-Organization-AuthAs; `None` when absent or empty,
+    /// which never counts as "not internal".
+    pub auth_as: Option<String>,
+    /// X-MS-Exchange-Organization-MessageDirectionality.
+    pub directionality: Option<String>,
+    pub detected: Option<ProtectionKind>,
+    /// This organization's labels on it.
+    pub own_labels: Vec<SeenLabel>,
+    /// Labels of other organizations (counted, never named).
+    pub foreign_labels: u32,
+    pub content_class: Option<String>,
+    pub message_class: Option<String>,
+    pub rpmsg_attachment: bool,
+    pub headers_from: HeadersFrom,
+    /// From the check's send to when a refresh found it (an upper bound:
+    /// refreshes are 10 seconds apart).
+    pub found_after_secs: Option<i64>,
+}
+
+/// A label of the account's organization seen on an arrived message.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeenLabel {
+    /// GUID, lowercase.
+    pub id: String,
+    pub enabled: bool,
+}
+
+/// Where an arrived message's header values were read from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HeadersFrom {
+    #[default]
+    Unread,
+    /// The headers Microsoft Graph parses (internetMessageHeaders).
+    Graph,
+    /// The transport headers as delivered (PR_TRANSPORT_MESSAGE_HEADERS).
+    Transport,
+}
+
+/// A value from a message or from Microsoft 365 fit to keep and copy: control
+/// and bidirectional characters removed, trimmed, at most `max` characters;
+/// `None` when nothing is left, so an empty header never counts as a value.
+pub fn clean_value(value: &str, max: usize) -> Option<String> {
+    let cleaned: String = value
+        .chars()
+        .filter(|c| !c.is_control() && !is_bidi_control(*c))
+        .collect();
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.chars().take(max).collect())
+}
+
+// --- Organization setup changes ----------------------------------------------
+
+/// When organization setup last changed the organization's mail flow rules
+/// and auto-labeling policies from this computer: the app value
+/// [`org_setup_changed_key`], as `{ "rulesChangedAt", "policiesChangedAt" }`.
+/// Checks judged soon after say it's too soon to tell.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Settle {
+    pub rules_changed_at: Option<DateTime<Utc>>,
+    pub policies_changed_at: Option<DateTime<Utc>>,
+}
+
+/// How long new or changed mail flow rules can take to start working.
+pub const RULES_SETTLE: Duration = Duration::minutes(60);
+/// How long auto-labeling policies can take to start working, once on.
+pub const POLICIES_SETTLE: Duration = Duration::hours(24);
+
+/// The app value that keeps the organization's [`Settle`]:
+/// `orgsetup.changed.<tenant id, lowercase>`.
+pub fn org_setup_changed_key(tenant: &str) -> String {
+    format!("orgsetup.changed.{}", tenant.trim().to_ascii_lowercase())
 }
 
 // --- Diagnostics -------------------------------------------------------------

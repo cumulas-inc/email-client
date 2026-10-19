@@ -121,6 +121,18 @@ export const tauriBackend: Backend = {
     invoke("open_protection_check_message", { accountId, item }),
   openInOutlook: (messageId) => invoke("open_in_outlook", { messageId }),
   getMessageDiagnostics: (messageId) => invoke("get_message_diagnostics", { messageId }),
+  getProtectionCheckDetails: (accountId) => invoke("get_protection_check_details", { accountId }),
+
+  getOrgSetupInfo: (accountId) => invoke("get_org_setup_info", { accountId }),
+  orgSetupSignIn: (accountId) => invoke("org_setup_sign_in", { accountId }),
+  cancelOrgSetupSignIn: () => invoke("cancel_org_setup_sign_in"),
+  readOrgSetup: (accountId) => invoke("read_org_setup", { accountId }),
+  planOrgSetup: (accountId, choices) => invoke("plan_org_setup", { accountId, choices }),
+  applyOrgSetup: (accountId, choices, confirmed) =>
+    invoke("apply_org_setup", { accountId, choices, confirmed }),
+  getOrgSetupScript: (accountId, request) => invoke("get_org_setup_script", { accountId, request }),
+  getOrgSetupDetails: () => invoke("get_org_setup_details"),
+  endOrgSetup: () => invoke("end_org_setup"),
 
   getAccountSignature: (accountId) => invoke("get_account_signature", { accountId }),
   updateOwnSignature: (accountId, html, onReplies) =>

@@ -120,9 +120,8 @@ fn check_result(
         Some(waiting) => CheckResult {
             state: CheckState::Waiting,
             at: Some(waiting.sent_at),
-            note: None,
-            test_message: false,
             passed_at,
+            ..CheckResult::default()
         },
         None => CheckResult {
             state: decided_state(record, now),
@@ -130,6 +129,9 @@ fn check_result(
             note: record.note,
             test_message: record.test_message_id.is_some(),
             passed_at,
+            other_label_id: record.other_label_id.clone(),
+            other_label_on_control: record.other_label_on_control,
+            changed_at: record.changed_at,
         },
     }
 }
@@ -527,7 +529,7 @@ impl CoreService {
                         state: CheckState::NotApplied,
                         at: Some(Utc::now()),
                         note: Some(CheckNote::HeaderNotKept),
-                        test_message_id: None,
+                        ..CheckRecord::default()
                     };
                 }
             })?;
@@ -587,6 +589,7 @@ impl CoreService {
             control = Some(ControlOutcome {
                 protected: arrived_protection(&content) == Some(ProtectionKind::RightsManaged),
                 label_id: arrived_label(&content, &tenant),
+                evidence: None,
             });
             changed = true;
             moved |= self
@@ -619,6 +622,7 @@ impl CoreService {
                                 .flatten()
                                 .unwrap_or_else(|| locator.remote_id.clone()),
                         ),
+                        ..CheckRecord::default()
                     },
                 ));
             }
@@ -631,7 +635,7 @@ impl CoreService {
             state: CheckState::Unknown,
             at: Some(now),
             note: Some(CheckNote::NotArrived),
-            test_message_id: None,
+            ..CheckRecord::default()
         };
         let updated = self.store.update_protection_checks(account_id, |checks| {
             // Only the run this looked for: another started meanwhile

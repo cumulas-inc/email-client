@@ -768,6 +768,9 @@ describe("Encryption and sensitivity labels", () => {
             note: null,
             testMessage: false,
             passedAt: null,
+            otherLabelId: null,
+            otherLabelOnControl: false,
+            changedAt: null,
           },
         })),
       }));

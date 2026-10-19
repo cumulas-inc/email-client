@@ -158,6 +158,7 @@ impl Setup {
                     at: Some(Utc::now() - Duration::days(days)),
                     note: None,
                     test_message_id: Some("AAMk-earlier".into()),
+                    ..CheckRecord::default()
                 };
             })
             .unwrap();

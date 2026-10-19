@@ -8,6 +8,7 @@ mod alerts;
 mod background;
 mod connector;
 mod mail;
+mod org_setup;
 mod permissions;
 mod pim;
 mod protection;
@@ -26,8 +27,8 @@ use uuid::Uuid;
 pub use crate::search::rank::MAX_RANKED_CANDIDATES;
 pub use alerts::{MAX_AGE_HOURS, MailAlert, SUMMARY_THRESHOLD};
 pub use connector::{
-    BrowserOpener, Connector, LiveConnector, PUBLISHED_MICROSOFT_CLIENT_ID, ProviderSet,
-    PushSource, builtin_microsoft_client_id,
+    AdminEndpoints, BrowserOpener, Connector, LiveConnector, PUBLISHED_MICROSOFT_CLIENT_ID,
+    ProviderSet, PushSource, builtin_microsoft_client_id,
 };
 pub use mail::Attachment;
 pub use search::{
@@ -124,6 +125,15 @@ pub struct CoreService {
     searches: Mutex<search::Registry>,
     /// Held by an account's protection check and its refreshes.
     protection_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The organization setup session: at most one, in memory only. Held
+    /// only to read or swap it, never across an await, so that sync
+    /// commands can end it at once.
+    org_setup: Mutex<Option<Arc<crate::orgsetup::Session>>>,
+    /// What organization setup did, kept across sessions until the next
+    /// sign-in attempt.
+    org_setup_log: Arc<crate::orgsetup::RunLog>,
+    /// Cancels the setup sign-in waiting for the browser.
+    pending_org_setup_sign_in: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl CoreService {
@@ -148,6 +158,9 @@ impl CoreService {
             signatures: Arc::default(),
             searches: Mutex::default(),
             protection_locks: Mutex::default(),
+            org_setup: Mutex::default(),
+            org_setup_log: Arc::default(),
+            pending_org_setup_sign_in: Mutex::default(),
         }
     }
 

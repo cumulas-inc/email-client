@@ -8,9 +8,11 @@ use chrono::{DateTime, Utc};
 use cumulas_core::model::{
     Account, AccountSignature, ActiveReminder, AdminConsentLink, Calendar, CheckItem,
     ComposeSignature, Contact, ContactDraft, EmailAddress, Event, EventDraft, EventResponse,
-    Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, NewImapAccount, OutgoingMessage,
-    PermissionRequest, ProtectionSetup, ReplyKind, SearchHit, SearchOptions, ServerSearchResult,
-    Settings, Snooze, SyncStatus, Task, TaskDraft, TaskList, TaskPatch,
+    Folder, ImapAccountUpdate, Message, MessagePage, MessageQuery, NewImapAccount, OrgSetupAdmin,
+    OrgSetupChoices, OrgSetupInfo, OrgSetupPlan, OrgSetupResult, OrgSetupScript,
+    OrgSetupScriptRequest, OrgSetupStatus, OutgoingMessage, PermissionRequest, ProtectionSetup,
+    ReplyKind, SearchHit, SearchOptions, ServerSearchResult, Settings, Snooze, SyncStatus, Task,
+    TaskDraft, TaskList, TaskPatch,
 };
 use cumulas_core::push::PushStatus;
 use cumulas_core::service::builtin_microsoft_client_id;
@@ -536,6 +538,108 @@ pub async fn get_message_diagnostics(
     message_id: String,
 ) -> Result<String> {
     state.service.message_diagnostics(&message_id).await
+}
+
+/// "Copy details for IT": what the account's last checks found.
+#[tauri::command]
+pub async fn get_protection_check_details(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<String> {
+    let service = state.service.clone();
+    blocking(move || service.protection_check_details(&account_id)).await
+}
+
+// --- organization setup -----------------------------------------------------------
+
+/// Whether setup can run from here for the account's organization. No
+/// network and no async lock: answers at once whatever setup is doing.
+#[tauri::command]
+pub async fn get_org_setup_info(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<OrgSetupInfo> {
+    let service = state.service.clone();
+    blocking(move || service.org_setup_info(&account_id)).await
+}
+
+/// Signs an administrator in with the setup app, in the browser.
+#[tauri::command]
+pub async fn org_setup_sign_in(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<OrgSetupAdmin> {
+    let opener = app.clone();
+    let open_browser = move |url: &str| {
+        opener
+            .opener()
+            .open_url(url, None::<&str>)
+            .map_err(|e| Error::internal(format!("could not open the browser: {e}")))
+    };
+    state
+        .service
+        .org_setup_sign_in(&open_browser, &account_id)
+        .await
+}
+
+/// Stops waiting for a setup sign-in the administrator abandoned in the
+/// browser.
+#[tauri::command]
+pub fn cancel_org_setup_sign_in(state: State<'_, AppState>) {
+    state.service.cancel_org_setup_sign_in();
+}
+
+#[tauri::command]
+pub async fn read_org_setup(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<OrgSetupStatus> {
+    state.service.read_org_setup(&account_id).await
+}
+
+#[tauri::command]
+pub async fn plan_org_setup(
+    state: State<'_, AppState>,
+    account_id: String,
+    choices: OrgSetupChoices,
+) -> Result<OrgSetupPlan> {
+    state.service.plan_org_setup(&account_id, &choices).await
+}
+
+#[tauri::command]
+pub async fn apply_org_setup(
+    state: State<'_, AppState>,
+    account_id: String,
+    choices: OrgSetupChoices,
+    confirmed: Vec<String>,
+) -> Result<OrgSetupResult> {
+    state
+        .service
+        .apply_org_setup(&account_id, &choices, &confirmed)
+        .await
+}
+
+#[tauri::command]
+pub async fn get_org_setup_script(
+    state: State<'_, AppState>,
+    account_id: String,
+    request: OrgSetupScriptRequest,
+) -> Result<OrgSetupScript> {
+    let service = state.service.clone();
+    blocking(move || service.org_setup_script(&account_id, &request)).await
+}
+
+/// "Copy setup details". Sync: reads the run log only.
+#[tauri::command]
+pub fn get_org_setup_details(state: State<'_, AppState>) -> String {
+    state.service.org_setup_details()
+}
+
+/// Forgets the setup sign-in. Sync: never waits for a call in flight.
+#[tauri::command]
+pub fn end_org_setup(state: State<'_, AppState>) {
+    state.service.end_org_setup();
 }
 
 // --- mail -----------------------------------------------------------------------

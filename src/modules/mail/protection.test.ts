@@ -28,6 +28,9 @@ const NOT_CHECKED: CheckResult = {
   note: null,
   testMessage: false,
   passedAt: null,
+  otherLabelId: null,
+  otherLabelOnControl: false,
+  changedAt: null,
 };
 const APPLIED: CheckResult = {
   state: "applied",
@@ -35,6 +38,9 @@ const APPLIED: CheckResult = {
   note: null,
   testMessage: true,
   passedAt: "2026-10-16T09:00:00Z",
+  otherLabelId: null,
+  otherLabelOnControl: false,
+  changedAt: null,
 };
 
 function label(id: string, sensitivity: number | null, check = APPLIED, extra = {}): LabelOption {

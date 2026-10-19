@@ -54,6 +54,8 @@ export const qk = {
     ["signatures", "compose", accountId, replyKind ?? "new"] as const,
 
   protectionSetup: (accountId: string) => ["protection", "setup", accountId] as const,
+  /** Under "protection", so the event applying organization setup sends refreshes it. */
+  orgSetupInfo: (accountId: string) => ["protection", "org-setup", accountId] as const,
 
   taskLists: () => ["tasks", "lists"] as const,
   tasks: (listId: string | null, includeCompleted: boolean) =>

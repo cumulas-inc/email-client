@@ -1150,13 +1150,25 @@ describe("the demo's protected mail", () => {
     expect(await backend.getProtectionSetup("acct-home")).toEqual({
       accountId: "acct-home",
       supported: false,
-      encrypt: { state: "notChecked", at: null, note: null, testMessage: false, passedAt: null },
+      encrypt: {
+        state: "notChecked",
+        at: null,
+        note: null,
+        testMessage: false,
+        passedAt: null,
+        otherLabelId: null,
+        otherLabelOnControl: false,
+        changedAt: null,
+      },
       doNotForward: {
         state: "notChecked",
         at: null,
         note: null,
         testMessage: false,
         passedAt: null,
+        otherLabelId: null,
+        otherLabelOnControl: false,
+        changedAt: null,
       },
       labels: [],
       policy: { required: false, defaultLabelId: null, justifyDowngrade: false, moreInfoUrl: null },
@@ -1476,6 +1488,92 @@ describe("the demo's protected mail", () => {
     expect(portal).not.toContain("recipientemailaddress");
     // Every message has them, protected or not.
     expect(await backend.getMessageDiagnostics("msg-1")).toContain("Detected: nothing");
+  });
+});
+
+describe("the demo's organization setup", () => {
+  const ALL_EMPLOYEES = "7b2d4e61-9c3a-4e5f-8a7b-6c5d4e3f2a10";
+  const WORK_ONLY = {
+    code: "unsupported",
+    message: "Only Microsoft 365 work and school accounts have an organization to set up.",
+  };
+  const NOT_AVAILABLE = {
+    code: "notConfigured",
+    message:
+      "Automatic setup isn't available in this version of Cumulas Mail. Use the PowerShell script instead.",
+  };
+  const choices = {
+    actions: true,
+    encryptTemplate: null,
+    doNotForwardTemplate: null,
+    labelIds: [],
+    labelsWithoutLicense: false,
+  };
+
+  it("has no setup app, as a build without one: only the script", async () => {
+    const backend = new MockBackend();
+    expect(await backend.getOrgSetupInfo("acct-work")).toEqual({
+      automatic: false,
+      tenantId: "demo-tenant",
+      signedIn: null,
+      approvalUrl: null,
+      rulesChangedAt: null,
+      policiesChangedAt: null,
+    });
+    await expect(backend.orgSetupSignIn("acct-work")).rejects.toEqual(NOT_AVAILABLE);
+    await expect(backend.readOrgSetup("acct-work")).rejects.toEqual(NOT_AVAILABLE);
+    await expect(backend.planOrgSetup("acct-work", choices)).rejects.toEqual(NOT_AVAILABLE);
+    await expect(backend.applyOrgSetup("acct-work", choices, [])).rejects.toEqual(NOT_AVAILABLE);
+    expect(await backend.getOrgSetupDetails()).toBe("");
+    expect(await backend.getProtectionCheckDetails("acct-work")).toBe("");
+    await backend.cancelOrgSetupSignIn();
+    await backend.endOrgSetup();
+    expect(backend.calls.orgSetupEnded).toBe(1);
+
+    // Only work and school accounts have an organization.
+    await expect(backend.getOrgSetupInfo("acct-home")).rejects.toEqual(WORK_ONLY);
+    await expect(backend.orgSetupSignIn("acct-home")).rejects.toEqual(WORK_ONLY);
+    await expect(
+      backend.getOrgSetupScript("acct-home", { choices: null, actions: true, labels: false }),
+    ).rejects.toEqual(WORK_ONLY);
+  });
+
+  it("fills in the script and the portal steps for the labels it covers", async () => {
+    const backend = new MockBackend();
+    const actionsOnly = await backend.getOrgSetupScript("acct-work", {
+      choices: null,
+      actions: true,
+      labels: false,
+    });
+    expect(actionsOnly.script).toMatch(
+      /^# Cumulas Mail: encryption and sensitivity labels for acme\.example \(tenant demo-tenant\)\./,
+    );
+    expect(actionsOnly.script).toContain("-Name 'Cumulas Mail: Encrypt'");
+    expect(actionsOnly.script).not.toContain("Connect-IPPSSession");
+    expect(actionsOnly.portalSteps).toEqual([]);
+
+    const allLabels = await backend.getOrgSetupScript("acct-work", {
+      choices: null,
+      actions: false,
+      labels: true,
+    });
+    expect(allLabels.portalSteps).toHaveLength(5);
+    expect(allLabels.script).not.toContain("'Cumulas Mail: Encrypt'");
+    expect(allLabels.script).toContain("Connect-IPPSSession");
+
+    const chosen = await backend.getOrgSetupScript("acct-work", {
+      choices: { ...choices, labelIds: [ALL_EMPLOYEES] },
+      actions: true,
+      labels: true,
+    });
+    expect(chosen.portalSteps).toEqual([
+      {
+        labelTitle: "Confidential › All Employees",
+        policyName: "Cumulas Mail: All Employees",
+        ruleName: "Cumulas Mail: All Employees (header)",
+        pattern: `(?i)^(${ALL_EMPLOYEES})$`,
+      },
+    ]);
   });
 });
 

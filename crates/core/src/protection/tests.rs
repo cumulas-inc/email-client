@@ -806,3 +806,76 @@ fn diagnostics_never_show_the_message() {
         "  - (name left out) · application/x-microsoft-rpmsg-message · 47 KB · protection file"
     ));
 }
+
+#[test]
+fn values_are_cleaned_capped_and_empty_ones_dropped() {
+    assert_eq!(
+        clean_value(" Anonymous\r\n", 200).as_deref(),
+        Some("Anonymous")
+    );
+    assert_eq!(
+        clean_value("In\u{202E}ter\u{0007}nal", 200).as_deref(),
+        Some("Internal")
+    );
+    // Nothing left: never a value, so an empty AuthAs doesn't count.
+    for empty in ["", "   ", "\u{200F}\t"] {
+        assert_eq!(clean_value(empty, 200), None, "{empty:?}");
+    }
+    assert_eq!(clean_value("abcdef", 3).as_deref(), Some("abc"));
+    let id = format!("<{}@contoso.com>", "x".repeat(300));
+    assert_eq!(clean_value(&id, 998).as_deref(), Some(id.as_str()));
+}
+
+#[test]
+fn setup_changes_are_kept_per_tenant() {
+    assert_eq!(
+        org_setup_changed_key(" 85F67998-E79A-4173-95C2-90B0E6DC231D "),
+        "orgsetup.changed.85f67998-e79a-4173-95c2-90b0e6dc231d"
+    );
+    assert_eq!(RULES_SETTLE, chrono::Duration::minutes(60));
+    assert_eq!(POLICIES_SETTLE, chrono::Duration::hours(24));
+    let settle: Settle =
+        serde_json::from_str(r#"{ "rulesChangedAt": "2026-10-19T14:03:00Z" }"#).unwrap();
+    assert_eq!(
+        settle,
+        Settle {
+            rules_changed_at: Some("2026-10-19T14:03:00Z".parse().unwrap()),
+            policies_changed_at: None,
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(settle).unwrap(),
+        serde_json::json!({ "rulesChangedAt": "2026-10-19T14:03:00Z", "policiesChangedAt": null })
+    );
+}
+
+#[test]
+fn evidence_reads_with_defaults() {
+    let evidence: CheckEvidence =
+        serde_json::from_str(r#"{ "relayStamped": true, "authAs": "Anonymous" }"#).unwrap();
+    assert_eq!(
+        evidence,
+        CheckEvidence {
+            relay_stamped: true,
+            auth_as: Some("Anonymous".into()),
+            ..CheckEvidence::default()
+        }
+    );
+    assert_eq!(evidence.headers_from, HeadersFrom::Unread);
+    let json = serde_json::to_value(CheckEvidence {
+        own_labels: vec![SeenLabel {
+            id: LABEL.into(),
+            enabled: true,
+        }],
+        headers_from: HeadersFrom::Transport,
+        detected: Some(ProtectionKind::RightsManaged),
+        ..CheckEvidence::default()
+    })
+    .unwrap();
+    assert_eq!(json["headersFrom"], "transport");
+    assert_eq!(json["detected"], "rightsManaged");
+    assert_eq!(
+        json["ownLabels"],
+        serde_json::json!([{ "id": LABEL, "enabled": true }])
+    );
+}

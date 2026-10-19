@@ -63,6 +63,9 @@ const result = (patch: Partial<CheckResult>): CheckResult => ({
   testMessage: false,
   // A pass counts from when it arrived.
   passedAt: patch.state === "applied" ? (patch.at ?? null) : null,
+  otherLabelId: null,
+  otherLabelOnControl: false,
+  changedAt: null,
   ...patch,
 });
 

@@ -5,9 +5,11 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use url::Url;
 
 use super::permissions::NeedsPermission;
 use crate::auth::GrantRecord;
+use crate::auth::admin_setup::{AdminSignIn, setup_not_available};
 use crate::auth::microsoft::{
     self, ApiTokenSource, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult, SyncTokenSource,
     admin_consent_link, is_personal_tenant, sync_scope,
@@ -16,6 +18,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
     Account, AccountFeature, AccountKind, AccountSettings, AdminConsentLink, ImapSettings,
 };
+use crate::orgsetup::{HostRules, RunLog};
 use crate::providers::graph::GraphProvider;
 use crate::providers::imap::{self, IdleConfig, ImapCredentials, ImapIdleWatcher, ImapProvider};
 use crate::providers::{
@@ -145,6 +148,22 @@ impl ProviderSet {
 
 pub type BrowserOpener = dyn Fn(&str) -> Result<()> + Send + Sync;
 
+/// Where organization setup signs in and talks to, for a build that names a
+/// setup app (`crate::auth::admin_setup::setup_client_id`).
+#[derive(Debug, Clone)]
+pub struct AdminEndpoints {
+    /// The setup app's client ID: never the mail app's.
+    pub client_id: String,
+    /// `https://login.microsoftonline.com`.
+    pub authority_host: String,
+    /// `https://outlook.office365.com`.
+    pub exchange: Url,
+    /// `https://ps.compliance.protection.outlook.com`.
+    pub compliance_discovery: Url,
+    /// Where requests, redirects and next pages may go.
+    pub hosts: HostRules,
+}
+
 /// How an account hears about changes between full syncs.
 #[derive(Clone)]
 pub enum PushSource {
@@ -200,6 +219,23 @@ pub trait Connector: Send + Sync {
         &self,
         _account: &Account,
     ) -> Option<Arc<dyn OrganizationSignatures>> {
+        None
+    }
+
+    /// Interactive sign-in with the setup app for the organization
+    /// `tenant_id`, every attempt logged to `log`, failed or not.
+    async fn admin_setup_sign_in(
+        &self,
+        _open_browser: &BrowserOpener,
+        _tenant_id: &str,
+        _log: &RunLog,
+    ) -> Result<AdminSignIn> {
+        Err(setup_not_available())
+    }
+
+    /// Where the setup session talks to; `None` when this build has no
+    /// setup app (then only the PowerShell script sets things up).
+    fn admin_setup_endpoints(&self) -> Option<AdminEndpoints> {
         None
     }
 }

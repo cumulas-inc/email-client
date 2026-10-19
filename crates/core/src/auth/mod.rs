@@ -1,6 +1,7 @@
 //! Authentication: OAuth 2.0 for Microsoft accounts. IMAP accounts use a
 //! password (or app password) kept in the [`crate::secrets::SecretStore`].
 
+pub mod admin_setup;
 pub mod microsoft;
 
 use std::time::Duration;

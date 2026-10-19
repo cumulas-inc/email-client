@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::{Store, from_json, from_ts, to_json, ts};
 use crate::error::Result;
 use crate::model::{CheckItem, CheckNote, CheckState, LabelCatalog, ProtectAction};
+use crate::protection::CheckEvidence;
 
 /// What an account's checks found, as kept (`account_protection.checks_json`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +25,9 @@ pub struct StoredChecks {
     pub labels: BTreeMap<String, CheckRecord>,
     /// The check waiting for its messages, if any.
     pub run: Option<CheckRun>,
+    /// The last check's control, kept after its run ends (for the notes and
+    /// "Copy details for IT").
+    pub last_control: Option<LastControl>,
 }
 
 impl StoredChecks {
@@ -65,6 +69,19 @@ pub struct CheckRecord {
     pub note: Option<CheckNote>,
     /// The arrived test message's Graph id, to open in Outlook on the web.
     pub test_message_id: Option<String>,
+    /// What its arrived test message showed; `None` for checks from before
+    /// 0.5.0, or when it didn't arrive.
+    pub evidence: Option<CheckEvidence>,
+    /// With note `OtherLabel`: the organization's label that arrived
+    /// instead (lowercase GUID).
+    pub other_label_id: Option<String>,
+    /// With note `OtherLabel`: the control arrived with that label too.
+    pub other_label_on_control: bool,
+    /// The setup change that was recent enough to matter when this was
+    /// judged, fixed then.
+    pub changed_at: Option<DateTime<Utc>>,
+    /// When its test message was sent (for "Copy details for IT").
+    pub sent_at: Option<DateTime<Utc>>,
 }
 
 /// A check waiting for its messages.
@@ -80,13 +97,23 @@ pub struct CheckRun {
 }
 
 /// How the control message, sent without any request, arrived.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct ControlOutcome {
     /// Encrypted with Microsoft Purview.
     pub protected: bool,
     /// The account's organization's label on it, if any.
     pub label_id: Option<String>,
+    /// What it showed; `None` for controls from before 0.5.0.
+    pub evidence: Option<CheckEvidence>,
+}
+
+/// The last check's control message, as judged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastControl {
+    pub sent_at: DateTime<Utc>,
+    pub outcome: ControlOutcome,
 }
 
 /// A test message on its way.
@@ -390,6 +417,7 @@ mod tests {
                     at: Some(at(9)),
                     note: None,
                     test_message_id: Some("AAMk-1".into()),
+                    ..CheckRecord::default()
                 };
                 checks.record_mut(&encrypt).state = CheckState::NotApplied;
                 checks.run = Some(CheckRun {
@@ -398,6 +426,7 @@ mod tests {
                     control: Some(ControlOutcome {
                         protected: false,
                         label_id: None,
+                        evidence: None,
                     }),
                     items: vec![RunItem {
                         item: encrypt.clone(),
@@ -444,6 +473,126 @@ mod tests {
             "UPDATE account_protection SET catalog_json = '[1]' WHERE account_id = 'm'",
         );
         assert_eq!(store.label_catalog("m").unwrap().catalog, None);
+    }
+
+    #[test]
+    fn checks_from_before_evidence_read_and_evidence_round_trips() {
+        use crate::model::ProtectionKind;
+        use crate::protection::{HeadersFrom, SeenLabel};
+
+        let store = Store::open_in_memory().unwrap();
+        store.insert_account(&microsoft_account("m")).unwrap();
+        // As 0.4.0 kept them: no evidence, notes' data or last control.
+        let old = format!(
+            r#"{{"encrypt":{{"state":"applied","at":"2026-10-16T09:00:00Z","note":null,
+                "testMessageId":"AAMk-1"}},
+            "doNotForward":{{"state":"notChecked","at":null,"note":null,"testMessageId":null}},
+            "labels":{{"{LABEL}":{{"state":"notApplied","at":"2026-10-16T09:00:00Z",
+                "note":null,"testMessageId":"AAMk-2"}}}},
+            "run":{{"controlToken":"k7q2m9xa","controlSentAt":"2026-10-16T09:00:00Z",
+                "control":{{"protected":false,"labelId":null}},"items":[]}}}}"#
+        );
+        store.update_protection_checks("m", |_| ()).unwrap();
+        store.execute_for_tests(&format!(
+            "UPDATE account_protection SET checks_json = '{old}' WHERE account_id = 'm'"
+        ));
+        let checks = store.protection_checks("m").unwrap();
+        assert_ne!(
+            checks,
+            StoredChecks::default(),
+            "0.4.0 checks must still read"
+        );
+        assert_eq!(
+            checks.encrypt,
+            CheckRecord {
+                state: CheckState::Applied,
+                at: Some(at(9)),
+                test_message_id: Some("AAMk-1".into()),
+                ..CheckRecord::default()
+            }
+        );
+        let label = &checks.labels[LABEL];
+        assert_eq!(label.state, CheckState::NotApplied);
+        assert_eq!(
+            (
+                &label.evidence,
+                &label.other_label_id,
+                label.other_label_on_control,
+                label.changed_at,
+                label.sent_at
+            ),
+            (&None, &None, false, None, None)
+        );
+        assert_eq!(
+            checks.run.as_ref().unwrap().control,
+            Some(ControlOutcome::default())
+        );
+        assert_eq!(checks.last_control, None);
+
+        // The new fields round-trip.
+        let evidence = CheckEvidence {
+            message_id: Some("<a1b2@contoso.com>".into()),
+            request_arrived: true,
+            relay_stamped: true,
+            auth_as: Some("Anonymous".into()),
+            directionality: Some("Originating".into()),
+            detected: Some(ProtectionKind::RightsManaged),
+            own_labels: vec![SeenLabel {
+                id: LABEL.into(),
+                enabled: true,
+            }],
+            foreign_labels: 1,
+            headers_from: HeadersFrom::Transport,
+            found_after_secs: Some(40),
+            ..CheckEvidence::default()
+        };
+        let control = ControlOutcome {
+            protected: false,
+            label_id: Some(LABEL.into()),
+            evidence: Some(CheckEvidence {
+                request_arrived: false,
+                ..evidence.clone()
+            }),
+        };
+        store
+            .update_protection_checks("m", |checks| {
+                checks.labels.insert(
+                    LABEL.into(),
+                    CheckRecord {
+                        state: CheckState::NotApplied,
+                        at: Some(at(10)),
+                        note: Some(CheckNote::OtherLabel),
+                        test_message_id: Some("AAMk-3".into()),
+                        evidence: Some(evidence.clone()),
+                        other_label_id: Some(LABEL.into()),
+                        other_label_on_control: true,
+                        changed_at: Some(at(9)),
+                        sent_at: Some(at(10)),
+                    },
+                );
+                checks.last_control = Some(LastControl {
+                    sent_at: at(10),
+                    outcome: control.clone(),
+                });
+            })
+            .unwrap();
+        let read = store.protection_checks("m").unwrap();
+        let label = &read.labels[LABEL];
+        assert_eq!(label.evidence.as_ref(), Some(&evidence));
+        assert_eq!(label.note, Some(CheckNote::OtherLabel));
+        assert_eq!(label.other_label_id.as_deref(), Some(LABEL));
+        assert!(label.other_label_on_control);
+        assert_eq!(
+            (label.changed_at, label.sent_at),
+            (Some(at(9)), Some(at(10)))
+        );
+        assert_eq!(
+            read.last_control,
+            Some(LastControl {
+                sent_at: at(10),
+                outcome: control,
+            })
+        );
     }
 
     #[test]

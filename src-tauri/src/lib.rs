@@ -268,6 +268,17 @@ pub fn run() {
             commands::open_protection_check_message,
             commands::open_in_outlook,
             commands::get_message_diagnostics,
+            commands::get_protection_check_details,
+            // organization setup
+            commands::get_org_setup_info,
+            commands::org_setup_sign_in,
+            commands::cancel_org_setup_sign_in,
+            commands::read_org_setup,
+            commands::plan_org_setup,
+            commands::apply_org_setup,
+            commands::get_org_setup_script,
+            commands::get_org_setup_details,
+            commands::end_org_setup,
             // mail
             commands::list_folders,
             commands::list_messages,
