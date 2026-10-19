@@ -133,8 +133,7 @@ impl CoreService {
 
     /// "Copy details for IT": what the account's last checks found.
     pub fn protection_check_details(&self, account_id: &str) -> Result<String> {
-        self.store.get_account(account_id)?;
-        Ok(String::new())
+        self.check_details_text(account_id)
     }
 
     /// When setup last changed the organization `tenant` from this

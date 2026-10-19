@@ -118,7 +118,13 @@ async fn without_a_setup_app_only_the_script_is_offered() {
     service.cancel_org_setup_sign_in();
     service.end_org_setup();
     assert_eq!(service.org_setup_details(), "");
-    assert_eq!(service.protection_check_details(&work.id).unwrap(), "");
+    // People's check details need no setup app.
+    assert!(
+        service
+            .protection_check_details(&work.id)
+            .unwrap()
+            .contains("setup check details for adele@contoso.com")
+    );
 }
 
 #[tokio::test]
