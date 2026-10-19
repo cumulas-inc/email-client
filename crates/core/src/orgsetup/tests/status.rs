@@ -489,6 +489,35 @@ fn leftovers_say_whether_they_can_go() {
         (stamped.state, stamped.summary.as_str()),
         (OrgSetupRowState::Info, unused)
     );
+    // Without the auto-labeling policies, whether the stamped strip rule is
+    // still needed isn't known: it's never called deletable.
+    let mut unread = snapshot_of(&tenant);
+    for compliance in [
+        Part::Failed(failure(FailureKind::NoRole, "denied")),
+        Part::Failed(failure(FailureKind::Unreachable, "connection reset")),
+        Part::Skipped,
+    ] {
+        unread.compliance = compliance;
+        let status = of(&unread, &ctx());
+        let stamped = row(
+            &status,
+            "leftover:Cumulas Mail: ignore stamped label requests from outside",
+        );
+        assert_eq!(stamped.state, OrgSetupRowState::Unknown);
+        assert_eq!(
+            stamped.summary,
+            "Auto-labeling policies couldn't be read, so Cumulas Mail can't tell whether this is still needed: policies from an earlier setup may use x-cumulas-label-stamped. Sign in as a Compliance Administrator or Global Administrator to check before deleting it."
+        );
+        // The other leftover doesn't depend on them.
+        assert_eq!(
+            row(
+                &status,
+                "leftover:Cumulas Mail: Confidential after the signature"
+            )
+            .summary,
+            unused
+        );
+    }
     // Still used by a policy of ours.
     tenant.with(|s| {
         s.policies = vec![json!({ "Name": "Cumulas Mail: Confidential", "Mode": "Enable", "ApplySensitivityLabel": CONFIDENTIAL, "ExchangeLocation": ["All"], "OverwriteLabel": true })];

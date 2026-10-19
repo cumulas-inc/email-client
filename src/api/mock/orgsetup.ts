@@ -844,13 +844,15 @@ function rows(tenant: DemoTenant, ctx: SetupContext, choices: OrgSetupChoices): 
     );
     for (const leftover of tenant.rules.filter((r) => isLeftover(r.name))) {
       const stamped = leftover.name.toLowerCase() === STAMPED_STRIP_RULE.toLowerCase();
+      // Whether the stamped one is still needed takes the auto-labeling policies.
+      const unread = stamped && !tenant.compliance;
       out.push(
         row(
           `leftover:${leftover.name}`,
           stamped ? "labels" : "routing",
           leftover.name,
-          "info",
-          ROWS.leftover.unused,
+          unread ? "unknown" : "info",
+          unread ? ROWS.leftover.unread : ROWS.leftover.unused,
           { objectName: leftover.name },
         ),
       );

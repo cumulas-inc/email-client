@@ -1025,34 +1025,45 @@ fn rows(
     }
     for leftover in leftovers(snapshot) {
         let stamped = leftover.is_named(LEFTOVER_STRIP_RULE);
-        let users: Vec<&str> = if stamped {
-            snapshot
-                .compliance
-                .read()
-                .map(|c| {
-                    c.rules
-                        .iter()
-                        .filter(|r| {
-                            is_owned(&r.name)
-                                && r.header_patterns
-                                    .iter()
-                                    .any(|(k, _)| k.eq_ignore_ascii_case(STAMPED_LABEL_HEADER))
-                        })
-                        .map(|r| r.policy.as_deref().unwrap_or(r.name.as_str()))
-                        .collect()
-                })
-                .unwrap_or_default()
+        // Which auto-labeling policies of ours still use the stamped
+        // header; None when they couldn't be read, so it's not known.
+        let users: Option<Vec<&str>> = if stamped {
+            snapshot.compliance.read().map(|c| {
+                c.rules
+                    .iter()
+                    .filter(|r| {
+                        is_owned(&r.name)
+                            && r.header_patterns
+                                .iter()
+                                .any(|(k, _)| k.eq_ignore_ascii_case(STAMPED_LABEL_HEADER))
+                    })
+                    .map(|r| r.policy.as_deref().unwrap_or(r.name.as_str()))
+                    .collect()
+            })
         } else {
-            Vec::new()
+            Some(Vec::new())
         };
-        let summary = if users.is_empty() {
-            "Left from an earlier setup and not used any more. You can delete it.".to_owned()
-        } else {
-            format!(
-                "Still needed: auto-labeling policies from an earlier setup ({}) use \
-                 x-cumulas-label-stamped. Select those labels and Repair them first.",
-                users.join(", ")
-            )
+        let (state, summary) = match users {
+            None => (
+                S::Unknown,
+                "Auto-labeling policies couldn't be read, so Cumulas Mail can't tell whether \
+                 this is still needed: policies from an earlier setup may use \
+                 x-cumulas-label-stamped. Sign in as a Compliance Administrator or Global \
+                 Administrator to check before deleting it."
+                    .to_owned(),
+            ),
+            Some(users) if users.is_empty() => (
+                S::Info,
+                "Left from an earlier setup and not used any more. You can delete it.".to_owned(),
+            ),
+            Some(users) => (
+                S::Info,
+                format!(
+                    "Still needed: auto-labeling policies from an earlier setup ({}) use \
+                     x-cumulas-label-stamped. Select those labels and Repair them first.",
+                    users.join(", ")
+                ),
+            ),
         };
         let section = if stamped {
             Section::Labels
@@ -1063,7 +1074,7 @@ fn rows(
             format!("leftover:{}", leftover.name),
             section,
             leftover.name.clone(),
-            S::Info,
+            state,
             summary,
         );
         r.object_name = Some(leftover.name.clone());

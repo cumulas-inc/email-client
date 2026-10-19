@@ -370,6 +370,9 @@ export const ROWS = {
     `Mail this rule matches goes out through “${connector}”${conditions ? `, for mail to ${conditions}` : ""}. Cumulas Mail's encryption rules come before it, so that service gets such mail already encrypted and can't add a signature to it. People's checks send mail to themselves, so they don't show whether encryption and labels work for mail this rule routes: send a test to an address it covers and look at what arrives.`,
   leftover: {
     unused: "Left from an earlier setup and not used any more. You can delete it.",
+    /** The stamped strip rule, when auto-labeling policies couldn't be read. */
+    unread:
+      "Auto-labeling policies couldn't be read, so Cumulas Mail can't tell whether this is still needed: policies from an earlier setup may use x-cumulas-label-stamped. Sign in as a Compliance Administrator or Global Administrator to check before deleting it.",
     stillNeeded: (policies: string) =>
       `Still needed: auto-labeling policies from an earlier setup (${policies}) use x-cumulas-label-stamped. Select those labels and Repair them first.`,
   },
