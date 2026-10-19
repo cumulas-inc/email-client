@@ -59,7 +59,7 @@ export function ResultView({ result }: { result: OrgSetupResult }) {
             <span className="orgsetup-outcome__text">
               <span className="orgsetup-outcome__title selectable">{changeTitle(r.change)}</span>
               <span className="orgsetup-outcome__line selectable">{outcomeText(r)}</span>
-              {r.outcome === "done" && r.message && (
+              {(r.outcome === "done" || r.outcome === "notYetListed") && r.message && (
                 <span className="orgsetup-outcome__line selectable">{r.message}</span>
               )}
             </span>

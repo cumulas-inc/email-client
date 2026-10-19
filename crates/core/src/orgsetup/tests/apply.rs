@@ -321,6 +321,57 @@ async fn a_change_whose_calls_changed_is_stale_too() {
 }
 
 #[tokio::test]
+async fn a_label_whose_name_starts_another_is_read_back_as_its_own() {
+    // "Confidential" comes first; "Confidential X" is chosen. Its rule's
+    // name starts with the other's policy name.
+    for other_policy in [false, true] {
+        let tenant = FakeTenant::fresh();
+        tenant.with(|s| {
+            s.rules = vec![rule(
+                STRIP_RULE,
+                json!({ "ExceptIfFromScope": "InOrganization", "RemoveHeader": "x-cumulas-label" }),
+            )];
+            s.labels = vec![
+                super::tenant::label(CONFIDENTIAL, "Confidential"),
+                super::tenant::label(GENERAL, "Confidential X"),
+            ];
+            if other_policy {
+                s.policies = vec![json!({
+                    "Name": "Cumulas Mail: Confidential", "Mode": "Enable", "Enabled": true,
+                    "ApplySensitivityLabel": CONFIDENTIAL, "ExchangeLocation": ["All"], "OverwriteLabel": true,
+                })];
+                s.policy_rules = vec![json!({
+                    "Name": "Cumulas Mail: Confidential (header)", "ParentPolicyName": "Cumulas Mail: Confidential",
+                    "Workload": "Exchange", "HeaderMatchesPatterns": { "x-cumulas-label": "^someone-else$" },
+                })];
+            }
+        });
+        let (_server, session) = start(&tenant).await;
+        let outcome = set_up(&session, &choices(false, &[GENERAL])).await;
+        let results = outcomes(&outcome.result.changes);
+        assert!(
+            results
+                .iter()
+                .any(|(id, _, _)| id
+                    == "create:autoLabelingRule:cumulas mail: confidential x (header)"),
+            "{results:?}"
+        );
+        for (id, outcome, message) in &results {
+            assert!(
+                matches!(
+                    outcome,
+                    OrgSetupOutcome::Done | OrgSetupOutcome::NotYetListed
+                ),
+                "{id}: {outcome:?} {message:?}"
+            );
+            if id.starts_with("create:autoLabelingRule") {
+                assert_eq!(*outcome, OrgSetupOutcome::Done, "{id}: {message:?}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn one_that_already_exists_is_adopted_and_repaired() {
     let tenant = FakeTenant::fresh();
     tenant.with(|s| {
@@ -471,6 +522,8 @@ async fn a_setting_that_cant_be_cleared_fails_and_nothing_is_deleted() {
         json!("InOrganization")
     );
     assert!(!outcome.rules_changed);
+    // A fallback that didn't work isn't kept for the next changes.
+    assert!(!session.pins().clear_with_empty);
 }
 
 #[tokio::test]
@@ -734,7 +787,7 @@ async fn a_change_microsoft_accepts_but_doesnt_keep_fails_with_what_it_shows() {
     assert_eq!(
         result.message.as_deref(),
         Some(
-            "Microsoft 365 accepted the change but shows something else: applies to mail from your organization's addresses (it applied only to mail Microsoft 365 had authenticated)"
+            "Microsoft 365 shows something else after the change: applies to mail from your organization's addresses (it applied only to mail Microsoft 365 had authenticated)"
         )
     );
 }

@@ -70,6 +70,8 @@ const BOARD = "c3d4e5f6-0718-4a29-b3c4-d5e6f7a8b9c0";
 const ENCRYPT = "Cumulas Mail: Encrypt";
 const DNF = "Cumulas Mail: Do Not Forward";
 const STRIP = "Cumulas Mail: ignore label requests from outside";
+/** What the core says of one that was already there (shown with "doesn't list it yet" too). */
+const ADOPTED = "It was already there; Cumulas Mail repaired it.";
 const LICENSE_MISSING =
   "Microsoft 365 says a license is missing: both the administrator who signs in and the people who send need a plan that includes automatic labeling. Microsoft said: The tenant isn't licensed for auto-labeling.";
 
@@ -434,7 +436,7 @@ function outcomes(
     signedOut: false,
     results: changes.map((c) =>
       c.object === "autoLabelingRule"
-        ? { change: c, outcome: "notYetListed", message: null }
+        ? { change: c, outcome: "notYetListed", message: ADOPTED }
         : done(c),
     ),
   };
@@ -716,6 +718,7 @@ describe("Set up or check for your organization", () => {
       within(dialog).getAllByText(DONE.done, { selector: ".orgsetup-outcome__line" }),
     ).toHaveLength(3);
     expect(within(dialog).getByText(DONE.notYetListed)).toBeInTheDocument();
+    expect(within(dialog).getByText(ADOPTED)).toBeInTheDocument();
     expect(within(dialog).getByText(DONE.checkLabels)).toBeInTheDocument();
     expect(within(dialog).queryByText(DONE.checkEncryption)).toBeNull();
     expect(within(dialog).getByText(DONE.everyoneElse)).toBeInTheDocument();

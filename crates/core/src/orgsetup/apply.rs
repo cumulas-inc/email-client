@@ -8,7 +8,6 @@ use std::collections::HashSet;
 use chrono::Utc;
 use serde_json::{Map, Value};
 
-use super::Session;
 use super::invoke::{Cmdlet, InvokeClient, InvokeError};
 use super::objects::{AutoPolicyView, AutoRuleView, TransportRuleView};
 use super::plan::{
@@ -17,6 +16,7 @@ use super::plan::{
 };
 use super::status::{self, Part, SessionInfo, SetupContext, Snapshot, read_snapshot};
 use super::wanted::{AUTO_ENABLE_AFTER, OwnRule, WantedRule, is_owned};
+use super::{Pins, Session};
 use crate::error::Result;
 use crate::model::{
     OrgSetupAction, OrgSetupChange, OrgSetupChangeResult, OrgSetupChoices, OrgSetupObject,
@@ -471,9 +471,21 @@ impl Run<'_> {
         let mut call = prepared(call, pins);
         let mut tried_empty = pins.clear_with_empty;
         let (mut tried_comment, mut tried_hashtable) = (false, false);
+        // The fallbacks this call took: pinned for the session only once
+        // the call went through with them (R8).
+        let mut fallbacks = Pins::default();
         loop {
             let error = match client.invoke(&call).await {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    if fallbacks != Pins::default() {
+                        self.session.pin(|p| {
+                            p.without_comments |= fallbacks.without_comments;
+                            p.plain_hashtable |= fallbacks.plain_hashtable;
+                            p.clear_with_empty |= fallbacks.clear_with_empty;
+                        });
+                    }
+                    return Ok(());
+                }
                 Err(e) => e,
             };
             let InvokeError::Rejected(detail) = &error else {
@@ -486,7 +498,7 @@ impl Run<'_> {
             if let Some(key) = comment.filter(|_| !tried_comment && text.contains("comment")) {
                 tried_comment = true;
                 call.params.remove(key);
-                self.session.pin(|p| p.without_comments = true);
+                fallbacks.without_comments = true;
                 self.session
                     .log()
                     .note(format!("{}: tried again without {key} (R8)", call.step));
@@ -506,7 +518,7 @@ impl Run<'_> {
                 if let Some(Value::Object(object)) = call.params.get_mut("HeaderMatchesPatterns") {
                     object.remove("@odata.type");
                 }
-                self.session.pin(|p| p.plain_hashtable = true);
+                fallbacks.plain_hashtable = true;
                 self.session.log().note(format!(
                     "{}: tried again with a plain hashtable (R8)",
                     call.step
@@ -521,7 +533,7 @@ impl Run<'_> {
             if !null_names.is_empty() && !tried_empty && mentions(&null_names) {
                 tried_empty = true;
                 call = empty_cleared(&call);
-                self.session.pin(|p| p.clear_with_empty = true);
+                fallbacks.clear_with_empty = true;
                 self.session.log().note(format!(
                     "{}: tried again clearing with \"\" or [] (R8)",
                     call.step
@@ -1049,8 +1061,9 @@ fn verify(
     }
 }
 
+/// After "Didn't go through: ".
 fn accepted_but(difference: &str) -> String {
-    format!("Microsoft 365 accepted the change but shows something else: {difference}")
+    format!("Microsoft 365 shows something else after the change: {difference}")
 }
 
 enum Shown {
@@ -1127,19 +1140,35 @@ fn verify_rule(after: &Assessment, planned: &Planned) -> Shown {
 fn verify_label(after: &Assessment, planned: &Planned) -> Shown {
     let name = &planned.change.name;
     let policy = planned.change.object == OrgSetupObject::AutoLabelingPolicy;
-    let state = after.labels.iter().find(|l| {
+    // The label the change is for; else by name, exactly before by the
+    // start of a rule's name (one label's policy name can start another's).
+    let named = |l: &&plan::LabelState| {
         if policy {
             l.policy_name
                 .as_deref()
                 .is_some_and(|n| n.eq_ignore_ascii_case(name))
         } else {
             l.rule.as_ref().is_some_and(|r| r.is_named(name))
-                || l.policy_name.as_deref().is_some_and(|n| {
-                    name.to_ascii_lowercase()
-                        .starts_with(&n.to_ascii_lowercase())
-                })
+                || l.policy_name
+                    .as_deref()
+                    .zip(l.view.as_ref())
+                    .is_some_and(|(n, view)| {
+                        super::wanted::policy_rule_name(n, view).eq_ignore_ascii_case(name)
+                    })
         }
-    });
+    };
+    let state = match &planned.group {
+        Some(group) => after.labels.iter().find(|l| &l.id == group),
+        None => after.labels.iter().find(named).or_else(|| {
+            after.labels.iter().find(|l| {
+                !policy
+                    && l.policy_name.as_deref().is_some_and(|n| {
+                        name.to_ascii_lowercase()
+                            .starts_with(&n.to_ascii_lowercase())
+                    })
+            })
+        }),
+    };
     let Some(state) = state else {
         return Shown::NotListed;
     };
