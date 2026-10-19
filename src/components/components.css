@@ -127,6 +127,11 @@
   font-weight: 700;
 }
 
+/* Focused when a dialog's content changes, to say what it is now: not a control. */
+.dialog__title:focus {
+  outline: none;
+}
+
 .dialog__body {
   padding: var(--space-2) var(--space-6) var(--space-4);
   overflow-y: auto;

@@ -2184,6 +2184,18 @@
 
 /* Settings → Accounts: sensitivity labels and encryption, each option with
    the check that shows whether the organization's mail server applies it. */
+/* How IT sets this up, Set up or check for your organization, Copy details for IT. */
+.protection-field > .account-field__head {
+  flex-wrap: wrap;
+}
+
+.protection-field__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
 /* A live region, there from the start, so what it comes to say is read out. */
 .protection-field__progress {
   font-size: var(--text-sm);
