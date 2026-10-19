@@ -97,6 +97,20 @@
   </keywords>
 
   <releases>
+    <release version="0.5.0" date="2026-10-19">
+      <description>
+        <p>Administrators can now set up encryption and sensitivity labels for their organization from Cumulas Mail, and the checks in Settings say why an option didn't work.</p>
+        <ul>
+          <li>Set up or check for your organization, under Sensitivity labels and encryption in a work account's settings: an administrator signs in, sees what's set up, and confirms each change before Cumulas Mail creates or repairs its mail flow rules and auto-labeling policies</li>
+          <li>It only changes rules and policies whose names start with "Cumulas Mail:" and never deletes anything; when it can't make a change, it shows a PowerShell script filled in for your organization, and the steps for the Microsoft Purview portal</li>
+          <li>Approve again for everyone re-adds Cumulas Mail's permissions for your organization</li>
+          <li>Encrypt and Do Not Forward work for organizations whose mail goes through the Cumulas Signatures relay, and sensitivity labels do too once mail coming back from the relay counts as mail from inside the organization</li>
+          <li>A check that says Arrived without it now says why, for example that no rule acted on the request or that the setup changed too recently to tell</li>
+          <li>Copy details for IT copies what the checks found, with what your IT team needs to trace the test messages</li>
+        </ul>
+        <p>If your organization created the cumulas-mail consent policy from the page for IT administrators, narrow it as the notice on that page, flatpak.cumulas.co/admin-consent, describes.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-10-18">
       <description>
         <p>Search finds the best matches first and is easier to narrow down, and Cumulas Mail now recognizes encrypted mail and sensitivity labels.</p>
