@@ -742,8 +742,9 @@ Otherwise the check says why, with a note under it:
   - the request reached your mail server (the header was still on the test message), but no rule
     or auto-labeling policy acted on it: missing, turned off, in test mode or simulation, not
     including the sender, too new, or without the license it needs;
-  - the request was removed on the way: usually by "Cumulas Mail: ignore label requests from
-    outside", because the message didn't count as from inside your organization;
+  - the request was removed on the way: for a label, usually by "Cumulas Mail: ignore label
+    requests from outside", because the message didn't count as from inside your organization;
+    for Encrypt or Do Not Forward, usually by that rule while its template couldn't be applied;
   - the message went through the Cumulas Signatures relay and came back as outside mail (see
     [With the Cumulas Signatures relay](#with-the-cumulas-signatures-relay));
   - your organization's setup was changed from this computer too recently to tell.
@@ -1050,10 +1051,11 @@ Work through these in order; most cases are settled by the first two.
    - _Got the request, but no rule acted on it_ (`requestIgnored`): the rule or auto-labeling
      policy is missing, turned off, in test mode or simulation, doesn't include the sender, is too
      new, or lacks a license. Steps 3 to 5.
-   - _The request was removed on the way_ (`requestRemoved`): a rule removed the header, usually
-     "Cumulas Mail: ignore label requests from outside" because the message didn't count as from
-     inside your organization (a relay or another service handed it back as outside mail), or a
-     rule of yours that removes headers. The message trace (step 6) shows which.
+   - _The request was removed on the way_ (`requestRemoved`): a rule removed the header. For a
+     label, usually "Cumulas Mail: ignore label requests from outside" because the message didn't
+     count as from inside your organization (a relay or another service handed it back as outside
+     mail); for Encrypt or Do Not Forward, usually that rule while its template couldn't be
+     applied; or a rule of yours that removes headers. The message trace (step 6) shows which.
    - _Your organization's setup changed … before this check_ (`tooSoon`): wait 30 minutes or more
      for rules, a day for auto-labeling policies, then check again.
    - _It arrived labeled … instead_ (`otherLabel`): another policy or a default label applied a

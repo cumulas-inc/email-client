@@ -1295,7 +1295,7 @@ Encrypt: Arrived encrypted · checked 2026-10-19 14:01 UTC
   Labels on it: none · other organizations' labels: 0
 Do Not Forward: Not checked yet
 Label Confidential ({LABEL}): Arrived without it · checked 2026-10-19 14:01 UTC
-  Note: Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. Your IT team needs to finish setting up “Count mail coming back from the signature server as mail from inside your organization” in Cumulas Signatures. Your organization's setup changed 10 minutes before this check; if that's under an hour (a day for labels), check again later.
+  Note: Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. They need Cumulas Signatures to count mail coming back from its server as mail from inside your organization: your IT team turns that on in Cumulas Signatures where it's offered (Finish setting up); otherwise ask Cumulas. Your organization's setup changed 10 minutes before this check; if that's under an hour (a day for labels), check again later.
   Sent: x-cumulas-label: {LABEL}, 2026-10-19 14:00:02 UTC
   Message-ID: <l1@contoso.com>
   Request still on the message when it arrived: yes
@@ -1307,10 +1307,10 @@ Label Confidential ({LABEL}): Arrived without it · checked 2026-10-19 14:01 UTC
 Setup changed on this computer: rules 2026-10-19 13:30:00 UTC, auto-labeling policies 2026-10-19 13:51:00 UTC
 
 For your IT team, in Exchange Online PowerShell:
-  Get-MessageTraceV2 -SenderAddress 'adele@contoso.com' -RecipientAddress 'adele@contoso.com' -Subject 'Cumulas Mail setup check' -SubjectFilterType StartsWith -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)
-  Get-MailDetailTransportRuleReport -MessageId '<c1@contoso.com>' -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)
-  Get-MailDetailTransportRuleReport -MessageId '<e1@contoso.com>' -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)
-  Get-MailDetailTransportRuleReport -MessageId '<l1@contoso.com>' -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)
+  Get-MessageTraceV2 -SenderAddress 'adele@contoso.com' -RecipientAddress 'adele@contoso.com' -Subject 'Cumulas Mail setup check' -SubjectFilterType StartsWith -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date) | ForEach-Object {{ Get-MessageTraceDetailV2 -MessageTraceId $_.MessageTraceId -RecipientAddress 'adele@contoso.com' }} | Format-List Date,Event,Detail
+  Get-MailDetailTransportRuleReport -MessageId '<c1@contoso.com>' -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date) | Format-List
+  Get-MailDetailTransportRuleReport -MessageId '<e1@contoso.com>' -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date) | Format-List
+  Get-MailDetailTransportRuleReport -MessageId '<l1@contoso.com>' -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date) | Format-List
 Guide: https://github.com/cumulas-inc/email-client/blob/main/docs/microsoft-365.md#troubleshooting-the-check
 "
     );

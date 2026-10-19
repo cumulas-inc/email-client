@@ -102,24 +102,61 @@ fn is_expired(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     at.is_some_and(|at| now - at > Duration::days(CHECK_VALID_DAYS))
 }
 
+/// What decides whether the Cumulas Signatures relay made a pass stale:
+/// whether the organization says the account's mail goes through it now,
+/// and the last check's control message.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Relay<'c> {
+    pub now: bool,
+    pub control: Option<&'c LastControl>,
+}
+
+impl<'c> Relay<'c> {
+    pub(super) fn of(now: bool, checks: &'c StoredChecks) -> Self {
+        Self {
+            now,
+            control: checks.last_control.as_ref(),
+        }
+    }
+}
+
 /// Whether a pass was made stale by the Cumulas Signatures relay: the
-/// account's mail goes through it now (`relay_now`), and the pass's test
-/// message didn't. Mail that goes through the relay may come back as
-/// outside mail, which Cumulas Mail's rules don't act on, so the pass says
-/// nothing of it. Passes from before 0.5.0 kept no evidence and never
-/// drift; a relay that went away leaves the rules acting on the first
-/// pass, which works.
-pub(super) fn relay_drift(record: &CheckRecord, relay_now: bool) -> bool {
+/// account's mail goes through it now, and the pass's test message didn't.
+/// Mail that goes through the relay may come back as outside mail, which
+/// Cumulas Mail's rules don't act on, so the pass says nothing of it.
+///
+/// The organization says so as soon as it chooses the relay, while its
+/// mail may not go through it for a while yet (routing waits for an
+/// administrator or a directory sync). So a pass checked once it said so
+/// drifts only when a later check's control message did go through the
+/// relay; a pass from before drifts at once. Passes from before 0.5.0 kept
+/// no evidence and never drift; a relay that went away leaves the rules
+/// acting on the first pass, which works.
+pub(super) fn relay_drift(record: &CheckRecord, relay: Relay<'_>) -> bool {
+    let routed_since = || {
+        relay.control.is_some_and(|control| {
+            record
+                .sent_at
+                .or(record.at)
+                .is_some_and(|sent| control.sent_at > sent)
+                && control
+                    .outcome
+                    .evidence
+                    .as_ref()
+                    .is_some_and(|e| e.relay_stamped)
+        })
+    };
     record.state == CheckState::Applied
-        && relay_now
+        && relay.now
         && record.evidence.as_ref().is_some_and(|e| !e.relay_stamped)
+        && (!record.relay_expected || routed_since())
 }
 
 /// What a check decided, as of `now`: an old pass is expired, and so is one
 /// the relay made stale (see [`relay_drift`]).
-fn decided_state(record: &CheckRecord, now: DateTime<Utc>, relay_now: bool) -> CheckState {
+fn decided_state(record: &CheckRecord, now: DateTime<Utc>, relay: Relay<'_>) -> CheckState {
     if record.state == CheckState::Applied
-        && (is_expired(record.at, now) || relay_drift(record, relay_now))
+        && (is_expired(record.at, now) || relay_drift(record, relay))
     {
         CheckState::Expired
     } else {
@@ -135,9 +172,9 @@ fn check_result(
     record: &CheckRecord,
     waiting: Option<&RunItem>,
     now: DateTime<Utc>,
-    relay_now: bool,
+    relay: Relay<'_>,
 ) -> CheckResult {
-    let passed_at = offered(record, now, relay_now).ok().and(record.at);
+    let passed_at = offered(record, now, relay).ok().and(record.at);
     match waiting {
         Some(waiting) => CheckResult {
             state: CheckState::Waiting,
@@ -146,9 +183,9 @@ fn check_result(
             ..CheckResult::default()
         },
         None => CheckResult {
-            state: decided_state(record, now, relay_now),
+            state: decided_state(record, now, relay),
             at: record.at,
-            note: if relay_drift(record, relay_now) {
+            note: if relay_drift(record, relay) {
                 Some(CheckNote::RelayChanged)
             } else {
                 record.note
@@ -169,9 +206,9 @@ fn check_result(
 pub(super) fn offered(
     record: &CheckRecord,
     now: DateTime<Utc>,
-    relay_now: bool,
+    relay: Relay<'_>,
 ) -> std::result::Result<(), CheckState> {
-    match decided_state(record, now, relay_now) {
+    match decided_state(record, now, relay) {
         CheckState::Applied => Ok(()),
         other => Err(other),
     }
@@ -356,15 +393,10 @@ impl CoreService {
         }
         let now = Utc::now();
         let checks = self.store.protection_checks(account_id)?;
-        let relay_now = self.relay_now(account_id);
+        let relay = Relay::of(self.relay_now(account_id), &checks);
         setup.supported = true;
         let result = |item: &CheckItem| {
-            check_result(
-                &checks.record(item),
-                waiting_for(&checks, item),
-                now,
-                relay_now,
-            )
+            check_result(&checks.record(item), waiting_for(&checks, item), now, relay)
         };
         setup.encrypt = result(&CheckItem::Action {
             action: ProtectAction::Encrypt,
@@ -700,6 +732,9 @@ impl CoreService {
                 .is_some();
         }
         let settle = self.settle(&tenant);
+        // Whether the organization said its mail goes through the relay, as
+        // each pass is judged.
+        let relay_now = self.relay_now(account_id);
         let mut decided: Vec<(String, CheckRecord)> = Vec::new();
         if let Some(control) = &control {
             for waiting in &run.items {
@@ -746,13 +781,13 @@ impl CoreService {
                         other_label_on_control: judged.other_label_on_control,
                         changed_at: judged.changed_at,
                         sent_at: Some(waiting.sent_at),
+                        relay_expected: relay_now,
                     },
                 ));
             }
         }
 
         let now = Utc::now();
-        let relay_now = self.relay_now(account_id);
         let timeout = Duration::minutes(CHECK_TIMEOUT_MINUTES);
         let control_late = control.is_none() && now - run.control_sent_at > timeout;
         let not_arrived = |sent_at: DateTime<Utc>| CheckRecord {
@@ -792,7 +827,7 @@ impl CoreService {
                     let previous = checks.record(&item);
                     // Nothing was learned of it: a pass that still counts
                     // stays, saying this test didn't arrive.
-                    if offered(&previous, now, relay_now).is_ok() {
+                    if offered(&previous, now, Relay::of(relay_now, checks)).is_ok() {
                         CheckRecord {
                             note: Some(CheckNote::NotArrived),
                             ..previous
@@ -874,15 +909,15 @@ impl CoreService {
             return Err(Error::unsupported(PROTECTED_SENDING_UNSUPPORTED));
         };
         let now = Utc::now();
-        let relay_now = self.relay_now(account_id);
         let checks = self.store.protection_checks(account_id)?;
+        let relay = Relay::of(self.relay_now(account_id), &checks);
         let catalog = self.label_list(&account)?;
         let settle = self.settle(tenant);
         let detail = |title: String, item: CheckItem| {
             let record = checks.record(&item);
             CheckDetailsItem {
                 title,
-                result: check_result(&record, waiting_for(&checks, &item), now, relay_now),
+                result: check_result(&record, waiting_for(&checks, &item), now, relay),
                 item,
                 record,
             }

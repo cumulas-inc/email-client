@@ -2353,7 +2353,7 @@ describe("the demo's organization setup", () => {
     );
     expect(relay).toContain("\nPath: relay present, return not internal\n");
     expect(relay).toContain(
-      `\n  Note: Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. Your IT team needs to finish setting up “Count mail coming back from the signature server as mail from inside your organization” in Cumulas Signatures.\n  Sent: x-cumulas-label: ${GENERAL}, `,
+      `\n  Note: Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. They need Cumulas Signatures to count mail coming back from its server as mail from inside your organization: your IT team turns that on in Cumulas Signatures where it's offered (Finish setting up); otherwise ask Cumulas.\n  Sent: x-cumulas-label: ${GENERAL}, `,
     );
   });
 });

@@ -998,16 +998,20 @@ fn check_note_words(
                      effect yet (allow up to a day), or need a license your plan doesn't have."
                 .into(),
         },
-        (CheckState::NotApplied, Some(CheckNote::RequestRemoved)) => format!(
-            "The request was removed on the way, but the message wasn't {}. Usually a rule \
+        // x-cumulas-protect is removed by Encrypt and Do Not Forward (the
+        // strip rule removes only x-cumulas-label).
+        (CheckState::NotApplied, Some(CheckNote::RequestRemoved)) if action.is_some() => {
+            "The request was removed on the way, but the message wasn't encrypted. Usually \
+             “Cumulas Mail: Encrypt” or “Cumulas Mail: Do Not Forward” removed it while its \
+             template couldn't be applied, or another rule removed x-cumulas-protect."
+                .into()
+        }
+        (CheckState::NotApplied, Some(CheckNote::RequestRemoved)) => {
+            "The request was removed on the way, but the message wasn't labeled. Usually a rule \
              removed it, such as “Cumulas Mail: ignore label requests from outside” when the \
-             message didn't count as from inside your organization.",
-            if action.is_some() {
-                "encrypted"
-            } else {
-                "labeled"
-            }
-        ),
+             message didn't count as from inside your organization."
+                .into()
+        }
         (CheckState::NotApplied, Some(CheckNote::RelayNotInternal)) if action.is_some() => {
             "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as \
              outside mail when it comes back. Cumulas Mail's encryption rules then need to come \
@@ -1016,9 +1020,10 @@ fn check_note_words(
         }
         (CheckState::NotApplied, Some(CheckNote::RelayNotInternal)) => {
             "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as \
-             outside mail when it comes back, so labels can't work yet. Your IT team needs to \
-             finish setting up “Count mail coming back from the signature server as mail from \
-             inside your organization” in Cumulas Signatures."
+             outside mail when it comes back, so labels can't work yet. They need Cumulas \
+             Signatures to count mail coming back from its server as mail from inside your \
+             organization: your IT team turns that on in Cumulas Signatures where it's offered \
+             (Finish setting up); otherwise ask Cumulas."
                 .into()
         }
         (CheckState::NotApplied, Some(CheckNote::TooSoon)) => {
@@ -1272,9 +1277,13 @@ pub fn check_details(input: &CheckDetailsInput<'_>) -> String {
     out.push(String::new());
     out.push("For your IT team, in Exchange Online PowerShell:".into());
     let address = ps_quote(&email);
+    // Step 6 of the guide, filled in: each message's events on its way,
+    // then each one's rule hits.
     out.push(format!(
         "  Get-MessageTraceV2 -SenderAddress {address} -RecipientAddress {address} -Subject {} \
-         -SubjectFilterType StartsWith -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)",
+         -SubjectFilterType StartsWith -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date) | \
+         ForEach-Object {{ Get-MessageTraceDetailV2 -MessageTraceId $_.MessageTraceId \
+         -RecipientAddress {address} }} | Format-List Date,Event,Detail",
         ps_quote(CHECK_SUBJECT_PREFIX)
     ));
     let mut listed: Vec<&str> = Vec::new();
@@ -1286,7 +1295,7 @@ pub fn check_details(input: &CheckDetailsInput<'_>) -> String {
         out.push(format!(
             "  Get-MailDetailTransportRuleReport -MessageId {} -EventType \
              TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) \
-             -EndDate (Get-Date)",
+             -EndDate (Get-Date) | Format-List",
             ps_quote(id)
         ));
     }

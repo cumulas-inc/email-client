@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::CoreService;
 use super::protection::{
-    label_title, listed_label, offered, relay_drift, waiting_for, work_tenant,
+    Relay, label_title, listed_label, offered, relay_drift, waiting_for, work_tenant,
 };
 use crate::error::{Error, ErrorCode, Result};
 use crate::html::sanitize_email_html;
@@ -456,9 +456,9 @@ impl CoreService {
                         .store
                         .protection_checks(&account.id)
                         .unwrap_or_default();
-                    let relay_now = self.relay_now(&account.id);
+                    let relay = Relay::of(self.relay_now(&account.id), &checks);
                     let choosable = |id: &str| {
-                        offered(&checks.record(&label_item(id)), Utc::now(), relay_now).is_ok()
+                        offered(&checks.record(&label_item(id)), Utc::now(), relay).is_ok()
                     };
                     return Err(reworded(e, &message, request, catalog.as_ref(), choosable));
                 }
@@ -480,14 +480,14 @@ impl CoreService {
     ) -> Result<Option<HeaderRequest>> {
         let now = Utc::now();
         let checks = self.store.protection_checks(&account.id)?;
-        let relay_now = self.relay_now(&account.id);
+        let relay = Relay::of(self.relay_now(&account.id), &checks);
         if message.label_id.is_none()
             && let Some(catalog) = catalog
             && catalog.policy.required
             && catalog
                 .labels
                 .iter()
-                .any(|l| offered(&checks.record(&label_item(&l.id)), now, relay_now).is_ok())
+                .any(|l| offered(&checks.record(&label_item(&l.id)), now, relay).is_ok())
         {
             return Err(Error::invalid_input(
                 "Choose a sensitivity label. Your organization requires one.",
@@ -506,7 +506,7 @@ impl CoreService {
                 "{name} is being checked for {email}. Wait for the check in Settings → Accounts \
                  to finish."
             )),
-            CheckState::Expired if relay_drift(&checks.record(item), relay_now) => {
+            CheckState::Expired if relay_drift(&checks.record(item), relay) => {
                 Error::invalid_input(format!(
                     "{name} was checked before your organization's mail went through the Cumulas \
                      Signatures relay. Check it again in Settings → Accounts."
@@ -528,7 +528,7 @@ impl CoreService {
                     )));
                 };
                 let item = label_item(&label.id);
-                if let Err(state) = offered(&checks.record(&item), now, relay_now) {
+                if let Err(state) = offered(&checks.record(&item), now, relay) {
                     return Err(not_set_up(
                         &format!("The label {}", label.title()),
                         &item,
@@ -548,7 +548,7 @@ impl CoreService {
                 )));
             }
             let item = CheckItem::Action { action };
-            if let Err(state) = offered(&checks.record(&item), now, relay_now) {
+            if let Err(state) = offered(&checks.record(&item), now, relay) {
                 return Err(not_set_up(action.name(), &item, state));
             }
         }

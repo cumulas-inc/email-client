@@ -262,10 +262,10 @@ export function checkDetails(input: DetailsInput): string {
     }`,
     "",
     "For your IT team, in Exchange Online PowerShell:",
-    `  Get-MessageTraceV2 -SenderAddress ${psQuote(input.email)} -RecipientAddress ${psQuote(input.email)} -Subject ${psQuote(CHECK_SUBJECT)} -SubjectFilterType StartsWith -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)`,
+    `  Get-MessageTraceV2 -SenderAddress ${psQuote(input.email)} -RecipientAddress ${psQuote(input.email)} -Subject ${psQuote(CHECK_SUBJECT)} -SubjectFilterType StartsWith -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date) | ForEach-Object { Get-MessageTraceDetailV2 -MessageTraceId $_.MessageTraceId -RecipientAddress ${psQuote(input.email)} } | Format-List Date,Event,Detail`,
     ...messageIds.map(
       (id) =>
-        `  Get-MailDetailTransportRuleReport -MessageId ${psQuote(id)} -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)`,
+        `  Get-MailDetailTransportRuleReport -MessageId ${psQuote(id)} -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date) | Format-List`,
     ),
     `Guide: ${CHECK_GUIDE}`,
     "",

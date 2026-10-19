@@ -1856,6 +1856,56 @@ async fn a_pass_from_before_the_relay_must_be_checked_again() {
 }
 
 #[tokio::test]
+async fn a_pass_while_the_relay_routing_waits_counts_until_mail_goes_through_it() {
+    let s = setup().await;
+    s.organization(FakeOrganization {
+        encrypts: vec![ProtectAction::Encrypt],
+        labels: vec![GENERAL.into()],
+        ..FakeOrganization::default()
+    });
+    // Cumulas Signatures says the relay signs, but Exchange doesn't route
+    // mail through it yet (consent, a directory sync, the admin's step).
+    signed_on_send(&s);
+    s.service
+        .check_protection(&s.account.id, &[ENCRYPT])
+        .await
+        .unwrap();
+    let setup = s.refresh().await;
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::Applied, None)
+    );
+    assert!(record(&s, &ENCRYPT).relay_expected);
+    // So it's offered, and sending with it works.
+    s.service
+        .send_message(OutgoingMessage {
+            protect: Some(ProtectAction::Encrypt),
+            ..outgoing(&s)
+        })
+        .await
+        .unwrap();
+
+    // Routing goes live: a later check's control comes through the relay,
+    // and that pass no longer says anything of mail that does.
+    s.organization(FakeOrganization {
+        encrypts: vec![ProtectAction::Encrypt],
+        labels: vec![GENERAL.into()],
+        relay: Some(FakeRelay { internal: true }),
+        ..FakeOrganization::default()
+    });
+    s.service
+        .check_protection(&s.account.id, &[label(GENERAL)])
+        .await
+        .unwrap();
+    let setup = s.refresh().await;
+    assert_eq!(
+        (setup.encrypt.state, setup.encrypt.note),
+        (CheckState::Expired, Some(CheckNote::RelayChanged))
+    );
+    assert_eq!(s.label_check(GENERAL).state, CheckState::Applied);
+}
+
+#[tokio::test]
 async fn details_for_it_say_what_the_last_checks_found_without_the_messages() {
     let s = setup().await;
     s.organization(FakeOrganization {
@@ -1883,9 +1933,10 @@ async fn details_for_it_say_what_the_last_checks_found_without_the_messages() {
         "Path: relay present, return not internal",
         "Do Not Forward: Not checked yet",
         "  Note: Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats \
-         it as outside mail when it comes back, so labels can't work yet. Your IT team needs \
-         to finish setting up “Count mail coming back from the signature server as mail from \
-         inside your organization” in Cumulas Signatures.",
+         it as outside mail when it comes back, so labels can't work yet. They need Cumulas \
+         Signatures to count mail coming back from its server as mail from inside your \
+         organization: your IT team turns that on in Cumulas Signatures where it's offered \
+         (Finish setting up); otherwise ask Cumulas.",
         "Setup changed on this computer: rules never, auto-labeling policies never",
     ] {
         assert!(text.lines().any(|l| l == line), "{line}\n{text}");

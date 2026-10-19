@@ -82,6 +82,9 @@ pub struct CheckRecord {
     pub changed_at: Option<DateTime<Utc>>,
     /// When its test message was sent (for "Copy details for IT").
     pub sent_at: Option<DateTime<Utc>>,
+    /// The organization said its mail goes through the Cumulas Signatures
+    /// relay when this was judged; `false` for checks from before.
+    pub relay_expected: bool,
 }
 
 /// A check waiting for its messages.
@@ -568,6 +571,7 @@ mod tests {
                         other_label_on_control: true,
                         changed_at: Some(at(9)),
                         sent_at: Some(at(10)),
+                        relay_expected: true,
                     },
                 );
                 checks.last_control = Some(LastControl {

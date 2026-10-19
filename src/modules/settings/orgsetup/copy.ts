@@ -452,11 +452,13 @@ export const CHECK_NOTES = {
   requestIgnoredLabel:
     "Your organization's mail server got the request (x-cumulas-label was still on the test message), but no auto-labeling policy applied the label. The policy may be missing, still in simulation, not include you, not be in effect yet (allow up to a day), or need a license your plan doesn't have.",
   requestRemoved: (kind: "action" | "label") =>
-    `The request was removed on the way, but the message wasn't ${kind === "action" ? "encrypted" : "labeled"}. Usually a rule removed it, such as “Cumulas Mail: ignore label requests from outside” when the message didn't count as from inside your organization.`,
+    kind === "action"
+      ? "The request was removed on the way, but the message wasn't encrypted. Usually “Cumulas Mail: Encrypt” or “Cumulas Mail: Do Not Forward” removed it while its template couldn't be applied, or another rule removed x-cumulas-protect."
+      : "The request was removed on the way, but the message wasn't labeled. Usually a rule removed it, such as “Cumulas Mail: ignore label requests from outside” when the message didn't count as from inside your organization.",
   relayNotInternalAction:
     "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back. Cumulas Mail's encryption rules then need to come before the relay's rule: Set up or check for your organization does that.",
   relayNotInternalLabel:
-    "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. Your IT team needs to finish setting up “Count mail coming back from the signature server as mail from inside your organization” in Cumulas Signatures.",
+    "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. They need Cumulas Signatures to count mail coming back from its server as mail from inside your organization: your IT team turns that on in Cumulas Signatures where it's offered (Finish setting up); otherwise ask Cumulas.",
   /** `ago`: how long before the check, such as "10 minutes". */
   tooSoon: (ago: string) =>
     `Your organization's setup changed ${ago} before this check. New rules can take 30 minutes or more to start working, and auto-labeling policies up to a day. Check again later.`,

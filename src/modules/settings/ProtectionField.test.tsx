@@ -512,7 +512,7 @@ describe("what the checks found", () => {
         IT,
     );
     expect(noteOf("Do Not Forward")).toBe(
-      "The request was removed on the way, but the message wasn't encrypted. Usually a rule removed it, such as “Cumulas Mail: ignore label requests from outside” when the message didn't count as from inside your organization." +
+      "The request was removed on the way, but the message wasn't encrypted. Usually “Cumulas Mail: Encrypt” or “Cumulas Mail: Do Not Forward” removed it while its template couldn't be applied, or another rule removed x-cumulas-protect." +
         IT,
     );
     expect(noteOf("General")).toBe(
@@ -537,7 +537,7 @@ describe("what the checks found", () => {
     );
     expect(statusOf("Do Not Forward")).toHaveTextContent(`Arrived encrypted · checked ${on}`);
     expect(noteOf("General")).toBe(
-      "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. Your IT team needs to finish setting up “Count mail coming back from the signature server as mail from inside your organization” in Cumulas Signatures." +
+      "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. They need Cumulas Signatures to count mail coming back from its server as mail from inside your organization: your IT team turns that on in Cumulas Signatures where it's offered (Finish setting up); otherwise ask Cumulas." +
         IT,
     );
   });
