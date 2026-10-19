@@ -254,6 +254,72 @@ async fn one_that_already_exists_is_adopted_and_repaired() {
 }
 
 #[tokio::test]
+async fn a_policy_that_already_exists_is_adopted_and_its_simulation_started() {
+    let tenant = FakeTenant::fresh();
+    tenant.with(|s| {
+        s.rules.push(rule(
+            STRIP_RULE,
+            json!({ "ExceptIfFromScope": "InOrganization", "RemoveHeader": "x-cumulas-label" }),
+        ));
+        s.policies.push(json!({
+            "Name": "Cumulas Mail: Confidential", "Identity": "Cumulas Mail: Confidential",
+            "Mode": "TestWithoutNotifications", "Enabled": true, "ApplySensitivityLabel": CONFIDENTIAL,
+            "ExchangeLocation": [], "OverwriteLabel": false, "SharePointLocation": [],
+        }));
+        // Not listed by the read nor apply's fresh read.
+        s.hidden.insert("Cumulas Mail: Confidential".into(), 2);
+    });
+    let (_server, session) = start(&tenant).await;
+    let outcome = set_up(&session, &choices(false, &[CONFIDENTIAL])).await;
+    let results = outcomes(&outcome.result.changes);
+    assert!(
+        results.iter().all(|r| r.1 == OrgSetupOutcome::Done),
+        "{results:?}"
+    );
+    assert_eq!(
+        results[0].2.as_deref(),
+        Some("It was already there; Cumulas Mail repaired it.")
+    );
+    let writes: Vec<String> = tenant.writes().into_iter().map(|(c, _)| c).collect();
+    assert_eq!(
+        writes,
+        [
+            "New-AutoSensitivityLabelPolicy",
+            "Set-AutoSensitivityLabelPolicy",
+            "New-AutoSensitivityLabelRule",
+            "Set-AutoSensitivityLabelPolicy",
+        ]
+    );
+    let policy = tenant.policy("Cumulas Mail: Confidential").unwrap();
+    assert_eq!(policy["OverwriteLabel"], json!(true));
+    assert_eq!(policy["ExchangeLocation"], json!(["All"]));
+    assert_eq!(policy["AutoEnableAfter"], json!("01:00:00"));
+
+    // Someone else's rule in it: left alone.
+    let tenant = FakeTenant::fresh();
+    tenant.with(|s| {
+        s.rules.push(rule(
+            STRIP_RULE,
+            json!({ "ExceptIfFromScope": "InOrganization", "RemoveHeader": "x-cumulas-label" }),
+        ));
+        s.policies.push(json!({
+            "Name": "Cumulas Mail: Confidential", "Mode": "Enable", "ExchangeLocation": ["All"],
+        }));
+        s.policy_rules.push(json!({
+            "Name": "Contoso: everything", "ParentPolicyName": "Cumulas Mail: Confidential",
+        }));
+        s.hidden.insert("Cumulas Mail: Confidential".into(), 2);
+    });
+    let (_server, session) = start(&tenant).await;
+    let outcome = set_up(&session, &choices(false, &[CONFIDENTIAL])).await;
+    let results = outcomes(&outcome.result.changes);
+    assert_eq!(results[0].1, OrgSetupOutcome::Failed, "{results:?}");
+    assert!(results[1..].iter().all(|r| r.1 == OrgSetupOutcome::Skipped));
+    let writes: Vec<String> = tenant.writes().into_iter().map(|(c, _)| c).collect();
+    assert_eq!(writes, ["New-AutoSensitivityLabelPolicy"]);
+}
+
+#[tokio::test]
 async fn a_refused_null_is_sent_again_as_empty_and_pinned() {
     let tenant = repairable();
     tenant.script(

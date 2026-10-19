@@ -388,9 +388,7 @@ impl Run<'_> {
             }
             let error = match self.write(client, call).await {
                 Ok(()) => {
-                    if let Some(name) = call.new_name().filter(|_| call.name.starts_with("New-")) {
-                        self.created.push((kind, name.to_owned()));
-                    }
+                    self.remember(call, kind);
                     continue;
                 }
                 Err(WriteFailure::Clearing(why)) => return Err(Ended::Failed(why)),
@@ -398,13 +396,8 @@ impl Run<'_> {
             };
             match error {
                 InvokeError::AlreadyExists(_) if call.name.starts_with("New-") => {
-                    match self.adopt(client, call, kind).await {
-                        Ok(()) => {
-                            note =
-                                Some("It was already there; Cumulas Mail repaired it.".to_owned())
-                        }
-                        Err(e) => return Err(e),
-                    }
+                    self.adopt(client, call, kind).await?;
+                    note = Some("It was already there; Cumulas Mail repaired it.".to_owned());
                 }
                 e if self.might_have_happened(&e) => {
                     if !self.happened(client, planned, call).await {
@@ -418,11 +411,21 @@ impl Run<'_> {
                 }
                 e => return Err(self.stop(&e, exchange, planned)),
             }
+            // There now, and ours: later calls (a new policy's simulation)
+            // may address it.
+            self.remember(call, kind);
         }
         if let Some(policy) = &planned.restart_if_off {
             note = self.restart_if_off(client, policy).await.or(note);
         }
         Ok(note)
+    }
+
+    /// Notes what a `New-*` call made (its name passed [`Self::owned`]).
+    fn remember(&mut self, call: &Cmdlet, kind: ObjectKind) {
+        if let Some(name) = call.new_name().filter(|_| call.name.starts_with("New-")) {
+            self.created.push((kind, name.to_owned()));
+        }
     }
 
     /// The target must be ours in the fresh read: a new object's name ours
@@ -654,6 +657,22 @@ impl Run<'_> {
                         "Its auto-labeling policy has SharePoint or OneDrive locations that \
                          Cumulas Mail doesn't set. Remove them in the Microsoft Purview portal, \
                          then select Read again.",
+                    ));
+                }
+                // Only rules of ours in it (D12).
+                let rules = list_again(client, OrgSetupObject::AutoLabelingRule)
+                    .await
+                    .ok_or_else(|| {
+                        failed("Microsoft 365 says it exists, but its rules couldn't be listed.")
+                    })?;
+                if rules
+                    .iter()
+                    .filter_map(AutoRuleView::read)
+                    .any(|r| r.in_policy(&policy.name) && !is_owned(&r.name))
+                {
+                    return Err(failed(
+                        "Its auto-labeling policy has another rule that Cumulas Mail doesn't set. \
+                         Remove it in the Microsoft Purview portal, then select Read again.",
                     ));
                 }
                 let mut set = Cmdlet::write(

@@ -319,6 +319,12 @@ impl TenantState {
                 }
             }
             "New-AutoSensitivityLabelPolicy" => {
+                let name = params["Name"].as_str().unwrap_or_default();
+                if self.policies.iter().any(|p| p["Name"] == name) {
+                    return ResponseTemplate::new(400).set_body_json(json!({
+                        "error": { "code": "BadRequest", "message": format!("The policy '{name}' already exists.") }
+                    }));
+                }
                 let mut policy = json!({
                     "Enabled": true, "AutoEnableAfter": null, "DistributionStatus": "Pending",
                     "SharePointLocation": [], "OneDriveLocation": [], "ExchangeSenderMemberOf": [],
@@ -362,6 +368,12 @@ impl TenantState {
                 envelope(listed)
             }
             "New-AutoSensitivityLabelRule" => {
+                let name = params["Name"].as_str().unwrap_or_default();
+                if self.policy_rules.iter().any(|r| r["Name"] == name) {
+                    return ResponseTemplate::new(400).set_body_json(json!({
+                        "error": { "code": "BadRequest", "message": format!("The rule '{name}' already exists.") }
+                    }));
+                }
                 let mut rule = json!({ "Disabled": false });
                 for (key, value) in params {
                     rule[key] = stored(value);
