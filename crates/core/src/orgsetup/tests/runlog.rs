@@ -70,6 +70,16 @@ fn the_text_names_the_run_and_every_attempt() {
     let text = details_text(&log);
     let version = env!("CARGO_PKG_VERSION");
     assert!(text.starts_with(&format!("Cumulas Mail {version}: organization setup details\nThese details include no passwords or tokens.")), "{text}");
+    // What the opening sentence says it includes is what the rest has.
+    assert!(
+        text.contains(
+            "every sensitivity label's name and IDs, Cumulas Signatures' connector, the settings \
+             of Cumulas Mail's own rules and policies, and Microsoft 365's error messages. Other \
+             mail flow rules appear by name, order, state and mode, and whether they stop later \
+             rules or send mail out; their conditions and actions aren't included."
+        ),
+        "{text}"
+    );
     assert!(text.contains(&format!("Tenant: {TENANT}\nSetup app: {SETUP_APP_NAME} ({CLIENT})\nSigned in as: admin@contoso.com\n")), "{text}");
     assert!(text.contains(&format!(
         "Sign-in: login.microsoftonline.com/{TENANT}, scope \"{scope}\""

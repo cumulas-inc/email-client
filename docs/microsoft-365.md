@@ -677,8 +677,12 @@ it; when it doesn't, labels are set up only after you select **Set up labels any
 Cumulas Mail forgets the sign-in when the window closes, after 60 minutes without use, or when it
 quits; it's never stored. **Copy setup details**, available after any sign-in attempt, copies what
 setup did, for support: each sign-in attempt with Microsoft's error codes, and each call to
-Microsoft 365 with its status and errors. It names your tenant, the administrator and Cumulas
-Mail's own rules and policies, other rules by name and order only, and no passwords or tokens.
+Microsoft 365 with its status and errors. It names your tenant and initial domain, the
+administrator, the work account's licenses, your Message Encryption settings and template names,
+every sensitivity label's name and IDs, Cumulas Signatures' connector and the settings of Cumulas
+Mail's own rules and policies; other mail flow rules appear by name, order, state and mode, and
+whether they stop later rules or send mail out, without their conditions and actions. It has no
+passwords or tokens.
 Cumulas Mail keeps it in memory until the next setup sign-in or until it quits.
 
 It uses Microsoft 365's PowerShell interface over HTTPS (`InvokeCommand`), which Microsoft doesn't

@@ -3,7 +3,8 @@
 //!
 //! It holds no token, cookie or password, ever. Parameter values and raw
 //! JSON are kept only for Cumulas Mail's own rules and policies; other rules
-//! appear by name and order only.
+//! appear by name, order, state and mode, and whether they stop later rules
+//! or send mail out (its opening sentence lists everything it names).
 
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
@@ -299,9 +300,13 @@ pub fn details_text(log: &RunLog) -> String {
         env!("CARGO_PKG_VERSION")
     );
     out.push_str(
-        "These details include no passwords or tokens. They name your organization's tenant, \
-         the administrator who signed in, and the names and settings of Cumulas Mail's own rules \
-         and policies. Other rules appear by name and order only.\n\n",
+        "These details include no passwords or tokens. They name your organization's tenant and \
+         initial domain, the administrator who signed in, the work account's licenses, your \
+         Message Encryption settings and template names, every sensitivity label's name and \
+         IDs, Cumulas Signatures' connector, the settings of Cumulas Mail's own rules and \
+         policies, and Microsoft 365's error messages. Other mail flow rules appear by name, \
+         order, state and mode, and whether they stop later rules or send mail out; their \
+         conditions and actions aren't included.\n\n",
     );
     let unknown = || "unknown".to_owned();
     let _ = writeln!(out, "Tenant: {}", header.tenant_id.unwrap_or_else(unknown));
