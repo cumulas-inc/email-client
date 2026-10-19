@@ -9,7 +9,10 @@ use url::Url;
 
 use super::permissions::NeedsPermission;
 use crate::auth::GrantRecord;
-use crate::auth::admin_setup::{AdminSignIn, setup_not_available};
+use crate::auth::admin_setup::{
+    AdminSetupConfig, AdminSignIn, COMPLIANCE_DISCOVERY_HOST, EXCHANGE_RESOURCE, admin_sign_in,
+    setup_client_id, setup_not_available,
+};
 use crate::auth::microsoft::{
     self, ApiTokenSource, MicrosoftAuthConfig, MicrosoftTokenSource, SignInResult, SyncTokenSource,
     admin_consent_link, is_personal_tenant, sync_scope,
@@ -462,6 +465,36 @@ impl Connector for LiveConnector {
             Arc::new(tokens),
             scope,
         )))
+    }
+
+    async fn admin_setup_sign_in(
+        &self,
+        open_browser: &BrowserOpener,
+        tenant_id: &str,
+        log: &RunLog,
+    ) -> Result<AdminSignIn> {
+        let endpoints = self
+            .admin_setup_endpoints()
+            .ok_or_else(setup_not_available)?;
+        let config = AdminSetupConfig {
+            client_id: endpoints.client_id,
+            tenant_id: tenant_id.to_owned(),
+            authority_host: endpoints.authority_host,
+        };
+        admin_sign_in(&config, open_browser, Duration::from_secs(300), log).await
+    }
+
+    fn admin_setup_endpoints(&self) -> Option<AdminEndpoints> {
+        // Never the mail app's own registration, whichever it is.
+        let mail = self.microsoft_config().ok();
+        let client_id = setup_client_id(mail.as_ref().map(|c| c.client_id.as_str()))?;
+        Some(AdminEndpoints {
+            client_id,
+            authority_host: microsoft::DEFAULT_AUTHORITY_HOST.to_owned(),
+            exchange: Url::parse(EXCHANGE_RESOURCE).ok()?,
+            compliance_discovery: Url::parse(COMPLIANCE_DISCOVERY_HOST).ok()?,
+            hosts: HostRules::production(),
+        })
     }
 }
 

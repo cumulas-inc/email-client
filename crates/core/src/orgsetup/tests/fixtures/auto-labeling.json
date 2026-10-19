@@ -1,0 +1,39 @@
+{
+  "labels": [
+    { "Guid": "6C1B0F3E-1111-4A8B-9C2D-000000000001", "ImmutableId": "9d0e0c1b-2222-4c3d-8e4f-000000000001", "Name": "Confidential", "DisplayName": "Confidential", "ContentType": "File, Email", "ParentId": null, "EncryptionEnabled": true },
+    { "Guid": "6c1b0f3e-1111-4a8b-9c2d-000000000004", "Name": "Files only", "DisplayName": "Files only", "ContentType": ["File"] },
+    { "Guid": "6c1b0f3e-1111-4a8b-9c2d-000000000005", "Name": "Parent", "ContentType": null }
+  ],
+  "policies": [
+    {
+      "Name": "Cumulas Mail: Confidential", "Identity": "Cumulas Mail: Confidential", "Mode": "TestWithoutNotifications",
+      "Enabled": "True", "ApplySensitivityLabel": "Confidential", "ExchangeLocation": [{ "Name": "All" }],
+      "ExchangeSenderMemberOf": ["cumulas-mail-users@contoso.com"], "OverwriteLabel": true,
+      "SharePointLocation": [], "OneDriveLocation": null,
+      "AutoEnableAfter": "01:00:00", "WhenChanged": "/Date(1760778764000+0000)/",
+      "TestModeStatus": { "Status": "Completed", "CompletedTime": "2026-10-18T12:00:00Z" },
+      "DistributionStatus": "Success"
+    },
+    {
+      "Name": "Cumulas Mail: Shared", "Identity": "Cumulas Mail: Shared", "Mode": "Enable",
+      "ApplySensitivityLabel": "6c1b0f3e-1111-4a8b-9c2d-000000000002", "ExchangeLocation": "All",
+      "SharePointLocation": ["All"], "DistributionStatus": "Error", "DistributionResults": ["Exchange: policy sync failed"]
+    }
+  ],
+  "rules": [
+    {
+      "Name": "Cumulas Mail: Confidential (header)", "ParentPolicyName": "Cumulas Mail: Confidential", "Workload": "Exchange",
+      "HeaderMatchesPatterns": { "@odata.type": "#Exchange.GenericHashTable", "x-cumulas-label": "^6c1b0f3e-1111-4a8b-9c2d-000000000001$" },
+      "Disabled": false
+    },
+    {
+      "Name": "Cumulas Mail: Shared (header)", "Policy": "Cumulas Mail: Shared", "Workload": "Exchange",
+      "HeaderMatchesPatterns": [{ "Key": "x-cumulas-label-stamped", "Value": ["(?i)^(a|b)$", "^c$"] }],
+      "SentTo": ["someone@contoso.com"]
+    },
+    {
+      "Name": "Cumulas Mail: Shared (other)", "Policy": "Cumulas Mail: Shared",
+      "HeaderMatchesPatterns": "x-cumulas-label: ^x$"
+    }
+  ]
+}

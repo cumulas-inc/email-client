@@ -8,9 +8,9 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::GraphProvider;
 use super::client::Failure;
 use super::types::null_default;
+use super::{GraphProvider, LicenseHint};
 use crate::error::Result;
 use crate::model::{CatalogLabel, LabelCatalog, LabelPolicy};
 use crate::providers::LabelsProvider;
@@ -212,5 +212,9 @@ impl LabelsProvider for GraphProvider {
             None => LabelPolicy::default(),
         };
         Ok(LabelCatalog { labels, policy })
+    }
+
+    async fn license_hint(&self) -> Result<Option<LicenseHint>> {
+        self.read_license_hint().await.map(Some)
     }
 }

@@ -29,6 +29,7 @@ use crate::model::{
 };
 use crate::search::SearchQuery;
 use crate::search::dates::Received;
+use graph::LicenseHint;
 
 /// Where a message lives on the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,6 +346,12 @@ pub trait LabelsProvider: Send + Sync {
     /// The labels the person may apply to email, and their label policy
     /// (Graph beta). Fails with HTTP 403 when Microsoft 365 refuses it.
     async fn label_catalog(&self) -> Result<LabelCatalog>;
+
+    /// Whether the person's own licenses include automatic labeling (a
+    /// hint for organization setup); `None` when the provider can't tell.
+    async fn license_hint(&self) -> Result<Option<LicenseHint>> {
+        Ok(None)
+    }
 }
 
 /// A Microsoft Graph change subscription, as Graph lists it.

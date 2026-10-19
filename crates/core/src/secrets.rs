@@ -131,6 +131,16 @@ pub struct MemorySecretStore {
     values: Mutex<HashMap<String, String>>,
 }
 
+impl MemorySecretStore {
+    /// Stores `value` under `key` at once: no keyring to wait for.
+    pub fn put(&self, key: &str, value: &str) {
+        self.values
+            .lock()
+            .unwrap()
+            .insert(key.to_owned(), value.to_owned());
+    }
+}
+
 #[async_trait]
 impl SecretStore for MemorySecretStore {
     async fn get(&self, key: &str) -> Result<Option<String>> {

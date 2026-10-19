@@ -716,6 +716,11 @@ pub(crate) struct FakeConnector {
     /// The sensitivity labels of Microsoft work and school accounts, when
     /// set.
     pub labels: Mutex<Option<Arc<dyn LabelsProvider>>>,
+    /// Where organization setup talks to (a mock server), when set: then a
+    /// setup sign-in is admin@contoso.com's, with static tokens.
+    pub admin_setup: Mutex<Option<AdminEndpoints>>,
+    /// What the next setup sign-ins fail with, in order.
+    pub admin_sign_in_failures: Mutex<VecDeque<Error>>,
 }
 
 impl FakeConnector {
@@ -737,6 +742,8 @@ impl FakeConnector {
             organization_signatures: Mutex::default(),
             organization_requests: AtomicUsize::new(0),
             labels: Mutex::default(),
+            admin_setup: Mutex::default(),
+            admin_sign_in_failures: Mutex::default(),
         }
     }
 }
@@ -824,6 +831,67 @@ impl Connector for FakeConnector {
         self.organization_signatures.lock().unwrap().clone()
     }
 
+    async fn admin_setup_sign_in(
+        &self,
+        _open_browser: &BrowserOpener,
+        tenant_id: &str,
+        log: &crate::orgsetup::RunLog,
+    ) -> Result<crate::auth::admin_setup::AdminSignIn> {
+        use crate::auth::admin_setup::{
+            AdminSetupConfig, AdminSignIn, AdminTokens, EXCHANGE_MANAGE_SCOPE, Resource,
+            SETUP_CONSENT_SCOPES,
+        };
+        use crate::orgsetup::runlog::SignInRecord;
+
+        let endpoints = self
+            .admin_setup_endpoints()
+            .ok_or_else(crate::auth::admin_setup::setup_not_available)?;
+        let host = url::Url::parse(&endpoints.authority_host)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        let record = SignInRecord::new(
+            format!("{host}/{tenant_id}"),
+            &SETUP_CONSENT_SCOPES.join(" "),
+        );
+        let failure = self.admin_sign_in_failures.lock().unwrap().pop_front();
+        if let Some(error) = failure {
+            log.sign_in(record.failed(&error));
+            return Err(error);
+        }
+        log.sign_in(record.redeemed(Some(EXCHANGE_MANAGE_SCOPE), true, true));
+        let config = AdminSetupConfig {
+            client_id: endpoints.client_id,
+            tenant_id: tenant_id.to_owned(),
+            authority_host: endpoints.authority_host,
+        };
+        let tokens = AdminTokens::new(
+            &config,
+            "refresh-0",
+            log.clone(),
+            Arc::new(std::time::SystemTime::now),
+        );
+        tokens
+            .prime(
+                Resource::Exchange,
+                "exchange-token",
+                std::time::Duration::from_secs(3600),
+            )
+            .await;
+        Ok(AdminSignIn {
+            username: crate::orgsetup::tests::ADMIN.into(),
+            display_name: "Megan Bowen".into(),
+            tenant_id: tenant_id.to_owned(),
+            object_id: crate::orgsetup::tests::ADMIN_OID.into(),
+            tokens,
+            granted: EXCHANGE_MANAGE_SCOPE.into(),
+        })
+    }
+
+    fn admin_setup_endpoints(&self) -> Option<AdminEndpoints> {
+        self.admin_setup.lock().unwrap().clone()
+    }
+
     async fn push_source(&self, account: &Account) -> Result<PushSource> {
         if account.kind == AccountKind::Microsoft
             && let Some(relay) = self.relay.lock().unwrap().clone()
@@ -855,9 +923,9 @@ struct RemindersChanged {
 type ChangeWatcher = Box<dyn Fn(&[DataKind], Option<&str>) + Send>;
 
 #[derive(Default)]
-struct RecordingSink {
+pub(in crate::service) struct RecordingSink {
     /// Every `data_changed`: the kinds and the account.
-    changes: Mutex<Vec<(Vec<DataKind>, Option<String>)>>,
+    pub(in crate::service) changes: Mutex<Vec<(Vec<DataKind>, Option<String>)>>,
     watcher: Mutex<Option<ChangeWatcher>>,
     reminders: Mutex<Vec<RemindersChanged>>,
     new_mail: Mutex<Vec<String>>,
