@@ -413,6 +413,9 @@ impl Respond for FakeTenant {
         let path = request.url.path();
         if path.ends_with("/oauth2/v2.0/token") {
             state.token_requests += 1;
+            if let Some(response) = state.scripted_for("token") {
+                return response;
+            }
             let form: HashMap<String, String> = url::form_urlencoded::parse(&request.body)
                 .into_owned()
                 .collect();

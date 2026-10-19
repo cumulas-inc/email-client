@@ -100,6 +100,7 @@ async fn discover(
                 .token(Resource::Compliance)
                 .await
                 .map_err(|e| match e.code {
+                    _ if super::invoke::is_signed_out(&e) => InvokeError::SignedOut(e.message),
                     ErrorCode::Network => InvokeError::Network(e.message),
                     _ => InvokeError::Unauthorized(ErrorDetail {
                         message: clean_value(&e.message, MAX_MESSAGE).unwrap_or_default(),

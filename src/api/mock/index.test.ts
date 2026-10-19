@@ -2256,7 +2256,8 @@ describe("the demo's organization setup", () => {
       [
         "create:mailFlowRule:cumulas mail: do not forward",
         "skipped",
-        "Your setup sign-in ended. Sign in again to continue.",
+        // The core's words for a change skipped this way.
+        "Your sign-in ended. Sign in again to continue.",
       ],
     ]);
     // The status as last read, and the change it made on record.

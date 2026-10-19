@@ -67,7 +67,7 @@ fn failure_message(error: &InvokeError, resource_exchange: bool) -> String {
              stopped."
         ),
         InvokeError::Cancelled => WINDOW_CLOSED.into(),
-        InvokeError::Unauthorized(_) => SIGNED_OUT.into(),
+        InvokeError::Unauthorized(_) | InvokeError::SignedOut(_) => SIGNED_OUT.into(),
         other => format!(
             "Microsoft 365 didn't accept this: {}.",
             other.message().trim_end_matches('.')
@@ -784,7 +784,7 @@ impl Run<'_> {
     fn stop(&mut self, error: &InvokeError, exchange: bool, planned: &Planned) -> Ended {
         let message = failure_message(error, exchange);
         match error {
-            InvokeError::Unauthorized(_) => {
+            InvokeError::Unauthorized(_) | InvokeError::SignedOut(_) => {
                 self.signed_out = true;
                 return Ended::Skipped(SIGNED_OUT.into());
             }

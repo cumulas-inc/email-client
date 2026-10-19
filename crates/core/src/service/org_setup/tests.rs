@@ -239,6 +239,9 @@ mod signed_in {
             sink,
             tenant,
             work,
+            // Kept: a dropped mock server goes back to wiremock's pool,
+            // and another test's organization would answer.
+            _server,
             ..
         } = setup().await;
         let info = service.org_setup_info(&work.id).unwrap();
@@ -361,6 +364,9 @@ mod signed_in {
             service,
             connector,
             work,
+            // Kept: a dropped mock server goes back to wiremock's pool,
+            // and another test's organization would answer.
+            _server,
             ..
         } = setup().await;
         connector
@@ -414,7 +420,12 @@ mod signed_in {
 
     #[tokio::test]
     async fn an_hour_unused_signs_out_even_while_the_computer_slept() {
-        let Setup { service, work, .. } = setup().await;
+        let Setup {
+            service,
+            work,
+            _server,
+            ..
+        } = setup().await;
         let (now, wall) = clock();
         service
             .org_setup_sign_in_with(no_browser(), &work.id, wall, Duration::from_millis(20))
@@ -452,6 +463,9 @@ mod signed_in {
             service,
             tenant,
             work,
+            // Kept: a dropped mock server goes back to wiremock's pool,
+            // and another test's organization would answer.
+            _server,
             ..
         } = setup().await;
         service
@@ -507,8 +521,86 @@ mod signed_in {
     }
 
     #[tokio::test]
+    async fn a_refused_refresh_ends_the_session() {
+        let Setup {
+            service,
+            tenant,
+            work,
+            // Kept: a dropped mock server goes back to wiremock's pool,
+            // and another test's organization would answer.
+            _server,
+            ..
+        } = setup().await;
+        service
+            .org_setup_sign_in(no_browser(), &work.id)
+            .await
+            .unwrap();
+        tenant.script(
+            "token",
+            ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "interaction_required",
+                "error_description": "AADSTS50133: Session is invalid due to expiration or recent password change.",
+                "error_codes": [50133],
+            })),
+        );
+        let error = service.read_org_setup(&work.id).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::AuthRequired);
+        assert_eq!(error.details.unwrap()["reason"], "setupSignedOut");
+        // Signed out, so Read again doesn't try the dead sign-in again.
+        assert!(!session_slot(&service));
+        assert_eq!(service.org_setup_info(&work.id).unwrap().signed_in, None);
+        assert!(
+            service
+                .org_setup_details()
+                .contains("Signed out: Microsoft 365 didn't accept the sign-in any more.")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_apply_that_ends_signed_out_ends_the_session() {
+        let Setup {
+            service,
+            tenant,
+            work,
+            _server,
+            ..
+        } = setup().await;
+        service
+            .org_setup_sign_in(no_browser(), &work.id)
+            .await
+            .unwrap();
+        let status = service.read_org_setup(&work.id).await.unwrap();
+        let confirmed: Vec<String> = status.plan.changes.iter().map(|c| c.id.clone()).collect();
+        // Refused again after the token's one refresh.
+        for _ in 0..2 {
+            tenant.script(
+                "New-TransportRule",
+                ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                    "error": { "code": "Unauthorized", "message": "Access denied." }
+                })),
+            );
+        }
+        let result = service
+            .apply_org_setup(&work.id, &status.defaults, &confirmed)
+            .await
+            .unwrap();
+        assert!(result.signed_out);
+        // As the result says: sign in again (the demo does the same).
+        assert!(!session_slot(&service));
+        assert_code(
+            service.read_org_setup(&work.id).await,
+            ErrorCode::AuthRequired,
+        );
+    }
+
+    #[tokio::test]
     async fn a_new_sign_in_replaces_the_session_and_starts_a_new_log() {
-        let Setup { service, work, .. } = setup().await;
+        let Setup {
+            service,
+            work,
+            _server,
+            ..
+        } = setup().await;
         service
             .org_setup_sign_in(no_browser(), &work.id)
             .await

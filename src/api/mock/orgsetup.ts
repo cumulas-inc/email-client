@@ -34,7 +34,7 @@ import {
   ROWS,
   ROW_TITLES,
   SETUP_APP_NAME,
-  SIGNED_OUT,
+  SKIPPED_SIGNED_OUT,
   psQuote,
 } from "../../modules/settings/orgsetup/copy";
 
@@ -797,7 +797,10 @@ function rows(tenant: DemoTenant, ctx: SetupContext, choices: OrgSetupChoices): 
       });
     }
     if (!r.enabled) return make("off", ROWS.rule.off, { fix: "setup" });
-    if (r.mode !== "Enforce") return make("off", ROWS.rule.testMode(r.mode), { fix: "setup" });
+    if (r.mode !== "Enforce") {
+      const summary = own === "strip" ? ROWS.rule.testModeStrip : ROWS.rule.testMode;
+      return make("off", summary(r.mode), { fix: "setup" });
+    }
     if (r.changedAt && ctx.now - r.changedAt < 30 * MINUTE_MS) {
       return make("waiting", ROWS.rule.waiting(minutesSince(r.changedAt, ctx.now)));
     }
@@ -1489,7 +1492,7 @@ export function makeChanges(
     const result = (outcome: OrgSetupChangeResult["outcome"], message: string | null = null) =>
       made.changes.push({ change: p.change, outcome, message });
     if (made.signedOut) {
-      result("skipped", SIGNED_OUT);
+      result("skipped", SKIPPED_SIGNED_OUT);
       continue;
     }
     if (p.labelId && labelsStopped) {

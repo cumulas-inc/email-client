@@ -37,6 +37,9 @@ use crate::signatures::config::{SignatureService, is_guid};
 const WORK_ACCOUNTS_ONLY: &str =
     "Only Microsoft 365 work and school accounts have an organization to set up.";
 
+/// What the run log notes when Microsoft 365 ended the sign-in.
+const REFUSED_NOTE: &str = "Signed out: Microsoft 365 didn't accept the sign-in any more.";
+
 /// The wall clock sessions read (tests move theirs).
 fn system_clock() -> WallClock {
     Arc::new(SystemTime::now)
@@ -263,7 +266,9 @@ impl CoreService {
             _ = session.cancelled() => return Err(signed_out()),
         };
         let ctx = self.setup_context(&account, &tenant, true).await?;
-        let snapshot = read_snapshot(&session, &ctx).await?;
+        let snapshot = read_snapshot(&session, &ctx)
+            .await
+            .inspect_err(|e| self.end_if_signed_out(&session, e))?;
         let status = status(&snapshot, &ctx, &session_info(&session));
         session.keep_snapshot(snapshot);
         session.touch();
@@ -300,8 +305,13 @@ impl CoreService {
             _ = session.cancelled() => return Err(signed_out()),
         };
         let ctx = self.setup_context(&account, &tenant, true).await?;
-        let outcome =
-            apply::apply(&session, &ctx, &session_info(&session), choices, confirmed).await?;
+        let outcome = apply::apply(&session, &ctx, &session_info(&session), choices, confirmed)
+            .await
+            .inspect_err(|e| self.end_if_signed_out(&session, e))?;
+        if outcome.result.signed_out {
+            // As the result says: sign in again to go on.
+            orgsetup::sign_out(&self.org_setup, &session, REFUSED_NOTE);
+        }
         if outcome.rules_changed || outcome.policies_changed {
             let settle = apply::settled(
                 self.settle(&tenant),
@@ -313,6 +323,14 @@ impl CoreService {
         session.touch();
         self.notify(&[DataKind::Protection], None);
         Ok(outcome.result)
+    }
+
+    /// Ends `session` when `error` says its sign-in ended (Microsoft
+    /// refused to renew it), so the next call doesn't try it again.
+    fn end_if_signed_out(&self, session: &Arc<Session>, error: &Error) {
+        if orgsetup::invoke::is_signed_out(error) {
+            orgsetup::sign_out(&self.org_setup, session, REFUSED_NOTE);
+        }
     }
 
     fn record_settle(&self, tenant: &str, settle: &Settle) {

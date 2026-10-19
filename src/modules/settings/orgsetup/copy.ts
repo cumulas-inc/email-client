@@ -185,6 +185,8 @@ export const DONE = {
 
 /** After Sign out, 60 idle minutes, or a call that found the sign-in ended (the core's words). */
 export const SIGNED_OUT = "Your setup sign-in ended. Sign in again to continue.";
+/** Why a change was skipped once the sign-in ended during the changes (the core's words). */
+export const SKIPPED_SIGNED_OUT = "Your sign-in ended. Sign in again to continue.";
 
 // --- Cumulas Mail's own permissions, and removing the setup app -------------------
 
@@ -315,6 +317,8 @@ export const ROWS = {
     differs: (difference: string) => `Needs repair: ${difference}.`,
     off: "Turned off.",
     testMode: (mode: string) => `In test mode (${mode}): it doesn't encrypt.`,
+    /** The strip rule in test mode. */
+    testModeStrip: (mode: string) => `In test mode (${mode}): it doesn't remove label requests.`,
     conflict: (rule: string, conditions: string) =>
       `“${rule}” comes first and stops later rules for mail it matches (${conditions}). Mail it matches isn't encrypted.`,
     waiting: (minutes: number) =>

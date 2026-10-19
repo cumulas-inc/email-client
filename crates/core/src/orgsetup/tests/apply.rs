@@ -372,6 +372,26 @@ async fn a_label_whose_name_starts_another_is_read_back_as_its_own() {
 }
 
 #[tokio::test]
+async fn a_refused_refresh_ends_the_read_as_a_sign_out() {
+    // The Exchange token is in hand; Security & Compliance's needs a
+    // refresh, which Microsoft refuses (the session was revoked).
+    let tenant = FakeTenant::fresh();
+    tenant.script(
+        "token",
+        ResponseTemplate::new(400).set_body_json(json!({
+            "error": "invalid_grant",
+            "error_description": "AADSTS50173: The provided grant has expired due to it being revoked.",
+            "error_codes": [50173],
+        })),
+    );
+    let (_server, session) = start(&tenant).await;
+    let error = read_snapshot(&session, &ctx()).await.unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::AuthRequired);
+    // Not a status whose halves say "Microsoft 365 didn't accept the sign-in".
+    assert_eq!(error.details.unwrap()["reason"], "setupSignedOut");
+}
+
+#[tokio::test]
 async fn one_that_already_exists_is_adopted_and_repaired() {
     let tenant = FakeTenant::fresh();
     tenant.with(|s| {

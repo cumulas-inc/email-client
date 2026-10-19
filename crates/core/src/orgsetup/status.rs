@@ -260,7 +260,7 @@ async fn read_part<T>(
     }
     match client.invoke(&cmdlet).await {
         Ok(output) => Ok(Part::Read(parse(&output.values))),
-        Err(InvokeError::Cancelled) => Err(super::signed_out()),
+        Err(InvokeError::Cancelled | InvokeError::SignedOut(_)) => Err(super::signed_out()),
         Err(e) => {
             *failed = true;
             Ok(Part::Failed(ReadFailure::from_error(&e)))
@@ -367,7 +367,7 @@ pub async fn read_snapshot(session: &Session, ctx: &SetupContext) -> Result<Snap
 async fn read_compliance(session: &Session) -> Result<Part<ComplianceSnapshot>> {
     let client = match session.compliance().await {
         Ok(client) => client,
-        Err(InvokeError::Cancelled) => return Err(super::signed_out()),
+        Err(InvokeError::Cancelled | InvokeError::SignedOut(_)) => return Err(super::signed_out()),
         Err(e) => return Ok(Part::Failed(ReadFailure::from_discovery(&e))),
     };
     let mut failed = false;
@@ -418,7 +418,9 @@ async fn read_compliance(session: &Session) -> Result<Part<ComplianceSnapshot>> 
                     *policy = detailed;
                 }
             }
-            Err(InvokeError::Cancelled) => return Err(super::signed_out()),
+            Err(InvokeError::Cancelled | InvokeError::SignedOut(_)) => {
+                return Err(super::signed_out());
+            }
             // The details' parameters aren't documented for this interface
             // (R9): the listing stands in for them.
             Err(InvokeError::Rejected(_)) => session.log().note(format!(

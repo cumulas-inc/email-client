@@ -50,6 +50,7 @@ import {
   SETUP_APP_IT_PAGE_URL,
   SIGNED_IN_AS,
   SIGNED_OUT,
+  SKIPPED_SIGNED_OUT,
   STALE,
 } from "./copy";
 import { OrgSetupDialog } from "./OrgSetupDialog";
@@ -1333,7 +1334,7 @@ describe("Set up or check for your organization, against the demo", () => {
     await user.click(within(dialog).getByRole("button", { name: "Set up" }));
     await user.click(within(dialog).getByRole("button", { name: "Make these changes" }));
     expect(await within(dialog).findByText(DONE.signedOut)).toBeInTheDocument();
-    expect(within(dialog).getByText(DONE.skipped(SIGNED_OUT))).toBeInTheDocument();
+    expect(within(dialog).getByText(DONE.skipped(SKIPPED_SIGNED_OUT))).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Sign in" }));
     expect(await within(dialog).findByText(FOOTER.changes(1))).toBeInTheDocument();
   });

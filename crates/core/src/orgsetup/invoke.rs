@@ -276,6 +276,9 @@ pub enum InvokeError {
     Unexpected(String),
     /// The session ended.
     Cancelled,
+    /// The setup sign-in ended: Microsoft refused to refresh its token
+    /// (revoked, a sign-in frequency, a password reset).
+    SignedOut(String),
 }
 
 impl InvokeError {
@@ -296,9 +299,10 @@ impl InvokeError {
     /// One line about it, for the run log and the admin.
     pub fn message(&self) -> String {
         match self {
-            InvokeError::Network(m) | InvokeError::Redirect(m) | InvokeError::Unexpected(m) => {
-                m.clone()
-            }
+            InvokeError::Network(m)
+            | InvokeError::Redirect(m)
+            | InvokeError::Unexpected(m)
+            | InvokeError::SignedOut(m) => m.clone(),
             InvokeError::Cancelled => "The setup window was closed.".into(),
             other => other
                 .detail()
@@ -727,12 +731,25 @@ fn anchor_at_fault(error: &InvokeError, anchor: &Anchor) -> bool {
     }
 }
 
-/// A token that couldn't be had, as InvokeCommand's answer would be.
-fn token_error(error: Error) -> InvokeError {
+/// A token that couldn't be had, as InvokeCommand's answer would be; a
+/// refused refresh ends the sign-in.
+pub(crate) fn token_error(error: Error) -> InvokeError {
+    if is_signed_out(&error) {
+        return InvokeError::SignedOut(error.message);
+    }
     match error.code {
         ErrorCode::Network => InvokeError::Network(error.message),
         _ => InvokeError::Unauthorized(ErrorDetail::text(&error.message)),
     }
+}
+
+/// Whether `error` is the setup sign-in's end ([`super::signed_out`]).
+pub(crate) fn is_signed_out(error: &Error) -> bool {
+    error.code == ErrorCode::AuthRequired
+        && error
+            .details
+            .as_ref()
+            .is_some_and(|d| d["reason"] == "setupSignedOut")
 }
 
 /// Reads a success response into `output`; returns the next page's link.
