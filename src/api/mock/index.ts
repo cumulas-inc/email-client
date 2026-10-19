@@ -66,7 +66,13 @@ import {
   isConsumerDomain,
   isPersonalAccount,
 } from "../../modules/settings/microsoft";
-import { OWN_PREFIX, psQuote } from "../../modules/settings/orgsetup/copy";
+import {
+  OWN_PREFIX,
+  SETUP_APP_NAME,
+  SIGNED_OUT,
+  psQuote,
+} from "../../modules/settings/orgsetup/copy";
+import { checkDetails } from "./checkDetails";
 import {
   type CatalogLabel,
   type MockState,
@@ -87,8 +93,29 @@ import {
   ranks,
   resolveDates,
 } from "../../lib/search/query";
+import {
+  type DemoOrgSetup,
+  type DemoTenant,
+  type OrgSetupSignInFailure,
+  type PurviewLabel,
+  type SetupContext,
+  SETUP_CLIENT_ID,
+  SetupLog,
+  demoTenant,
+  invalidChoice,
+  makeChanges,
+  mockSetupConsentUrl,
+  orgSetupSignInError,
+  orgSetupStatus,
+  planOrgSetup,
+  policyNames,
+  setupConsentError,
+} from "./orgsetup";
 import { MAX_SNIPPETS, admits, matchesSearch, mockSnippet, rankHits } from "./searchQuery";
 import { createWorstState } from "./worst";
+
+export type { DemoOrgSetup, OrgSetupSignInFailure } from "./orgsetup";
+export { mockSetupConsentUrl } from "./orgsetup";
 
 const DEFAULT_SETTINGS: Settings = {
   theme: "system",
@@ -447,10 +474,12 @@ const NO_ADMIN_NEEDED = "Personal Microsoft accounts don't need an administrator
 /**
  * The demo work account's protection checks (`?protection=` in the URL):
  * Encrypt, Do Not Forward and most labels passed ("setup"); the same with
- * Encrypt's check too old ("expired"); or a check of Encrypt waiting for
- * its test message ("checking").
+ * Encrypt's check too old ("expired"); a check of Encrypt waiting for its
+ * test message ("checking"); or mail going through the Cumulas Signatures
+ * relay, which Microsoft 365 treats as outside mail when it comes back, so
+ * Encrypt and Do Not Forward passed and labels didn't ("relay").
  */
-export type DemoProtection = "setup" | "checking" | "expired";
+export type DemoProtection = "setup" | "checking" | "expired" | "relay";
 
 // The core's messages about sending protected mail and its checks.
 const WORK_ACCOUNTS_ONLY = "Only Microsoft 365 work and school accounts can send protected mail.";
@@ -467,6 +496,26 @@ const ORG_SETUP_WORK_ONLY =
   "Only Microsoft 365 work and school accounts have an organization to set up.";
 const SETUP_NOT_AVAILABLE =
   "Automatic setup isn't available in this version of Cumulas Mail. Use the PowerShell script instead.";
+const READ_FIRST = "Read your organization's setup first: select Read again.";
+/** Cumulas Signatures' page for administrators (AppInfo.signatureServer). */
+const SIGNATURES_MANAGE_URL = "https://signature.cumulas.co/manage";
+/** The demo organization's administrator, and their Microsoft Entra object ID. */
+const SETUP_ADMIN = {
+  name: "sam.rivera",
+  displayName: "Sam Rivera",
+  objectId: "5f3a9c2e-7b1d-4e8f-a6c4-2d9b0e1f3a7c",
+};
+/** The work account's own person's object ID, signing in without an administrator role. */
+const SETUP_USER_OBJECT_ID = "1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+/** A label Purview lists that isn't published to the demo's work account. */
+const BOARD_LABEL: PurviewLabel = {
+  id: "c3d4e5f6-0718-4a29-b3c4-d5e6f7a8b9c0",
+  name: "Board",
+  title: "Highly Confidential › Board",
+  encrypts: true,
+};
+/** How long after setup changed auto-labeling policies the demo's label checks are too soon to tell. */
+const TOO_SOON_MS = 2 * 60_000;
 
 /** What a check decided, as the core keeps it: never "expired" or "waiting". */
 type CheckRecord = Omit<CheckResult, "passedAt">;
@@ -502,8 +551,12 @@ interface MockProtection {
   run: { items: CheckItem[]; sentAt: string; looks: number } | null;
 }
 
-/** How each check of the demo's "setup" turned out: most arrived protected. */
-function demoOutcome(item: CheckItem, at: string): CheckRecord {
+/**
+ * How each check of the demo's "setup" turned out: most arrived protected,
+ * and Project Atlas's request reached delivery but no policy acted on it.
+ * Through the relay (`relay`), labels came back as outside mail.
+ */
+function demoOutcome(item: CheckItem, at: string, relay = false): CheckRecord {
   const result = (state: CheckResult["state"], note: CheckResult["note"] = null): CheckRecord => ({
     ...NOT_CHECKED,
     state,
@@ -512,9 +565,10 @@ function demoOutcome(item: CheckItem, at: string): CheckRecord {
     testMessage: true,
   });
   if (item.kind === "action") return result("applied");
-  if (item.labelId === DEMO_LABEL_IDS.atlas) return result("notApplied");
   // Acme labels all mail Public by default: the control arrives labeled too.
   if (item.labelId === DEMO_LABEL_IDS.public) return result("unknown", "otherRule");
+  if (relay) return result("notApplied", "relayNotInternal");
+  if (item.labelId === DEMO_LABEL_IDS.atlas) return result("notApplied", "requestIgnored");
   return result("applied");
 }
 
@@ -571,8 +625,10 @@ export interface MockOptions {
   customClient?: boolean;
   /** Adds protected and labeled demo mail (`?protected`). */
   protectedMail?: boolean;
-  /** The demo work account's protection checks (`?protection=setup|checking|expired`); default: labels listed, nothing checked. */
+  /** The demo work account's protection checks (`?protection=setup|checking|expired|relay`); default: labels listed, nothing checked. */
   protection?: DemoProtection;
+  /** The work account's organization as setup finds it (`?orgsetup=`); default "fresh". */
+  orgSetup?: DemoOrgSetup;
   /** An update of the Flatpak is installed (`?update=installed|restartfails`). */
   update?: DemoUpdate;
   /** Started by a restart into an update (`?updated`). */
@@ -708,6 +764,32 @@ export class MockBackend implements Backend {
   private protection = new Map<string, MockProtection>();
   /** The checks the demo's work account starts with (`?protection=`). */
   private demoProtection: { accountId: string; kind: DemoProtection } | null = null;
+  /** How work accounts' organizations start out for setup (`?orgsetup=`). */
+  private orgSetupKind: DemoOrgSetup;
+  /** Each organization as setup finds it, by tenant, once looked at. */
+  private organizations = new Map<string, DemoTenant>();
+  /** The setup sign-in, like the core's: at most one, for one organization; whether it read yet. */
+  private orgSetupSession: {
+    tenantId: string;
+    admin: OrgSetupAdmin;
+    objectId: string;
+    read: boolean;
+  } | null = null;
+  /** The calls and sign-ins "Copy setup details" names. */
+  private setupLog = new SetupLog();
+  /** Ends the setup sign-in waiting in the browser, as Cancel does. */
+  private pendingOrgSetupSignIn: (() => void) | null = null;
+  /** Holds setup sign-ins in the browser while set (holdOrgSetupSignIn). */
+  private orgSetupSignInGate: Promise<void> | null = null;
+  /** How setup sign-ins fail, when they do (failOrgSetupSignIn). */
+  private orgSetupSignInFailure: OrgSetupSignInFailure | null = null;
+  /** Organizations whose administrator opened the setup app's approval link. */
+  private setupApproved = new Set<string>();
+  /** When setup last changed each organization's rules and policies from here, by tenant. */
+  private orgSetupChanged = new Map<
+    string,
+    { rulesChangedAt: string | null; policiesChangedAt: string | null }
+  >();
 
   constructor(options: MockOptions = {}) {
     this.latency = options.latency ?? 0;
@@ -730,6 +812,7 @@ export class MockBackend implements Backend {
       ...options.background,
     };
     this.customClient = options.customClient ?? false;
+    this.orgSetupKind = options.orgSetup ?? "fresh";
     this.update = options.update
       ? { kind: "installed", commit: DEMO_UPDATE_COMMIT, restart: "idle" }
       : { kind: "none" };
@@ -828,6 +911,11 @@ export class MockBackend implements Backend {
   }
 
   async openLink(url: string) {
+    // The demo's administrator approves the setup app on its approval page.
+    const tenant = /^https:\/\/login\.microsoftonline\.com\/([^/?]+)\/v2\.0\/adminconsent\?/.exec(
+      url,
+    )?.[1];
+    if (tenant && url === mockSetupConsentUrl(tenant)) this.setupApproved.add(tenant);
     window.open(url, "_blank", "noopener,noreferrer");
   }
 
@@ -2277,6 +2365,11 @@ export class MockBackend implements Backend {
           ]
         : []),
       `Requested by Cumulas Mail: ${requested?.action === "doNotForward" ? "do-not-forward" : (requested?.action ?? "none")} · label: ${requested?.label?.id ?? "none"}`,
+      // The demo's messages don't say how Exchange handled them.
+      "Relay (X-Signature-Stamped): no",
+      "Counted as internal (AuthAs): not said",
+      "Direction: not said",
+      `Request read from: ${requested?.action || requested?.label ? "the message property" : "none"}`,
     ];
     return lines.join("\n");
   }
@@ -2311,14 +2404,14 @@ export class MockBackend implements Backend {
       run: null,
     };
     const demo = this.demoProtection?.accountId === account.id ? this.demoProtection.kind : null;
-    if (demo === "setup" || demo === "expired") {
+    if (demo === "setup" || demo === "expired" || demo === "relay") {
       const twoDaysAgo = new Date(Date.now() - 2 * DAY_MS).toISOString();
       protection.encrypt = demoOutcome({ kind: "action", action: "encrypt" }, twoDaysAgo);
       protection.doNotForward = demoOutcome({ kind: "action", action: "doNotForward" }, twoDaysAgo);
       for (const label of demoLabelCatalog().labels) {
         protection.labels.set(
           label.id,
-          demoOutcome({ kind: "label", labelId: label.id }, twoDaysAgo),
+          demoOutcome({ kind: "label", labelId: label.id }, twoDaysAgo, demo === "relay"),
         );
       }
       if (demo === "expired") {
@@ -2336,6 +2429,31 @@ export class MockBackend implements Backend {
     }
     this.protection.set(account.id, protection);
     return protection;
+  }
+
+  /** The demo's mail goes through the Cumulas Signatures relay (`?protection=relay`). */
+  private throughRelay(account: Account): boolean {
+    return this.demoProtection?.accountId === account.id && this.demoProtection.kind === "relay";
+  }
+
+  /**
+   * How a check of the demo turns out now: as in demoOutcome, but a label's
+   * check within two minutes of setup changing the organization's
+   * auto-labeling policies from here is too soon to tell, as the core
+   * judges it.
+   */
+  private checkOutcome(account: Account, item: CheckItem, at: string): CheckRecord {
+    const outcome = demoOutcome(item, at, this.throughRelay(account));
+    const changed = this.orgSetupChanged.get(this.tenantOf(account))?.policiesChangedAt;
+    if (
+      item.kind === "label" &&
+      changed &&
+      outcome.note !== "otherRule" &&
+      Date.parse(at) - Date.parse(changed) < TOO_SOON_MS
+    ) {
+      return { ...outcome, state: "notApplied", note: "tooSoon", changedAt: changed };
+    }
+    return outcome;
   }
 
   private checkRecord(protection: MockProtection, item: CheckItem): CheckRecord {
@@ -2472,7 +2590,9 @@ export class MockBackend implements Backend {
     run.looks += 1;
     if (run.looks >= 2) {
       const now = new Date().toISOString();
-      for (const item of run.items) this.setCheckRecord(protection, item, demoOutcome(item, now));
+      for (const item of run.items) {
+        this.setCheckRecord(protection, item, this.checkOutcome(account, item, now));
+      }
       protection.run = null;
       this.deliverTestMessages(account, run.items);
       this.emit(["protection", "mail"], accountId);
@@ -2551,9 +2671,9 @@ export class MockBackend implements Backend {
         : null,
       false,
     );
+    const protection = this.protectionOf(account);
     for (const item of items) {
-      const outcome = demoOutcome(item, "");
-      const applied = outcome.state !== "notApplied";
+      const applied = !!protection && this.checkRecord(protection, item).state !== "notApplied";
       if (item.kind === "action") arrived(null, applied);
       else {
         const label = applied ? labelOf(item.labelId) : null;
@@ -2576,17 +2696,60 @@ export class MockBackend implements Backend {
     this.calls.openedInOutlook.push(`check:${accountId}:${checkKey(item)}`);
   }
 
-  /** Like the core for now: nothing to copy yet. */
+  /** "Copy details for IT", in the core's shape, from what the demo's checks found. */
   async getProtectionCheckDetails(accountId: string) {
     await this.delay();
-    this.account(accountId);
-    return "";
+    const account = this.account(accountId);
+    if (!this.protectionOf(account)) fail("unsupported", WORK_ACCOUNTS_ONLY);
+    const setup = this.protectionSetup(account);
+    const protection = this.protectionOf(account)!;
+    const record = (item: CheckItem) => this.checkRecord(protection, item);
+    const encrypt = { kind: "action", action: "encrypt" } as const;
+    const doNotForward = { kind: "action", action: "doNotForward" } as const;
+    const changed = this.orgSetupChanged.get(this.tenantOf(account));
+    return checkDetails({
+      version: (await this.getAppInfo()).version,
+      email: account.email,
+      tenant: this.tenantOf(account),
+      relay: this.throughRelay(account),
+      items: [
+        { title: "Encrypt", item: encrypt, result: setup.encrypt, record: record(encrypt) },
+        {
+          title: "Do Not Forward",
+          item: doNotForward,
+          result: setup.doNotForward,
+          record: record(doNotForward),
+        },
+        // Labels only once checked: an organization may list many.
+        ...setup.labels
+          .filter((l) => l.check.state !== "notChecked")
+          .map((l) => {
+            const item = { kind: "label", labelId: l.id } as const;
+            return {
+              title: `Label ${labelTitle(l)} (${l.id})`,
+              item,
+              result: l.check,
+              record: record(item),
+            };
+          }),
+      ],
+      labels: setup.labels.map((l) => ({
+        id: l.id,
+        title: labelTitle(l),
+        encrypts: l.hasProtection,
+      })),
+      rulesChangedAt: changed?.rulesChangedAt ?? null,
+      policiesChangedAt: changed?.policiesChangedAt ?? null,
+    });
   }
 
   // --- organization setup ---------------------------------------------------------
   //
-  // As a build without a setup app: automatic setup isn't available, and the
-  // dialog offers the PowerShell script and the Microsoft Purview portal steps.
+  // The work account's organization as `?orgsetup=` has it set up
+  // (orgsetup.ts): an administrator signs in with the setup app, reads what's
+  // set up, and makes the changes the dialog confirms, or copies the
+  // PowerShell script. "unconfigured" is a build without a setup app, which
+  // offers only the script.
 
   /** Like the core: only work and school accounts have an organization to set up. */
   private setupAccount(accountId: string): Account {
@@ -2595,53 +2758,265 @@ export class MockBackend implements Backend {
     return account;
   }
 
-  async getOrgSetupInfo(accountId: string): Promise<OrgSetupInfo> {
-    await this.delay();
-    const account = this.setupAccount(accountId);
+  private tenantOf(account: Account): string {
+    return account.settings.kind === "microsoft" ? account.settings.tenantId : "";
+  }
+
+  /** What Purview lists: the demo's labels, and one the work account isn't given. */
+  private purviewLabels(): PurviewLabel[] {
+    return [
+      ...demoLabelCatalog().labels.map((l) => ({
+        id: l.id,
+        name: l.name,
+        title: labelTitle(l),
+        encrypts: l.hasProtection,
+      })),
+      BOARD_LABEL,
+    ];
+  }
+
+  /** The account's organization as setup finds it, set up as `?orgsetup=` says until changed. */
+  private organization(account: Account): DemoTenant {
+    const tenant = this.tenantOf(account);
+    let organization = this.organizations.get(tenant);
+    if (!organization) {
+      organization = demoTenant(this.orgSetupKind, this.purviewLabels());
+      this.organizations.set(tenant, organization);
+    }
+    return organization;
+  }
+
+  /** What the core knows of the account and the administrator without Microsoft. */
+  private setupContext(
+    account: Account,
+    { admin, objectId }: { admin: OrgSetupAdmin; objectId: string },
+  ): SetupContext {
+    const catalog = this.protectionOf(account)?.catalog?.labels ?? null;
     return {
-      automatic: false,
-      tenantId: account.settings.kind === "microsoft" ? account.settings.tenantId : "",
-      signedIn: null,
-      approvalUrl: null,
-      rulesChangedAt: null,
-      policiesChangedAt: null,
+      email: account.email,
+      catalog:
+        catalog?.map((l) => ({ id: l.id, title: labelTitle(l), encrypts: l.hasProtection })) ??
+        null,
+      needsPermission: account.needsPermission.includes("sensitivityLabels"),
+      refused: account.refusedFeatures.includes("sensitivityLabels"),
+      admin,
+      adminObjectId: objectId,
+      signaturesManageUrl: SIGNATURES_MANAGE_URL,
+      now: Date.now(),
     };
   }
 
-  async orgSetupSignIn(accountId: string): Promise<OrgSetupAdmin> {
-    await this.delay();
-    this.setupAccount(accountId);
-    fail("notConfigured", SETUP_NOT_AVAILABLE);
+  /** The setup sign-in for the account's organization; like the core, setupSignedOut without one. */
+  private setupSession(account: Account): NonNullable<MockBackend["orgSetupSession"]> {
+    const session = this.orgSetupSession;
+    if (!session || session.tenantId !== this.tenantOf(account)) {
+      fail("authRequired", SIGNED_OUT, { reason: "setupSignedOut" });
+    }
+    return session;
   }
 
-  async cancelOrgSetupSignIn() {}
+  /** The demo's sessions take a while with latency: reading and making changes go through Microsoft. */
+  private async microsoftCalls(times: number): Promise<void> {
+    if (this.latency > 0) await new Promise((r) => setTimeout(r, this.latency * times));
+  }
+
+  async getOrgSetupInfo(accountId: string): Promise<OrgSetupInfo> {
+    await this.delay();
+    const account = this.setupAccount(accountId);
+    const tenantId = this.tenantOf(account);
+    const automatic = this.orgSetupKind !== "unconfigured";
+    const session = this.orgSetupSession?.tenantId === tenantId ? this.orgSetupSession : null;
+    const changed = this.orgSetupChanged.get(tenantId);
+    return {
+      automatic,
+      tenantId,
+      signedIn: session ? { ...session.admin } : null,
+      approvalUrl: automatic ? mockSetupConsentUrl(tenantId) : null,
+      rulesChangedAt: changed?.rulesChangedAt ?? null,
+      policiesChangedAt: changed?.policiesChangedAt ?? null,
+    };
+  }
+
+  /**
+   * Like the core: ends the sign-in there was, then waits for Microsoft's
+   * sign-in in the browser (Cancel ends it). In `consent` the setup app
+   * needs approving first; failOrgSetupSignIn makes it fail otherwise.
+   */
+  async orgSetupSignIn(accountId: string): Promise<OrgSetupAdmin> {
+    await this.delay();
+    const account = this.setupAccount(accountId);
+    if (this.orgSetupKind === "unconfigured") fail("notConfigured", SETUP_NOT_AVAILABLE);
+    const tenant = this.tenantOf(account);
+    await this.cancelOrgSetupSignIn();
+    this.orgSetupSession = null;
+    const at = Date.now();
+    let cancel!: () => void;
+    const canceled = await new Promise<boolean>((resolve) => {
+      cancel = () => resolve(true);
+      this.pendingOrgSetupSignIn = cancel;
+      const gate = this.orgSetupSignInGate;
+      if (gate) void gate.then(() => resolve(false));
+      else if (this.latency > 0) setTimeout(() => resolve(false), this.latency * 10);
+      else resolve(false);
+    });
+    if (this.pendingOrgSetupSignIn === cancel) this.pendingOrgSetupSignIn = null;
+    if (canceled) {
+      this.setupLog.signIn(at, tenant, "cancelled");
+      fail("signInCancelled", "Sign-in was canceled.");
+    }
+    if (this.orgSetupKind === "consent" && !this.setupApproved.has(tenant)) {
+      this.setupLog.signIn(
+        at,
+        tenant,
+        `error consent_required · AADSTS65001 · "The user or administrator has not consented to use the application with ID '${SETUP_CLIENT_ID}' named '${SETUP_APP_NAME}'."`,
+      );
+      throw setupConsentError(tenant);
+    }
+    if (this.orgSetupSignInFailure) {
+      const error = orgSetupSignInError(
+        this.orgSetupSignInFailure,
+        emailDomain(account.email) ?? account.email,
+      );
+      const aadsts = error.details?.aadsts;
+      this.setupLog.signIn(
+        at,
+        tenant,
+        `error · ${aadsts ? `AADSTS${aadsts} · ` : ""}"${error.message}"`,
+      );
+      throw error;
+    }
+    // An administrator of the organization; in `noRole`, the account's own person, who isn't one.
+    const own = this.orgSetupKind === "noRole";
+    const admin: OrgSetupAdmin = own
+      ? { username: account.email, displayName: account.displayName }
+      : {
+          username: `${SETUP_ADMIN.name}@${emailDomain(account.email) ?? "acme.example"}`,
+          displayName: SETUP_ADMIN.displayName,
+        };
+    this.setupLog.signIn(
+      at,
+      tenant,
+      'code redeemed · granted "https://outlook.office365.com/Exchange.Manage openid profile offline_access" · ID token yes · refresh token yes',
+    );
+    this.setupLog.signedIn(admin.username);
+    this.orgSetupSession = {
+      tenantId: tenant,
+      admin,
+      objectId: own ? SETUP_USER_OBJECT_ID : SETUP_ADMIN.objectId,
+      read: false,
+    };
+    return { ...admin };
+  }
+
+  async cancelOrgSetupSignIn() {
+    this.pendingOrgSetupSignIn?.();
+    this.pendingOrgSetupSignIn = null;
+  }
 
   async readOrgSetup(accountId: string): Promise<OrgSetupStatus> {
     await this.delay();
-    this.setupAccount(accountId);
-    fail("notConfigured", SETUP_NOT_AVAILABLE);
+    const account = this.setupAccount(accountId);
+    if (this.orgSetupKind === "unconfigured") fail("notConfigured", SETUP_NOT_AVAILABLE);
+    const session = this.setupSession(account);
+    await this.microsoftCalls(10);
+    // Signed out meanwhile: the core's read ends the same way.
+    if (this.orgSetupSession !== session) this.setupSession(account);
+    const organization = this.organization(account);
+    const context = this.setupContext(account, session);
+    this.setupLog.read(context.now, organization, account.email);
+    session.read = true;
+    return orgSetupStatus(organization, context);
   }
 
-  async planOrgSetup(accountId: string, _choices: OrgSetupChoices): Promise<OrgSetupPlan> {
+  async planOrgSetup(accountId: string, choices: OrgSetupChoices): Promise<OrgSetupPlan> {
     await this.delay();
-    this.setupAccount(accountId);
-    fail("notConfigured", SETUP_NOT_AVAILABLE);
+    const { organization, context } = this.setupToChange(accountId, choices);
+    return planOrgSetup(organization, context, choices).plan;
   }
 
+  /** The organization and what the core knows, for planning `choices` after a read. */
+  private setupToChange(
+    accountId: string,
+    choices: OrgSetupChoices,
+  ): {
+    account: Account;
+    session: NonNullable<MockBackend["orgSetupSession"]>;
+    organization: DemoTenant;
+    context: SetupContext;
+  } {
+    const account = this.setupAccount(accountId);
+    if (this.orgSetupKind === "unconfigured") fail("notConfigured", SETUP_NOT_AVAILABLE);
+    const session = this.setupSession(account);
+    if (!session.read) fail("invalidInput", READ_FIRST);
+    const organization = this.organization(account);
+    const context = this.setupContext(account, session);
+    const invalid = invalidChoice(organization, context, choices);
+    if (invalid) fail("invalidInput", invalid);
+    return { account, session, organization, context };
+  }
+
+  /**
+   * Like the core: reads again, and makes the changes only when they're
+   * still the ones `confirmed`; else `stale`, with nothing changed. The
+   * changes are what the demo's organization is made of from then on.
+   */
   async applyOrgSetup(
     accountId: string,
-    _choices: OrgSetupChoices,
-    _confirmed: string[],
+    choices: OrgSetupChoices,
+    confirmed: string[],
   ): Promise<OrgSetupResult> {
     await this.delay();
-    this.setupAccount(accountId);
-    fail("notConfigured", SETUP_NOT_AVAILABLE);
+    const { account, session, organization, context } = this.setupToChange(accountId, choices);
+    const tenant = this.tenantOf(account);
+    const before = orgSetupStatus(organization, context);
+    this.setupLog.read(context.now, organization, account.email);
+    const { plan, planned } = planOrgSetup(organization, context, choices);
+    const ids = new Set(plan.changes.map((c) => c.id));
+    const asked = new Set(confirmed);
+    if (ids.size !== asked.size || [...ids].some((id) => !asked.has(id))) {
+      return { stale: true, signedOut: false, changes: [], status: before };
+    }
+    await this.microsoftCalls(15);
+    if (this.orgSetupSession !== session) {
+      // The dialog closed before Microsoft was asked: nothing was changed.
+      return {
+        stale: false,
+        signedOut: false,
+        changes: plan.changes.map((change) => ({
+          change,
+          outcome: "skipped",
+          message: "The setup window was closed.",
+        })),
+        status: before,
+      };
+    }
+    const now = Date.now();
+    const made = makeChanges(organization, planned, now, this.setupLog);
+    if (made.rulesChanged || made.policiesChanged) {
+      const at = new Date(now).toISOString();
+      const last = this.orgSetupChanged.get(tenant);
+      this.orgSetupChanged.set(tenant, {
+        rulesChangedAt: made.rulesChanged ? at : (last?.rulesChangedAt ?? null),
+        policiesChangedAt: made.policiesChanged ? at : (last?.policiesChangedAt ?? null),
+      });
+    }
+    let status = before;
+    if (made.signedOut) {
+      this.orgSetupSession = null;
+      this.setupLog.note(now, "Signed out: Microsoft 365 didn't accept the sign-in any more.");
+    } else {
+      const after = this.setupContext(account, session);
+      this.setupLog.read(after.now, organization, account.email);
+      status = orgSetupStatus(organization, after);
+    }
+    this.emit(["protection"], accountId);
+    return { stale: false, signedOut: made.signedOut, changes: made.changes, status };
   }
 
   /**
    * A shortened script with the core's header lines, and the portal steps
    * of the labels it covers: the chosen ones, else the account's when
-   * `request.labels` is set.
+   * `request.labels` is set. Works without signing in.
    */
   async getOrgSetupScript(
     accountId: string,
@@ -2649,21 +3024,24 @@ export class MockBackend implements Backend {
   ): Promise<OrgSetupScript> {
     await this.delay();
     const account = this.setupAccount(accountId);
-    const tenant = account.settings.kind === "microsoft" ? account.settings.tenantId : "";
+    const tenant = this.tenantOf(account);
     const catalog = this.protectionOf(account)?.catalog?.labels ?? [];
-    const chosen = request.choices?.labelIds;
-    const labels = request.labels ? catalog.filter((l) => !chosen || chosen.includes(l.id)) : [];
-    // Like the core's names: at most 64 characters, else by the label's ID.
-    const fits = (name: string, fallback: string) => (name.length > 64 ? fallback : name);
-    const portalSteps = labels.map((label) => {
-      const policyName = fits(`${OWN_PREFIX}${label.name}`, `${OWN_PREFIX}label ${label.id}`);
-      return {
-        labelTitle: labelTitle(label),
-        policyName,
-        ruleName: fits(`${policyName} (header)`, `${OWN_PREFIX}label ${label.id} (header)`),
-        pattern: `(?i)^(${label.id})$`,
-      };
-    });
+    const chosen = request.choices?.labelIds.map((id) => id.trim().toLowerCase());
+    // Like the core's validation: only labels the account or Purview lists.
+    const known = this.purviewLabels();
+    if (chosen?.some((id) => !known.some((l) => l.id === id))) {
+      fail("invalidInput", "That label isn't one Purview lists.");
+    }
+    const labels = !request.labels
+      ? []
+      : chosen
+        ? known.filter((l) => chosen.includes(l.id))
+        : catalog.map((l) => ({ id: l.id, name: l.name, title: labelTitle(l) }));
+    const portalSteps = labels.map((label) => ({
+      labelTitle: label.title,
+      ...policyNames(label),
+      pattern: `(?i)^(${label.id})$`,
+    }));
     const made = new Date().toISOString().slice(0, 16).replace("T", " ");
     const org = emailDomain(account.email) ?? account.email;
     const lines = [
@@ -2701,14 +3079,46 @@ export class MockBackend implements Backend {
     return { script: `${lines.join("\n")}\n`, portalSteps };
   }
 
-  /** Nothing to copy: no setup sign-in was tried. */
+  /** "Copy setup details": empty until a setup sign-in was tried. */
   async getOrgSetupDetails() {
     await this.delay();
-    return "";
+    return this.setupLog.text((await this.getAppInfo()).version);
   }
 
+  /** Forgets the setup sign-in; "Copy setup details" keeps what it did. */
   async endOrgSetup() {
     this.calls.orgSetupEnded += 1;
+    this.orgSetupSession = null;
+  }
+
+  /** Keeps setup sign-ins waiting in the browser until the returned function is called, or Cancel (tests). */
+  holdOrgSetupSignIn(): () => void {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    this.orgSetupSignInGate = gate;
+    return () => {
+      if (this.orgSetupSignInGate === gate) this.orgSetupSignInGate = null;
+      release();
+    };
+  }
+
+  /** Makes setup sign-ins fail as the core says `failure`, or work again with null (tests, demos). */
+  failOrgSetupSignIn(failure: OrgSetupSignInFailure | null): void {
+    this.orgSetupSignInFailure = failure;
+  }
+
+  /** Ends the setup sign-in behind the dialog's back, as 60 minutes without use do (tests). */
+  expireOrgSetup(): void {
+    this.orgSetupSession = null;
+  }
+
+  /**
+   * Sets the organizations up as `kind` has them, as another administrator
+   * might while the dialog is open (tests): a plan shown before is stale.
+   */
+  setOrgSetup(kind: DemoOrgSetup): void {
+    this.orgSetupKind = kind;
+    this.organizations.clear();
   }
 
   // --- signatures -----------------------------------------------------------------
