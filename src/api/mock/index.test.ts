@@ -1861,7 +1861,8 @@ describe("the demo's organization setup", () => {
         "Encrypts mail that asks for it with the template “Encrypt”",
         "Holds the message and tries again if encryption fails, instead of sending it unencrypted",
       ],
-      powershell: `New-TransportRule -Name 'Cumulas Mail: Encrypt' -ExceptIfFromScope 'NotInOrganization' -HeaderMatchesMessageHeader 'x-cumulas-protect' -HeaderMatchesPatterns @('^encrypt$') -ApplyRightsProtectionTemplate 'Encrypt' -RemoveHeader 'x-cumulas-protect' -RuleErrorAction 'Defer' -Mode 'Enforce' -Comments ${MARKER}`,
+      // Name first, then the others by name, as the core lists them.
+      powershell: `New-TransportRule -Name 'Cumulas Mail: Encrypt' -ApplyRightsProtectionTemplate 'Encrypt' -Comments ${MARKER} -ExceptIfFromScope 'NotInOrganization' -HeaderMatchesMessageHeader 'x-cumulas-protect' -HeaderMatchesPatterns @('^encrypt$') -Mode 'Enforce' -RemoveHeader 'x-cumulas-protect' -RuleErrorAction 'Defer'`,
     });
     expect(status.plan).toMatchObject({ problems: [], blocked: 0 });
 
@@ -1881,7 +1882,7 @@ describe("the demo's organization setup", () => {
       expect(change.powershell).not.toMatch(/^Remove-/m);
     }
     expect(plan.changes[0]!.powershell).toBe(
-      `New-TransportRule -Name 'Cumulas Mail: ignore label requests from outside' -ExceptIfFromScope 'InOrganization' -RemoveHeader 'x-cumulas-label' -Priority 0 -Mode 'Enforce' -Comments ${MARKER}`,
+      `New-TransportRule -Name 'Cumulas Mail: ignore label requests from outside' -Comments ${MARKER} -ExceptIfFromScope 'InOrganization' -Mode 'Enforce' -Priority 0 -RemoveHeader 'x-cumulas-label'`,
     );
     // The disclosure, under the first label change only.
     expect(plan.changes[3]!.details).toEqual([
@@ -1891,10 +1892,10 @@ describe("the demo's organization setup", () => {
       "Starts in simulation",
     ]);
     expect(plan.changes[4]!.powershell).toBe(
-      `New-AutoSensitivityLabelRule -Name 'Cumulas Mail: General (header)' -Policy 'Cumulas Mail: General' -Workload 'Exchange' -HeaderMatchesPatterns @{ 'x-cumulas-label' = '(?i)^(${GENERAL})$' }`,
+      `New-AutoSensitivityLabelRule -Name 'Cumulas Mail: General (header)' -HeaderMatchesPatterns @{ 'x-cumulas-label' = '(?i)^(${GENERAL})$' } -Policy 'Cumulas Mail: General' -Workload 'Exchange'`,
     );
     expect(plan.changes[5]!.powershell).toBe(
-      "Set-AutoSensitivityLabelPolicy -Identity 'Cumulas Mail: General' -StartSimulation $true -AutoEnableAfter '01:00:00'",
+      "Set-AutoSensitivityLabelPolicy -Identity 'Cumulas Mail: General' -AutoEnableAfter '01:00:00' -StartSimulation $true",
     );
     // The same for the same choices.
     expect(await backend.planOrgSetup("acct-work", labeled)).toEqual(plan);
@@ -1940,7 +1941,7 @@ describe("the demo's organization setup", () => {
     // What the details say Cumulas Mail did, with the values of its own objects.
     const details = await backend.getOrgSetupDetails();
     expect(details).toContain(
-      "UTC  Create “Cumulas Mail: Encrypt”\n  New-TransportRule (Name='Cumulas Mail: Encrypt', ExceptIfFromScope='NotInOrganization',",
+      "UTC  Create “Cumulas Mail: Encrypt”\n  New-TransportRule (Name='Cumulas Mail: Encrypt', ApplyRightsProtectionTemplate='Encrypt', Comments=",
     );
     expect(details).toContain(
       "  0  Cumulas Mail: ignore label requests from outside · Enabled · Enforce\n  1  Cumulas Mail: Encrypt · Enabled · Enforce\n  2  Cumulas Mail: Do Not Forward · Enabled · Enforce\n",
@@ -2041,7 +2042,7 @@ describe("the demo's organization setup", () => {
     // Only what differs, by the rule's Guid, and never a delete.
     expect(encryptChange.powershell).toMatch(
       new RegExp(
-        `^Set-TransportRule -Identity '[0-9a-f-]{36}' -FromScope \\$null -ExceptIfFromScope 'NotInOrganization' -HeaderContainsMessageHeader \\$null -HeaderContainsWords \\$null -RuleErrorAction 'Defer' -Comments ${MARKER.replace(/[.()>]/g, "\\$&")}$`,
+        `^Set-TransportRule -Identity '[0-9a-f-]{36}' -Comments ${MARKER.replace(/[.()>]/g, "\\$&")} -ExceptIfFromScope 'NotInOrganization' -FromScope \\$null -HeaderContainsMessageHeader \\$null -HeaderContainsWords \\$null -RuleErrorAction 'Defer'$`,
       ),
     );
     expect(dnfChange.details).toEqual(["Turns from test mode (Audit) to Enforce"]);

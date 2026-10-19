@@ -1006,9 +1006,24 @@ function psValue(value: PsValue): string {
   return `@{ ${entries.map(([k, v]) => `${psQuote(k)} = ${psQuote(v)}`).join("; ")} }`;
 }
 
+/**
+ * A call's parameters in the core's order: Identity and Name first, then the
+ * others by name (invoke::ordered_params over its sorted map).
+ */
+function orderedParams(call: PlannedCall): [string, PsValue][] {
+  const first = ["Identity", "Name"];
+  const rest = call.params
+    .filter(([key]) => !first.includes(key))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return [...first.flatMap((name) => call.params.filter(([key]) => key === name)), ...rest];
+}
+
 /** One call as PowerShell, Identity or Name first (script::render_call). */
 export function renderCall(call: PlannedCall): string {
-  return [call.cmdlet, ...call.params.map(([key, value]) => `-${key} ${psValue(value)}`)].join(" ");
+  return [
+    call.cmdlet,
+    ...orderedParams(call).map(([key, value]) => `-${key} ${psValue(value)}`),
+  ].join(" ");
 }
 
 const EXCHANGE = "outlook.office365.com" as const;
@@ -1591,7 +1606,9 @@ export class SetupLog {
   /** One change's call, with the values of ours (every call apply makes is on ours). */
   call(at: number, p: Planned, status: number, error?: string): void {
     for (const call of p.calls) {
-      const params = call.params.map(([key, value]) => `${key}=${psValue(value)}`).join(", ");
+      const params = orderedParams(call)
+        .map(([key, value]) => `${key}=${psValue(value)}`)
+        .join(", ");
       this.entries.push(
         `${clock(at)}  ${ACTION_VERBS[p.change.action]} “${p.change.name}”`,
         `  ${call.cmdlet} (${params}) on ${call.host} · anchor UPN · ${status} · 380 ms`,
