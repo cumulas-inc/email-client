@@ -78,6 +78,27 @@ export function iso(d: Date): string {
   return d.toISOString();
 }
 
+/** Today's demo mail has arrived by this time of day; none of it is later. */
+export const TODAYS_MAIL_BY = { hours: 10, minutes: 0 };
+
+/**
+ * When a demo message arrived: `at` itself, except for today's mail before
+ * {@link TODAYS_MAIL_BY}, when it's spread over the part of the day that has
+ * passed, in the same order. So no message arrives in the future, whatever
+ * the time, and today's mail is still today's.
+ */
+export function receivedBy(at: Date, now = new Date()): Date {
+  const midnight = new Date(now);
+  midnight.setHours(0, 0, 0, 0);
+  const by = new Date(midnight);
+  by.setHours(TODAYS_MAIL_BY.hours, TODAYS_MAIL_BY.minutes);
+  if (now >= by || at < midnight) return at;
+  const share = (now.getTime() - midnight.getTime()) / (by.getTime() - midnight.getTime());
+  const spread =
+    midnight.getTime() + (Math.min(at.getTime(), by.getTime()) - midnight.getTime()) * share;
+  return new Date(spread);
+}
+
 /** Midnight UTC of a local calendar day, as all-day events are stored. */
 export function allDay(daysFromToday: number): string {
   const d = at(daysFromToday, 0);
@@ -160,7 +181,7 @@ function message(accountId: string, me: EmailAddress, seed: MessageSeed): Messag
     to: seed.to ?? [me],
     cc: seed.cc ?? [],
     preview: text.slice(0, 180),
-    receivedAt: iso(seed.received),
+    receivedAt: iso(receivedBy(seed.received)),
     isRead: seed.read ?? true,
     isFlagged: seed.flagged ?? false,
     isDraft: seed.draft ?? false,
