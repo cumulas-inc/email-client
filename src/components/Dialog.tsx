@@ -71,9 +71,11 @@ export function Dialog({
         e.stopPropagation();
         if (canClose) onClose();
       }}
-      onClose={() => {
+      onClose={(e) => {
         // Closed by the browser itself: a second Escape can't be refused.
         // Open again while it can't close; otherwise its owner closes it.
+        // Like cancel, React passes it on to a dialog this one opened from.
+        e.stopPropagation();
         const dialog = ref.current;
         if (!canClose) {
           if (dialog && !dialog.open && typeof dialog.showModal === "function") dialog.showModal();

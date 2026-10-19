@@ -43,6 +43,23 @@ describe("Dialog", () => {
     expect(showModal).toHaveBeenCalledTimes(1);
   });
 
+  it("doesn't close a dialog it was opened from when the browser closes it", () => {
+    const outer = vi.fn();
+    const inner = vi.fn();
+    render(
+      <Dialog open onClose={outer} title="Settings">
+        <Dialog open onClose={inner} title="Setup">
+          <p>Body</p>
+        </Dialog>
+      </Dialog>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Setup", hidden: true });
+    dialog.removeAttribute("open");
+    fireEvent(dialog, new Event("close"));
+    expect(inner).toHaveBeenCalledTimes(1);
+    expect(outer).not.toHaveBeenCalled();
+  });
+
   it("lets its owner know when the browser closes it otherwise", () => {
     const { onClose, dialog } = dialogOf();
     dialog.removeAttribute("open");
