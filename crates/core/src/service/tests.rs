@@ -101,6 +101,8 @@ pub(crate) struct FakeServer {
     /// Messages fetched, and the failure every fetch meets.
     pub fetches: usize,
     pub fetch_failure: Option<Error>,
+    /// The failure every read of transport headers meets.
+    pub transport_failure: Option<Error>,
     next_uid: u32,
 }
 
@@ -122,6 +124,32 @@ pub(crate) struct FakeOrganization {
     pub default_label: Option<String>,
     /// Drafts asking for these labels lose the property.
     pub drops_labels: Vec<String>,
+    /// Its mail goes through the Cumulas Signatures relay, which stamps it.
+    /// Rules act on the first pass, before the relay; auto-labeling only on
+    /// mail that counts as from inside.
+    pub relay: Option<FakeRelay>,
+    /// Rules for these that don't act (turned off, or in test mode): the
+    /// request stays, and nothing is applied.
+    pub rules_ignore: Vec<ProtectAction>,
+    /// A rule removes x-cumulas-label from all mail.
+    pub strips_label_requests: bool,
+    /// Rules that send mail asking for these as a link to Microsoft's
+    /// encrypted message portal.
+    pub portal_link_for: Vec<ProtectAction>,
+    /// Labels whose policy encrypts the mail, which then arrives without a
+    /// label that can be read.
+    pub encrypts_labels_without_header: Vec<String>,
+    /// Mail arrives with its transport headers, and the headers Graph
+    /// parses lack Exchange's own (AuthAs, the direction, the relay's
+    /// stamp).
+    pub transport_headers: bool,
+}
+
+/// The Cumulas Signatures relay in an organization's mail path.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FakeRelay {
+    /// Mail coming back from it counts as from inside the organization.
+    pub internal: bool,
 }
 
 /// A message that arrived from the account itself.
@@ -131,6 +159,8 @@ pub(crate) struct Delivered {
     pub folder: String,
     pub subject: String,
     pub content: MessageContent,
+    /// Its transport headers, raw.
+    pub transport: Option<String>,
 }
 
 impl FakeServer {
@@ -147,17 +177,76 @@ impl FakeServer {
             return;
         }
         let org = &self.organization;
+        let internal = org.relay.is_none_or(|r| r.internal);
         let action = request.and_then(|r| r.protect);
         let label = request.and_then(|r| r.label_id.clone());
-        let ruled = action.is_some_and(|a| org.encrypts.contains(&a));
-        let encrypted = ruled || org.encrypts_everything;
-        let applied = label
+        let acting = action.filter(|a| !org.rules_ignore.contains(a));
+        let portal = acting.is_some_and(|a| org.portal_link_for.contains(&a));
+        let ruled = acting.is_some_and(|a| org.encrypts.contains(&a)) || portal;
+        // Auto-labeling sees the request only if no rule removed it.
+        let requested_label = label.filter(|_| !org.strips_label_requests);
+        let hidden_label = requested_label
+            .as_ref()
+            .is_some_and(|l| internal && org.encrypts_labels_without_header.contains(l));
+        let encrypted = (ruled && !portal) || org.encrypts_everything || hidden_label;
+        let applied = requested_label
             .clone()
-            .filter(|l| org.labels.contains(l))
+            .filter(|l| internal && org.labels.contains(l))
             .or_else(|| org.default_label.clone());
+        let msip_labels = applied.map(|l| {
+            format!(
+                "MSIP_Label_{l}_Enabled=true; MSIP_Label_{l}_SiteId={}; \
+                 MSIP_Label_{l}_Method=Privileged",
+                org.tenant
+            )
+        });
+        let requested_action = action
+            .filter(|_| !ruled || org.keeps_header)
+            .map(|a| a.header_value().to_owned());
+        let auth_as = if internal { "Internal" } else { "Anonymous" };
+        self.next_uid += 1;
+        let message_id = format!("<arrived-{}@contoso.com>", self.next_uid);
+        // As transport delivered them: the hops' headers above the message's.
+        let transport = org.transport_headers.then(|| {
+            let mut headers = vec![
+                "Received: from AM0PR01MB0001.eurprd01.prod.outlook.com (2603:10a6::1) by\r\n \
+                 AM0PR01MB0002.eurprd01.prod.outlook.com with HTTPS; Mon, 19 Oct 2026 14:03:00 \
+                 +0000"
+                    .to_owned(),
+                format!("X-MS-Exchange-Organization-AuthAs: {auth_as}"),
+                "X-MS-Exchange-Organization-MessageDirectionality: Originating".to_owned(),
+            ];
+            if org.relay.is_some() {
+                headers.push("X-Signature-Stamped: 1".into());
+                // The first pass's, below the return's.
+                headers.push("X-MS-Exchange-Organization-AuthAs: Internal".into());
+            }
+            if encrypted {
+                headers.push("Content-Class: rpmsg.message".into());
+            }
+            if let Some(value) = &requested_action {
+                headers.push(format!("x-cumulas-protect: {value}"));
+            }
+            if let Some(value) = &requested_label {
+                headers.push(format!("x-cumulas-label: {value}"));
+            }
+            if let Some(value) = &msip_labels {
+                headers.push(format!("msip_labels: {value}"));
+            }
+            headers.push(format!("Message-ID: {message_id}"));
+            headers.join("\r\n") + "\r\n\r\n"
+        });
+        // Graph's parsed headers lack Exchange's own when the transport
+        // headers are what has them.
+        let graph = !org.transport_headers;
         let content = MessageContent {
             body_html: Some(if encrypted {
                 "<p>You've received an encrypted message.</p>".into()
+            } else if portal {
+                "<p>You've received an encrypted message. <a \
+                 href=\"https://outlook.office365.com/Encryption/retrieve.ashx?id=1\">Read the \
+                 message</a></p>"
+                    .into()
             } else {
                 message.body_html.clone()
             }),
@@ -175,28 +264,26 @@ impl FakeServer {
             },
             signals: MessageSignals {
                 content_class: encrypted.then(|| "rpmsg.message".into()),
-                msip_labels: applied.map(|l| {
-                    format!(
-                        "MSIP_Label_{l}_Enabled=true; MSIP_Label_{l}_SiteId={}; \
-                         MSIP_Label_{l}_Method=Privileged",
-                        org.tenant
-                    )
-                }),
+                msip_labels,
                 msip_labels_source: None,
-                requested_action: action
-                    .filter(|_| !ruled || org.keeps_header)
-                    .map(|a| a.header_value().into()),
-                requested_label: label,
+                requested_action_source: requested_action.as_ref().map(|_| "property".into()),
+                requested_action,
+                requested_label_source: requested_label.as_ref().map(|_| "property".into()),
+                requested_label,
+                relay_stamped: graph && org.relay.is_some(),
+                auth_as: graph.then(|| auth_as.into()),
+                directionality: graph.then(|| "Originating".into()),
                 ..MessageSignals::default()
             },
+            internet_message_id: Some(message_id),
             ..MessageContent::default()
         };
-        self.next_uid += 1;
         let delivered = Delivered {
             remote_id: format!("AAMk-arrived-{}", self.next_uid),
             folder: "INBOX".into(),
             subject: message.subject.clone(),
             content,
+            transport,
         };
         if self
             .hold
@@ -628,6 +715,18 @@ impl MailProvider for FakeMail {
 
     async fn own_address(&self) -> Result<Option<EmailAddress>> {
         Ok(self.server.lock().unwrap().own_address.clone())
+    }
+
+    async fn transport_headers(&self, m: &MessageLocator) -> Result<Option<String>> {
+        let server = self.server.lock().unwrap();
+        if let Some(e) = &server.transport_failure {
+            return Err(e.clone());
+        }
+        Ok(server
+            .delivered
+            .iter()
+            .find(|d| d.remote_id == m.remote_id)
+            .and_then(|d| d.transport.clone()))
     }
 }
 

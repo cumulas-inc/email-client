@@ -695,6 +695,10 @@ Attachments: 2
 Label header: from the header
   - {LABEL} · this organization: yes · enabled: yes · method: Standard · in your labels: yes
 Requested by Cumulas Mail: none · label: none
+Relay (X-Signature-Stamped): no
+Counted as internal (AuthAs): not said
+Direction: not said
+Request read from: none
 ",
         env!("CARGO_PKG_VERSION")
     );
@@ -737,6 +741,7 @@ fn diagnostics_say_what_couldnt_be_read() {
         "  - smime.p7m · application/pkcs7-mime · 3.3 MB · protection file",
         "Label header: not read",
         "Requested by Cumulas Mail: not read · label: not read",
+        "Request read from: not read",
     ] {
         assert!(text.lines().any(|l| l == line), "{line}\n{text}");
     }
@@ -877,5 +882,594 @@ fn evidence_reads_with_defaults() {
     assert_eq!(
         json["ownLabels"],
         serde_json::json!([{ "id": LABEL, "enabled": true }])
+    );
+}
+
+// --- Check evidence ---------------------------------------------------------------
+
+const ARRIVED_BODY: &str = "<p>Automated setup check from Cumulas Mail. You can delete it.</p>";
+
+fn arrived(signals: MessageSignals) -> MessageContent {
+    MessageContent {
+        body_html: Some(ARRIVED_BODY.into()),
+        internet_message_id: Some("<a1@contoso.com>".into()),
+        signals,
+        ..MessageContent::default()
+    }
+}
+
+fn at(hour: u32, minute: u32, second: u32) -> DateTime<Utc> {
+    use chrono::TimeZone;
+    Utc.with_ymd_and_hms(2026, 10, 19, hour, minute, second)
+        .unwrap()
+}
+
+#[test]
+fn header_values_are_unfolded_in_order() {
+    let raw = "Received: from a\r\n\tby b\r\nX-MS-Exchange-Organization-AuthAs: Anonymous\r\n\
+               x-ms-exchange-organization-authas:  Internal \r\nThread-Topic: a: b: c\r\n\
+               Subject: folded\r\n over\r\n  two lines\r\n\r\nX-Body: not a header\r\n";
+    assert_eq!(
+        header_values(raw, "X-MS-Exchange-Organization-AuthAs"),
+        ["Anonymous", "Internal"]
+    );
+    assert_eq!(header_values(raw, "RECEIVED"), ["from a\tby b"]);
+    assert_eq!(header_values(raw, "Subject"), ["folded over  two lines"]);
+    assert_eq!(header_values(raw, "Thread-Topic"), ["a: b: c"]);
+    // The body isn't read.
+    assert!(header_values(raw, "X-Body").is_empty());
+    // Bare line feeds, and a field that ends the block.
+    assert_eq!(header_values("A: 1\nB: 2\n\tmore", "b"), ["2\tmore"]);
+    assert!(header_values("", "A").is_empty());
+    // A line without a colon names no field, nor do its continuations.
+    assert!(header_values("AuthAs Internal\r\n Internal\r\n", "AuthAs").is_empty());
+    assert_eq!(header_values("Empty:\r\nEmpty: x", "Empty"), ["", "x"]);
+}
+
+#[test]
+fn evidence_comes_from_the_transport_headers_first() {
+    let transport = format!(
+        "Received: from AM0PR01MB0001.eurprd01.prod.outlook.com\r\n\
+         X-MS-Exchange-Organization-AuthAs: Anonymous\r\n\
+         X-MS-Exchange-Organization-MessageDirectionality: Incoming\r\n\
+         X-Signature-Stamped: 1\r\n\
+         x-cumulas-label-stamped: {LABEL}\r\n\
+         X-MS-Exchange-Organization-AuthAs: Internal\r\n\
+         X-MS-Exchange-Organization-MessageDirectionality: Originating\r\n\
+         Content-Class: rpmsg.message\r\n\
+         x-cumulas-protect: encrypt\r\n\r\n"
+    );
+    // Graph's parsed headers say otherwise: the transport headers win.
+    let content = MessageContent {
+        attachments: vec![file("att-1", "message.rpmsg", RPMSG_TYPE)],
+        ..arrived(MessageSignals {
+            auth_as: Some("Internal".into()),
+            message_class: Some("IPM.Note.rpmsg.Microsoft Information Protection".into()),
+            ..signals()
+        })
+    };
+    let evidence = check_evidence(
+        &content,
+        Some(&transport),
+        TENANT,
+        at(14, 0, 0),
+        at(14, 0, 40),
+    );
+    assert_eq!(
+        evidence,
+        CheckEvidence {
+            message_id: Some("<a1@contoso.com>".into()),
+            request_arrived: true,
+            relay_stamped: true,
+            label_stamped: Some(LABEL.into()),
+            auth_as: Some("Anonymous".into()),
+            directionality: Some("Incoming".into()),
+            detected: Some(ProtectionKind::RightsManaged),
+            own_labels: vec![],
+            foreign_labels: 0,
+            content_class: Some("rpmsg.message".into()),
+            message_class: Some("IPM.Note.rpmsg.Microsoft Information Protection".into()),
+            rpmsg_attachment: true,
+            headers_from: HeadersFrom::Transport,
+            found_after_secs: Some(40),
+        }
+    );
+    assert!(relay_not_internal(&evidence));
+}
+
+#[test]
+fn without_transport_headers_evidence_comes_from_graphs() {
+    let msip_labels = msip(&[
+        (LABEL, "Enabled", "true"),
+        (LABEL, "SiteId", TENANT),
+        (OTHER_LABEL, "Enabled", "false"),
+        (OTHER_LABEL, "SiteId", TENANT),
+        ("bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee", "Enabled", "true"),
+        (
+            "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "SiteId",
+            OTHER_TENANT,
+        ),
+    ]);
+    let content = arrived(MessageSignals {
+        relay_stamped: true,
+        label_stamped: Some(LABEL.into()),
+        auth_as: Some("Internal".into()),
+        directionality: Some("Originating".into()),
+        msip_labels: Some(msip_labels),
+        requested_label: Some(LABEL.into()),
+        ..signals()
+    });
+    let evidence = check_evidence(&content, None, TENANT, at(14, 0, 0), at(14, 1, 10));
+    assert_eq!(evidence.headers_from, HeadersFrom::Graph);
+    assert!(evidence.relay_stamped && evidence.request_arrived);
+    assert_eq!(evidence.label_stamped.as_deref(), Some(LABEL));
+    assert_eq!(evidence.auth_as.as_deref(), Some("Internal"));
+    assert_eq!(evidence.directionality.as_deref(), Some("Originating"));
+    assert_eq!(evidence.detected, None);
+    assert!(!evidence.rpmsg_attachment);
+    assert_eq!(evidence.found_after_secs, Some(70));
+    // The organization's labels by id, others counted only.
+    assert_eq!(
+        evidence.own_labels,
+        [
+            SeenLabel {
+                id: LABEL.into(),
+                enabled: true
+            },
+            SeenLabel {
+                id: OTHER_LABEL.into(),
+                enabled: false
+            }
+        ]
+    );
+    assert_eq!(evidence.foreign_labels, 1);
+    assert_eq!(first_own_label(&evidence), Some(LABEL));
+    // Returned as mail from inside: not "not internal".
+    assert!(!relay_not_internal(&evidence));
+}
+
+#[test]
+fn a_request_arrived_when_either_source_kept_it() {
+    let transport = "X-MS-Exchange-Organization-AuthAs: Internal\r\n\r\n";
+    // The property alone.
+    let content = arrived(MessageSignals {
+        requested_action: Some("encrypt".into()),
+        requested_action_source: Some("property".into()),
+        ..signals()
+    });
+    for transport in [Some(transport), None] {
+        let evidence = check_evidence(&content, transport, TENANT, at(14, 0, 0), at(14, 1, 0));
+        assert!(evidence.request_arrived, "{transport:?}");
+    }
+    // The transport headers alone.
+    let headers = "x-cumulas-label: 6c1b3b5e-0d4f-4b1e-9d3a-2f0e6a7b8c9d\r\n\r\n";
+    let content = arrived(signals());
+    let evidence = check_evidence(&content, Some(headers), TENANT, at(14, 0, 0), at(14, 1, 0));
+    assert!(evidence.request_arrived);
+    // Neither, or only an empty header.
+    for transport in [Some(transport), Some("x-cumulas-protect:  \r\n"), None] {
+        let evidence = check_evidence(&content, transport, TENANT, at(14, 0, 0), at(14, 1, 0));
+        assert!(!evidence.request_arrived, "{transport:?}");
+    }
+}
+
+#[test]
+fn a_content_class_only_the_transport_headers_have_still_counts() {
+    // An rpmsg file by type alone needs a message-level signal.
+    let content = MessageContent {
+        attachments: vec![file("att-1", "attachment", RPMSG_TYPE)],
+        ..arrived(signals())
+    };
+    let evidence = check_evidence(&content, None, TENANT, at(14, 0, 0), at(14, 1, 0));
+    assert_eq!(evidence.detected, None);
+    assert!(evidence.rpmsg_attachment);
+    let evidence = check_evidence(
+        &content,
+        Some("Content-Class: rpmsg.message\r\n"),
+        TENANT,
+        at(14, 0, 0),
+        at(14, 1, 0),
+    );
+    assert_eq!(evidence.detected, Some(ProtectionKind::RightsManaged));
+    assert_eq!(evidence.content_class.as_deref(), Some("rpmsg.message"));
+}
+
+#[test]
+fn evidence_values_are_cleaned_and_capped() {
+    let long = "O".repeat(300);
+    let message_id = format!("<{}@contoso.com>", "x".repeat(300));
+    let transport = format!(
+        "X-Signature-Stamped: 1\r\n\
+         X-MS-Exchange-Organization-AuthAs: In\u{202E}ter\u{0007}nal\r\n\
+         X-MS-Exchange-Organization-MessageDirectionality: {long}\r\n\r\n"
+    );
+    let content = MessageContent {
+        internet_message_id: Some(message_id.clone()),
+        ..arrived(signals())
+    };
+    let evidence = check_evidence(
+        &content,
+        Some(&transport),
+        TENANT,
+        at(14, 0, 0),
+        // The clock went back: never a negative wait.
+        at(13, 59, 0),
+    );
+    assert_eq!(evidence.auth_as.as_deref(), Some("Internal"));
+    assert_eq!(evidence.directionality.unwrap().chars().count(), 200);
+    // Whole, to paste into Get-MailDetailTransportRuleReport.
+    assert_eq!(evidence.message_id.as_deref(), Some(message_id.as_str()));
+    assert_eq!(evidence.found_after_secs, Some(0));
+}
+
+#[test]
+fn an_empty_auth_as_is_none_and_never_counts_as_outside() {
+    for transport in [
+        Some("X-Signature-Stamped: 1\r\nX-MS-Exchange-Organization-AuthAs:   \r\n\r\n"),
+        Some("X-Signature-Stamped: 1\r\n\r\n"),
+        None,
+    ] {
+        let content = arrived(MessageSignals {
+            relay_stamped: true,
+            auth_as: Some("\u{200F}".into()),
+            ..signals()
+        });
+        let evidence = check_evidence(&content, transport, TENANT, at(14, 0, 0), at(14, 1, 0));
+        assert!(evidence.relay_stamped, "{transport:?}");
+        assert_eq!(evidence.auth_as, None, "{transport:?}");
+        assert!(!relay_not_internal(&evidence), "{transport:?}");
+    }
+    // Stamped but empty: not the relay.
+    let evidence = check_evidence(
+        &arrived(signals()),
+        Some("X-Signature-Stamped: \r\nX-MS-Exchange-Organization-AuthAs: Anonymous\r\n"),
+        TENANT,
+        at(14, 0, 0),
+        at(14, 1, 0),
+    );
+    assert!(!evidence.relay_stamped);
+    assert!(!relay_not_internal(&evidence));
+    // Not internal, in any case.
+    let returned = |auth_as: &str| CheckEvidence {
+        relay_stamped: true,
+        auth_as: Some(auth_as.into()),
+        ..CheckEvidence::default()
+    };
+    assert!(!relay_not_internal(&returned("internal")));
+    assert!(relay_not_internal(&returned("Anonymous")));
+    assert!(relay_not_internal(&returned("Partner")));
+}
+
+#[test]
+fn powershell_strings_double_every_quote_that_ends_them() {
+    assert_eq!(ps_quote("O'Brien’s"), "'O''Brien’’s'");
+    assert_eq!(ps_quote("‘a‚b‛"), "'‘‘a‚‚b‛‛'");
+    assert_eq!(ps_quote("a'|iex#@contoso.com"), "'a''|iex#@contoso.com'");
+    assert_eq!(ps_quote(""), "''");
+}
+
+// --- Copy details for IT -----------------------------------------------------------
+
+fn details_fixture() -> (Option<LastControl>, Vec<CheckDetailsItem>) {
+    let control = LastControl {
+        sent_at: at(14, 0, 0),
+        outcome: crate::store::ControlOutcome {
+            protected: false,
+            label_id: None,
+            evidence: Some(CheckEvidence {
+                message_id: Some("<c1@contoso.com>".into()),
+                relay_stamped: true,
+                auth_as: Some("Anonymous".into()),
+                directionality: Some("Originating".into()),
+                headers_from: HeadersFrom::Transport,
+                found_after_secs: Some(40),
+                ..CheckEvidence::default()
+            }),
+        },
+    };
+    let encrypt = CheckEvidence {
+        message_id: Some("<e1@contoso.com>".into()),
+        relay_stamped: true,
+        auth_as: Some("Anonymous".into()),
+        directionality: Some("Originating".into()),
+        detected: Some(ProtectionKind::RightsManaged),
+        content_class: Some("rpmsg.message".into()),
+        message_class: Some("IPM.Note.rpmsg.Microsoft Information Protection".into()),
+        rpmsg_attachment: true,
+        headers_from: HeadersFrom::Transport,
+        found_after_secs: Some(40),
+        ..CheckEvidence::default()
+    };
+    let label = CheckEvidence {
+        message_id: Some("<l1@contoso.com>".into()),
+        request_arrived: true,
+        relay_stamped: true,
+        label_stamped: Some(LABEL.into()),
+        auth_as: Some("Anonymous".into()),
+        directionality: Some("Originating".into()),
+        own_labels: vec![SeenLabel {
+            id: OTHER_LABEL.into(),
+            enabled: false,
+        }],
+        foreign_labels: 1,
+        headers_from: HeadersFrom::Transport,
+        found_after_secs: Some(50),
+        ..CheckEvidence::default()
+    };
+    let items = vec![
+        CheckDetailsItem {
+            title: "Encrypt".into(),
+            item: CheckItem::Action {
+                action: ProtectAction::Encrypt,
+            },
+            result: CheckResult {
+                state: CheckState::Applied,
+                at: Some(at(14, 1, 0)),
+                test_message: true,
+                passed_at: Some(at(14, 1, 0)),
+                ..CheckResult::default()
+            },
+            record: CheckRecord {
+                state: CheckState::Applied,
+                at: Some(at(14, 1, 0)),
+                test_message_id: Some("AAMk-1".into()),
+                evidence: Some(encrypt),
+                sent_at: Some(at(14, 0, 1)),
+                ..CheckRecord::default()
+            },
+        },
+        CheckDetailsItem {
+            title: "Do Not Forward".into(),
+            item: CheckItem::Action {
+                action: ProtectAction::DoNotForward,
+            },
+            result: CheckResult::default(),
+            record: CheckRecord::default(),
+        },
+        CheckDetailsItem {
+            title: format!("Label Confidential ({LABEL})"),
+            item: CheckItem::Label {
+                label_id: LABEL.into(),
+            },
+            result: CheckResult {
+                state: CheckState::NotApplied,
+                at: Some(at(14, 1, 0)),
+                note: Some(CheckNote::RelayNotInternal),
+                test_message: true,
+                changed_at: Some(at(13, 51, 0)),
+                ..CheckResult::default()
+            },
+            record: CheckRecord {
+                state: CheckState::NotApplied,
+                at: Some(at(14, 1, 0)),
+                note: Some(CheckNote::RelayNotInternal),
+                test_message_id: Some("AAMk-2".into()),
+                evidence: Some(label),
+                changed_at: Some(at(13, 51, 0)),
+                sent_at: Some(at(14, 0, 2)),
+                ..CheckRecord::default()
+            },
+        },
+    ];
+    (Some(control), items)
+}
+
+#[test]
+fn check_details_say_what_each_message_showed_in_a_fixed_shape() {
+    let (control, items) = details_fixture();
+    let catalog = catalog();
+    let settle = Settle {
+        rules_changed_at: Some(at(13, 30, 0)),
+        policies_changed_at: Some(at(13, 51, 0)),
+    };
+    let text = check_details(&CheckDetailsInput {
+        email: "adele@contoso.com",
+        tenant: TENANT,
+        version: "0.5.0",
+        control: control.as_ref(),
+        items,
+        catalog: Some(&catalog),
+        settle: &settle,
+    });
+    let expected = format!(
+        "Cumulas Mail 0.5.0: setup check details for adele@contoso.com
+Organization (tenant): {TENANT}
+These details include no message text. They include the test messages' Message-IDs and what Microsoft 365 said about how it handled them.
+
+Control message (no request), sent 2026-10-19 14:00:00 UTC, found within 40 s
+  Message-ID: <c1@contoso.com>
+  Went through the Cumulas Signatures relay (X-Signature-Stamped): yes
+  Counted as from inside your organization (X-MS-Exchange-Organization-AuthAs): Anonymous
+  Direction (X-MS-Exchange-Organization-MessageDirectionality): Originating
+  Arrived: nothing; label of your organization: none
+  Headers read from: the message's transport headers
+Path: relay present, return not internal
+
+Encrypt: Arrived encrypted · checked 2026-10-19 14:01 UTC
+  Sent: x-cumulas-protect: encrypt, 2026-10-19 14:00:01 UTC
+  Message-ID: <e1@contoso.com>
+  Request still on the message when it arrived: no
+  Relay: yes · AuthAs: Anonymous · Direction: Originating
+  Arrived: Microsoft Purview encryption · Content-Class: rpmsg.message · Message class: IPM.Note.rpmsg.Microsoft Information Protection · message.rpmsg: yes
+  Labels on it: none · other organizations' labels: 0
+Do Not Forward: Not checked yet
+Label Confidential ({LABEL}): Arrived without it · checked 2026-10-19 14:01 UTC
+  Note: Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as outside mail when it comes back, so labels can't work yet. Your IT team needs to finish setting up “Count mail coming back from the signature server as mail from inside your organization” in Cumulas Signatures. Your organization's setup changed 10 minutes before this check; if that's under an hour (a day for labels), check again later.
+  Sent: x-cumulas-label: {LABEL}, 2026-10-19 14:00:02 UTC
+  Message-ID: <l1@contoso.com>
+  Request still on the message when it arrived: yes
+  Arrived with x-cumulas-label-stamped: {LABEL}
+  Relay: yes · AuthAs: Anonymous · Direction: Originating
+  Arrived: nothing · Content-Class: not said · Message class: not said · message.rpmsg: no
+  Labels on it: {OTHER_LABEL}, not enabled · other organizations' labels: 1
+
+Setup changed on this computer: rules 2026-10-19 13:30:00 UTC, auto-labeling policies 2026-10-19 13:51:00 UTC
+
+For your IT team, in Exchange Online PowerShell:
+  Get-MessageTraceV2 -SenderAddress 'adele@contoso.com' -RecipientAddress 'adele@contoso.com' -Subject 'Cumulas Mail setup check' -SubjectFilterType StartsWith -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)
+  Get-MailDetailTransportRuleReport -MessageId '<c1@contoso.com>' -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)
+  Get-MailDetailTransportRuleReport -MessageId '<e1@contoso.com>' -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)
+  Get-MailDetailTransportRuleReport -MessageId '<l1@contoso.com>' -EventType TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)
+Guide: https://github.com/cumulas-inc/email-client/blob/main/docs/microsoft-365.md#troubleshooting-the-check
+"
+    );
+    assert_eq!(text, expected);
+}
+
+#[test]
+fn check_details_keep_every_value_inside_one_powershell_string() {
+    let (control, mut items) = details_fixture();
+    let crafted = "<x'; Remove-TransportRule *>";
+    items[0].record.evidence.as_mut().unwrap().message_id = Some(crafted.into());
+    let text = check_details(&CheckDetailsInput {
+        email: "a'|iex#@contoso.com",
+        tenant: TENANT,
+        version: "0.5.0",
+        control: control.as_ref(),
+        items,
+        catalog: None,
+        settle: &Settle::default(),
+    });
+    assert!(text.contains(
+        "Get-MessageTraceV2 -SenderAddress 'a''|iex#@contoso.com' -RecipientAddress \
+         'a''|iex#@contoso.com' -Subject"
+    ));
+    assert!(text.contains(
+        "Get-MailDetailTransportRuleReport -MessageId '<x''; Remove-TransportRule *>' -EventType"
+    ));
+    // Every command line's quotes pair up: no value ends its string.
+    for line in text.lines().filter(|l| l.starts_with("  Get-")) {
+        assert_eq!(line.matches('\'').count() % 2, 0, "{line}");
+    }
+    assert!(
+        text.contains("Setup changed on this computer: rules never, auto-labeling policies never")
+    );
+    // Without the label list, a label is its id.
+    assert!(text.contains(&format!("Label Confidential ({LABEL}): Arrived without it")));
+}
+
+#[test]
+fn check_details_show_the_path_when_nothing_else_arrived() {
+    let (control, _) = details_fixture();
+    let not_arrived = |title: &str, item: CheckItem| CheckDetailsItem {
+        title: title.into(),
+        item,
+        result: CheckResult {
+            state: CheckState::Unknown,
+            at: Some(at(14, 16, 0)),
+            note: Some(CheckNote::NotArrived),
+            ..CheckResult::default()
+        },
+        record: CheckRecord {
+            state: CheckState::Unknown,
+            at: Some(at(14, 16, 0)),
+            note: Some(CheckNote::NotArrived),
+            sent_at: Some(at(14, 0, 1)),
+            ..CheckRecord::default()
+        },
+    };
+    let items = vec![
+        not_arrived(
+            "Encrypt",
+            CheckItem::Action {
+                action: ProtectAction::Encrypt,
+            },
+        ),
+        not_arrived(
+            "Do Not Forward",
+            CheckItem::Action {
+                action: ProtectAction::DoNotForward,
+            },
+        ),
+    ];
+    let input = |control: Option<&LastControl>, items: Vec<CheckDetailsItem>| {
+        check_details(&CheckDetailsInput {
+            email: "adele@contoso.com",
+            tenant: TENANT,
+            version: "0.5.0",
+            control,
+            items,
+            catalog: None,
+            settle: &Settle::default(),
+        })
+    };
+    let text = input(control.as_ref(), items.clone());
+    assert!(text.contains("\nPath: relay present, return not internal\n"));
+    assert!(text.contains(
+        "Encrypt: Couldn't check · 2026-10-19 14:16 UTC
+  Note: The test message didn't arrive in your Inbox within 15 minutes.
+  Sent: x-cumulas-protect: encrypt, 2026-10-19 14:00:01 UTC
+  Arrived: not kept
+Do Not Forward: Couldn't check"
+    ));
+    // Only the control arrived: one rule report.
+    assert_eq!(text.matches("Get-MailDetailTransportRuleReport").count(), 1);
+
+    // No control kept, or the relay not in the path.
+    let text = input(None, items.clone());
+    assert!(text.contains("Control message (no request): not found\nPath: not known\n"));
+    assert!(!text.contains("Get-MailDetailTransportRuleReport"));
+    let mut direct = control.unwrap();
+    let evidence = direct.outcome.evidence.as_mut().unwrap();
+    evidence.relay_stamped = false;
+    evidence.auth_as = Some("Internal".into());
+    assert!(input(Some(&direct), items.clone()).contains("\nPath: no relay\n"));
+    let evidence = direct.outcome.evidence.as_mut().unwrap();
+    evidence.relay_stamped = true;
+    assert!(
+        input(Some(&direct), items.clone()).contains("\nPath: relay present, return internal\n")
+    );
+    direct.outcome.evidence.as_mut().unwrap().auth_as = None;
+    assert!(
+        input(Some(&direct), items.clone()).contains("\nPath: relay present, return not known\n")
+    );
+}
+
+#[test]
+fn diagnostics_say_how_the_message_came_and_where_its_request_was_read() {
+    let content = MessageContent {
+        internet_message_id: Some("<a1@contoso.com>".into()),
+        ..arrived(MessageSignals {
+            relay_stamped: true,
+            auth_as: Some("Anonymous".into()),
+            directionality: Some("Originating".into()),
+            requested_action: Some("encrypt".into()),
+            requested_action_source: Some("property".into()),
+            requested_label: Some(LABEL.into()),
+            requested_label_source: Some("header".into()),
+            ..signals()
+        })
+    };
+    let input = |content| DiagnosticsInput {
+        account: DiagnosticsAccount::MicrosoftWork,
+        folder_role: FolderRole::Sent,
+        content,
+        protection: None,
+        tenant_id: Some(TENANT),
+        catalog: None,
+    };
+    let text = diagnostics(&input(&content));
+    let tail = format!(
+        "Requested by Cumulas Mail: encrypt · label: {LABEL}
+Relay (X-Signature-Stamped): yes
+Counted as internal (AuthAs): Anonymous
+Direction: Originating
+Request read from: the message property and the header
+"
+    );
+    assert!(text.ends_with(&tail), "{text}");
+    // A text for bug reports: no identifiers.
+    assert!(!text.contains("a1@contoso.com"));
+
+    let one_source = MessageContent {
+        signals: MessageSignals {
+            requested_label_source: Some("property".into()),
+            ..content.signals.clone()
+        },
+        ..content.clone()
+    };
+    assert!(
+        diagnostics(&input(&one_source)).contains("\nRequest read from: the message property\n")
     );
 }

@@ -212,6 +212,22 @@ pub struct MessageSignals {
     /// properties first, else the headers.
     pub requested_action: Option<String>,
     pub requested_label: Option<String>,
+    /// Where `requested_action` and `requested_label` came from:
+    /// Some("property") | Some("header").
+    pub requested_action_source: Option<String>,
+    pub requested_label_source: Option<String>,
+    /// X-Signature-Stamped was on it: the Cumulas Signatures relay handled
+    /// it.
+    pub relay_stamped: bool,
+    /// x-cumulas-label-stamped (the earlier relay recipe's copy of the label
+    /// request).
+    pub label_stamped: Option<String>,
+    /// X-MS-Exchange-Organization-AuthAs: "Internal" when Exchange counted
+    /// it as from inside the organization.
+    pub auth_as: Option<String>,
+    /// X-MS-Exchange-Organization-MessageDirectionality: "Originating" or
+    /// "Incoming".
+    pub directionality: Option<String>,
     /// Graph: the batched named properties couldn't be read this time.
     pub properties_unavailable: bool,
     /// Graph: fetches in a row that couldn't read them (the service counts;
@@ -322,6 +338,15 @@ pub trait MailProvider: Send + Sync {
 
     /// The mailbox's own address (Graph `mail`, else `userPrincipalName`).
     async fn own_address(&self) -> Result<Option<EmailAddress>> {
+        Ok(None)
+    }
+
+    /// The message's transport headers as delivered
+    /// (PR_TRANSPORT_MESSAGE_HEADERS), raw, at most
+    /// [`MAX_TRANSPORT_HEADERS_BYTES`](crate::protection::MAX_TRANSPORT_HEADERS_BYTES);
+    /// `None` when the server has none. Microsoft only; read by the setup
+    /// checks.
+    async fn transport_headers(&self, _message: &MessageLocator) -> Result<Option<String>> {
         Ok(None)
     }
 

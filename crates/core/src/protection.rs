@@ -19,10 +19,12 @@ use url::Url;
 use crate::error::{Error, ErrorCode};
 use crate::html::html_to_text;
 use crate::model::{
-    AttachmentMeta, FolderRole, LabelCatalog, ProtectAction, Protection, ProtectionKind, ReplyKind,
+    AttachmentMeta, CatalogLabel, CheckItem, CheckNote, CheckResult, CheckState, FolderRole,
+    LabelCatalog, ProtectAction, Protection, ProtectionKind, ReplyKind,
 };
 use crate::providers::{MessageContent, MessageSignals, SmimeContent};
 use crate::signatures::config::is_guid;
+use crate::store::{CheckRecord, LastControl};
 
 /// Most test messages one check sends (plus its control), under Exchange
 /// Online's 30 messages a minute. `MAX_CHECK_ITEMS` in
@@ -47,11 +49,28 @@ pub const CONTENT_CLASS_PROPERTY: &str =
     "String {00020386-0000-0000-C000-000000000046} Name Content-Class";
 pub const MSIP_LABELS_PROPERTY: &str =
     "String {00020386-0000-0000-C000-000000000046} Name msip_labels";
-/// The `Name` part is case-sensitive: exactly the header's lowercase name.
+/// Exchange stores names in this set in lowercase (MS-OXCPRPT) and Graph's
+/// Name filter is case-sensitive: always the header's lowercase name.
 pub const PROTECT_PROPERTY: &str =
     "String {00020386-0000-0000-C000-000000000046} Name x-cumulas-protect";
 pub const LABEL_PROPERTY: &str =
     "String {00020386-0000-0000-C000-000000000046} Name x-cumulas-label";
+/// PR_TRANSPORT_MESSAGE_HEADERS: the whole header block transport delivered,
+/// not only the part Graph parses into internetMessageHeaders.
+pub const TRANSPORT_HEADERS_PROPERTY: &str = "String 0x007D";
+/// Most of a message's transport headers kept: Exchange Online's limit for
+/// a message's header.
+pub const MAX_TRANSPORT_HEADERS_BYTES: usize = 256 * 1024;
+
+/// The Cumulas Signatures relay adds it to every message it hands back.
+pub const STAMP_HEADER: &str = "X-Signature-Stamped";
+/// The earlier relay recipe's copy of the label request.
+pub const LABEL_STAMPED_HEADER: &str = "x-cumulas-label-stamped";
+/// How Exchange Online counted the sender: `Internal` for mail from inside
+/// the organization.
+pub const AUTH_AS_HEADER: &str = "X-MS-Exchange-Organization-AuthAs";
+/// `Originating` or `Incoming`.
+pub const DIRECTIONALITY_HEADER: &str = "X-MS-Exchange-Organization-MessageDirectionality";
 
 /// Attachment ids of the parts of a message's MIME read on Graph:
 /// `mime:<section>` (IMAP's are the bare section).
@@ -606,13 +625,186 @@ pub enum HeadersFrom {
 /// A value from a message or from Microsoft 365 fit to keep and copy: control
 /// and bidirectional characters removed, trimmed, at most `max` characters;
 /// `None` when nothing is left, so an empty header never counts as a value.
-pub fn clean_value(value: &str, max: usize) -> Option<String> {
+pub(crate) fn clean_value(value: &str, max: usize) -> Option<String> {
     let cleaned: String = value
         .chars()
         .filter(|c| !c.is_control() && !is_bidi_control(*c))
         .collect();
     let trimmed = cleaned.trim();
     (!trimmed.is_empty()).then(|| trimmed.chars().take(max).collect())
+}
+
+/// Most characters kept of a header value in the evidence.
+const EVIDENCE_VALUE_CHARS: usize = 200;
+/// Most characters kept of a Message-ID: RFC 5322's line limit, so that it
+/// can be pasted whole into Get-MailDetailTransportRuleReport.
+const MESSAGE_ID_CHARS: usize = 998;
+/// Most labels kept of one message's msip_labels.
+const MAX_SEEN_LABELS: usize = 20;
+
+/// The values of header `name` (ASCII case ignored) in a raw header block,
+/// unfolded (a line starting with a space or tab continues the one before)
+/// and trimmed, in order. Reading stops at the first empty line, where a
+/// body would start.
+pub fn header_values(raw: &str, name: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    // The value of a field named `name` while its lines are read.
+    let mut current: Option<String> = None;
+    for line in raw.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.starts_with([' ', '\t']) {
+            if let Some(value) = current.as_mut() {
+                value.push_str(line);
+            }
+            continue;
+        }
+        if let Some(value) = current.take() {
+            values.push(value.trim().to_owned());
+        }
+        if line.is_empty() {
+            break;
+        }
+        current = line
+            .split_once(':')
+            .filter(|(field, _)| field.trim().eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.to_owned());
+    }
+    if let Some(value) = current {
+        values.push(value.trim().to_owned());
+    }
+    values
+}
+
+/// What a setup check's test message (or control) showed when it arrived,
+/// `sent_at` and found `now`. With its transport headers (`transport`), the
+/// relay's stamp, AuthAs, the direction and Content-Class come from them:
+/// the first copy of each, since every hop adds its own on top, so it's the
+/// delivering hop's. Without, from the headers Graph parsed (the signals).
+/// The request counts as arrived when either kept it.
+pub fn check_evidence(
+    content: &MessageContent,
+    transport: Option<&str>,
+    tenant: &str,
+    sent_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> CheckEvidence {
+    let signals = &content.signals;
+    let value = |v: Option<&str>| v.and_then(|v| clean_value(v, EVIDENCE_VALUE_CHARS));
+    let first = |name: &str| transport.and_then(|raw| header_values(raw, name).into_iter().next());
+    let requested = signals.requested_action.is_some() || signals.requested_label.is_some();
+    let mut evidence = match transport {
+        Some(raw) => CheckEvidence {
+            relay_stamped: value(first(STAMP_HEADER).as_deref()).is_some(),
+            label_stamped: value(first(LABEL_STAMPED_HEADER).as_deref()),
+            auth_as: value(first(AUTH_AS_HEADER).as_deref()),
+            directionality: value(first(DIRECTIONALITY_HEADER).as_deref()),
+            request_arrived: requested
+                || [PROTECT_HEADER, LABEL_HEADER].iter().any(|name| {
+                    header_values(raw, name)
+                        .iter()
+                        .any(|v| value(Some(v)).is_some())
+                }),
+            headers_from: HeadersFrom::Transport,
+            ..CheckEvidence::default()
+        },
+        None => CheckEvidence {
+            relay_stamped: signals.relay_stamped,
+            label_stamped: value(signals.label_stamped.as_deref()),
+            auth_as: value(signals.auth_as.as_deref()),
+            directionality: value(signals.directionality.as_deref()),
+            request_arrived: requested,
+            headers_from: HeadersFrom::Graph,
+            ..CheckEvidence::default()
+        },
+    };
+    // A Content-Class Graph missed (property and header) is taken from the
+    // transport headers, so that it no longer hides Purview's encryption.
+    let transport_class = first("Content-Class");
+    let patched = MessageSignals {
+        content_class: signals
+            .content_class
+            .clone()
+            .or_else(|| transport_class.clone()),
+        ..signals.clone()
+    };
+    let body_html = content.body_html.as_deref();
+    evidence.detected = detect(
+        &patched,
+        &content.attachments,
+        body_html,
+        is_blank(body_html, content.body_text.as_deref()),
+        false,
+    )
+    .map(|p| p.kind);
+    evidence.content_class = value(
+        transport_class
+            .or_else(|| signals.content_class.clone())
+            .as_deref(),
+    );
+    evidence.message_class = value(signals.message_class.as_deref());
+    evidence.message_id = content
+        .internet_message_id
+        .as_deref()
+        .and_then(|id| clean_value(id, MESSAGE_ID_CHARS));
+    evidence.rpmsg_attachment = content
+        .attachments
+        .iter()
+        .any(|a| is_rpmsg_name(&a.name) || is_rpmsg_type(&a.content_type));
+    let msip = signals.msip_labels.clone().or_else(|| first("msip_labels"));
+    let tenant = tenant.trim();
+    for label in parse_msip_labels(msip.as_deref().unwrap_or_default()) {
+        let own = label
+            .site_id
+            .as_deref()
+            .is_some_and(|site| site.trim().eq_ignore_ascii_case(tenant));
+        if !own {
+            evidence.foreign_labels = evidence.foreign_labels.saturating_add(1);
+        } else if evidence.own_labels.len() < MAX_SEEN_LABELS {
+            evidence.own_labels.push(SeenLabel {
+                id: label.id,
+                enabled: label.enabled,
+            });
+        }
+    }
+    evidence.found_after_secs = Some((now - sent_at).num_seconds().max(0));
+    evidence
+}
+
+/// The first enabled label of the organization the evidence saw, as
+/// [`own_label`] finds it.
+pub fn first_own_label(evidence: &CheckEvidence) -> Option<&str> {
+    evidence
+        .own_labels
+        .iter()
+        .find(|l| l.enabled)
+        .map(|l| l.id.as_str())
+}
+
+/// Whether the message went through the Cumulas Signatures relay and came
+/// back counted as mail from outside the organization: stamped, with an
+/// AuthAs that is set and isn't `Internal`. An unset AuthAs never counts.
+pub fn relay_not_internal(evidence: &CheckEvidence) -> bool {
+    evidence.relay_stamped
+        && evidence
+            .auth_as
+            .as_deref()
+            .is_some_and(|a| !a.trim().eq_ignore_ascii_case("Internal"))
+}
+
+/// A PowerShell single-quoted string: `'…'`, with `'` and the typographic
+/// single quotes PowerShell also ends such a string at doubled, so that any
+/// value stays one string.
+pub fn ps_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for c in value.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
 }
 
 // --- Organization setup changes ----------------------------------------------
@@ -637,6 +829,471 @@ pub const POLICIES_SETTLE: Duration = Duration::hours(24);
 /// `orgsetup.changed.<tenant id, lowercase>`.
 pub fn org_setup_changed_key(tenant: &str) -> String {
     format!("orgsetup.changed.{}", tenant.trim().to_ascii_lowercase())
+}
+
+// --- Copy details for IT -----------------------------------------------------
+
+/// How every test message's subject starts (a token follows).
+pub const CHECK_SUBJECT_PREFIX: &str = "Cumulas Mail setup check";
+/// Where the guide says what the check details mean.
+const CHECK_GUIDE: &str = "https://github.com/cumulas-inc/email-client/blob/main/docs/microsoft-365.md#troubleshooting-the-check";
+
+/// One option's check, for [`check_details`].
+#[derive(Debug, Clone)]
+pub struct CheckDetailsItem {
+    /// "Encrypt", "Do Not Forward", or "Label Confidential (<id>)".
+    pub title: String,
+    pub item: CheckItem,
+    /// As Settings shows it now.
+    pub result: CheckResult,
+    /// What its last decided check kept.
+    pub record: CheckRecord,
+}
+
+/// What [`check_details`] describes: an account's last checks.
+pub struct CheckDetailsInput<'a> {
+    /// The account's own address.
+    pub email: &'a str,
+    pub tenant: &'a str,
+    pub version: &'a str,
+    pub control: Option<&'a LastControl>,
+    pub items: Vec<CheckDetailsItem>,
+    pub catalog: Option<&'a LabelCatalog>,
+    pub settle: &'a Settle,
+}
+
+fn utc(at: DateTime<Utc>) -> String {
+    at.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+}
+
+fn utc_day(at: DateTime<Utc>) -> String {
+    at.format("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+/// How long `span` is, in words: "10 minutes", "3 hours".
+fn span_words(span: Duration) -> String {
+    let minutes = span.num_minutes().max(0);
+    let plural = |n: i64, unit: &str| {
+        if n == 1 {
+            format!("1 {unit}")
+        } else {
+            format!("{n} {unit}s")
+        }
+    };
+    match minutes {
+        0 => "less than a minute".into(),
+        1..60 => plural(minutes, "minute"),
+        60..2880 => plural(minutes / 60, "hour"),
+        _ => plural(minutes / 1440, "day"),
+    }
+}
+
+fn said(value: Option<&str>) -> &str {
+    value.unwrap_or("not said")
+}
+
+/// What a check found, as diagnostics name it.
+fn kind_words(kind: Option<ProtectionKind>) -> &'static str {
+    match kind {
+        Some(ProtectionKind::RightsManaged) => "Microsoft Purview encryption",
+        Some(ProtectionKind::SmimeEncrypted) => "S/MIME encryption",
+        Some(ProtectionKind::SmimeSigned) => "S/MIME signature",
+        Some(ProtectionKind::PortalLink) => "encrypted message portal link",
+        None => "nothing",
+    }
+}
+
+/// A label of the organization: "Title (id)" when it's listed, else its id.
+fn label_words(catalog: Option<&LabelCatalog>, id: &str) -> String {
+    match catalog.and_then(|c| c.label(id)) {
+        Some(label) => format!("{} ({id})", label.title()),
+        None => id.to_owned(),
+    }
+}
+
+/// A check's row in Settings (`describeCheck`), with times in UTC.
+fn check_row_words(result: &CheckResult, label: bool) -> String {
+    let on = result.at.map(utc_day);
+    let dated = |text: &str| {
+        on.as_ref()
+            .map_or(text.to_owned(), |on| format!("{text} · {on}"))
+    };
+    let checked = |text: &str| {
+        on.as_ref()
+            .map_or(text.to_owned(), |on| format!("{text} · checked {on}"))
+    };
+    match (result.state, result.note) {
+        (CheckState::NotChecked, _) => "Not checked yet".into(),
+        (CheckState::Waiting, _) => "Checking…".into(),
+        (CheckState::Applied, _) if label => checked("Arrived labeled"),
+        (CheckState::Applied, _) => checked("Arrived encrypted"),
+        (CheckState::Expired, Some(CheckNote::RelayChanged)) => "Check again to use it".into(),
+        (CheckState::Expired, _) => format!(
+            "Checked over {CHECK_VALID_DAYS} days ago{}. Check again to use it.",
+            on.as_deref()
+                .map(|on| format!(" ({on})"))
+                .unwrap_or_default()
+        ),
+        (CheckState::NotApplied, Some(CheckNote::HeaderNotKept)) => dated("Couldn't send the test"),
+        (CheckState::NotApplied, Some(CheckNote::OtherLabel)) => {
+            checked("Arrived with another label")
+        }
+        (CheckState::NotApplied, _) => checked("Arrived without it"),
+        (CheckState::Unknown, Some(CheckNote::NotArrived)) => dated("Couldn't check"),
+        (CheckState::Unknown, _) => dated("Couldn't tell"),
+    }
+}
+
+/// The note under a check's row in Settings, as its words for people say
+/// it (`CHECK_NOTES` in `src/modules/settings/orgsetup/copy.ts`), without
+/// the pointer to these details.
+fn check_note_words(
+    result: &CheckResult,
+    item: &CheckItem,
+    catalog: Option<&LabelCatalog>,
+) -> Option<String> {
+    let action = match item {
+        CheckItem::Action { action } => Some(*action),
+        CheckItem::Label { .. } => None,
+    };
+    // How long before the check was decided the setup changed.
+    let changed = result
+        .changed_at
+        .zip(result.at)
+        .map(|(changed, at)| span_words(at - changed));
+    let note = match (result.state, result.note) {
+        (CheckState::Waiting, _) => {
+            return result.passed_at.map(|at| {
+                format!(
+                    "Until this check is done, the one from {} still applies.",
+                    utc_day(at)
+                )
+            });
+        }
+        (CheckState::Applied, Some(CheckNote::NotArrived)) => format!(
+            "The latest test message didn't arrive in your Inbox within {CHECK_TIMEOUT_MINUTES} \
+             minutes, so this earlier check still applies."
+        ),
+        (CheckState::Expired, Some(CheckNote::RelayChanged)) => {
+            "Your organization's mail now goes through the Cumulas Signatures relay, which it \
+             didn't when this was checked."
+                .into()
+        }
+        (CheckState::NotApplied, Some(CheckNote::HeaderNotKept)) => {
+            "Microsoft 365 didn't keep the request on the test message, so Cumulas Mail can't \
+             ask for this."
+                .into()
+        }
+        (CheckState::NotApplied, Some(CheckNote::RequestIgnored)) => match action {
+            Some(action) => format!(
+                "Your organization's mail server got the request (x-cumulas-protect was still on \
+                 the test message), but no rule acted on it. The rule “Cumulas Mail: {}” may be \
+                 missing, turned off, in test mode, or new: rules can take 30 minutes or more to \
+                 start working.",
+                action.name()
+            ),
+            None => "Your organization's mail server got the request (x-cumulas-label was still \
+                     on the test message), but no auto-labeling policy applied the label. The \
+                     policy may be missing, still in simulation, not include you, not be in \
+                     effect yet (allow up to a day), or need a license your plan doesn't have."
+                .into(),
+        },
+        (CheckState::NotApplied, Some(CheckNote::RequestRemoved)) => format!(
+            "The request was removed on the way, but the message wasn't {}. Usually a rule \
+             removed it, such as “Cumulas Mail: ignore label requests from outside” when the \
+             message didn't count as from inside your organization.",
+            if action.is_some() {
+                "encrypted"
+            } else {
+                "labeled"
+            }
+        ),
+        (CheckState::NotApplied, Some(CheckNote::RelayNotInternal)) if action.is_some() => {
+            "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as \
+             outside mail when it comes back. Cumulas Mail's encryption rules then need to come \
+             before the relay's rule: Set up or check for your organization does that."
+                .into()
+        }
+        (CheckState::NotApplied, Some(CheckNote::RelayNotInternal)) => {
+            "Your mail goes through the Cumulas Signatures relay, and Microsoft 365 treats it as \
+             outside mail when it comes back, so labels can't work yet. Your IT team needs to \
+             finish setting up “Count mail coming back from the signature server as mail from \
+             inside your organization” in Cumulas Signatures."
+                .into()
+        }
+        (CheckState::NotApplied, Some(CheckNote::TooSoon)) => {
+            return Some(format!(
+                "Your organization's setup changed {} before this check. New rules can take 30 \
+                 minutes or more to start working, and auto-labeling policies up to a day. \
+                 Check again later.",
+                changed.as_deref().unwrap_or("shortly")
+            ));
+        }
+        (CheckState::NotApplied, Some(CheckNote::OtherLabel)) => {
+            let title = result
+                .other_label_id
+                .as_deref()
+                .and_then(|id| catalog.and_then(|c| c.label(id)))
+                .map_or_else(
+                    || "a different label of your organization".to_owned(),
+                    CatalogLabel::title,
+                );
+            format!(
+                "It arrived labeled {title} instead.{}",
+                if result.other_label_on_control {
+                    " Your organization puts that label on all mail."
+                } else {
+                    ""
+                }
+            )
+        }
+        (CheckState::NotApplied, _) => "The test message arrived without it, as far as Cumulas \
+                                        Mail can tell. New mail flow rules can take 30 minutes \
+                                        or more to start working, and auto-labeling policies up \
+                                        to a day."
+            .into(),
+        (CheckState::Unknown, Some(CheckNote::OtherRule)) => {
+            "Another rule in your organization already protects or labels this mail, so Cumulas \
+             Mail can't tell whether its own rule works."
+                .into()
+        }
+        (CheckState::Unknown, Some(CheckNote::HeaderKept)) => {
+            "The test message arrived encrypted, but your organization's rule didn't remove the \
+             x-cumulas-protect header, so another rule may have encrypted it. Ask your IT team \
+             to check the rule."
+                .into()
+        }
+        (CheckState::Unknown, Some(CheckNote::NotArrived)) => format!(
+            "The test message didn't arrive in your Inbox within {CHECK_TIMEOUT_MINUTES} minutes."
+        ),
+        (CheckState::Unknown, Some(CheckNote::OtherProtection)) => {
+            "The test message arrived protected another way (S/MIME, or as a link to Microsoft's \
+             encrypted message portal), so Cumulas Mail can't tell whether your organization's \
+             rule did it. Open the test message to see."
+                .into()
+        }
+        (CheckState::Unknown, Some(CheckNote::LabelUnreadable)) => {
+            "The test message arrived encrypted, but Cumulas Mail couldn't read its label. Open \
+             the test message to see which label it has."
+                .into()
+        }
+        _ => return None,
+    };
+    Some(match changed {
+        Some(ago) if matches!(result.state, CheckState::NotApplied | CheckState::Unknown) => {
+            format!(
+                "{note} Your organization's setup changed {ago} before this check; if that's \
+                 under an hour (a day for labels), check again later."
+            )
+        }
+        _ => note,
+    })
+}
+
+/// The lines of what an arrived message showed, after its first.
+fn evidence_lines(out: &mut Vec<String>, evidence: &CheckEvidence, catalog: Option<&LabelCatalog>) {
+    out.push(format!(
+        "  Message-ID: {}",
+        said(evidence.message_id.as_deref())
+    ));
+    out.push(format!(
+        "  Request still on the message when it arrived: {}",
+        yes_no(evidence.request_arrived)
+    ));
+    if let Some(stamped) = &evidence.label_stamped {
+        out.push(format!("  Arrived with x-cumulas-label-stamped: {stamped}"));
+    }
+    out.push(format!(
+        "  Relay: {} · AuthAs: {} · Direction: {}",
+        yes_no(evidence.relay_stamped),
+        said(evidence.auth_as.as_deref()),
+        said(evidence.directionality.as_deref())
+    ));
+    out.push(format!(
+        "  Arrived: {} · Content-Class: {} · Message class: {} · message.rpmsg: {}",
+        kind_words(evidence.detected),
+        said(evidence.content_class.as_deref()),
+        said(evidence.message_class.as_deref()),
+        yes_no(evidence.rpmsg_attachment)
+    ));
+    let labels: Vec<String> = evidence
+        .own_labels
+        .iter()
+        .map(|l| {
+            format!(
+                "{}, {}",
+                label_words(catalog, &l.id),
+                if l.enabled { "enabled" } else { "not enabled" }
+            )
+        })
+        .collect();
+    out.push(format!(
+        "  Labels on it: {} · other organizations' labels: {}",
+        if labels.is_empty() {
+            "none".into()
+        } else {
+            labels.join("; ")
+        },
+        evidence.foreign_labels
+    ));
+}
+
+/// "Copy details for IT": what an account's last checks found, for its
+/// organization's IT team. Never a message's text or subject; the test
+/// messages' Message-IDs and what Microsoft 365 said of them. Every value in
+/// a command is quoted with [`ps_quote`].
+pub fn check_details(input: &CheckDetailsInput<'_>) -> String {
+    let catalog = input.catalog;
+    // An address is far shorter than a Message-ID's limit.
+    let email = clean_value(input.email, MESSAGE_ID_CHARS).unwrap_or_default();
+    let mut out = vec![
+        format!(
+            "Cumulas Mail {}: setup check details for {email}",
+            input.version
+        ),
+        format!(
+            "Organization (tenant): {}",
+            clean_value(input.tenant, EVIDENCE_VALUE_CHARS).unwrap_or_default()
+        ),
+        "These details include no message text. They include the test messages' Message-IDs \
+         and what Microsoft 365 said about how it handled them."
+            .into(),
+        String::new(),
+    ];
+    let mut message_ids: Vec<&str> = Vec::new();
+    let control = input.control.and_then(|c| c.outcome.evidence.as_ref());
+    match input.control {
+        Some(last) => {
+            let found = control
+                .and_then(|e| e.found_after_secs)
+                .map(|secs| format!(", found within {secs} s"))
+                .unwrap_or_default();
+            out.push(format!(
+                "Control message (no request), sent {}{found}",
+                utc(last.sent_at)
+            ));
+            match control {
+                Some(evidence) => {
+                    out.push(format!(
+                        "  Message-ID: {}",
+                        said(evidence.message_id.as_deref())
+                    ));
+                    out.push(format!(
+                        "  Went through the Cumulas Signatures relay (X-Signature-Stamped): {}",
+                        yes_no(evidence.relay_stamped)
+                    ));
+                    out.push(format!(
+                        "  Counted as from inside your organization \
+                         (X-MS-Exchange-Organization-AuthAs): {}",
+                        said(evidence.auth_as.as_deref())
+                    ));
+                    out.push(format!(
+                        "  Direction (X-MS-Exchange-Organization-MessageDirectionality): {}",
+                        said(evidence.directionality.as_deref())
+                    ));
+                    out.push(format!(
+                        "  Arrived: {}; label of your organization: {}",
+                        kind_words(evidence.detected),
+                        first_own_label(evidence)
+                            .map_or_else(|| "none".into(), |id| label_words(catalog, id))
+                    ));
+                    out.push(format!(
+                        "  Headers read from: {}",
+                        match evidence.headers_from {
+                            HeadersFrom::Transport => "the message's transport headers",
+                            HeadersFrom::Graph => "Microsoft Graph",
+                            HeadersFrom::Unread => "not read",
+                        }
+                    ));
+                }
+                None => out.push("  Arrived: not kept".into()),
+            }
+        }
+        None => out.push("Control message (no request): not found".into()),
+    }
+    out.push(format!(
+        "Path: {}",
+        match control {
+            None => "not known",
+            Some(e) if !e.relay_stamped => "no relay",
+            Some(e) if relay_not_internal(e) => "relay present, return not internal",
+            Some(e) if e.auth_as.is_some() => "relay present, return internal",
+            Some(_) => "relay present, return not known",
+        }
+    ));
+    if let Some(id) = control.and_then(|e| e.message_id.as_deref()) {
+        message_ids.push(id);
+    }
+    out.push(String::new());
+
+    for item in &input.items {
+        let label = matches!(item.item, CheckItem::Label { .. });
+        out.push(format!(
+            "{}: {}",
+            item.title,
+            check_row_words(&item.result, label)
+        ));
+        if let Some(note) = check_note_words(&item.result, &item.item, catalog) {
+            out.push(format!("  Note: {note}"));
+        }
+        let record = &item.record;
+        // A check on its way: what the one before it kept isn't its.
+        if item.result.state == CheckState::Waiting
+            || (record.at.is_none() && record.sent_at.is_none())
+        {
+            continue;
+        }
+        let sent = record.sent_at.map_or_else(|| "not said".into(), utc);
+        out.push(match &item.item {
+            CheckItem::Action { action } => format!(
+                "  Sent: {PROTECT_HEADER}: {}, {sent}",
+                action.header_value()
+            ),
+            CheckItem::Label { label_id } => format!("  Sent: {LABEL_HEADER}: {label_id}, {sent}"),
+        });
+        match &record.evidence {
+            Some(evidence) => {
+                evidence_lines(&mut out, evidence, catalog);
+                if let Some(id) = evidence.message_id.as_deref() {
+                    message_ids.push(id);
+                }
+            }
+            None => out.push("  Arrived: not kept".into()),
+        }
+    }
+
+    let changed = |at: Option<DateTime<Utc>>| at.map_or_else(|| "never".into(), utc);
+    out.push(String::new());
+    out.push(format!(
+        "Setup changed on this computer: rules {}, auto-labeling policies {}",
+        changed(input.settle.rules_changed_at),
+        changed(input.settle.policies_changed_at)
+    ));
+    out.push(String::new());
+    out.push("For your IT team, in Exchange Online PowerShell:".into());
+    let address = ps_quote(&email);
+    out.push(format!(
+        "  Get-MessageTraceV2 -SenderAddress {address} -RecipientAddress {address} -Subject {} \
+         -SubjectFilterType StartsWith -StartDate (Get-Date).AddDays(-2) -EndDate (Get-Date)",
+        ps_quote(CHECK_SUBJECT_PREFIX)
+    ));
+    let mut listed: Vec<&str> = Vec::new();
+    for id in message_ids {
+        if listed.contains(&id) {
+            continue;
+        }
+        listed.push(id);
+        out.push(format!(
+            "  Get-MailDetailTransportRuleReport -MessageId {} -EventType \
+             TransportRuleHits,TransportRuleActionHits -StartDate (Get-Date).AddDays(-2) \
+             -EndDate (Get-Date)",
+            ps_quote(id)
+        ));
+    }
+    out.push(format!("Guide: {CHECK_GUIDE}"));
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
 }
 
 // --- Diagnostics -------------------------------------------------------------
@@ -731,13 +1388,7 @@ pub fn diagnostics(input: &DiagnosticsInput<'_>) -> String {
     let protection = input.protection;
     out.push(format!(
         "Detected: {}",
-        match protection.map(|p| p.kind) {
-            Some(ProtectionKind::RightsManaged) => "Microsoft Purview encryption",
-            Some(ProtectionKind::SmimeEncrypted) => "S/MIME encryption",
-            Some(ProtectionKind::SmimeSigned) => "S/MIME signature",
-            Some(ProtectionKind::PortalLink) => "encrypted message portal link",
-            None => "nothing",
-        }
+        kind_words(protection.map(|p| p.kind))
     ));
     out.push(format!(
         "Content hidden in a container: {}",
@@ -881,6 +1532,44 @@ pub fn diagnostics(input: &DiagnosticsInput<'_>) -> String {
     };
     out.push(format!(
         "Requested by Cumulas Mail: {action} · label: {label}"
+    ));
+    let said = |value: Option<&String>| value.map_or_else(|| "not said".into(), |v| shown_value(v));
+    out.push(format!(
+        "Relay (X-Signature-Stamped): {}",
+        yes_no(signals.relay_stamped)
+    ));
+    out.push(format!(
+        "Counted as internal (AuthAs): {}",
+        said(signals.auth_as.as_ref())
+    ));
+    out.push(format!(
+        "Direction: {}",
+        said(signals.directionality.as_ref())
+    ));
+    let mut sources: Vec<&str> = Vec::new();
+    for source in [
+        signals.requested_action_source.as_deref(),
+        signals.requested_label_source.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let source = if source == "property" {
+            "the message property"
+        } else {
+            "the header"
+        };
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    out.push(format!(
+        "Request read from: {}",
+        match sources.as_slice() {
+            [] if unread => "not read".into(),
+            [] => "none".into(),
+            sources => sources.join(" and "),
+        }
     ));
     let mut text = out.join("\n");
     text.push('\n');

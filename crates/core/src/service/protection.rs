@@ -23,17 +23,21 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
     Account, AccountFeature, AccountKind, AccountSettings, CatalogLabel, CheckItem, CheckNote,
     CheckResult, CheckState, DataKind, EmailAddress, EntityKind, FolderRole, LabelCatalog,
-    LabelOption, LabelPolicy, OutgoingMessage, ProtectAction, ProtectionKind, ProtectionSetup,
-    local_id,
+    LabelOption, LabelPolicy, OrganizationSignatureState, OutgoingMessage, ProtectAction,
+    ProtectionKind, ProtectionSetup, local_id,
 };
 use crate::protection::{
-    CHECK_TIMEOUT_MINUTES, CHECK_VALID_DAYS, MAX_CHECK_ITEMS, PROTECTED_SENDING_UNSUPPORTED,
-    detect, has_reason, is_blank, own_label,
+    CHECK_SUBJECT_PREFIX, CHECK_TIMEOUT_MINUTES, CHECK_VALID_DAYS, CheckDetailsInput,
+    CheckDetailsItem, CheckEvidence, MAX_CHECK_ITEMS, POLICIES_SETTLE,
+    PROTECTED_SENDING_UNSUPPORTED, RULES_SETTLE, Settle, check_details, check_evidence,
+    first_own_label, has_reason, relay_not_internal,
 };
 use crate::providers::{HeaderRequest, LabelsProvider, MessageContent, MessageLocator};
 use crate::signatures::config::is_guid;
 use crate::signatures::is_organization_tenant;
-use crate::store::{CheckRecord, CheckRun, ControlOutcome, RunItem, StoredCatalog, StoredChecks};
+use crate::store::{
+    CheckRecord, CheckRun, ControlOutcome, LastControl, RunItem, StoredCatalog, StoredChecks,
+};
 
 /// How long a listing of the labels is used before they're listed again.
 const LABELS_MAX_AGE: Duration = Duration::hours(6);
@@ -52,7 +56,7 @@ const TOKEN_LENGTH: usize = 8;
 
 /// A test message's subject; the token finds it in the Inbox.
 fn check_subject(token: &str) -> String {
-    format!("Cumulas Mail setup check [{token}]")
+    format!("{CHECK_SUBJECT_PREFIX} [{token}]")
 }
 
 fn new_token() -> String {
@@ -98,24 +102,42 @@ fn is_expired(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     at.is_some_and(|at| now - at > Duration::days(CHECK_VALID_DAYS))
 }
 
-/// What a check decided, as of `now`: an old pass is expired.
-fn decided_state(record: &CheckRecord, now: DateTime<Utc>) -> CheckState {
-    if record.state == CheckState::Applied && is_expired(record.at, now) {
+/// Whether a pass was made stale by the Cumulas Signatures relay: the
+/// account's mail goes through it now (`relay_now`), and the pass's test
+/// message didn't. Mail that goes through the relay may come back as
+/// outside mail, which Cumulas Mail's rules don't act on, so the pass says
+/// nothing of it. Passes from before 0.5.0 kept no evidence and never
+/// drift; a relay that went away leaves the rules acting on the first
+/// pass, which works.
+pub(super) fn relay_drift(record: &CheckRecord, relay_now: bool) -> bool {
+    record.state == CheckState::Applied
+        && relay_now
+        && record.evidence.as_ref().is_some_and(|e| !e.relay_stamped)
+}
+
+/// What a check decided, as of `now`: an old pass is expired, and so is one
+/// the relay made stale (see [`relay_drift`]).
+fn decided_state(record: &CheckRecord, now: DateTime<Utc>, relay_now: bool) -> CheckState {
+    if record.state == CheckState::Applied
+        && (is_expired(record.at, now) || relay_drift(record, relay_now))
+    {
         CheckState::Expired
     } else {
         record.state
     }
 }
 
-/// A check as the UI shows it: an old pass shows as expired; an item whose
-/// test message is on its way (`waiting`) shows as waiting, while the pass
+/// A check as the UI shows it: an old pass shows as expired, and one the
+/// relay made stale too, with the note `RelayChanged`; an item whose test
+/// message is on its way (`waiting`) shows as waiting, while the pass
 /// before it, if any, still counts (`passed_at`).
 fn check_result(
     record: &CheckRecord,
     waiting: Option<&RunItem>,
     now: DateTime<Utc>,
+    relay_now: bool,
 ) -> CheckResult {
-    let passed_at = offered(record, now).ok().and(record.at);
+    let passed_at = offered(record, now, relay_now).ok().and(record.at);
     match waiting {
         Some(waiting) => CheckResult {
             state: CheckState::Waiting,
@@ -124,9 +146,13 @@ fn check_result(
             ..CheckResult::default()
         },
         None => CheckResult {
-            state: decided_state(record, now),
+            state: decided_state(record, now, relay_now),
             at: record.at,
-            note: record.note,
+            note: if relay_drift(record, relay_now) {
+                Some(CheckNote::RelayChanged)
+            } else {
+                record.note
+            },
             test_message: record.test_message_id.is_some(),
             passed_at,
             other_label_id: record.other_label_id.clone(),
@@ -138,12 +164,14 @@ fn check_result(
 
 /// How the last decided check stands now: `Ok` when its option may be
 /// offered, else the state that keeps it from it (`Expired` for an old
-/// pass). A check on its way changes nothing until it's decided.
+/// pass, or one the relay made stale). A check on its way changes nothing
+/// until it's decided.
 pub(super) fn offered(
     record: &CheckRecord,
     now: DateTime<Utc>,
+    relay_now: bool,
 ) -> std::result::Result<(), CheckState> {
-    match decided_state(record, now) {
+    match decided_state(record, now, relay_now) {
         CheckState::Applied => Ok(()),
         other => Err(other),
     }
@@ -178,60 +206,117 @@ fn header_request(tenant: &str, item: &CheckItem, catalog: Option<&LabelCatalog>
     }
 }
 
-/// What a test message that arrived shows of its item's option.
+/// What a test message that arrived showed of its item's option, with what
+/// the notes need.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Judged {
+    state: CheckState,
+    note: Option<CheckNote>,
+    /// With `OtherLabel`: the organization's label that arrived instead.
+    other_label_id: Option<String>,
+    /// With `OtherLabel`: the control arrived with that label too.
+    other_label_on_control: bool,
+    /// The setup change recent enough to matter (see [`recent_change`]),
+    /// whatever was decided, so that the note can add the wait.
+    changed_at: Option<DateTime<Utc>>,
+}
+
+/// The change this computer made to the organization's setup recent enough
+/// to explain a test message sent at `sent_at` arriving without its option:
+/// mail flow rules can take an hour to start working, auto-labeling
+/// policies a day. A change after the message was sent (and before it was
+/// judged, `now`) counts too: it may have arrived in between.
+fn recent_change(
+    item: &CheckItem,
+    settle: &Settle,
+    sent_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let (at, window) = match item {
+        CheckItem::Action { .. } => (settle.rules_changed_at, RULES_SETTLE),
+        CheckItem::Label { .. } => (settle.policies_changed_at, POLICIES_SETTLE),
+    };
+    at.filter(|at| *at <= now && sent_at - *at < window)
+}
+
+/// What a test message that arrived shows of its item's option, from what
+/// it showed (`evidence`) against the control's. First match wins: what
+/// arrived decides; then, for what arrived without it, the likeliest
+/// reason: the relay's return as outside mail (whether rules scoped by
+/// address act on it is unverified, so it's the stronger explanation), a
+/// setup change too recent, then whether the request was still on it.
 fn judge(
     item: &CheckItem,
-    content: &MessageContent,
+    evidence: &CheckEvidence,
     control: &ControlOutcome,
-    tenant: &str,
-) -> (CheckState, Option<CheckNote>) {
+    settle: &Settle,
+    sent_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Judged {
+    let changed_at = recent_change(item, settle, sent_at, now);
+    let decided = |state: CheckState, note: Option<CheckNote>| Judged {
+        state,
+        note,
+        other_label_id: None,
+        other_label_on_control: false,
+        changed_at,
+    };
+    let without_it = || {
+        let relay = relay_not_internal(evidence)
+            || control.evidence.as_ref().is_some_and(relay_not_internal);
+        let note = if relay {
+            CheckNote::RelayNotInternal
+        } else if changed_at.is_some() {
+            CheckNote::TooSoon
+        } else if evidence.request_arrived {
+            CheckNote::RequestIgnored
+        } else {
+            CheckNote::RequestRemoved
+        };
+        decided(CheckState::NotApplied, Some(note))
+    };
     match item {
-        CheckItem::Action { .. } => {
-            let protection = arrived_protection(content);
-            if protection != Some(ProtectionKind::RightsManaged) {
-                (CheckState::NotApplied, None)
-            } else if control.protected {
-                (CheckState::Unknown, Some(CheckNote::OtherRule))
-            } else if content.signals.requested_action.is_some() {
-                // The rule documented for it removes the header; one that
-                // encrypted the message for another reason doesn't.
-                (CheckState::Unknown, Some(CheckNote::HeaderKept))
-            } else {
-                (CheckState::Applied, None)
+        CheckItem::Action { .. } => match evidence.detected {
+            Some(ProtectionKind::RightsManaged) if control.protected => {
+                decided(CheckState::Unknown, Some(CheckNote::OtherRule))
             }
-        }
+            // The rule documented for it removes the header; one that
+            // encrypted the message for another reason doesn't.
+            Some(ProtectionKind::RightsManaged) if evidence.request_arrived => {
+                decided(CheckState::Unknown, Some(CheckNote::HeaderKept))
+            }
+            Some(ProtectionKind::RightsManaged) => decided(CheckState::Applied, None),
+            Some(_) => decided(CheckState::Unknown, Some(CheckNote::OtherProtection)),
+            None => without_it(),
+        },
         CheckItem::Label { label_id } => {
-            let arrived = arrived_label(content, tenant);
-            if arrived.as_deref() != Some(label_id.as_str()) {
-                (CheckState::NotApplied, None)
-            } else if control.label_id.as_deref() == Some(label_id.as_str()) {
-                (CheckState::Unknown, Some(CheckNote::OtherRule))
-            } else {
-                (CheckState::Applied, None)
+            let on_control = |id: &str| {
+                control
+                    .label_id
+                    .as_deref()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(id))
+            };
+            match first_own_label(evidence) {
+                Some(own) if own.eq_ignore_ascii_case(label_id) && on_control(own) => {
+                    decided(CheckState::Unknown, Some(CheckNote::OtherRule))
+                }
+                Some(own) if own.eq_ignore_ascii_case(label_id) => {
+                    decided(CheckState::Applied, None)
+                }
+                Some(own) => Judged {
+                    other_label_id: Some(own.to_owned()),
+                    other_label_on_control: on_control(own),
+                    ..decided(CheckState::NotApplied, Some(CheckNote::OtherLabel))
+                },
+                // Purview's encryption hides the label from the headers
+                // Cumulas Mail can read.
+                None if evidence.detected == Some(ProtectionKind::RightsManaged) => {
+                    decided(CheckState::Unknown, Some(CheckNote::LabelUnreadable))
+                }
+                None => without_it(),
             }
         }
     }
-}
-
-fn arrived_protection(content: &MessageContent) -> Option<ProtectionKind> {
-    let blank = is_blank(content.body_html.as_deref(), content.body_text.as_deref());
-    detect(
-        &content.signals,
-        &content.attachments,
-        content.body_html.as_deref(),
-        blank,
-        false,
-    )
-    .map(|p| p.kind)
-}
-
-fn arrived_label(content: &MessageContent, tenant: &str) -> Option<String> {
-    content
-        .signals
-        .msip_labels
-        .as_deref()
-        .and_then(|raw| own_label(raw, tenant))
-        .map(|l| l.id)
 }
 
 impl CoreService {
@@ -271,9 +356,16 @@ impl CoreService {
         }
         let now = Utc::now();
         let checks = self.store.protection_checks(account_id)?;
+        let relay_now = self.relay_now(account_id);
         setup.supported = true;
-        let result =
-            |item: &CheckItem| check_result(&checks.record(item), waiting_for(&checks, item), now);
+        let result = |item: &CheckItem| {
+            check_result(
+                &checks.record(item),
+                waiting_for(&checks, item),
+                now,
+                relay_now,
+            )
+        };
         setup.encrypt = result(&CheckItem::Action {
             action: ProtectAction::Encrypt,
         });
@@ -582,31 +674,58 @@ impl CoreService {
         let mut changed = false;
         let mut moved = false;
         let mut control = run.control.clone();
+        // Judged now: kept as the last control too.
+        let mut control_judged = false;
         if control.is_none()
             && let Some(locator) = found.get(&run.control_token)
-            && let Some(content) = self.fetch_arrived(&providers, locator).await
+            && let Some((content, transport)) = self.fetch_arrived(&providers, locator).await
         {
+            let evidence = check_evidence(
+                &content,
+                transport.as_deref(),
+                &tenant,
+                run.control_sent_at,
+                Utc::now(),
+            );
             control = Some(ControlOutcome {
-                protected: arrived_protection(&content) == Some(ProtectionKind::RightsManaged),
-                label_id: arrived_label(&content, &tenant),
-                evidence: None,
+                protected: evidence.detected == Some(ProtectionKind::RightsManaged),
+                label_id: first_own_label(&evidence).map(str::to_owned),
+                evidence: Some(evidence),
             });
             changed = true;
+            control_judged = true;
             moved |= self
                 .discard_test_message(&account, &providers, locator)
                 .await
                 .is_some();
         }
+        let settle = self.settle(&tenant);
         let mut decided: Vec<(String, CheckRecord)> = Vec::new();
         if let Some(control) = &control {
             for waiting in &run.items {
                 let Some(locator) = found.get(&waiting.token) else {
                     continue;
                 };
-                let Some(content) = self.fetch_arrived(&providers, locator).await else {
+                let Some((content, transport)) = self.fetch_arrived(&providers, locator).await
+                else {
                     continue;
                 };
-                let (state, note) = judge(&waiting.item, &content, control, &tenant);
+                let now = Utc::now();
+                let evidence = check_evidence(
+                    &content,
+                    transport.as_deref(),
+                    &tenant,
+                    waiting.sent_at,
+                    now,
+                );
+                let judged = judge(
+                    &waiting.item,
+                    &evidence,
+                    control,
+                    &settle,
+                    waiting.sent_at,
+                    now,
+                );
                 let new_id = self
                     .discard_test_message(&account, &providers, locator)
                     .await;
@@ -614,27 +733,33 @@ impl CoreService {
                 decided.push((
                     waiting.token.clone(),
                     CheckRecord {
-                        state,
-                        at: Some(Utc::now()),
-                        note,
+                        state: judged.state,
+                        at: Some(now),
+                        note: judged.note,
                         test_message_id: Some(
                             new_id
                                 .flatten()
                                 .unwrap_or_else(|| locator.remote_id.clone()),
                         ),
-                        ..CheckRecord::default()
+                        evidence: Some(evidence),
+                        other_label_id: judged.other_label_id,
+                        other_label_on_control: judged.other_label_on_control,
+                        changed_at: judged.changed_at,
+                        sent_at: Some(waiting.sent_at),
                     },
                 ));
             }
         }
 
         let now = Utc::now();
+        let relay_now = self.relay_now(account_id);
         let timeout = Duration::minutes(CHECK_TIMEOUT_MINUTES);
         let control_late = control.is_none() && now - run.control_sent_at > timeout;
-        let not_arrived = CheckRecord {
+        let not_arrived = |sent_at: DateTime<Utc>| CheckRecord {
             state: CheckState::Unknown,
             at: Some(now),
             note: Some(CheckNote::NotArrived),
+            sent_at: Some(sent_at),
             ..CheckRecord::default()
         };
         let updated = self.store.update_protection_checks(account_id, |checks| {
@@ -649,8 +774,8 @@ impl CoreService {
             let mut changed = changed;
             current.control = control.clone();
             // Each item that's done: what was decided of it, or `None` when
-            // its message never came.
-            let mut records: Vec<(CheckItem, Option<CheckRecord>)> = Vec::new();
+            // its message (sent then) never came.
+            let mut records: Vec<(CheckItem, DateTime<Utc>, Option<CheckRecord>)> = Vec::new();
             current.items.retain(|waiting| {
                 let decided = decided.iter().find(|(token, _)| *token == waiting.token);
                 let record = match decided {
@@ -658,25 +783,31 @@ impl CoreService {
                     None if control_late || now - waiting.sent_at > timeout => None,
                     None => return true,
                 };
-                records.push((waiting.item.clone(), record));
+                records.push((waiting.item.clone(), waiting.sent_at, record));
                 false
             });
             changed |= !records.is_empty();
-            for (item, record) in records {
+            for (item, sent_at, record) in records {
                 let record = record.unwrap_or_else(|| {
                     let previous = checks.record(&item);
                     // Nothing was learned of it: a pass that still counts
                     // stays, saying this test didn't arrive.
-                    if offered(&previous, now).is_ok() {
+                    if offered(&previous, now, relay_now).is_ok() {
                         CheckRecord {
                             note: Some(CheckNote::NotArrived),
                             ..previous
                         }
                     } else {
-                        not_arrived.clone()
+                        not_arrived(sent_at)
                     }
                 });
                 *checks.record_mut(&item) = record;
+            }
+            if control_judged && let Some(outcome) = &control {
+                checks.last_control = Some(LastControl {
+                    sent_at: run.control_sent_at,
+                    outcome: outcome.clone(),
+                });
             }
             if checks.run.as_ref().is_some_and(|run| run.items.is_empty()) {
                 checks.run = None;
@@ -693,25 +824,97 @@ impl CoreService {
         self.protection_setup(account_id)
     }
 
-    /// A test message as it arrived; `None` when it can't be judged yet:
-    /// not fetched, or fetched without its named properties, whose absence
-    /// could make a protected arrival look ordinary.
+    /// A test message as it arrived, and its transport headers when
+    /// Microsoft 365 gives them; `None` when it can't be judged yet: not
+    /// fetched, or fetched without its named properties, whose absence could
+    /// make a protected arrival look ordinary. The transport headers are
+    /// only a better source: without them, the headers Graph parsed are
+    /// used.
     async fn fetch_arrived(
         &self,
         providers: &ProviderSet,
         locator: &MessageLocator,
-    ) -> Option<MessageContent> {
-        match providers.mail.fetch_message(locator).await {
+    ) -> Option<(MessageContent, Option<String>)> {
+        let content = match providers.mail.fetch_message(locator).await {
             Ok(content) if content.signals.properties_unavailable => {
                 tracing::debug!("a setup check's message came without its properties");
-                None
+                return None;
             }
-            Ok(content) => Some(content),
+            Ok(content) => content,
             Err(e) => {
                 tracing::info!("reading a setup check's message failed: {e}");
+                return None;
+            }
+        };
+        let transport = match providers.mail.transport_headers(locator).await {
+            Ok(transport) => transport,
+            Err(e) => {
+                tracing::info!("reading a setup check's message's transport headers failed: {e}");
                 None
             }
+        };
+        Some((content, transport))
+    }
+
+    /// Whether the account's organization adds its signature on send (the
+    /// Cumulas Signatures relay), as it last said: then the account's mail
+    /// goes through the relay.
+    pub(super) fn relay_now(&self, account_id: &str) -> bool {
+        self.store
+            .account_signatures(account_id)
+            .is_ok_and(|s| s.organization.state == OrganizationSignatureState::AddedOnSend)
+    }
+
+    /// "Copy details for IT" (see [`check_details`]): what the account's
+    /// last checks found. Errors: `NotFound`, `Unsupported` (not a work or
+    /// school account).
+    pub(super) fn check_details_text(&self, account_id: &str) -> Result<String> {
+        let account = self.store.get_account(account_id)?;
+        let Some(tenant) = work_tenant(&account) else {
+            return Err(Error::unsupported(PROTECTED_SENDING_UNSUPPORTED));
+        };
+        let now = Utc::now();
+        let relay_now = self.relay_now(account_id);
+        let checks = self.store.protection_checks(account_id)?;
+        let catalog = self.label_list(&account)?;
+        let settle = self.settle(tenant);
+        let detail = |title: String, item: CheckItem| {
+            let record = checks.record(&item);
+            CheckDetailsItem {
+                title,
+                result: check_result(&record, waiting_for(&checks, &item), now, relay_now),
+                item,
+                record,
+            }
+        };
+        let mut items: Vec<CheckDetailsItem> =
+            [ProtectAction::Encrypt, ProtectAction::DoNotForward]
+                .into_iter()
+                .map(|action| detail(action.name().to_owned(), CheckItem::Action { action }))
+                .collect();
+        // Labels only once checked: an organization may list many.
+        for label in catalog.iter().flat_map(|c| &c.labels) {
+            let item = CheckItem::Label {
+                label_id: label.id.clone(),
+            };
+            if checks.record(&item).state != CheckState::NotChecked
+                || waiting_for(&checks, &item).is_some()
+            {
+                items.push(detail(
+                    format!("Label {} ({})", label.title(), label.id),
+                    item,
+                ));
+            }
         }
+        Ok(check_details(&CheckDetailsInput {
+            email: &account.email,
+            tenant,
+            version: env!("CARGO_PKG_VERSION"),
+            control: checks.last_control.as_ref(),
+            items,
+            catalog: catalog.as_ref(),
+            settle: &settle,
+        }))
     }
 
     /// Moves a test message that was read to Deleted Items, here too when
