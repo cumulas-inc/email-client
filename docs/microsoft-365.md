@@ -284,7 +284,7 @@ another setup registration needs the same steps:
 6. Open its approval link, once, in a tenant you administer:
 
    ```text
-   https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=b4f17c55-b9f6-4a84-958f-afe3842da327&scope=openid+profile+offline_access+https%3A%2F%2Foutlook.office365.com%2FExchange.Manage&redirect_uri=http%3A%2F%2Flocalhost
+   https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=b4f17c55-b9f6-4a84-958f-afe3842da327&scope=openid+profile+offline_access+https%3A%2F%2Foutlook.office365.com%2F.default&redirect_uri=http%3A%2F%2Flocalhost
    ```
 
    Microsoft must end at `http://localhost` (a page that can't connect),

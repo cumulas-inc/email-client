@@ -66,7 +66,7 @@ const ORG = "acme.example";
 const ADMIN: OrgSetupAdmin = { username: "sam.rivera@acme.example", displayName: "Sam Rivera" };
 const ADMIN_OID = "4d1f6b2a-0c3e-4f5a-9b8c-7d6e5f4a3b21";
 const SETUP_CLIENT_ID = "b4f17c55-b9f6-4a84-958f-afe3842da327";
-const SETUP_LINK = `https://login.microsoftonline.com/demo-tenant/v2.0/adminconsent?client_id=${SETUP_CLIENT_ID}&scope=openid+profile+offline_access+https%3A%2F%2Foutlook.office365.com%2FExchange.Manage&redirect_uri=http%3A%2F%2Flocalhost`;
+const SETUP_LINK = `https://login.microsoftonline.com/demo-tenant/v2.0/adminconsent?client_id=${SETUP_CLIENT_ID}&scope=openid+profile+offline_access+https%3A%2F%2Foutlook.office365.com%2F.default&redirect_uri=http%3A%2F%2Flocalhost`;
 const SIGNATURES_MANAGE = "https://signature.cumulas.co/manage";
 const { general: GENERAL, allEmployees: ALL_EMPLOYEES } = DEMO_LABEL_IDS;
 /** A label Purview lists that isn't in the work account's own list. */

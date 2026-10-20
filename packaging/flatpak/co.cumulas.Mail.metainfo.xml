@@ -97,6 +97,14 @@
   </keywords>
 
   <releases>
+    <release version="0.5.1" date="2026-10-20">
+      <description>
+        <p>Administrators can now sign in to Set up or check for your organization.</p>
+        <ul>
+          <li>Microsoft refused the administrator's sign-in with error AADSTS650053; Cumulas Mail now asks for the Exchange permission the way Microsoft expects</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-10-19">
       <description>
         <p>Administrators of Microsoft 365 organizations can now set up encryption and sensitivity labels from Cumulas Mail, and the checks in Settings → Accounts say why an option didn't work.</p>

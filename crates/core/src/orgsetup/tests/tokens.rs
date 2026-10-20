@@ -72,7 +72,7 @@ async fn exchange_tokens_refresh_with_the_in_memory_refresh_token() {
     assert_eq!(forms[0]["refresh_token"], "refresh-0");
     assert_eq!(
         forms[0]["scope"],
-        "https://outlook.office365.com/Exchange.Manage offline_access"
+        "https://outlook.office365.com/.default offline_access"
     );
     // Microsoft rotated it: the new one is kept, in memory.
     assert_eq!(forms[1]["refresh_token"], "refresh-rotated");

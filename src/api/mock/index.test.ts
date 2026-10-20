@@ -1539,7 +1539,7 @@ describe("the demo's organization setup", () => {
   const BOARD = "c3d4e5f6-0718-4a29-b3c4-d5e6f7a8b9c0";
   /** The setup app's approval link for the demo's organization. */
   const SETUP_LINK =
-    "https://login.microsoftonline.com/demo-tenant/v2.0/adminconsent?client_id=b4f17c55-b9f6-4a84-958f-afe3842da327&scope=openid+profile+offline_access+https%3A%2F%2Foutlook.office365.com%2FExchange.Manage&redirect_uri=http%3A%2F%2Flocalhost";
+    "https://login.microsoftonline.com/demo-tenant/v2.0/adminconsent?client_id=b4f17c55-b9f6-4a84-958f-afe3842da327&scope=openid+profile+offline_access+https%3A%2F%2Foutlook.office365.com%2F.default&redirect_uri=http%3A%2F%2Flocalhost";
   const MARKER =
     "'Managed by Cumulas Mail (cumulas-mail:v1). Check or repair it from Cumulas Mail: Settings > Accounts > Sensitivity labels and encryption > Set up or check for your organization.'";
   const WORK_ONLY = {
@@ -1726,7 +1726,7 @@ describe("the demo's organization setup", () => {
       "\nTenant: demo-tenant\nSetup app: Cumulas Mail - Admin Setup (b4f17c55-b9f6-4a84-958f-afe3842da327)\nSigned in as: sam.rivera@acme.example\n",
     );
     expect(details).toMatch(
-      /\d\d:\d\d:\d\d UTC {2}Sign-in: login\.microsoftonline\.com\/demo-tenant, scope "openid profile offline_access https:\/\/outlook\.office365\.com\/Exchange\.Manage"\n {2}code redeemed · /,
+      /\d\d:\d\d:\d\d UTC {2}Sign-in: login\.microsoftonline\.com\/demo-tenant, scope "openid profile offline_access https:\/\/outlook\.office365\.com\/\.default"\n {2}code redeemed · /,
     );
     expect(details).toContain(
       "  Get-TransportRule (ResultSize) on outlook.office365.com · anchor UPN · 200",
