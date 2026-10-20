@@ -48,6 +48,12 @@ const BUILD_SETUP_CLIENT_ID: Option<&str> = option_env!("CUMULAS_MS_SETUP_CLIENT
 /// Exchange Online, the resource setup's mail flow rule calls go to.
 pub const EXCHANGE_RESOURCE: &str = "https://outlook.office365.com";
 pub const EXCHANGE_MANAGE_SCOPE: &str = "https://outlook.office365.com/Exchange.Manage";
+/// What the sign-in, its redemption, refresh and the approval link ask
+/// Exchange Online for: the permissions the registration lists, so
+/// Exchange.Manage. Microsoft refuses Exchange.Manage asked for by name
+/// (AADSTS650053, naming Microsoft Graph as the resource), as it did for the
+/// first real sign-in; Microsoft's own module asks for this one.
+pub const EXCHANGE_DEFAULT_SCOPE: &str = "https://outlook.office365.com/.default";
 /// Where the regional Security & Compliance host is found.
 pub const COMPLIANCE_DISCOVERY_HOST: &str = "https://ps.compliance.protection.outlook.com";
 /// Tried in order for the Security & Compliance token.
@@ -55,14 +61,24 @@ pub const COMPLIANCE_SCOPES: [&str; 2] = [
     "https://ps.compliance.protection.outlook.com/.default",
     "https://ps.compliance.protection.outlook.com/Exchange.Manage",
 ];
-/// What the setup sign-in asks consent for, in this order. String literals,
-/// so check-admin-consent.sh can read them; a test asserts the last equals
-/// [`EXCHANGE_MANAGE_SCOPE`].
+/// The permissions the setup registration lists and an approval grants, in
+/// this order; the IT page's setup script grants exactly these. String
+/// literals, so check-admin-consent.sh can read them; a test asserts the last
+/// equals [`EXCHANGE_MANAGE_SCOPE`]. The sign-in asks for them as
+/// [`SETUP_REQUEST_SCOPES`].
 pub const SETUP_CONSENT_SCOPES: &[&str] = &[
     "openid",
     "profile",
     "offline_access",
     "https://outlook.office365.com/Exchange.Manage",
+];
+/// What the setup sign-in and its approval link ask for: the OpenID Connect
+/// scopes, and Exchange Online's [`EXCHANGE_DEFAULT_SCOPE`].
+pub const SETUP_REQUEST_SCOPES: &[&str] = &[
+    "openid",
+    "profile",
+    "offline_access",
+    "https://outlook.office365.com/.default",
 ];
 /// Where the approval link and the sign-in return: the registration's only
 /// redirect URI. Nothing listens there once an administrator has approved,
@@ -159,7 +175,7 @@ fn apart_from_mail(setup: &str, mail_client_id: Option<&str>) -> Option<String> 
 /// The setup app's approval link for `tenant` (a tenant ID; `organizations`
 /// without one):
 /// `https://login.microsoftonline.com/<tenant>/v2.0/adminconsent?client_id=…&scope=…&redirect_uri=http://localhost`,
-/// asking for [`SETUP_CONSENT_SCOPES`], the OpenID Connect ones unqualified.
+/// asking for [`SETUP_REQUEST_SCOPES`], the OpenID Connect ones unqualified.
 pub fn setup_admin_consent_url(client_id: &str, tenant: Option<&str>) -> String {
     let plausible = |t: &str| {
         !t.is_empty()
@@ -172,7 +188,7 @@ pub fn setup_admin_consent_url(client_id: &str, tenant: Option<&str>) -> String 
         .unwrap_or("organizations");
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", client_id)
-        .append_pair("scope", &SETUP_CONSENT_SCOPES.join(" "))
+        .append_pair("scope", &SETUP_REQUEST_SCOPES.join(" "))
         .append_pair("redirect_uri", SETUP_REDIRECT_URI)
         .finish();
     format!("{DEFAULT_AUTHORITY_HOST}/{tenant}/v2.0/adminconsent?{query}")
@@ -245,7 +261,7 @@ pub struct AdminSignIn {
 
 /// What the setup sign-in asks for and redeems its code for.
 fn setup_scope() -> String {
-    SETUP_CONSENT_SCOPES.join(" ")
+    SETUP_REQUEST_SCOPES.join(" ")
 }
 
 /// Opens the browser at Microsoft's sign-in for the setup app and waits (up
@@ -559,7 +575,7 @@ pub enum Resource {
 
 /// What Exchange Online's tokens are asked for when refreshed.
 fn exchange_refresh_scope() -> String {
-    format!("{EXCHANGE_MANAGE_SCOPE} offline_access")
+    format!("{EXCHANGE_DEFAULT_SCOPE} offline_access")
 }
 
 /// AADSTS codes meaning a Security & Compliance scope form isn't the one
@@ -742,7 +758,7 @@ mod tests {
     use super::*;
 
     /// The approval link the IT page publishes for the setup app.
-    const PUBLISHED_SETUP_LINK: &str = "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=b4f17c55-b9f6-4a84-958f-afe3842da327&scope=openid+profile+offline_access+https%3A%2F%2Foutlook.office365.com%2FExchange.Manage&redirect_uri=http%3A%2F%2Flocalhost";
+    const PUBLISHED_SETUP_LINK: &str = "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=b4f17c55-b9f6-4a84-958f-afe3842da327&scope=openid+profile+offline_access+https%3A%2F%2Foutlook.office365.com%2F.default&redirect_uri=http%3A%2F%2Flocalhost";
     const ID: &str = "99999999-8888-7777-6666-555555555555";
 
     #[test]
@@ -760,6 +776,23 @@ mod tests {
         assert_eq!(
             EXCHANGE_MANAGE_SCOPE,
             format!("{EXCHANGE_RESOURCE}/Exchange.Manage")
+        );
+        // What's asked for: the same scopes, Exchange Online's through .default.
+        assert_eq!(
+            EXCHANGE_DEFAULT_SCOPE,
+            format!("{EXCHANGE_RESOURCE}/.default")
+        );
+        assert_eq!(SETUP_REQUEST_SCOPES.len(), SETUP_CONSENT_SCOPES.len());
+        assert_eq!(SETUP_REQUEST_SCOPES[..3], SETUP_CONSENT_SCOPES[..3]);
+        assert_eq!(
+            SETUP_REQUEST_SCOPES.last().copied(),
+            Some(EXCHANGE_DEFAULT_SCOPE)
+        );
+        // Never Exchange.Manage by name: Microsoft refuses it (AADSTS650053).
+        assert!(
+            !SETUP_REQUEST_SCOPES
+                .iter()
+                .any(|s| s.contains("Exchange.Manage"))
         );
         assert!(
             COMPLIANCE_SCOPES
@@ -864,9 +897,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             scope,
-            "openid profile offline_access https://outlook.office365.com/Exchange.Manage"
+            "openid profile offline_access https://outlook.office365.com/.default"
         );
-        assert_eq!(scope.split(' ').collect::<Vec<_>>(), SETUP_CONSENT_SCOPES);
+        assert_eq!(scope.split(' ').collect::<Vec<_>>(), SETUP_REQUEST_SCOPES);
         // Never the mail app's: no Graph scope, no push service.
         assert!(!url.contains("graph.microsoft.com"));
         assert!(!url.contains("Sync.Receive"));
@@ -918,8 +951,7 @@ mod tests {
 
         const TENANT: &str = "85f67998-e79a-4173-95c2-90b0e6dc231d";
         const OTHER_TENANT: &str = "11111111-2222-3333-4444-555555555555";
-        const SCOPE: &str =
-            "openid profile offline_access https://outlook.office365.com/Exchange.Manage";
+        const SCOPE: &str = "openid profile offline_access https://outlook.office365.com/.default";
 
         fn config(server: &MockServer) -> AdminSetupConfig {
             AdminSetupConfig {

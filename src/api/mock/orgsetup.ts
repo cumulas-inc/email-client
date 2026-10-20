@@ -88,7 +88,7 @@ export type OrgSetupSignInFailure =
 /** Cumulas Mail - Admin Setup's client ID (crates/core/src/auth/admin_setup.rs). */
 export const SETUP_CLIENT_ID = "b4f17c55-b9f6-4a84-958f-afe3842da327";
 /** What the setup sign-in asks consent for, in order. */
-const SETUP_SCOPES = "openid profile offline_access https://outlook.office365.com/Exchange.Manage";
+const SETUP_SCOPES = "openid profile offline_access https://outlook.office365.com/.default";
 const AUTHORITY = "login.microsoftonline.com";
 
 /**

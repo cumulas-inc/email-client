@@ -33,7 +33,7 @@
 #    (id="consent-policy-notice"), which keeps the setup app out; and the
 #    setup app's approval link, built here from the constants, is
 #    PUBLISHED_SETUP_LINK, which the app's tests build, and the docs show
-#    it. Unset: no such section;
+#    it, asking for SETUP_REQUEST_SCOPES. Unset: no such section;
 #  - the client IDs in the page are the mail app's and the setup app's, and
 #    the app IDs it looks up or names as an API (appId eq '…',
 #    -ResourceApplication) are those, Microsoft Graph's, and, in the setup
@@ -158,9 +158,11 @@ else
   die "No PUBLISHED_SETUP_CLIENT_ID (None or Some(\"<GUID>\")) in $admin_setup."
 fi
 mapfile -t setup_scopes < <(rust_const "$admin_setup" SETUP_CONSENT_SCOPES | strings)
+mapfile -t setup_request_scopes < <(rust_const "$admin_setup" SETUP_REQUEST_SCOPES | strings)
 mapfile -t setup_markers < <(rust_const "$admin_setup" SETUP_ONLY_MARKERS | strings)
 setup_redirect=$(rust_const "$admin_setup" SETUP_REDIRECT_URI | strings)
 [ "${#setup_scopes[@]}" -gt 0 ] || die "No SETUP_CONSENT_SCOPES in $admin_setup."
+[ "${#setup_request_scopes[@]}" -gt 0 ] || die "No SETUP_REQUEST_SCOPES in $admin_setup."
 [ "${#setup_markers[@]}" -gt 0 ] || die "No SETUP_ONLY_MARKERS in $admin_setup."
 [ -n "$setup_redirect" ] || die "No SETUP_REDIRECT_URI in $admin_setup."
 
@@ -390,9 +392,10 @@ if [ -n "$setup_id" ]; then
     grep -qF -- "-ClientApplicationIds \"$setup_id\"" <<<"$exclude"
 
   # The link the app shows administrators of a tenant: here for the tenant
-  # "organizations", with the OpenID Connect scopes as they are.
+  # "organizations", with the OpenID Connect scopes as they are and Exchange
+  # Online's through .default (SETUP_REQUEST_SCOPES).
   setup_link="$endpoint?client_id=$(form_encode "$setup_id")"
-  setup_link+="&scope=$(form_encode "${setup_scopes[*]}")"
+  setup_link+="&scope=$(form_encode "${setup_request_scopes[*]}")"
   setup_link+="&redirect_uri=$(form_encode "$setup_redirect")"
   setup_app_link=$(sed -n 's/^[[:space:]]*const PUBLISHED_SETUP_LINK: &str = "\([^"]*\)";.*/\1/p' "$admin_setup")
   [ -n "$setup_app_link" ] || die "No PUBLISHED_SETUP_LINK in $admin_setup."
